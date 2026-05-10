@@ -74,12 +74,13 @@ cp .env.example .env
 - `ENABLE_PERP_HEDGE=false` 可停用 perpetual hedge；目前預設即為關閉
 - `OPTION_STRATEGY` 選擇 `naked_short`、`bull_put_spread` 或 `covered_call`（舊名 `naked_short_put` / `naked_short_call` 會被解析為 `naked_short`）
 - 其餘共用參數可直接從 [`.env.example`](.env.example) 複製；策略專屬參數已拆到 [`.env.naked_short`](.env.naked_short)、[`.env.bull_put_spread`](.env.bull_put_spread)、[`.env.covered_call`](.env.covered_call)。如果舊版 `.env.naked_short_put` 還留著，找不到 `.env.naked_short` 時會自動 fallback。
+- 子帳戶／專用 key 的帳戶層範本：[`.env.example_sub`](.env.example_sub)（複製為 `.env.<strategy>_sub`，實際憑證檔仍在 `.gitignore` 內）。
 
 ### Recommended Env Profiles
 
 設定載入順序是「account env -> `.env.<OPTION_STRATEGY>`」。例如 `.env` 或 `.env.bull_put_spread_sub` 裡設定 `OPTION_STRATEGY=bull_put_spread` 時，程式會自動讀取同目錄的 `.env.bull_put_spread`，並用 profile 內的 delta、OTM、APR、risk、defense、pacing 參數覆蓋 account env 的 fallback 值。
 
-實盤多子帳戶建議使用本機帳戶 env：`.env.covered_call_sub`、`.env.naked_short_sub`、`.env.bull_put_spread_sub`。這些檔案已放進 `.gitignore`，每個檔案只填該 sub account 的 `DERIBIT_CLIENT_ID/SECRET`、`ORDER_LABEL_PREFIX` 與 `STATE_FILE`，策略參數仍由對應 `.env.<strategy>` profile 管理。
+實盤多子帳戶建議使用本機帳戶 env：`.env.covered_call_sub`、`.env.naked_short_sub`、`.env.bull_put_spread_sub`。請以 [`.env.example_sub`](.env.example_sub) 為範本建立這些檔名；實際含密鑰的檔案已放進 `.gitignore`。每個檔案只填該 sub account 的 `DERIBIT_CLIENT_ID/SECRET`、`ORDER_LABEL_PREFIX` 與 `STATE_FILE`，策略參數仍由對應 `.env.<strategy>` profile 管理。
 
 以下參數以 `REFERENCE_CAPITAL_USDC=1000` 的小資金試跑為基準，預設偏保守。實際上線前先用 `testnet` 與 dry-run 觀察 `scan --json` 的候選數量、rejection reason 與成交價差；若候選太少，優先放寬 `MIN_LIQUID_EXPIRIES_REQUIRED`、流動性門檻或 DTE，不要先大幅提高 delta。
 
