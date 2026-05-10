@@ -70,8 +70,8 @@ def test_closed_groups_payload_excludes_performance_groups(tmp_path):
 
 
 def test_aggregate_stress_returns_per_strategy_sections(tmp_path, monkeypatch):
-    put_cfg = make_config(tmp_path, option_strategy="naked_short")
-    call_cfg = make_config(tmp_path, option_strategy="covered_call")
+    put_cfg = make_config(tmp_path, option_strategy="naked_short", client_id="id-put")
+    call_cfg = make_config(tmp_path, option_strategy="covered_call", client_id="id-call")
     put_env = tmp_path / "put.env"
     call_env = tmp_path / "call.env"
     configs = {put_env: put_cfg, call_env: call_cfg}
@@ -101,6 +101,40 @@ def test_aggregate_stress_returns_per_strategy_sections(tmp_path, monkeypatch):
     assert per_strategy["naked_short"]["scenarios"][0]["loss_by_book_usdc"] == {"USDC": Decimal("-100")}
     assert per_strategy["covered_call"]["strategy_analysis"]["label"] == "covered_call"
     assert per_strategy["covered_call"]["accounts"][0]["name"] == "call"
+
+
+def test_aggregate_stress_dedupes_shared_api_credentials(tmp_path, monkeypatch):
+    """Same DERIBIT_CLIENT_ID/SECRET in two rows is one exchange account — aggregate risk once."""
+    cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="dup")
+    cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="dup")
+    env_a = tmp_path / "a.env"
+    env_b = tmp_path / "b.env"
+    configs = {env_a: cfg_a, env_b: cfg_b}
+    accounts = [
+        DashboardAccount("put", env_a, cfg_a, cfg_a.state_file, tmp_path / "ledger-a"),
+        DashboardAccount("call", env_b, cfg_b, cfg_b.state_file, tmp_path / "ledger-b"),
+    ]
+
+    def fake_compute_current_stress(config, _client, *, shocks):
+        assert shocks == [Decimal("-0.10")]
+        if config.option_strategy == "covered_call":
+            return _stress_result("covered_call", "BTC", Decimal("-50"))
+        return _stress_result("naked_short", "USDC", Decimal("-100"))
+
+    monkeypatch.setattr(frontend_server, "load_config", lambda env_file, require_private=False: configs[env_file])
+    monkeypatch.setattr(frontend_server, "DeribitClient", lambda _config: object())
+    monkeypatch.setattr(frontend_server, "compute_current_stress", fake_compute_current_stress)
+
+    payload = frontend_server._aggregate_stress(accounts, shocks=[Decimal("-0.10")])
+
+    assert payload["option_strategy"] == "multi_account"
+    assert payload["scenarios"][0]["loss_usdc_total"] == Decimal("-100")
+    assert payload["scenarios"][0]["loss_usdc_pct_of_total_equity"] == Decimal("-0.1")
+
+    per_strategy = {item["option_strategy"]: item for item in payload["strategy_stresses"]}
+    assert set(per_strategy) == {"naked_short", "covered_call"}
+    assert len(per_strategy["naked_short"]["accounts"]) == 1
+    assert len(per_strategy["covered_call"]["accounts"]) == 1
 
 
 def test_aggregate_stress_normalizes_put_spread_alias(tmp_path, monkeypatch):
@@ -168,3 +202,22 @@ def test_aggregate_portfolios_sums_spot_excluded_day_pnl(tmp_path):
         "ETH": Decimal("5"),
         "USDC": Decimal("12"),
     }
+
+
+def test_aggregate_portfolios_dedupes_shared_api_credentials(tmp_path):
+    shared = make_config(tmp_path, client_id="shared-key", client_secret="s")
+    other = make_config(tmp_path, client_id="other-key", client_secret="s", state_file=tmp_path / "other.json")
+    accounts = [
+        DashboardAccount("s1", tmp_path / "x.env", shared, shared.state_file, tmp_path / "ledger-x"),
+        DashboardAccount("s2", tmp_path / "y.env", shared, shared.state_file, tmp_path / "ledger-y"),
+        DashboardAccount("o", tmp_path / "z.env", other, other.state_file, tmp_path / "ledger-z"),
+    ]
+    statuses: list[dict] = [
+        {"portfolio": {"total_equity_usdc": Decimal("900"), "day_start_equity_usdc": Decimal("900")}},
+        {"portfolio": {"total_equity_usdc": Decimal("900"), "day_start_equity_usdc": Decimal("900")}},
+        {"portfolio": {"total_equity_usdc": Decimal("100"), "day_start_equity_usdc": Decimal("100")}},
+    ]
+    equity_statuses = frontend_server._dedupe_statuses_for_equity_aggregate(accounts, statuses)
+    assert len(equity_statuses) == 2
+    portfolio = frontend_server._aggregate_portfolios(accounts, statuses, equity_statuses=equity_statuses)
+    assert portfolio["total_equity_usdc"] == Decimal("1000")

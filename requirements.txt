@@ -3,3 +3,7 @@ python-dotenv
 pytest
 fastapi
 uvicorn[standard]
+reportlab
+matplotlib
+numpy
+pillow

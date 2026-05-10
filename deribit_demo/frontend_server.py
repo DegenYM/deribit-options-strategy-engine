@@ -56,6 +56,40 @@ def _has_private_creds(config: BotConfig) -> bool:
     return bool(config.client_id and config.client_secret)
 
 
+def _live_api_identity_config(config: BotConfig, label: str) -> str:
+    """Same meaning as `_live_api_identity`, but accepts a config object directly."""
+    if not _has_private_creds(config):
+        return f"noid:{label}"
+    cid = config.client_id.strip().lower()
+    csec = config.client_secret.strip()
+    return f"{cid}\0{csec}"
+
+
+def _live_api_identity(account: DashboardAccount) -> str:
+    """Identify the Deribit API login used for exchange balances / portfolio snapshots.
+
+    Multiple dashboard rows may share one sub-account (same API key, different strategy
+    state files). Summing those snapshots double-counts equity; de-dupe on this key.
+    """
+    return _live_api_identity_config(account.config, account.name)
+
+
+def _dedupe_statuses_for_equity_aggregate(
+    accounts: list[DashboardAccount],
+    statuses: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return first status per `_live_api_identity` (order preserved)."""
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for account, status in zip(accounts, statuses, strict=False):
+        key = _live_api_identity(account)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(status)
+    return out
+
+
 def _ledger_path_for(ts: datetime, root: Path) -> Path:
     return root / f"equity_{ts.strftime('%Y%m%d')}.jsonl"
 
@@ -544,15 +578,19 @@ def _weighted_ratio_by_book(
 def _aggregate_portfolios(
     accounts: list[DashboardAccount],
     statuses: list[dict[str, Any]],
+    *,
+    equity_statuses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    portfolios = [status.get("portfolio") or {} for status in statuses]
-    total_equity = _sum_decimal_field(portfolios, "total_equity_usdc")
-    day_start = _sum_decimal_field(portfolios, "day_start_equity_usdc")
-    day_net_flow = _sum_decimal_field(portfolios, "day_net_flow_usdc")
-    day_pnl = _sum_decimal_field(portfolios, "day_pnl_usdc_ex_flow")
-    day_pnl_ex_spot = _sum_decimal_field(portfolios, "day_pnl_usdc_ex_flow_ex_spot")
-    open_max_loss = _sum_decimal_field(portfolios, "open_max_loss")
-    run_rate = _sum_decimal_field(portfolios, "projected_max_profit_run_rate_usdc")
+    all_portfolios = [status.get("portfolio") or {} for status in statuses]
+    equity_src = equity_statuses if equity_statuses is not None else statuses
+    equity_portfolios = [status.get("portfolio") or {} for status in equity_src]
+    total_equity = _sum_decimal_field(equity_portfolios, "total_equity_usdc")
+    day_start = _sum_decimal_field(equity_portfolios, "day_start_equity_usdc")
+    day_net_flow = _sum_decimal_field(equity_portfolios, "day_net_flow_usdc")
+    day_pnl = _sum_decimal_field(equity_portfolios, "day_pnl_usdc_ex_flow")
+    day_pnl_ex_spot = _sum_decimal_field(equity_portfolios, "day_pnl_usdc_ex_flow_ex_spot")
+    open_max_loss = _sum_decimal_field(equity_portfolios, "open_max_loss")
+    run_rate = _sum_decimal_field(equity_portfolios, "projected_max_profit_run_rate_usdc")
     reference_capital = sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
     target_apr_num = sum(
         (account.config.target_portfolio_apr * account.config.reference_capital_usdc for account in accounts),
@@ -561,18 +599,18 @@ def _aggregate_portfolios(
     target_apr = _ratio(target_apr_num, reference_capital)
     projected_apr = _ratio(run_rate, reference_capital)
 
-    equity_by_book = _sum_decimal_dict(portfolios, "equity_by_book")
-    day_start_by_book = _sum_decimal_dict(portfolios, "day_start_equity_by_book")
-    day_net_flow_by_book = _sum_decimal_dict(portfolios, "day_net_flow_usdc_by_book")
-    day_pnl_by_book = _sum_decimal_dict(portfolios, "day_pnl_usdc_ex_flow_by_book")
-    day_pnl_ex_spot_by_book = _sum_decimal_dict(portfolios, "day_pnl_usdc_ex_flow_ex_spot_by_book")
+    equity_by_book = _sum_decimal_dict(equity_portfolios, "equity_by_book")
+    day_start_by_book = _sum_decimal_dict(equity_portfolios, "day_start_equity_by_book")
+    day_net_flow_by_book = _sum_decimal_dict(equity_portfolios, "day_net_flow_usdc_by_book")
+    day_pnl_by_book = _sum_decimal_dict(equity_portfolios, "day_pnl_usdc_ex_flow_by_book")
+    day_pnl_ex_spot_by_book = _sum_decimal_dict(equity_portfolios, "day_pnl_usdc_ex_flow_ex_spot_by_book")
     drawdown_by_book: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    for portfolio in portfolios:
+    for portfolio in equity_portfolios:
         for book, drawdown in (portfolio.get("day_drawdown_pct_by_book") or {}).items():
             key = str(book).upper()
             drawdown_by_book[key] = max(drawdown_by_book[key], _dec(drawdown))
-    im_by_book = _weighted_ratio_by_book(portfolios, ratio_key="im_ratio")
-    mm_by_book = _weighted_ratio_by_book(portfolios, ratio_key="mm_ratio")
+    im_by_book = _weighted_ratio_by_book(equity_portfolios, ratio_key="im_ratio")
+    mm_by_book = _weighted_ratio_by_book(equity_portfolios, ratio_key="mm_ratio")
     margin_ratios = {
         book: {
             "im_ratio": im_by_book.get(book, Decimal("0")),
@@ -582,14 +620,14 @@ def _aggregate_portfolios(
     }
 
     regime_by_currency: dict[str, str] = {}
-    for portfolio in portfolios:
+    for portfolio in equity_portfolios:
         for book, regime in (portfolio.get("regime_by_currency") or {}).items():
             key = str(book).upper()
             regime_by_currency[key] = _worst_regime([regime_by_currency.get(key, "normal"), str(regime)])
 
     def _bool_by_book(key: str) -> dict[str, bool]:
         out: dict[str, bool] = defaultdict(bool)
-        for portfolio in portfolios:
+        for portfolio in equity_portfolios:
             for book, value in (portfolio.get(key) or {}).items():
                 out[str(book).upper()] = out[str(book).upper()] or bool(value)
         return dict(out)
@@ -597,7 +635,7 @@ def _aggregate_portfolios(
     halt_reasons: list[str] = []
     halt_reasons_by_book: dict[str, list[str]] = defaultdict(list)
     regime_detail_by_currency: dict[str, list[str]] = defaultdict(list)
-    for account, portfolio in zip(accounts, portfolios, strict=False):
+    for account, portfolio in zip(accounts, all_portfolios, strict=False):
         for reason in portfolio.get("halt_entry_reasons") or []:
             halt_reasons.append(f"{account.name}: {reason}")
         for book, reasons in (portfolio.get("halt_entry_reasons_by_book") or {}).items():
@@ -611,26 +649,26 @@ def _aggregate_portfolios(
         "day_net_flow_usdc": day_net_flow,
         "day_pnl_usdc_ex_flow": day_pnl,
         "day_pnl_usdc_ex_flow_ex_spot": day_pnl_ex_spot,
-        "day_drawdown_pct": max((_dec(p.get("day_drawdown_pct")) for p in portfolios), default=Decimal("0")),
+        "day_drawdown_pct": max((_dec(p.get("day_drawdown_pct")) for p in equity_portfolios), default=Decimal("0")),
         "open_max_loss": open_max_loss,
         "open_max_loss_pct": _ratio(open_max_loss, total_equity),
         "initial_margin_ratio": _ratio(
-            sum((_dec(p.get("initial_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in portfolios), Decimal("0")),
+            sum((_dec(p.get("initial_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in equity_portfolios), Decimal("0")),
             total_equity,
         ),
         "maintenance_margin_ratio": _ratio(
-            sum((_dec(p.get("maintenance_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in portfolios), Decimal("0")),
+            sum((_dec(p.get("maintenance_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in equity_portfolios), Decimal("0")),
             total_equity,
         ),
         "projected_max_profit_run_rate_usdc": run_rate,
         "projected_max_profit_apr": projected_apr,
         "target_progress_ratio": _ratio(projected_apr, target_apr),
-        "regime": _worst_regime([str(p.get("regime") or "normal") for p in portfolios]),
-        "halt_new_entries": any(bool(p.get("halt_new_entries")) for p in portfolios),
-        "hard_derisk": any(bool(p.get("hard_derisk")) for p in portfolios),
-        "cooldown_until_ms": max((int(p.get("cooldown_until_ms") or 0) for p in portfolios), default=0) or None,
-        "cooling_down": any(bool(p.get("cooling_down")) for p in portfolios),
-        "delta_totals_by_currency": _sum_decimal_dict(portfolios, "delta_totals_by_currency"),
+        "regime": _worst_regime([str(p.get("regime") or "normal") for p in equity_portfolios]),
+        "halt_new_entries": any(bool(p.get("halt_new_entries")) for p in equity_portfolios),
+        "hard_derisk": any(bool(p.get("hard_derisk")) for p in equity_portfolios),
+        "cooldown_until_ms": max((int(p.get("cooldown_until_ms") or 0) for p in equity_portfolios), default=0) or None,
+        "cooling_down": any(bool(p.get("cooling_down")) for p in equity_portfolios),
+        "delta_totals_by_currency": _sum_decimal_dict(equity_portfolios, "delta_totals_by_currency"),
         "regime_by_currency": regime_by_currency,
         "halt_entry_reasons": halt_reasons,
         "regime_detail_by_currency": dict(regime_detail_by_currency),
@@ -643,7 +681,7 @@ def _aggregate_portfolios(
         "day_drawdown_pct_by_book": dict(drawdown_by_book),
         "cooldown_until_ms_by_book": {
             book: max(
-                (int((p.get("cooldown_until_ms_by_book") or {}).get(book) or 0) for p in portfolios),
+                (int((p.get("cooldown_until_ms_by_book") or {}).get(book) or 0) for p in equity_portfolios),
                 default=0,
             ) or None
             for book in sorted(equity_by_book)
@@ -662,6 +700,7 @@ def _aggregate_status(accounts: list[DashboardAccount]) -> dict[str, Any]:
     positions: list[dict[str, Any]] = []
     account_summaries: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
     underlying_index_usd: dict[str, str] = {}
+    seen_balance_identity: set[str] = set()
 
     for account in accounts:
         payload = _bot_for_account(account, require_private=True).status()
@@ -672,14 +711,18 @@ def _aggregate_status(accounts: list[DashboardAccount]) -> dict[str, Any]:
         trade_groups.extend(_tag_rows(payload.get("trade_groups") or [], account))
         open_orders.extend(_tag_rows(payload.get("open_orders") or [], account))
         positions.extend(_tag_rows(payload.get("positions") or [], account))
-        for book, row in (payload.get("accounts") or {}).items():
-            book_key = str(book).upper()
-            for field, value in row.items():
-                account_summaries[book_key][field] += _dec(value)
+        balance_key = _live_api_identity(account)
+        if balance_key not in seen_balance_identity:
+            seen_balance_identity.add(balance_key)
+            for book, row in (payload.get("accounts") or {}).items():
+                book_key = str(book).upper()
+                for field, value in row.items():
+                    account_summaries[book_key][field] += _dec(value)
 
+    equity_statuses = _dedupe_statuses_for_equity_aggregate(accounts, statuses)
     return {
         "env": "multi" if len(accounts) > 1 else accounts[0].config.env,
-        "portfolio": _aggregate_portfolios(accounts, statuses),
+        "portfolio": _aggregate_portfolios(accounts, statuses, equity_statuses=equity_statuses),
         "underlying_index_usd": underlying_index_usd,
         "accounts": {book: dict(values) for book, values in sorted(account_summaries.items())},
         "trade_group_count": len(trade_groups),
@@ -907,13 +950,17 @@ def _aggregate_stress(accounts: list[DashboardAccount], *, shocks: list[Decimal]
         },
     )
     strategy_buckets: dict[str, dict[str, Any]] = {}
+    aggregate_identity: set[str] = set()
 
     for account in accounts:
         cfg = load_config(account.env_file, require_private=True)
         result = compute_current_stress(cfg, DeribitClient(cfg), shocks=shocks)
         strategy = normalize_strategy_name(result.option_strategy or cfg.option_strategy)
         strategy_bucket = strategy_buckets.setdefault(strategy, _new_stress_bucket(strategy, analysis=result.strategy_analysis))
-        _add_stress_result(aggregate, account, result)
+        ident = _live_api_identity_config(cfg, account.name)
+        if ident not in aggregate_identity:
+            aggregate_identity.add(ident)
+            _add_stress_result(aggregate, account, result)
         _add_stress_result(strategy_bucket, account, result)
 
     payload = _finalize_stress_bucket(aggregate)

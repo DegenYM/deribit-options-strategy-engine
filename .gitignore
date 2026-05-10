@@ -12,3 +12,4 @@ __pycache__/
 data/backtest_cache/
 data/frontend_ledger/
 logs/
+.mplconfig/
