@@ -1,0 +1,13 @@
+# 本機／策略用環境檔（含 API 金鑰）；範本例外
+.env
+.env.*
+!.env.example
+.DS_Store
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+.state/
+data/backtest_cache/
+data/frontend_ledger/
+logs/

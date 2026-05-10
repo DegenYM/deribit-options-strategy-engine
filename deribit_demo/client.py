@@ -1,0 +1,616 @@
+from __future__ import annotations
+
+import itertools
+import time
+from decimal import Decimal
+from typing import Any
+
+import requests
+
+from .config import BotConfig
+from .exceptions import AuthenticationError, ExchangeError, TransientExchangeError
+from .utils import format_decimal, utc_now_ms
+
+
+class DeribitClient:
+    """Deribit JSON-RPC over HTTP client.
+
+    - Uses POST + JSON-RPC body for all requests so order parameters never appear in the URL.
+    - OAuth2 client_credentials auth; tokens are cached and refreshed before expiry.
+    - Idempotent reads retry on transient errors; non-idempotent mutations retry at most once
+      on pure connection errors and never on 5xx/timeout/429 (caller must reconcile).
+    """
+
+    RETRYABLE_STATUS_CODES = {408, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+    RATE_LIMIT_STATUS = 429
+    IDEMPOTENT_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+    UNSAFE_CONNECTION_RETRIES = 1
+    TOKEN_REFRESH_SAFETY_SECONDS = 30
+
+    # JSON-RPC methods that mutate exchange state; must NOT be blindly retried.
+    _UNSAFE_METHODS = frozenset(
+        {
+            "private/buy",
+            "private/sell",
+            "private/close_position",
+            "private/cancel",
+            "private/cancel_all",
+            "private/cancel_all_by_currency",
+            "private/cancel_all_by_instrument",
+            "private/cancel_by_label",
+            "private/edit",
+            "private/edit_by_label",
+            "private/create_combo",
+        }
+    )
+
+    def __init__(self, config: BotConfig, session: requests.Session | None = None):
+        self.config = config
+        self.session = session or requests.Session()
+        self._access_token: str | None = None
+        self._refresh_token: str | None = None
+        self._token_expiry_ms: int = 0
+        self._id_counter = itertools.count(1)
+
+    # ------------------------------------------------------------------
+    # Authentication
+    # ------------------------------------------------------------------
+
+    def _require_credentials(self) -> None:
+        if not self.config.has_private_credentials:
+            raise AuthenticationError(
+                "Private Deribit method requires DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET"
+            )
+
+    def _token_expired(self) -> bool:
+        if not self._access_token:
+            return True
+        safety_ms = self.TOKEN_REFRESH_SAFETY_SECONDS * 1000
+        return utc_now_ms() + safety_ms >= self._token_expiry_ms
+
+    def _ensure_access_token(self) -> str:
+        if not self._token_expired():
+            assert self._access_token is not None
+            return self._access_token
+        self._require_credentials()
+
+        if self._refresh_token:
+            try:
+                self._refresh_access_token()
+                assert self._access_token is not None
+                return self._access_token
+            except (AuthenticationError, ExchangeError, TransientExchangeError):
+                self._access_token = None
+                self._refresh_token = None
+
+        result = self._call_auth(
+            {
+                "grant_type": "client_credentials",
+                "client_id": self.config.client_id,
+                "client_secret": self.config.client_secret,
+            }
+        )
+        self._apply_auth_result(result)
+        assert self._access_token is not None
+        return self._access_token
+
+    def _refresh_access_token(self) -> None:
+        assert self._refresh_token is not None
+        result = self._call_auth(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": self._refresh_token,
+            }
+        )
+        self._apply_auth_result(result)
+
+    def _apply_auth_result(self, result: dict[str, Any]) -> None:
+        access_token = result.get("access_token") if isinstance(result, dict) else None
+        if not isinstance(access_token, str) or not access_token:
+            raise AuthenticationError("Deribit auth response missing access_token")
+        refresh_token = result.get("refresh_token") if isinstance(result, dict) else None
+        expires_in = result.get("expires_in") if isinstance(result, dict) else None
+        try:
+            ttl_seconds = int(expires_in) if expires_in is not None else 0
+        except (TypeError, ValueError):
+            ttl_seconds = 0
+        self._access_token = access_token
+        self._refresh_token = refresh_token if isinstance(refresh_token, str) else None
+        self._token_expiry_ms = utc_now_ms() + max(ttl_seconds, 0) * 1000
+
+    def _call_auth(self, params: dict[str, Any]) -> dict[str, Any]:
+        payload = self._jsonrpc_body("public/auth", params)
+        response = self._post_raw(self.config.rest_base_url + "/public/auth", payload, headers={})
+        if response.status_code == self.RATE_LIMIT_STATUS:
+            raise TransientExchangeError("public/auth rate limited (HTTP 429)")
+        if response.status_code in self.RETRYABLE_STATUS_CODES:
+            raise TransientExchangeError(f"public/auth HTTP {response.status_code}")
+        if response.status_code >= 400:
+            raise AuthenticationError(
+                f"public/auth failed: HTTP {response.status_code} {response.text}"
+            )
+        data = self._parse_jsonrpc(response, "public/auth")
+        result = data.get("result")
+        if not isinstance(result, dict):
+            raise AuthenticationError("public/auth returned no result")
+        return result
+
+    # ------------------------------------------------------------------
+    # Core request primitives
+    # ------------------------------------------------------------------
+
+    def _jsonrpc_body(self, method: str, params: dict[str, Any] | None) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": next(self._id_counter),
+            "method": method,
+        }
+        if params is not None:
+            body["params"] = self._normalize_params(params) or {}
+        else:
+            body["params"] = {}
+        return body
+
+    def _normalize_params(self, params: dict[str, Any] | None) -> dict[str, Any] | None:
+        if params is None:
+            return None
+        normalized: dict[str, Any] = {}
+        for key, value in params.items():
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                normalized[key] = value
+            elif isinstance(value, Decimal):
+                normalized[key] = format_decimal(value, 8)
+            else:
+                normalized[key] = value
+        return normalized
+
+    def _headers(self, *, private: bool) -> dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if private:
+            token = self._ensure_access_token()
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def _post_raw(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+    ) -> requests.Response:
+        return self.session.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=self.config.request_timeout_seconds,
+        )
+
+    def _parse_jsonrpc(self, response: requests.Response, method_name: str) -> dict[str, Any]:
+        try:
+            payload = response.json()
+        except Exception as exc:
+            raise ExchangeError(f"{method_name} returned invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ExchangeError(f"{method_name} returned non-object JSON body")
+        if payload.get("jsonrpc") != "2.0":
+            raise ExchangeError(f"{method_name} missing jsonrpc=2.0 field")
+        if "id" not in payload:
+            raise ExchangeError(f"{method_name} missing jsonrpc id field")
+        return payload
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response) -> float | None:
+        header = response.headers.get("Retry-After") if hasattr(response, "headers") else None
+        if header is None:
+            return None
+        try:
+            return max(float(header), 0.0)
+        except (TypeError, ValueError):
+            return None
+
+    def _classify_error(self, method_name: str, error: dict[str, Any]) -> Exception:
+        code = error.get("code")
+        message = error.get("message")
+        data = error.get("data")
+        text = f"{method_name} failed: code={code} message={message} data={data}"
+        try:
+            code_int = int(code) if code is not None else 0
+        except (TypeError, ValueError):
+            code_int = 0
+        auth_codes = {13009, 13010, 13004, 13007, 13008}
+        transient_codes = {10028, 10040, 10041, 10042, 10043, 10044, 10066}
+        if code_int in auth_codes:
+            return AuthenticationError(text)
+        if code_int in transient_codes:
+            return TransientExchangeError(text)
+        return ExchangeError(text)
+
+    # ------------------------------------------------------------------
+    # Idempotent (safe) request path — retries on transient failures.
+    # ------------------------------------------------------------------
+
+    def _idempotent_request(
+        self,
+        method_name: str,
+        *,
+        params: dict[str, Any] | None = None,
+        private: bool = False,
+    ) -> Any:
+        url = f"{self.config.rest_base_url}/{method_name}"
+        attempts = len(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS) + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            body = self._jsonrpc_body(method_name, params)
+            try:
+                response = self._post_raw(url, body, headers=self._headers(private=private))
+            except requests.exceptions.RequestException as exc:
+                last_error = exc
+                if attempt < attempts - 1:
+                    time.sleep(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
+                    continue
+                raise TransientExchangeError(f"{method_name} failed after retries: {exc}") from exc
+
+            status = response.status_code
+            if status == self.RATE_LIMIT_STATUS:
+                if attempt < attempts - 1:
+                    wait = self._retry_after_seconds(response)
+                    if wait is None:
+                        wait = self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt]
+                    time.sleep(wait)
+                    continue
+                raise TransientExchangeError(f"{method_name} rate limited: HTTP 429")
+            if status in self.RETRYABLE_STATUS_CODES:
+                if attempt < attempts - 1:
+                    time.sleep(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
+                    continue
+                raise TransientExchangeError(f"{method_name} retryable failure: HTTP {status}")
+            if status == 401 and private and attempt < attempts - 1:
+                # Token might have been invalidated server-side; drop cache and retry.
+                self._access_token = None
+                self._refresh_token = None
+                self._token_expiry_ms = 0
+                continue
+            if status >= 400:
+                raise ExchangeError(
+                    f"{method_name} failed: HTTP {status} {response.text}"
+                )
+
+            payload = self._parse_jsonrpc(response, method_name)
+            error = payload.get("error")
+            if isinstance(error, dict) and error:
+                raise self._classify_error(method_name, error)
+            return payload.get("result")
+
+        raise TransientExchangeError(f"{method_name} failed after retries: {last_error}")
+
+    # ------------------------------------------------------------------
+    # Non-idempotent (unsafe) request path — retries only on connection errors, at most once.
+    # ------------------------------------------------------------------
+
+    def _unsafe_request(
+        self,
+        method_name: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        url = f"{self.config.rest_base_url}/{method_name}"
+        attempts = self.UNSAFE_CONNECTION_RETRIES + 1
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            body = self._jsonrpc_body(method_name, params)
+            try:
+                response = self._post_raw(url, body, headers=self._headers(private=True))
+            except requests.exceptions.ConnectionError as exc:
+                last_error = exc
+                if attempt < attempts - 1:
+                    time.sleep(0.25)
+                    continue
+                raise TransientExchangeError(
+                    f"{method_name} connection failed after {attempt + 1} attempts: {exc}"
+                ) from exc
+            except requests.exceptions.Timeout as exc:
+                # Non-idempotent: order may have been accepted. Caller must reconcile.
+                raise TransientExchangeError(
+                    f"{method_name} timed out; reconcile required: {exc}"
+                ) from exc
+            except requests.exceptions.RequestException as exc:
+                raise TransientExchangeError(f"{method_name} request error: {exc}") from exc
+
+            status = response.status_code
+            if status == self.RATE_LIMIT_STATUS:
+                raise TransientExchangeError(
+                    f"{method_name} rate limited: HTTP 429 (no auto-retry for unsafe calls)"
+                )
+            if status in self.RETRYABLE_STATUS_CODES:
+                raise TransientExchangeError(
+                    f"{method_name} server error HTTP {status}; reconcile required"
+                )
+            if status >= 400:
+                raise ExchangeError(
+                    f"{method_name} failed: HTTP {status} {response.text}"
+                )
+            payload = self._parse_jsonrpc(response, method_name)
+            error = payload.get("error")
+            if isinstance(error, dict) and error:
+                raise self._classify_error(method_name, error)
+            return payload.get("result")
+
+        raise TransientExchangeError(f"{method_name} failed: {last_error}")
+
+    def _request(
+        self,
+        method_name: str,
+        *,
+        params: dict[str, Any] | None = None,
+        private: bool = False,
+    ) -> Any:
+        if method_name in self._UNSAFE_METHODS:
+            return self._unsafe_request(method_name, params=params)
+        return self._idempotent_request(method_name, params=params, private=private)
+
+    # ------------------------------------------------------------------
+    # Public API wrappers
+    # ------------------------------------------------------------------
+
+    def ping(self) -> Any:
+        return self._request("public/test")
+
+    def get_instruments(self, currency: str, *, kind: str = "option", expired: bool = False) -> list[dict[str, Any]]:
+        result = self._request(
+            "public/get_instruments",
+            params={"currency": currency.upper(), "kind": kind, "expired": expired},
+        )
+        return result or []
+
+    def get_instrument(self, instrument_name: str) -> dict[str, Any]:
+        return self._request(
+            "public/get_instrument",
+            params={"instrument_name": instrument_name},
+        ) or {}
+
+    def get_tradingview_chart_data(
+        self,
+        instrument_name: str,
+        *,
+        start_timestamp: int,
+        end_timestamp: int,
+        resolution: str,
+    ) -> dict[str, Any]:
+        """Public OHLCV data in TradingView format.
+
+        Deribit returns an object with arrays (ticks/open/high/low/close/volume)
+        and a `status` field.
+        """
+        result = self._request(
+            "public/get_tradingview_chart_data",
+            params={
+                "instrument_name": instrument_name,
+                "start_timestamp": int(start_timestamp),
+                "end_timestamp": int(end_timestamp),
+                "resolution": str(resolution),
+            },
+        )
+        return result or {}
+
+    def get_order_book(self, instrument_name: str, *, depth: int = 1) -> dict[str, Any]:
+        return self._request("public/get_order_book", params={"instrument_name": instrument_name, "depth": depth}) or {}
+
+    def get_index_price(self, index_name: str) -> dict[str, Any]:
+        return self._request("public/get_index_price", params={"index_name": index_name}) or {}
+
+    def get_index_chart_data(self, index_name: str, *, range_name: str = "1d") -> list[list[Any]]:
+        result = self._request("public/get_index_chart_data", params={"index_name": index_name, "range": range_name})
+        return result or []
+
+    def get_volatility_index_data(
+        self,
+        currency: str,
+        *,
+        start_timestamp: int,
+        end_timestamp: int,
+        resolution: str = "1D",
+    ) -> dict[str, Any]:
+        return self._request(
+            "public/get_volatility_index_data",
+            params={
+                "currency": currency.upper(),
+                "start_timestamp": start_timestamp,
+                "end_timestamp": end_timestamp,
+                "resolution": resolution,
+            },
+        ) or {}
+
+    def get_funding_chart_data(self, instrument_name: str, *, length: str = "8h") -> dict[str, Any]:
+        return self._request(
+            "public/get_funding_chart_data",
+            params={"instrument_name": instrument_name, "length": length},
+        ) or {}
+
+    def get_account_summaries(self, *, extended: bool = False) -> list[dict[str, Any]]:
+        result = self._request(
+            "private/get_account_summaries",
+            params={"extended": extended},
+            private=True,
+        )
+        if isinstance(result, dict):
+            summaries = result.get("summaries")
+            if isinstance(summaries, list):
+                return [item for item in summaries if isinstance(item, dict)]
+            return []
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        return []
+
+    def get_transaction_log(
+        self,
+        *,
+        currency: str,
+        start_timestamp: int,
+        end_timestamp: int,
+        count: int = 100,
+        subaccount_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch the transaction log window for a currency.
+
+        Returns the raw ``logs`` list. Types of interest for external cash-flow
+        reconciliation are ``deposit``, ``withdrawal``, and ``transfer`` (see
+        ``EXTERNAL_FLOW_TRANSACTION_TYPES`` in ``models.py``). Ordinary trading
+        entries like ``trade``, ``settlement``, ``delivery``, etc. are returned
+        too — the caller is responsible for filtering.
+        """
+        params: dict[str, Any] = {
+            "currency": currency.upper(),
+            "start_timestamp": int(start_timestamp),
+            "end_timestamp": int(end_timestamp),
+            "count": int(count),
+        }
+        if subaccount_id is not None:
+            params["subaccount_id"] = int(subaccount_id)
+        result = self._request(
+            "private/get_transaction_log",
+            params=params,
+            private=True,
+        )
+        if isinstance(result, dict):
+            logs = result.get("logs")
+            if isinstance(logs, list):
+                return [item for item in logs if isinstance(item, dict)]
+            return []
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        return []
+
+    def get_open_orders(self, *, kind: str = "any") -> list[dict[str, Any]]:
+        params = {"kind": kind} if kind else None
+        result = self._request("private/get_open_orders", params=params, private=True)
+        return result or []
+
+    def get_open_orders_by_label(self, currency: str, label: str) -> list[dict[str, Any]]:
+        result = self._request(
+            "private/get_open_orders_by_label",
+            params={"currency": currency.upper(), "label": label},
+            private=True,
+        )
+        return result or []
+
+    def get_positions(self, *, currency: str = "any", kind: str | None = "any") -> list[dict[str, Any]]:
+        # Deribit ``kind`` filter only accepts future|option|future_combo|option_combo.
+        # Passing ``kind=any`` can yield empty or incomplete results on some accounts; omit to fetch all kinds.
+        params: dict[str, Any] = {"currency": currency}
+        if kind is not None and str(kind).strip().lower() not in {"", "any"}:
+            params["kind"] = kind
+        result = self._request("private/get_positions", params=params, private=True)
+        return result or []
+
+    def get_order_state(self, order_id: str) -> dict[str, Any]:
+        return self._request("private/get_order_state", params={"order_id": order_id}, private=True) or {}
+
+    def get_order_state_by_label(self, currency: str, label: str) -> dict[str, Any]:
+        return self._request(
+            "private/get_order_state_by_label",
+            params={"currency": currency.upper(), "label": label},
+            private=True,
+        ) or {}
+
+    def get_user_trades_by_order(self, order_id: str, *, historical: bool = False) -> list[dict[str, Any]]:
+        result = self._request(
+            "private/get_user_trades_by_order",
+            params={"order_id": order_id, "historical": historical},
+            private=True,
+        )
+        return result or []
+
+    def create_combo(self, trades: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._request("private/create_combo", params={"trades": trades}) or {}
+
+    def place_order(
+        self,
+        *,
+        direction: str,
+        instrument_name: str,
+        amount: Decimal | str,
+        label: str,
+        order_type: str = "limit",
+        price: Decimal | str | None = None,
+        time_in_force: str | None = None,
+        post_only: bool | None = None,
+        reject_post_only: bool | None = None,
+        reduce_only: bool | None = None,
+        trigger_price: Decimal | str | None = None,
+        trigger: str | None = None,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        method = "private/buy" if direction.lower() == "buy" else "private/sell"
+        if not client_order_id:
+            client_order_id = f"{label}-{utc_now_ms()}"
+        params: dict[str, Any] = {
+            "instrument_name": instrument_name,
+            "amount": amount,
+            "label": label,
+            "type": order_type,
+            "client_order_id": client_order_id,
+        }
+        if price is not None:
+            params["price"] = price
+        if time_in_force is not None:
+            params["time_in_force"] = time_in_force
+        if post_only is not None:
+            params["post_only"] = post_only
+        if reject_post_only is not None:
+            params["reject_post_only"] = reject_post_only
+        if reduce_only is not None:
+            params["reduce_only"] = reduce_only
+        if trigger_price is not None:
+            params["trigger_price"] = trigger_price
+        if trigger is not None:
+            params["trigger"] = trigger
+        return self._request(method, params=params) or {}
+
+    def place_buy_order(self, **kwargs: Any) -> dict[str, Any]:
+        return self.place_order(direction="buy", **kwargs)
+
+    def place_sell_order(self, **kwargs: Any) -> dict[str, Any]:
+        return self.place_order(direction="sell", **kwargs)
+
+    def close_position(
+        self,
+        instrument_name: str,
+        *,
+        order_type: str = "market",
+        price: Decimal | str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"instrument_name": instrument_name, "type": order_type}
+        if price is not None:
+            params["price"] = price
+        return self._request("private/close_position", params=params) or {}
+
+    def cancel_order(self, order_id: str) -> dict[str, Any]:
+        return self._request("private/cancel", params={"order_id": order_id}) or {}
+
+    def edit_order(
+        self,
+        order_id: str,
+        *,
+        amount: Decimal | str | None = None,
+        price: Decimal | str | None = None,
+        post_only: bool | None = None,
+        reject_post_only: bool | None = None,
+        advanced: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"order_id": order_id}
+        if amount is not None:
+            params["amount"] = amount
+        if price is not None:
+            params["price"] = price
+        if post_only is not None:
+            params["post_only"] = post_only
+        if reject_post_only is not None:
+            params["reject_post_only"] = reject_post_only
+        if advanced is not None:
+            params["advanced"] = advanced
+        return self._request("private/edit", params=params) or {}
+
+    def cancel_all(self, *, kind: str = "any") -> Any:
+        return self._request("private/cancel_all", params={"kind": kind}) or {}

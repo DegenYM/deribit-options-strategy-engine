@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" role="img" aria-labelledby="title desc">
+  <title id="title">Naked Short Put Payoff</title>
+  <desc id="desc">Short put payoff diagram with break-even price and short put strike price.</desc>
+  <defs>
+    <marker id="axisArrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#071a3d"/>
+    </marker>
+    <marker id="greenArrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#0f7f86"/>
+    </marker>
+  </defs>
+  <rect width="900" height="520" rx="24" fill="#edf4fb"/>
+  <text x="450" y="64" text-anchor="middle" font-family="Arial, sans-serif" font-size="48" font-weight="800" fill="#071a3d">Naked Short Put</text>
+
+  <line x1="92" y1="420" x2="92" y2="104" stroke="#071a3d" stroke-width="7" stroke-linecap="round" marker-end="url(#axisArrow)"/>
+  <line x1="92" y1="300" x2="805" y2="300" stroke="#071a3d" stroke-width="7" stroke-linecap="round" marker-end="url(#axisArrow)"/>
+  <text x="54" y="275" transform="rotate(-90 54 275)" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#071a3d">Profit / Loss</text>
+  <text x="720" y="348" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="800" fill="#071a3d">Underlying Price</text>
+
+  <line x1="540" y1="300" x2="540" y2="430" stroke="#071a3d" stroke-width="3" stroke-dasharray="4 6"/>
+  <line x1="590" y1="300" x2="590" y2="205" stroke="#071a3d" stroke-width="3" stroke-dasharray="4 6"/>
+  <circle cx="540" cy="300" r="10" fill="#edf4fb" stroke="#071a3d" stroke-width="6"/>
+  <circle cx="590" cy="300" r="10" fill="#edf4fb" stroke="#071a3d" stroke-width="6"/>
+
+  <path d="M165 430 L540 300" fill="none" stroke="#f24b55" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M540 300 L590 205 L770 205" fill="none" stroke="#0f7f86" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#greenArrow)"/>
+
+  <rect x="604" y="172" width="214" height="42" rx="8" fill="#071a3d"/>
+  <text x="711" y="200" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="700" fill="#ffffff">Short Put Strike</text>
+
+  <rect x="300" y="402" width="350" height="44" rx="9" fill="#0f7f86"/>
+  <text x="475" y="431" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#ffffff">Break-even = strike - premium</text>
+
+  <text x="138" y="456" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#f24b55">Loss expands as price falls</text>
+  <text x="630" y="152" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#0f7f86">Max profit = premium</text>
+  <text x="450" y="488" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#071a3d">Profile target APR: 10% - 18%</text>
+</svg>

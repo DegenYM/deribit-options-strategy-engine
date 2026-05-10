@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" role="img" aria-labelledby="title desc">
+  <title id="title">Covered Call Payoff</title>
+  <desc id="desc">Covered call payoff diagram with break-even price, spot cost basis, and short call strike.</desc>
+  <defs>
+    <marker id="axisArrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#071a3d"/>
+    </marker>
+    <marker id="greenArrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#0f7f86"/>
+    </marker>
+  </defs>
+  <rect width="900" height="520" rx="24" fill="#edf4fb"/>
+  <text x="450" y="64" text-anchor="middle" font-family="Arial, sans-serif" font-size="48" font-weight="800" fill="#071a3d">Covered Call</text>
+
+  <line x1="92" y1="420" x2="92" y2="104" stroke="#071a3d" stroke-width="7" stroke-linecap="round" marker-end="url(#axisArrow)"/>
+  <line x1="92" y1="300" x2="805" y2="300" stroke="#071a3d" stroke-width="7" stroke-linecap="round" marker-end="url(#axisArrow)"/>
+  <text x="54" y="275" transform="rotate(-90 54 275)" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#071a3d">Profit / Loss</text>
+  <text x="720" y="348" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="800" fill="#071a3d">Underlying Price</text>
+
+  <line x1="330" y1="300" x2="330" y2="430" stroke="#0f7f86" stroke-width="3" stroke-dasharray="4 6"/>
+  <line x1="390" y1="300" x2="390" y2="255" stroke="#071a3d" stroke-width="3" stroke-dasharray="4 6"/>
+  <line x1="610" y1="300" x2="610" y2="185" stroke="#071a3d" stroke-width="3" stroke-dasharray="4 6"/>
+  <circle cx="330" cy="300" r="10" fill="#edf4fb" stroke="#0f7f86" stroke-width="6"/>
+  <circle cx="390" cy="300" r="10" fill="#edf4fb" stroke="#071a3d" stroke-width="6"/>
+  <circle cx="610" cy="300" r="10" fill="#edf4fb" stroke="#071a3d" stroke-width="6"/>
+
+  <path d="M165 430 L330 300" fill="none" stroke="#f24b55" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M330 300 L610 185 L770 185" fill="none" stroke="#0f7f86" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#greenArrow)"/>
+
+  <rect x="210" y="402" width="330" height="44" rx="9" fill="#0f7f86"/>
+  <text x="375" y="431" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#ffffff">Break-even = spot cost - premium</text>
+
+  <rect x="284" y="228" width="206" height="42" rx="8" fill="#071a3d"/>
+  <text x="387" y="256" text-anchor="middle" font-family="Arial, sans-serif" font-size="19" font-weight="700" fill="#ffffff">Spot Cost Basis</text>
+
+  <rect x="624" y="152" width="218" height="42" rx="8" fill="#071a3d"/>
+  <text x="733" y="180" text-anchor="middle" font-family="Arial, sans-serif" font-size="19" font-weight="700" fill="#ffffff">Short Call Strike</text>
+
+  <text x="145" y="456" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#f24b55">Downside still follows spot</text>
+  <text x="612" y="132" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#0f7f86">Upside capped after strike</text>
+  <text x="450" y="488" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#071a3d">Profile target APR: 15% - 28%</text>
+</svg>

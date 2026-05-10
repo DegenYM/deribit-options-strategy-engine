@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" role="img" aria-labelledby="title desc">
+  <title id="title">Bull Put Spread Payoff</title>
+  <desc id="desc">Bull put spread payoff diagram with long put strike, break-even price, and short put strike.</desc>
+  <defs>
+    <marker id="axisArrow" markerWidth="10" markerHeight="10" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#071a3d"/>
+    </marker>
+    <marker id="redArrow" markerWidth="9" markerHeight="9" refX="1" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M8,0 L8,6 L0,3 z" fill="#f24b55"/>
+    </marker>
+    <marker id="greenArrow" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L8,3 z" fill="#0f7f86"/>
+    </marker>
+  </defs>
+  <rect width="900" height="520" rx="24" fill="#edf4fb"/>
+  <text x="450" y="64" text-anchor="middle" font-family="Arial, sans-serif" font-size="48" font-weight="800" fill="#071a3d">Bull Put Spread</text>
+
+  <line x1="92" y1="420" x2="92" y2="104" stroke="#071a3d" stroke-width="7" stroke-linecap="round" marker-end="url(#axisArrow)"/>
+  <line x1="92" y1="300" x2="805" y2="300" stroke="#071a3d" stroke-width="7" stroke-linecap="round" marker-end="url(#axisArrow)"/>
+  <text x="54" y="275" transform="rotate(-90 54 275)" text-anchor="middle" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#071a3d">Profit / Loss</text>
+  <text x="720" y="348" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="800" fill="#071a3d">Underlying Price</text>
+
+  <line x1="330" y1="300" x2="330" y2="390" stroke="#071a3d" stroke-width="3" stroke-dasharray="4 6"/>
+  <line x1="500" y1="300" x2="500" y2="438" stroke="#0f7f86" stroke-width="3" stroke-dasharray="4 6"/>
+  <line x1="570" y1="300" x2="570" y2="205" stroke="#071a3d" stroke-width="3" stroke-dasharray="4 6"/>
+  <circle cx="330" cy="300" r="10" fill="#edf4fb" stroke="#071a3d" stroke-width="6"/>
+  <circle cx="500" cy="300" r="10" fill="#edf4fb" stroke="#0f7f86" stroke-width="6"/>
+  <circle cx="570" cy="300" r="10" fill="#edf4fb" stroke="#071a3d" stroke-width="6"/>
+
+  <path d="M330 390 L165 390" fill="none" stroke="#f24b55" stroke-width="10" stroke-linecap="round" marker-end="url(#redArrow)"/>
+  <path d="M330 390 L500 300" fill="none" stroke="#f24b55" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M500 300 L570 205 L770 205" fill="none" stroke="#0f7f86" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#greenArrow)"/>
+
+  <rect x="178" y="360" width="234" height="42" rx="8" fill="#071a3d"/>
+  <text x="295" y="388" text-anchor="middle" font-family="Arial, sans-serif" font-size="19" font-weight="700" fill="#ffffff">Long Put Strike</text>
+
+  <rect x="584" y="172" width="214" height="42" rx="8" fill="#071a3d"/>
+  <text x="691" y="200" text-anchor="middle" font-family="Arial, sans-serif" font-size="19" font-weight="700" fill="#ffffff">Short Put Strike</text>
+
+  <rect x="245" y="432" width="430" height="44" rx="9" fill="#0f7f86"/>
+  <text x="460" y="461" text-anchor="middle" font-family="Arial, sans-serif" font-size="20" font-weight="800" fill="#ffffff">Break-even = short strike - net credit</text>
+
+  <text x="145" y="424" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#f24b55">Max loss is capped</text>
+  <text x="615" y="152" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#0f7f86">Max profit = net credit</text>
+  <text x="450" y="506" text-anchor="middle" font-family="Arial, sans-serif" font-size="18" font-weight="700" fill="#071a3d">Profile target APR: 8% - 14%</text>
+</svg>
