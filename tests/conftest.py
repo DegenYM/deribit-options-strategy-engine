@@ -134,11 +134,26 @@ def make_config(tmp_path: Path, **overrides) -> BotConfig:
 
 
 class FakeClient:
-    def __init__(self, *, drawdowns=None, dvol_ratios=None, btc_book_equity: str | None = None, eth_book_equity: str | None = None):
+    def __init__(
+        self,
+        *,
+        drawdowns=None,
+        dvol_ratios=None,
+        btc_book_equity: str | None = None,
+        eth_book_equity: str | None = None,
+        btc_initial_margin: str | None = None,
+        eth_initial_margin: str | None = None,
+        btc_maintenance_margin: str | None = None,
+        eth_maintenance_margin: str | None = None,
+    ):
         self.drawdowns = drawdowns or {"BTC": Decimal("-0.02"), "ETH": Decimal("-0.02")}
         self.dvol_ratios = dvol_ratios or {"BTC": Decimal("1.10"), "ETH": Decimal("1.10")}
         self.btc_book_equity = btc_book_equity
         self.eth_book_equity = eth_book_equity
+        self.btc_initial_margin = btc_initial_margin
+        self.eth_initial_margin = eth_initial_margin
+        self.btc_maintenance_margin = btc_maintenance_margin
+        self.eth_maintenance_margin = eth_maintenance_margin
         self.transaction_log: dict[str, list[dict]] = {}
         self.order_book_overrides: dict[str, dict] = {}
         self.placed_orders: list[dict] = []
@@ -443,8 +458,18 @@ class FakeClient:
     def get_account_summaries(self, *, extended=False):
         btc_eq = self.btc_book_equity if self.btc_book_equity is not None else "0"
         eth_eq = self.eth_book_equity if self.eth_book_equity is not None else "0"
-        btc_mm = "0.01" if Decimal(btc_eq) > 0 else "0"
-        eth_mm = "0.01" if Decimal(eth_eq) > 0 else "0"
+        btc_mm = (
+            self.btc_maintenance_margin
+            if self.btc_maintenance_margin is not None
+            else ("0.01" if Decimal(btc_eq) > 0 else "0")
+        )
+        eth_mm = (
+            self.eth_maintenance_margin
+            if self.eth_maintenance_margin is not None
+            else ("0.01" if Decimal(eth_eq) > 0 else "0")
+        )
+        btc_im = self.btc_initial_margin if self.btc_initial_margin is not None else "0"
+        eth_im = self.eth_initial_margin if self.eth_initial_margin is not None else "0"
         return [
             {
                 "currency": "USDC",
@@ -465,7 +490,7 @@ class FakeClient:
                 "equity": btc_eq,
                 "available_funds": btc_eq,
                 "available_withdrawal_funds": btc_eq,
-                "initial_margin": "0",
+                "initial_margin": btc_im,
                 "maintenance_margin": btc_mm,
                 "delta_total": "0.04",
                 "options_delta": "0",
@@ -478,7 +503,7 @@ class FakeClient:
                 "equity": eth_eq,
                 "available_funds": eth_eq,
                 "available_withdrawal_funds": eth_eq,
-                "initial_margin": "0",
+                "initial_margin": eth_im,
                 "maintenance_margin": eth_mm,
                 "delta_total": "0",
                 "options_delta": "0",
@@ -495,6 +520,8 @@ class FakeClient:
         end_timestamp,
         count=100,
         subaccount_id=None,
+        query=None,
+        continuation=None,
     ):
         entries = getattr(self, "transaction_log", {})
         rows = entries.get(currency.upper(), []) if isinstance(entries, dict) else []
@@ -526,6 +553,49 @@ class FakeClient:
 
     def get_user_trades_by_order(self, order_id, *, historical=False):
         return self.user_trades_by_order.get(order_id, [])
+
+    def get_user_trades_by_currency(
+        self,
+        currency,
+        *,
+        kind=None,
+        start_id=None,
+        end_id=None,
+        count=10,
+        start_timestamp=None,
+        end_timestamp=None,
+        sorting=None,
+        historical=False,
+        subaccount_id=None,
+    ):
+        store = getattr(self, "user_trades_by_currency", None)
+        if isinstance(store, dict):
+            key = (str(currency).upper(), int(subaccount_id) if subaccount_id is not None else None)
+            payload = store.get(key)
+            if isinstance(payload, dict):
+                return payload
+        return {"trades": [], "has_more": False}
+
+    def get_user_trades_by_instrument(
+        self,
+        instrument_name,
+        *,
+        start_seq=None,
+        end_seq=None,
+        count=10,
+        start_timestamp=None,
+        end_timestamp=None,
+        sorting=None,
+        historical=False,
+        subaccount_id=None,
+    ):
+        store = getattr(self, "user_trades_by_instrument", None)
+        if isinstance(store, dict):
+            key = (str(instrument_name).strip(), int(subaccount_id) if subaccount_id is not None else None)
+            payload = store.get(key)
+            if isinstance(payload, dict):
+                return payload
+        return {"trades": [], "has_more": False}
 
     def create_combo(self, trades):
         combo_id = f"{trades[0]['instrument_name'].split('-', 1)[0]}-COMBO-{self._combo_counter}"

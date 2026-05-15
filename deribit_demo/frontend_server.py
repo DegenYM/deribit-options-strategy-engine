@@ -11,6 +11,7 @@ assets are mounted at ``/`` so the dashboard is reachable from a single URL.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -32,6 +33,7 @@ from .exceptions import ConfigurationError
 from .models import OrderBookSnapshot, normalize_strategy_name
 from .stress import black_swan_strategy_analysis
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
+from .fees import annualized_return
 from .utils import format_decimal, json_default, to_decimal, utc_now, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
@@ -74,19 +76,125 @@ def _live_api_identity(account: DashboardAccount) -> str:
     return _live_api_identity_config(account.config, account.name)
 
 
+def _merge_decimal_dict_union_max(into: dict[str, Decimal], extra: dict[str, Any]) -> None:
+    """Union-merge ``extra`` into ``into`` (upper-case keys); same-book values should match — keep max."""
+    for raw_key, raw_val in (extra or {}).items():
+        k = str(raw_key).upper()
+        v = _dec(raw_val)
+        if k not in into:
+            into[k] = v
+        else:
+            into[k] = max(into[k], v)
+
+
+def _merge_portfolio_for_same_api_identity(base: dict[str, Any], extra: dict[str, Any]) -> None:
+    """Mutate ``base`` portfolio dict by layering per-book views from ``extra``.
+
+    Same Deribit login may load multiple env files with different ``TRADED_COLLATERALS``.
+    Each bot snapshot only lists books it manages; union-merge restores missing collateral rows
+    for the dashboard without double-counting headline totals (those stay on the first snapshot).
+    """
+    if not extra:
+        return
+
+    for key in (
+        "equity_by_book",
+        "day_start_equity_by_book",
+        "day_net_flow_usdc_by_book",
+        "day_pnl_usdc_ex_flow_by_book",
+        "day_pnl_usdc_ex_flow_ex_spot_by_book",
+        "day_drawdown_pct_by_book",
+    ):
+        merged_map: dict[str, Decimal] = {}
+        for raw_k, raw_v in (base.get(key) or {}).items():
+            merged_map[str(raw_k).upper()] = _dec(raw_v)
+        _merge_decimal_dict_union_max(merged_map, extra.get(key) or {})
+        base[key] = merged_map
+
+    base["halt_new_entries"] = bool(base.get("halt_new_entries")) or bool(extra.get("halt_new_entries"))
+    base["hard_derisk"] = bool(base.get("hard_derisk")) or bool(extra.get("hard_derisk"))
+    base["cooling_down"] = bool(base.get("cooling_down")) or bool(extra.get("cooling_down"))
+
+    base_delta = dict(base.get("delta_totals_by_currency") or {})
+    _merge_decimal_dict_union_max(base_delta, extra.get("delta_totals_by_currency") or {})
+    base["delta_totals_by_currency"] = base_delta
+
+    base_reg = dict(base.get("regime_by_currency") or {})
+    for raw_k, raw_v in (extra.get("regime_by_currency") or {}).items():
+        kk = str(raw_k).upper()
+        base_reg[kk] = _worst_regime([str(base_reg.get(kk, "normal")), str(raw_v)])
+    base["regime_by_currency"] = base_reg
+
+    base_margin = dict(base.get("margin_ratios_by_currency") or {})
+    for raw_k, ratios in (extra.get("margin_ratios_by_currency") or {}).items():
+        kk = str(raw_k).upper()
+        if kk not in base_margin:
+            base_margin[kk] = ratios
+    base["margin_ratios_by_currency"] = base_margin
+
+    base_detail = {str(k).upper(): list(v or []) for k, v in (base.get("regime_detail_by_currency") or {}).items()}
+    for raw_k, details in (extra.get("regime_detail_by_currency") or {}).items():
+        kk = str(raw_k).upper()
+        base_detail.setdefault(kk, []).extend(list(details or []))
+    base["regime_detail_by_currency"] = base_detail
+
+    base_halt_book = {
+        str(k).upper(): list(v or []) for k, v in (base.get("halt_entry_reasons_by_book") or {}).items()
+    }
+    for raw_k, reasons in (extra.get("halt_entry_reasons_by_book") or {}).items():
+        kk = str(raw_k).upper()
+        base_halt_book.setdefault(kk, []).extend(list(reasons or []))
+    base["halt_entry_reasons_by_book"] = base_halt_book
+
+    base_cd_book = {str(k).upper(): v for k, v in (base.get("cooldown_until_ms_by_book") or {}).items()}
+    for raw_k, ms in (extra.get("cooldown_until_ms_by_book") or {}).items():
+        kk = str(raw_k).upper()
+        choices = [base_cd_book.get(kk), ms]
+        numeric = [int(x) for x in choices if x is not None]
+        base_cd_book[kk] = max(numeric) if numeric else base_cd_book.get(kk)
+    base["cooldown_until_ms_by_book"] = base_cd_book
+
+    for key in ("cooling_down_by_book", "hard_derisk_by_book", "halt_entries_by_book"):
+        sub = dict(base.get(key) or {})
+        for raw_k, flag in (extra.get(key) or {}).items():
+            kk = str(raw_k).upper()
+            sub[kk] = bool(sub.get(kk)) or bool(flag)
+        base[key] = sub
+
+
+def _merge_status_group_for_equity(group: list[dict[str, Any]]) -> dict[str, Any]:
+    """Deep-merge a list of status payloads that share one Deribit API identity."""
+    merged = copy.deepcopy(group[0])
+    portfolio = dict(merged.get("portfolio") or {})
+    merged["portfolio"] = portfolio
+    for other in group[1:]:
+        _merge_portfolio_for_same_api_identity(portfolio, other.get("portfolio") or {})
+    return merged
+
+
 def _dedupe_statuses_for_equity_aggregate(
     accounts: list[DashboardAccount],
     statuses: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Return first status per `_live_api_identity` (order preserved)."""
-    seen: set[str] = set()
-    out: list[dict[str, Any]] = []
+    """One status per `_live_api_identity`, with per-book portfolio rows union-merged.
+
+    Order follows first-seen account row (same as the legacy de-dupe).
+    """
+    order: list[str] = []
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for account, status in zip(accounts, statuses, strict=False):
         key = _live_api_identity(account)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(status)
+        if key not in buckets:
+            order.append(key)
+        buckets[key].append(status)
+
+    out: list[dict[str, Any]] = []
+    for key in order:
+        group = buckets[key]
+        if len(group) == 1:
+            out.append(group[0])
+        else:
+            out.append(_merge_status_group_for_equity(group))
     return out
 
 
@@ -359,6 +467,43 @@ def _closed_groups_payload(state_path: Path) -> dict[str, Any]:
     }
 
 
+def _entry_dte_days_at_open(group: dict[str, Any]) -> Decimal:
+    entry_ms = int(group.get("entry_timestamp_ms") or 0)
+    exp_ms = int(group.get("expiration_timestamp_ms") or 0)
+    if entry_ms <= 0 or exp_ms <= entry_ms:
+        return Decimal("0")
+    return Decimal(str(exp_ms - entry_ms)) / Decimal("86400000")
+
+
+def _ensure_entry_net_apr(
+    group: dict[str, Any],
+    *,
+    equity_by_book: dict[str, Decimal],
+    index_usd: dict[str, Decimal],
+) -> None:
+    if _dec(group.get("entry_net_apr")) > 0:
+        return
+    credit_usdc = _dec(group.get("entry_credit"))
+    dte = _entry_dte_days_at_open(group)
+    coll = str(group.get("collateral_currency") or group.get("currency") or "USDC").upper()
+    equity = equity_by_book.get(coll) or Decimal("0")
+    if credit_usdc <= 0 or dte <= 0 or equity <= 0:
+        group["entry_net_apr"] = format_decimal(Decimal("0"), 8)
+        return
+    if coll == "USDC":
+        net_credit = credit_usdc
+        capital = equity
+    else:
+        idx = index_usd.get(coll) or Decimal("0")
+        if idx <= 0:
+            group["entry_net_apr"] = format_decimal(Decimal("0"), 8)
+            return
+        net_credit = credit_usdc / idx
+        capital = equity
+    apr = annualized_return(net_credit=net_credit, capital_base=capital, dte_days=dte)
+    group["entry_net_apr"] = format_decimal(apr, 8)
+
+
 def _enrich_groups_payload_open_unrealized(bot: DeribitOptionTrialBot, payload: dict[str, Any]) -> None:
     """Mirror engine open-row fields so the UI works from ``/api/groups`` alone.
 
@@ -370,11 +515,25 @@ def _enrich_groups_payload_open_unrealized(bot: DeribitOptionTrialBot, payload: 
         return
     cache: dict[str, OrderBookSnapshot] = {}
     underlying: dict[str, str] = {}
+    index_usd: dict[str, Decimal] = {}
     for sym in ("BTC", "ETH"):
         idx = bot._currency_index_price(sym, cache)
         underlying[sym] = format_decimal(idx, 4) if idx > 0 else "0"
+        if idx > 0:
+            index_usd[sym] = idx
+    index_usd["USDC"] = Decimal("1")
     payload["underlying_index_usd"] = underlying
+    equity_by_book: dict[str, Decimal] = {}
+    try:
+        for ccy, summary in bot._account_summaries_by_currency().items():
+            book = str(ccy).upper()
+            eq = to_decimal(summary.equity)
+            if eq > 0:
+                equity_by_book[book] = eq
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug("entry_net_apr equity lookup skipped: %s", exc)
     for g in open_rows:
+        _ensure_entry_net_apr(g, equity_by_book=equity_by_book, index_usd=index_usd)
         ec = to_decimal(g.get("entry_credit"))
         cd = to_decimal(g.get("current_debit"))
         unrealized_usdc = ec - cd
@@ -514,6 +673,28 @@ def _tag_row(row: dict[str, Any], account: DashboardAccount) -> dict[str, Any]:
     out = dict(row)
     out["account_name"] = account.name
     out["account_env_file"] = str(account.env_file)
+    return out
+
+
+def _trade_group_row_key(row: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            str(row.get("account_name") or ""),
+            str(row.get("group_id") or ""),
+            str(row.get("short_instrument_name") or ""),
+        ]
+    )
+
+
+def _dedupe_trade_group_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = _trade_group_row_key(row)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
     return out
 
 
@@ -776,6 +957,9 @@ def _aggregate_groups(accounts: list[DashboardAccount]) -> dict[str, Any]:
         next_group_id[account.name] = payload.get("next_group_id")
         excluded_closed_count += int(payload.get("performance_excluded_closed_group_count") or 0)
 
+    merged_open = _dedupe_trade_group_rows(merged_open)
+    merged_closed = _dedupe_trade_group_rows(merged_closed)
+
     return {
         "open": merged_open,
         "closed": merged_closed,
@@ -816,6 +1000,7 @@ def _aggregate_report(accounts: list[DashboardAccount], *, days: int) -> dict[st
         Decimal("0"),
     )
 
+    recent_closed = _dedupe_trade_group_rows(recent_closed)
     recent_closed.sort(key=lambda row: int(row.get("closed_timestamp_ms") or 0), reverse=True)
     return {
         "action": "report",

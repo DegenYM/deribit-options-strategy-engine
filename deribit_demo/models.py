@@ -477,6 +477,8 @@ class TradeGroup:
     # collateral is coin-based.
     estimated_im_collateral: Decimal = Decimal("0")
     entry_fee: Decimal = Decimal("0")
+    #: Net APR at entry (net credit / book equity, annualized by entry DTE).
+    entry_net_apr: Decimal = Decimal("0")
     hedge_instrument_name: str = ""
     hedge_size_base: Decimal = Decimal("0")
     current_debit: Decimal = Decimal("0")
@@ -540,6 +542,7 @@ class TradeGroup:
             "entry_credit": self.entry_credit,
             "original_entry_credit": self.original_entry_credit,
             "entry_fee": self.entry_fee,
+            "entry_net_apr": self.entry_net_apr,
             "max_loss": self.max_loss,
             "estimated_im_collateral": self.estimated_im_collateral,
             "regime_at_entry": self.regime_at_entry,
@@ -621,6 +624,7 @@ class TradeGroup:
             entry_credit=to_decimal(payload.get("entry_credit")),
             original_entry_credit=to_decimal(payload.get("original_entry_credit") or payload.get("entry_credit")),
             entry_fee=to_decimal(payload.get("entry_fee")),
+            entry_net_apr=to_decimal(payload.get("entry_net_apr")),
             max_loss=to_decimal(payload.get("max_loss")),
             estimated_im_collateral=to_decimal(payload.get("estimated_im_collateral")),
             regime_at_entry=str(payload.get("regime_at_entry") or RiskRegime.NORMAL.value),

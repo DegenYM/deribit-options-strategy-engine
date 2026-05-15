@@ -337,7 +337,7 @@ MAX_GROUPS_PER_CURRENCY=3
 注意：
 
 - `ping` 可以不帶私有憑證
-- `status`、`enter-best --live`、`manage --live`、`run --live`、`panic-close --live`、`cancel` 需要私有憑證
+- `status`、`enter-best --live`、`manage --live`、`run --live`、`panic-close --live`、`close-position --live`、`cancel` 需要私有憑證
 - Deribit 衍生品交易是否可用，取決於你的帳戶資格與司法管轄限制
 
 ## Commands
@@ -360,6 +360,68 @@ MAX_GROUPS_PER_CURRENCY=3
 ```
 
 `scan --strategy` 可在不修改 `.env` 的情況下覆蓋本次掃描策略，並會套用同目錄對應的 `.env.<strategy>` profile。可用值為 `naked_short`、`bull_put_spread`、`covered_call`（舊名 `naked_short_put` / `naked_short_call` 仍會被接受並對應到 `naked_short`）。
+
+### `close-position`（子帳精準平倉）
+
+關閉**指定合約**的交易所倉位，適合手動殘倉、單腿調整或只平某一張期權／永續。與 `panic-close` 不同：不會取消全部掛單、不平掉其他 group、不寫入 portfolio cooldown。
+
+**請用子帳專用 env**（API key 已限定該子帳），例如 `.env.naked_short_sub`、`.env.bull_put_spread_sub`、`.env.covered_call_sub`（範本見 [`.env.example_sub`](.env.example_sub)）。
+
+| 參數 | 說明 |
+|------|------|
+| `--env-file PATH` | 子帳憑證與 `STATE_FILE`（可寫在子命令前或後） |
+| `--list` | 只列出非零倉位（dry-run，不需 `--instrument`） |
+| `--instrument NAME` | 要平的合約全名；可重複傳入或逗號分隔多個 |
+| `--live` | 實際送單；省略則僅預覽 |
+| `--order-type market\|limit` | 預設 `market`；選擇權 `limit` 走 IOC limit + retry（同 `manage` 平倉） |
+| `--amount QTY` | 部分平倉張數；省略則平掉該合約全部倉位 |
+| `--json` | JSON 輸出 |
+
+平倉方式（依合約類型）：
+
+- **選擇權**：`market` → reduce-only 市價單；`limit` → reduce-only IOC limit（含 retry）
+- **永續／期貨**：`private/close_position`（市價）
+
+```bash
+# 1) 先看子帳有哪些倉位
+./bot --env-file .env.naked_short_sub status --json
+./bot --env-file .env.naked_short_sub close-position --list --json
+
+# 2) 預覽平某一張（不送單）
+./bot --env-file .env.naked_short_sub close-position \
+  --instrument BTC_USDC-27MAR26-90000-P --json
+
+# 3) 市價全平該合約
+./bot --env-file .env.naked_short_sub close-position \
+  --instrument BTC_USDC-27MAR26-90000-P --live --json
+
+# 4) 選擇權用 limit 平倉（較接近 manage 的平倉邏輯）
+./bot --env-file .env.bull_put_spread_sub close-position \
+  --instrument BTC_USDC-27MAR26-88000-P --order-type limit --live --json
+
+# 5) 一次平多個合約
+./bot --env-file .env.bull_put_spread_sub close-position \
+  --instrument BTC_USDC-27MAR26-90000-P,BTC_USDC-27MAR26-85000-P --live --json
+
+# 6) 部分平倉（0.05 張）
+./bot --env-file .env.naked_short_sub close-position \
+  --instrument BTC_USDC-27MAR26-90000-P --amount 0.05 --live --json
+
+# 7) 平永續對沖倉（若 ENABLE_PERP_HEDGE=true）
+./bot --env-file .env.naked_short_sub close-position \
+  --instrument BTC-PERPETUAL --live --json
+```
+
+**與 `panic-close` 對照**
+
+| | `close-position` | `panic-close` |
+|--|------------------|---------------|
+| 範圍 | 僅 `--instrument` 指定合約 | 全部 open group + PERP |
+| 掛單 | 不取消 | 取消所有 open orders |
+| Cooldown | 不設定 | 寫入全 book cooldown |
+| 本地 state | 不自動更新 group | 標記 group 為 closed |
+
+手動平掉 bot 有追蹤的 spread 後，本地 `STATE_FILE` 可能與交易所不一致；之後可再跑 `manage` 讓 reconcile 收斂，或等 Phase 2 的 `--group-id` / `--sync-state`。
 
 一次啟動多個 live 設定檔：
 

@@ -155,6 +155,33 @@
         </div>
       </section>
 
+      <section class="section-card priority-section">
+        <div class="section-heading">
+          <div>
+            <p class="section-eyebrow">Activity</p>
+            <h2 class="section-title">Recent opened &amp; closed</h2>
+            <p class="section-copy mt-1">
+              Last 20 entries and exits with entry net APR, fees, and credit at a glance.
+            </p>
+          </div>
+          <span class="open-meta-pill" id="activity-meta">—</span>
+        </div>
+        <div id="activity-panels" class="activity-panels">
+          <div class="activity-panel">
+            <h3 class="activity-panel-title">Recently opened</h3>
+            <ul id="recent-opened-list" class="activity-list">
+              <li class="activity-empty">Loading…</li>
+            </ul>
+          </div>
+          <div class="activity-panel">
+            <h3 class="activity-panel-title">Recently closed</h3>
+            <ul id="recent-closed-list" class="activity-list">
+              <li class="activity-empty">Loading…</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
       <details class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
@@ -261,41 +288,6 @@
       <details class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
-            <p class="section-eyebrow">History</p>
-            <h2 class="section-title">Recent closed trades (up to 20)</h2>
-          </div>
-          <div class="section-summary-meta">
-            <span id="closed-meta">—</span>
-            <span class="section-toggle" aria-hidden="true"></span>
-          </div>
-        </summary>
-        <div class="section-body overflow-x-auto">
-          <div class="table-card">
-          <table class="w-full text-sm">
-            <thead class="bg-slate-900/80 text-slate-400">
-              <tr>
-                <th class="text-left px-3 py-2">Closed at</th>
-                <th class="text-left px-3 py-2">Group</th>
-                <th class="text-left px-3 py-2">Strategy</th>
-                <th class="text-left px-3 py-2">Book</th>
-                <th class="text-right px-3 py-2">Amount</th>
-                <th class="text-left px-3 py-2">Reason</th>
-                <th class="text-right px-3 py-2">PnL (USDC)</th>
-                <th class="text-right px-3 py-2">Annualized</th>
-                <th class="text-right px-3 py-2">Holding days</th>
-              </tr>
-            </thead>
-            <tbody id="closed-rows" class="divide-y divide-slate-800">
-              <tr><td colspan="9" class="px-3 py-4 text-slate-500 text-center">Loading…</td></tr>
-            </tbody>
-          </table>
-          </div>
-        </div>
-      </details>
-
-      <details class="section-card collapsible-section">
-        <summary class="section-summary">
-          <div>
             <p class="section-eyebrow">Tail risk</p>
             <h2 class="section-title">Black swan stress</h2>
           </div>
@@ -311,7 +303,6 @@
 
       <footer class="text-xs text-slate-600 text-center pt-4 pb-8">
         Amounts are USDC-equivalent where noted. Spread report excludes perp hedge PnL.
-        Closed <strong>Annualized</strong> is PnL vs collateral initial margin (IM), annualized by holding days (not vs max_loss).
         The scheduler can still append snapshots to <code>data/frontend_ledger/</code> for your own tooling.
       </footer>
     </main>

@@ -155,6 +155,33 @@ def test_covered_call_scan_payload_uses_covered_call_diagnostics(tmp_path):
     assert any("[covered_call]" in blocker for blocker in result["entry_blockers"])
 
 
+def test_covered_call_scan_skips_book_im_target_when_native_cover_available(tmp_path):
+    client = FakeClient(
+        eth_book_equity="10",
+        eth_initial_margin="3.7",
+        eth_maintenance_margin="0.01",
+    )
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        managed_currencies=("ETH",),
+        book_im_target=Decimal("0.35"),
+        book_mm_target=Decimal("0.22"),
+        min_net_apr=Decimal("0.05"),
+        eth_call_delta_min=Decimal("0.08"),
+        eth_call_delta_max=Decimal("0.14"),
+        eth_call_otm_min=Decimal("0.08"),
+        eth_call_otm_max=Decimal("0.14"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+
+    result = engine.scan(currencies=("ETH",), top_n=1)
+
+    assert not any("im_ratio" in blocker for blocker in result["entry_blockers"])
+    assert not any("mm_ratio" in blocker for blocker in result["entry_blockers"])
+
+
 def test_covered_call_group_caps_ignore_existing_naked_put_groups(tmp_path):
     client = FakeClient(eth_book_equity="5")
     config = make_config(
@@ -404,6 +431,91 @@ def test_covered_call_robust_exit_ignores_non_itm_call(tmp_path):
     assert result["actions"] == []
 
 
+def test_covered_call_high_delta_skips_hard_derisk_and_cooldown(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        hard_defense_delta_call=Decimal("0.50"),
+        hard_stop_loss_pct=Decimal("0.45"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(eth_book_equity="10"))
+    group = _covered_call_group(dte_days=3)
+    group.currency = "ETH"
+    group.collateral_currency = "ETH"
+    group.covered_underlying_quantity = Decimal("0.1")
+    group.short_delta = Decimal("0.85")
+    group.current_debit = Decimal("950")
+    state = StrategyState()
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    context = engine._load_runtime()
+
+    assert context.snapshot.hard_derisk is False
+    assert not any(
+        "open_group_hard_defense_or_stop_trigger" in reason
+        for reason in context.snapshot.halt_entry_reasons
+    )
+    result = engine.manage(live=True)
+    assert not any(action.get("action") == "cooldown_started" for action in result["actions"])
+
+
+def test_covered_call_manage_skips_take_profit_and_time_exit(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        tp_capture_pct=Decimal("0.55"),
+        time_exit_dte=4,
+        enable_early_exit=True,
+        covered_call_spot_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group(dte_days=14)
+    group.profit_capture = Decimal("0.9")
+
+    actions = engine._manage_group(SimpleNamespace(orderbook_cache={}), group, live=False)
+
+    assert actions == []
+    assert group.status == "open"
+
+
+def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake_client):
+    from datetime import UTC, datetime
+
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        halt_drawdown_pct=Decimal("0.025"),
+        hard_derisk_drawdown_pct=Decimal("0.06"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    today_key = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    group = _covered_call_group(dte_days=10)
+    group.currency = "ETH"
+    group.collateral_currency = "ETH"
+    group.covered_underlying_quantity = Decimal("1")
+    state = StrategyState()
+    state.day_key = today_key
+    state.day_start_equity_by_book = {"BTC": Decimal("70000"), "ETH": Decimal("35000"), "USDC": Decimal("1000")}
+    state.day_start_equity_native_by_book = {"BTC": Decimal("1"), "ETH": Decimal("10"), "USDC": Decimal("1000")}
+    state.last_equity_by_book = dict(state.day_start_equity_by_book)
+    state.last_equity_native_by_book = dict(state.day_start_equity_native_by_book)
+    state.groups.append(group)
+    engine.state_store.save(state)
+    fake_client.eth_book_equity = "8"
+    fake_client.btc_book_equity = "1"
+
+    context = engine._load_runtime()
+
+    assert context.snapshot.hard_derisk_by_book.get("ETH") is not True
+    result = engine.manage(live=True)
+    assert not any(action.get("action") == "cooldown_started" for action in result["actions"])
+    assert "ETH" not in engine.state_store.load().cooldown_until_ms_by_book
+
+
 def test_covered_call_settlement_exit_marks_pending_and_previews_spot_sell(tmp_path):
     client = FakeClient(btc_book_equity="0.5")
     config = make_config(
@@ -620,6 +732,133 @@ def test_panic_close_dry_run_lists_positions(tmp_path, fake_client):
     assert result["action"] == "panic_close"
     assert result["live"] is False
     assert "actions" in result
+
+
+def test_close_position_list_returns_open_positions(tmp_path, fake_client):
+    instrument = "BTC_USDC-14APR30-63000-P"
+    fake_client.positions = [
+        {
+            "instrument_name": instrument,
+            "direction": "sell",
+            "kind": "option",
+            "size": "0.1",
+            "size_currency": "0.1",
+            "mark_price": "610",
+            "average_price": "600",
+            "floating_profit_loss": "0",
+            "delta": "-0.11",
+        }
+    ]
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+
+    result = engine.close_positions(list_only=True, live=False)
+
+    assert result["action"] == "close-position"
+    assert result["list_only"] is True
+    assert len(result["positions"]) == 1
+    assert result["positions"][0]["instrument_name"] == instrument
+
+
+def test_close_position_preview_skips_unknown_instrument(tmp_path, fake_client):
+    fake_client.positions = []
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+
+    result = engine.close_positions(
+        instruments=["BTC_USDC-14APR30-63000-P"],
+        live=False,
+    )
+
+    assert result["targets"] == []
+    assert result["skipped"] == [
+        {"instrument_name": "BTC_USDC-14APR30-63000-P", "reason": "no_open_position"}
+    ]
+
+
+def test_close_position_preview_short_option(tmp_path, fake_client):
+    instrument = "BTC_USDC-14APR30-63000-P"
+    fake_client.positions = [
+        {
+            "instrument_name": instrument,
+            "direction": "sell",
+            "kind": "option",
+            "size": "0.1",
+            "size_currency": "0.1",
+            "mark_price": "610",
+            "average_price": "600",
+            "floating_profit_loss": "0",
+            "delta": "-0.11",
+        }
+    ]
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+
+    result = engine.close_positions(instruments=[instrument], live=False)
+
+    assert len(result["targets"]) == 1
+    target = result["targets"][0]
+    assert target["status"] == "preview"
+    assert target["close_side"] == "buy"
+    assert target["method"] == "reduce_only_market"
+    assert target["amount"] == "0.1"
+
+
+def test_close_position_live_market_option(tmp_path, fake_client):
+    instrument = "BTC_USDC-14APR30-63000-P"
+    fake_client.positions = [
+        {
+            "instrument_name": instrument,
+            "direction": "sell",
+            "kind": "option",
+            "size": "0.1",
+            "size_currency": "0.1",
+            "mark_price": "610",
+            "average_price": "600",
+            "floating_profit_loss": "0",
+            "delta": "-0.11",
+        }
+    ]
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+
+    result = engine.close_positions(
+        instruments=[instrument],
+        live=True,
+        order_type="market",
+    )
+
+    assert result["targets"][0]["status"] == "filled"
+    assert len(fake_client.placed_orders) == 1
+    order = fake_client.placed_orders[0]
+    assert order["instrument_name"] == instrument
+    assert order["direction"] == "buy"
+    assert order["reduce_only"] is True
+    assert order["order_type"] == "market"
+
+
+def test_close_position_live_closes_perp(tmp_path, fake_client):
+    instrument = "BTC-PERPETUAL"
+    fake_client.positions = [
+        {
+            "instrument_name": instrument,
+            "direction": "buy",
+            "kind": "future",
+            "size": "100",
+            "size_currency": "100",
+            "mark_price": "70000",
+            "average_price": "69000",
+            "floating_profit_loss": "0",
+            "delta": "1",
+        }
+    ]
+    config = make_config(tmp_path)
+    engine = DeribitOptionTrialBot(config, fake_client)
+
+    result = engine.close_positions(instruments=[instrument], live=True)
+
+    assert result["targets"][0]["action"] == "close_perp"
+    assert fake_client.closed_positions == [instrument]
 
 
 def test_delta_totals_ignore_summary_delta_total(tmp_path, fake_client):
@@ -981,6 +1220,72 @@ def test_reconcile_adopts_exchange_short_put_missing_from_state(tmp_path, fake_c
     assert open_groups[0].short_instrument_name == short
     assert open_groups[0].last_action == "adopted_from_exchange"
     assert open_groups[0].quantity == Decimal("0.1")
+
+
+def test_reconcile_adopts_short_call_via_exact_instrument_when_absent_from_bulk(tmp_path):
+    """Bulk get_instruments can omit names the account still holds; adopt must use get_instrument like refresh."""
+    short = "BTC-22MAY26-85000-C"
+    exp_ms = future_expiry(11)
+
+    class BulkSparseClient(FakeClient):
+        def get_instruments(self, currency, *, kind="option", expired=False):
+            if currency.upper() == "BTC" and kind == "option":
+                return []
+            return super().get_instruments(currency, kind=kind, expired=expired)
+
+        def get_instrument(self, instrument_name):
+            if instrument_name == short:
+                return {
+                    "instrument_name": short,
+                    "base_currency": "BTC",
+                    "quote_currency": "BTC",
+                    "settlement_currency": "BTC",
+                    "instrument_type": "reversed",
+                    "tick_size": "0.0001",
+                    "tick_size_steps": [],
+                    "min_trade_amount": "0.1",
+                    "contract_size": "0.1",
+                    "option_type": "call",
+                    "expiration_timestamp": exp_ms,
+                    "strike": "85000",
+                    "instrument_state": "open",
+                }
+            return super().get_instrument(instrument_name)
+
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        option_markets_profile="inverse_native",
+        enable_short_put=False,
+        enable_short_call=True,
+    )
+    engine = DeribitOptionTrialBot(config, BulkSparseClient())
+    state = StrategyState()
+    pos = Position.from_api(
+        {
+            "instrument_name": short,
+            "direction": "sell",
+            "kind": "option",
+            "size": "0.1",
+            "size_currency": "0.1",
+            "mark_price": "0.0033",
+            "average_price": "0.003",
+            "floating_profit_loss": "0",
+            "delta": "-0.11",
+        }
+    )
+    markets = engine._load_supported_option_markets()
+    assert all(inst.instrument_name != short for inst in markets.get("BTC", []))
+    engine._reconcile_state(
+        state,
+        option_positions=[pos],
+        orderbook_cache={},
+        markets_by_currency=markets,
+    )
+    open_groups = [g for g in state.groups if g.status == "open"]
+    assert len(open_groups) == 1
+    assert open_groups[0].short_instrument_name == short
+    assert open_groups[0].last_action == "adopted_from_exchange"
 
 
 def test_reconcile_promotes_existing_bull_put_spread_group_from_long_position(tmp_path, fake_client):

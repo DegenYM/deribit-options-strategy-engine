@@ -660,22 +660,50 @@
     return `<span class="chip ${cls}">${escapeHtml(info.short)}</span>`;
   }
 
+  function tradeGroupKey(g) {
+    return [
+      String(g?.account_name || ""),
+      String(g?.group_id || ""),
+      String(g?.short_instrument_name || ""),
+    ].join("\u0000");
+  }
+
+  function dedupeTradeGroups(rows) {
+    const seen = new Set();
+    const out = [];
+    for (const g of rows || []) {
+      const key = tradeGroupKey(g);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(g);
+    }
+    return out;
+  }
+
+  function isOpenTradeGroup(g) {
+    const st = String(g?.status || "open").toLowerCase();
+    return st !== "closed";
+  }
+
+  function isClosedTradeGroup(g) {
+    const st = String(g?.status || "").toLowerCase();
+    if (st === "closed") return true;
+    return closedTimestampMs(g) !== null;
+  }
+
   function currentOpenRows(status, groups) {
     const out = [];
     const seen = new Set();
-    const keyFor = (g) =>
-      [
-        String(g?.account_name || ""),
-        String(g?.group_id || ""),
-        String(g?.short_instrument_name || ""),
-      ].join("\u0000");
     for (const g of status?.trade_groups || []) {
-      const key = keyFor(g);
+      if (!isOpenTradeGroup(g)) continue;
+      const key = tradeGroupKey(g);
+      if (seen.has(key)) continue;
       seen.add(key);
       out.push(g);
     }
     for (const g of groups?.open || []) {
-      const key = keyFor(g);
+      if (!isOpenTradeGroup(g)) continue;
+      const key = tradeGroupKey(g);
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(g);
@@ -683,9 +711,17 @@
     return out.map((g) => enrichOpenGroupRow(status, g));
   }
 
+  function mergedClosedRows(report, groups, limit = 20) {
+    const rows = dedupeTradeGroups([
+      ...(report?.recent_closed_trades || []),
+      ...(groups?.closed || []),
+    ]).filter(isClosedTradeGroup);
+    rows.sort((a, b) => (closedTimestampMs(b) || 0) - (closedTimestampMs(a) || 0));
+    return rows.slice(0, limit);
+  }
+
   function closedRowsForStrategyStats(report, groups) {
-    if (groups?.closed?.length) return groups.closed;
-    return report?.recent_closed_trades || [];
+    return mergedClosedRows(report, groups, 500);
   }
 
   function strategyOrder(ids) {
@@ -746,9 +782,161 @@
     const explicit = num(g?.holding_days);
     if (explicit !== null) return explicit;
     const closed = closedTimestampMs(g);
-    const entry = num(g?.entry_timestamp_ms);
+    const entry = entryTimestampMs(g);
     if (closed === null || entry === null || entry <= 0) return null;
     return Math.max(closed - entry, 0) / 86_400_000;
+  }
+
+  function entryTimestampMs(g) {
+    const ms = num(g?.entry_timestamp_ms);
+    if (ms !== null) return ms;
+    if (g?.entry_timestamp) {
+      const dt = luxon.DateTime.fromISO(String(g.entry_timestamp), { zone: "utc" });
+      if (dt.isValid) return dt.toMillis();
+    }
+    return null;
+  }
+
+  function groupEntryDteDaysAtOpen(g) {
+    const entry = entryTimestampMs(g);
+    const exp = parseExpiryMsUtc(g);
+    if (entry === null || exp === null || exp <= entry) return null;
+    return (exp - entry) / 86_400_000;
+  }
+
+  function bookEquityNative(status, book) {
+    const b = String(book || "USDC").toUpperCase();
+    const eq = num(status?.accounts?.[b]?.equity);
+    if (eq === null || eq <= 0) return null;
+    return eq;
+  }
+
+  /** Entry net APR: persisted at open, else estimate from entry credit / book equity / entry DTE. */
+  function groupEntryNetApr(g, status) {
+    const stored = num(g?.entry_net_apr);
+    if (stored !== null && stored > 0) return stored;
+    const credit = num(g?.entry_credit);
+    const dte = groupEntryDteDaysAtOpen(g);
+    const book = String(g.collateral_currency || g.currency || "USDC").toUpperCase();
+    const equity = bookEquityNative(status, book);
+    if (credit === null || dte === null || dte <= 0 || equity === null || equity <= 0) return null;
+    let netCredit = credit;
+    let capital = equity;
+    if (book !== "USDC") {
+      const idx =
+        num(status?.underlying_index_usd?.[book]) ?? num(STATE.groups?.underlying_index_usd?.[book]) ?? num(STATE.lastSpotUsd?.[book]);
+      if (idx === null || idx <= 0) return null;
+      netCredit = credit / idx;
+      capital = equity;
+    }
+    return (netCredit / capital) * (365 / dte);
+  }
+
+  function groupEntryFeeUsd(g) {
+    return num(g?.entry_fee);
+  }
+
+  function groupCloseFeeUsd(g) {
+    const openEst = num(g?.current_close_fee);
+    if (openEst !== null && openEst > 0) return openEst;
+    return num(g?.realized_close_fee);
+  }
+
+  function groupEntryCreditUsd(g, status, groups) {
+    return openRowEntryCreditUsd(g, status, groups);
+  }
+
+  function allTradeGroupsForActivity(status, groups) {
+    const rows = [];
+    const seen = new Set();
+    const add = (g) => {
+      if (!g) return;
+      const key = tradeGroupKey(g);
+      if (seen.has(key)) return;
+      seen.add(key);
+      rows.push(g);
+    };
+    for (const g of status?.trade_groups || []) add(g);
+    for (const g of groups?.open || []) add(g);
+    for (const g of groups?.closed || []) add(g);
+    return rows;
+  }
+
+  function recentOpenedRows(status, groups, limit = 10) {
+    return dedupeTradeGroups(allTradeGroupsForActivity(status, groups))
+      .slice()
+      .sort((a, b) => (entryTimestampMs(b) || 0) - (entryTimestampMs(a) || 0))
+      .slice(0, limit);
+  }
+
+  function recentClosedRows(report, groups, limit = 10) {
+    return mergedClosedRows(report, groups, limit);
+  }
+
+  function tradeGroupActivityTitle(g) {
+    const ccy = String(g?.currency || "").toUpperCase() || "Option";
+    const ins = String(g?.short_instrument_name || "");
+    if (ins) {
+      const tail = ins.split("-").slice(-2).join(" ");
+      return `${ccy} ${tail}`.trim();
+    }
+    try {
+      return openPositionTitle(g);
+    } catch (_) {
+      return `${ccy} trade`;
+    }
+  }
+
+  function activityDetailLine(parts) {
+    return parts
+      .filter((p) => p)
+      .map((p) => {
+        if (typeof p === "string") return `<span>${escapeHtml(p)}</span>`;
+        return `<span>${escapeHtml(p[0])} <strong>${escapeHtml(String(p[1]))}</strong></span>`;
+      })
+      .join("");
+  }
+
+  function activityRowHtml(g, status, groups, { kind }) {
+    const id = strategyId(g);
+    const book = String(g.collateral_currency || g.currency || "—").toUpperCase();
+    const entryApr = groupEntryNetApr(g, status);
+    const entryFee = groupEntryFeeUsd(g);
+    const closeFee = groupCloseFeeUsd(g);
+    const credit = num(g.entry_credit);
+    const ts =
+      kind === "closed" ? closedTimestampMs(g) : entryTimestampMs(g);
+    const tsLabel = kind === "closed" ? "Closed" : "Opened";
+    const pnl = num(g.realized_pnl);
+    const holding = groupHoldingDays(g);
+    const title = tradeGroupActivityTitle(g);
+    const meta = [
+      [`${tsLabel}`, fmtTime(ts)],
+      entryApr !== null ? ["Net APR", fmtPct(entryApr, 1)] : null,
+      entryFee !== null ? ["Entry fee", fmtUsd(entryFee)] : null,
+      closeFee !== null && kind === "closed" ? ["Close fee", fmtUsd(closeFee)] : null,
+      closeFee !== null && kind === "open" ? ["Est. close fee", fmtUsd(closeFee)] : null,
+      credit !== null ? ["Credit", fmtUsd(credit)] : null,
+      kind === "closed" && pnl !== null ? ["PnL", fmtUsd(pnl)] : null,
+      kind === "closed" && holding !== null ? ["Held", `${fmtNum(holding, 1)}d`] : null,
+    ];
+    return `
+      <li class="activity-row">
+        <div class="activity-row-head">
+          ${strategyChipHtml(id)}
+          <span class="activity-row-title">${escapeHtml(title)}</span>
+          <span class="text-[11px] text-slate-500">${escapeHtml(book)}</span>
+          ${
+            accountHint(g)
+              ? `<span class="text-[11px] text-slate-500">${escapeHtml(accountHint(g))}</span>`
+              : ""
+          }
+        </div>
+        <div class="activity-row-meta">${activityDetailLine(meta)}</div>
+        <div class="font-mono text-[10px] text-slate-600 mt-1 break-all">${escapeHtml(
+          g.short_instrument_name || ""
+        )}</div>
+      </li>`;
   }
 
   function setText(id, text) {
@@ -1616,13 +1804,31 @@
             <span class="open-position-native ${pnlClass(nativeUnr)}">${fmtNativeUnrealizedDisplay(nativeUnr, coll)}</span>
           </div>
         </div>
-        <div class="open-position-kpis">
+        <div class="open-position-kpis open-position-kpis-extended">
           ${openPositionMetricHtml("DTE", dteVal !== null ? `${fmtNum(dteVal, 2)}d` : "—")}
           ${openPositionMetricHtml(
             "Credit kept",
             `${fmtPct(creditKept, 1)}${creditCaptureBarHtml(creditKept)}`
           )}
           ${openPositionMetricHtml("Entry credit", entryCredit === null ? "—" : fmtUsd(entryCredit))}
+          ${(() => {
+            const entryApr = groupEntryNetApr(g, status);
+            const aprClass =
+              entryApr !== null && entryApr >= 0.15 ? "pnl-pos" : "";
+            return openPositionMetricHtml(
+              "Entry net APR",
+              entryApr === null ? "—" : fmtPct(entryApr, 1),
+              aprClass
+            );
+          })()}
+          ${openPositionMetricHtml(
+            "Entry fee",
+            groupEntryFeeUsd(g) === null ? "—" : fmtUsd(groupEntryFeeUsd(g))
+          )}
+          ${openPositionMetricHtml(
+            "Est. close fee",
+            groupCloseFeeUsd(g) === null ? "—" : fmtUsd(groupCloseFeeUsd(g))
+          )}
         </div>
         <div class="open-position-legs ${isBullPutSpread ? "has-two-legs" : "has-one-leg"}">
           ${openPositionLegCardHtml(g, status, groups, "short")}
@@ -2299,6 +2505,38 @@
     root.innerHTML = rows.map((g) => openPositionCardHtml(g, status, groups)).join("");
   }
 
+  function renderActivityList(root, rows, status, groups, kind, emptyLabel) {
+    if (!root) return;
+    if (!rows.length) {
+      root.innerHTML = `<li class="activity-empty">${escapeHtml(emptyLabel)}</li>`;
+      return;
+    }
+    const html = [];
+    for (const g of rows) {
+      try {
+        html.push(activityRowHtml(g, status, groups, { kind }));
+      } catch (err) {
+        console.warn("activity row skipped", g?.group_id, err);
+      }
+    }
+    root.innerHTML = html.length
+      ? html.join("")
+      : `<li class="activity-empty">${escapeHtml(emptyLabel)}</li>`;
+  }
+
+  function renderRecentActivity(status, report, groups) {
+    const openedRoot = document.getElementById("recent-opened-list");
+    const closedRoot = document.getElementById("recent-closed-list");
+    if (!openedRoot && !closedRoot) return;
+
+    const opened = recentOpenedRows(status, groups, 20);
+    const closed = recentClosedRows(report, groups, 20);
+    setText("activity-meta", `${opened.length} opened · ${closed.length} closed`);
+
+    renderActivityList(openedRoot, opened, status, groups, "open", "No recent opens");
+    renderActivityList(closedRoot, closed, status, groups, "closed", "No recent closes");
+  }
+
   function closedTimestampMs(g) {
     const ms = num(g.closed_timestamp_ms);
     if (ms !== null) return ms;
@@ -2307,14 +2545,6 @@
       if (dt.isValid) return dt.toMillis();
     }
     return null;
-  }
-
-  /** Short leg qty (negative when size > 0, same convention as open Amount). */
-  function fmtClosedRowAmount(g) {
-    const q = num(g.quantity);
-    if (q === null) return "—";
-    const qSigned = q > 0 ? -Math.abs(q) : q;
-    return fmtNum(qSigned, 4);
   }
 
   /** Realized PnL in the book collateral native unit (USDC pnl ÷ index for inverse books). */
@@ -2347,55 +2577,6 @@
     const pnlN = closedPnlInBookNativeUnits(g, status);
     if (pnlN === null) return null;
     return (365 * pnlN) / (equity * holding);
-  }
-
-  function renderClosedTable(report, groups, status) {
-    const tbody = document.getElementById("closed-rows");
-    if (!tbody) return;
-    let rows = report?.recent_closed_trades;
-    if (!rows || !rows.length) {
-      // Fallback to local state when report endpoint not authorised.
-      rows = (groups?.closed || [])
-        .slice()
-        .sort(
-          (a, b) =>
-            (closedTimestampMs(b) || 0) - (closedTimestampMs(a) || 0)
-        )
-        .slice(0, 20);
-    }
-    setText("closed-meta", `${rows.length} shown`);
-    if (!rows.length) {
-      tbody.innerHTML = `<tr><td colspan="9" class="px-3 py-4 text-slate-500 text-center">No closed trades</td></tr>`;
-      return;
-    }
-    tbody.innerHTML = rows
-      .map((g) => {
-        const closedMs = closedTimestampMs(g);
-        const pnl = num(g.realized_pnl);
-        const ann = closedAnnualizedReturnOnEquity(g, status);
-        const holding = groupHoldingDays(g);
-        const book = g.collateral_currency || g.currency || "—";
-        return `
-          <tr>
-            <td class="px-3 py-2 font-mono text-xs">${fmtTime(closedMs)}</td>
-            <td class="px-3 py-2">
-              <div class="font-mono">${escapeHtml(g.group_id)}</div>
-              ${
-                accountHint(g)
-                  ? `<div class="text-[11px] text-slate-500 mt-1">${escapeHtml(accountHint(g))}</div>`
-                  : ""
-              }
-            </td>
-            <td class="px-3 py-2">${strategyChipHtml(strategyId(g))}</td>
-            <td class="px-3 py-2">${escapeHtml(book)}</td>
-            <td class="px-3 py-2 text-right font-mono">${fmtClosedRowAmount(g)}</td>
-            <td class="px-3 py-2 text-xs">${escapeHtml(g.close_reason || "")}</td>
-            <td class="px-3 py-2 text-right font-mono ${pnlClass(pnl)}">${fmtUsd(pnl)}</td>
-            <td class="px-3 py-2 text-right font-mono">${ann === null ? "—" : fmtPct(ann, 1)}</td>
-            <td class="px-3 py-2 text-right font-mono">${fmtNum(holding, 2)}</td>
-          </tr>`;
-      })
-      .join("");
   }
 
   // ---------- stress card ----------
@@ -2546,7 +2727,7 @@
       if (renderDependentViews) {
         renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
         renderOpenTable(STATE.status, STATE.groups);
-        renderClosedTable(STATE.report, STATE.groups, STATE.status);
+        renderRecentActivity(STATE.status, STATE.report, STATE.groups);
       }
     } catch (_) {
       /* ignore */
@@ -2591,7 +2772,7 @@
           renderDailyPnlChart();
           renderAprChart();
           renderOpenTable(STATE.status, STATE.groups);
-          renderClosedTable(STATE.report, STATE.groups, STATE.status);
+          renderRecentActivity(STATE.status, STATE.report, STATE.groups);
           renderStress(STATE.stress);
         });
       }

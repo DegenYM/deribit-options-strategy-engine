@@ -451,6 +451,8 @@ class DeribitClient:
         end_timestamp: int,
         count: int = 100,
         subaccount_id: int | None = None,
+        query: str | None = None,
+        continuation: int | None = None,
     ) -> list[dict[str, Any]]:
         """Fetch the transaction log window for a currency.
 
@@ -459,6 +461,9 @@ class DeribitClient:
         ``EXTERNAL_FLOW_TRANSACTION_TYPES`` in ``models.py``). Ordinary trading
         entries like ``trade``, ``settlement``, ``delivery``, etc. are returned
         too — the caller is responsible for filtering.
+
+        Pass ``query`` (e.g. ``\"trade\"``) to use Deribit's server-side filter
+        (see ``private/get_transaction_log`` docs).
         """
         params: dict[str, Any] = {
             "currency": currency.upper(),
@@ -468,6 +473,10 @@ class DeribitClient:
         }
         if subaccount_id is not None:
             params["subaccount_id"] = int(subaccount_id)
+        if query is not None and str(query).strip():
+            params["query"] = str(query).strip()
+        if continuation is not None:
+            params["continuation"] = int(continuation)
         result = self._request(
             "private/get_transaction_log",
             params=params,
@@ -521,6 +530,100 @@ class DeribitClient:
             private=True,
         )
         return result or []
+
+    def get_user_trades_by_currency(
+        self,
+        currency: str,
+        *,
+        kind: str | None = None,
+        start_id: str | None = None,
+        end_id: str | None = None,
+        count: int = 10,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
+        sorting: str | None = None,
+        historical: bool = False,
+        subaccount_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Latest fills for instruments in ``currency`` (see Deribit ``private/get_user_trades_by_currency``).
+
+        Pass ``subaccount_id`` when authenticating as the **main** account to read a subaccount's trades.
+        Subaccount API keys already scope to that account; ``subaccount_id`` is usually omitted then.
+        """
+        params: dict[str, Any] = {
+            "currency": currency.upper(),
+            "count": max(1, min(int(count), 1000)),
+            "historical": bool(historical),
+        }
+        if kind is not None and str(kind).strip():
+            params["kind"] = str(kind).strip()
+        if start_id is not None and str(start_id).strip():
+            params["start_id"] = str(start_id).strip()
+        if end_id is not None and str(end_id).strip():
+            params["end_id"] = str(end_id).strip()
+        if start_timestamp is not None:
+            params["start_timestamp"] = int(start_timestamp)
+        if end_timestamp is not None:
+            params["end_timestamp"] = int(end_timestamp)
+        if sorting is not None and str(sorting).strip():
+            params["sorting"] = str(sorting).strip()
+        if subaccount_id is not None:
+            params["subaccount_id"] = int(subaccount_id)
+        result = self._request(
+            "private/get_user_trades_by_currency",
+            params=params,
+            private=True,
+        )
+        if isinstance(result, list):
+            return {"trades": result, "has_more": False}
+        if isinstance(result, dict):
+            return result
+        return {"trades": [], "has_more": False}
+
+    def get_user_trades_by_instrument(
+        self,
+        instrument_name: str,
+        *,
+        start_seq: int | None = None,
+        end_seq: int | None = None,
+        count: int = 10,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
+        sorting: str | None = None,
+        historical: bool = False,
+        subaccount_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Fills for one contract (``private/get_user_trades_by_instrument``).
+
+        Use this for a single option/future/perp name, e.g. ``BTC_USDC-27MAR26-90000-P``.
+        """
+        params: dict[str, Any] = {
+            "instrument_name": str(instrument_name).strip(),
+            "count": max(1, min(int(count), 1000)),
+            "historical": bool(historical),
+        }
+        if start_seq is not None:
+            params["start_seq"] = int(start_seq)
+        if end_seq is not None:
+            params["end_seq"] = int(end_seq)
+        if start_timestamp is not None:
+            params["start_timestamp"] = int(start_timestamp)
+        if end_timestamp is not None:
+            params["end_timestamp"] = int(end_timestamp)
+        if sorting is not None and str(sorting).strip():
+            params["sorting"] = str(sorting).strip()
+        if subaccount_id is not None:
+            params["subaccount_id"] = int(subaccount_id)
+        result = self._request(
+            "private/get_user_trades_by_instrument",
+            params=params,
+            private=True,
+        )
+        if isinstance(result, list):
+            return {"trades": result, "has_more": False}
+        if isinstance(result, dict):
+            return result
+        return {"trades": [], "has_more": False}
 
     def create_combo(self, trades: list[dict[str, Any]]) -> dict[str, Any]:
         return self._request("private/create_combo", params={"trades": trades}) or {}

@@ -221,3 +221,37 @@ def test_aggregate_portfolios_dedupes_shared_api_credentials(tmp_path):
     assert len(equity_statuses) == 2
     portfolio = frontend_server._aggregate_portfolios(accounts, statuses, equity_statuses=equity_statuses)
     assert portfolio["total_equity_usdc"] == Decimal("1000")
+
+
+def test_dedupe_merges_equity_by_book_for_shared_credentials(tmp_path):
+    """Same API key + different TRADED_COLLATERALS must union per-book rows on one snapshot."""
+    shared = make_config(tmp_path, client_id="shared-key", client_secret="s")
+    accounts = [
+        DashboardAccount("inverse_first", tmp_path / "a.env", shared, shared.state_file, tmp_path / "ledger-a"),
+        DashboardAccount("linear_second", tmp_path / "b.env", shared, shared.state_file, tmp_path / "ledger-b"),
+    ]
+    statuses: list[dict] = [
+        {
+            "portfolio": {
+                "total_equity_usdc": Decimal("7000"),
+                "equity_by_book": {"BTC": Decimal("3000"), "ETH": Decimal("2000")},
+                "day_start_equity_by_book": {"BTC": Decimal("3000"), "ETH": Decimal("2000")},
+            }
+        },
+        {
+            "portfolio": {
+                "total_equity_usdc": Decimal("7000"),
+                "equity_by_book": {"USDC": Decimal("7000")},
+                "day_start_equity_by_book": {"USDC": Decimal("6900")},
+            }
+        },
+    ]
+    merged = frontend_server._dedupe_statuses_for_equity_aggregate(accounts, statuses)
+    assert len(merged) == 1
+    eb = merged[0]["portfolio"]["equity_by_book"]
+    assert eb["BTC"] == Decimal("3000")
+    assert eb["ETH"] == Decimal("2000")
+    assert eb["USDC"] == Decimal("7000")
+    portfolio = frontend_server._aggregate_portfolios(accounts, statuses, equity_statuses=merged)
+    assert portfolio["total_equity_usdc"] == Decimal("7000")
+    assert portfolio["equity_by_book"]["USDC"] == Decimal("7000")

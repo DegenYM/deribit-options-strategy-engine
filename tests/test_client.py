@@ -382,3 +382,61 @@ def test_invalid_access_token_forces_reauth_on_idempotent_path(tmp_path):
     # Final data call uses refreshed token
     positions_calls = [c for c in session.calls if c["json"]["method"] == "private/get_positions"]
     assert positions_calls[-1]["headers"].get("Authorization") == "Bearer token-2"
+
+
+def test_get_user_trades_by_currency_jsonrpc_params(tmp_path):
+    session = FakeSession(
+        [
+            FakeResponse(_auth_result()),
+            FakeResponse(_ok_body({"trades": [{"trade_id": "1"}], "has_more": False})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    out = client.get_user_trades_by_currency(
+        "USDC",
+        kind="option",
+        count=100,
+        sorting="desc",
+        historical=True,
+        subaccount_id=42,
+    )
+
+    assert out == {"trades": [{"trade_id": "1"}], "has_more": False}
+    data_calls = [c for c in session.calls if c["json"]["method"] == "private/get_user_trades_by_currency"]
+    assert len(data_calls) == 1
+    p = data_calls[0]["json"]["params"]
+    assert p["currency"] == "USDC"
+    assert p["count"] == 100
+    assert p["kind"] == "option"
+    assert p["sorting"] == "desc"
+    assert p["historical"] is True
+    assert p["subaccount_id"] == 42
+
+
+def test_get_user_trades_by_instrument_jsonrpc_params(tmp_path):
+    session = FakeSession(
+        [
+            FakeResponse(_auth_result()),
+            FakeResponse(_ok_body({"trades": [{"trade_id": "x"}], "has_more": True})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    out = client.get_user_trades_by_instrument(
+        "BTC_USDC-27MAR26-90000-P",
+        count=20,
+        sorting="asc",
+        historical=False,
+        subaccount_id=7,
+    )
+
+    assert out == {"trades": [{"trade_id": "x"}], "has_more": True}
+    data_calls = [c for c in session.calls if c["json"]["method"] == "private/get_user_trades_by_instrument"]
+    assert len(data_calls) == 1
+    p = data_calls[0]["json"]["params"]
+    assert p["instrument_name"] == "BTC_USDC-27MAR26-90000-P"
+    assert p["count"] == 20
+    assert p["sorting"] == "asc"
+    assert p["historical"] is False
+    assert p["subaccount_id"] == 7

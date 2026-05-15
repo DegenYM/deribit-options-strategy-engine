@@ -24,7 +24,7 @@ def configure_logging(verbose: bool = False) -> None:
 
 
 def build_bot(args) -> DeribitOptionTrialBot:
-    private_commands = {"status", "enter-best", "manage", "run", "panic-close", "cancel"}
+    private_commands = {"status", "enter-best", "manage", "run", "panic-close", "close-position", "cancel"}
     require_private = args.command in private_commands or (args.command == "scan" and getattr(args, "live", False))
     config = load_config(
         args.env_file,
@@ -33,6 +33,16 @@ def build_bot(args) -> DeribitOptionTrialBot:
     )
     client = DeribitClient(config)
     return DeribitOptionTrialBot(config, client)
+
+
+def _parse_instrument_names(raw_values: list[str] | None) -> list[str]:
+    names: list[str] = []
+    for raw in raw_values or []:
+        for part in str(raw).split(","):
+            name = part.strip()
+            if name:
+                names.append(name)
+    return list(dict.fromkeys(names))
 
 
 def render(data, json_output: bool) -> None:
@@ -122,6 +132,39 @@ def main(argv: list[str] | None = None) -> int:
     panic_parser.add_argument("--live", action="store_true", help="Actually place closing orders")
     panic_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    close_parser = subparsers.add_parser(
+        "close-position",
+        help="Close specific option or perp positions (use sub-account --env-file)",
+    )
+    _add_env_file_after_subcommand(close_parser)
+    close_parser.add_argument(
+        "--instrument",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="Contract to close; repeat or comma-separate (e.g. BTC_USDC-27MAR26-90000-P)",
+    )
+    close_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List non-zero positions only (dry-run; ignores --instrument)",
+    )
+    close_parser.add_argument("--live", action="store_true", help="Actually place closing orders")
+    close_parser.add_argument(
+        "--order-type",
+        choices=["market", "limit"],
+        default="market",
+        help="market: perp via close_position, option via reduce-only market; "
+        "limit: option IOC limit with retry (default market)",
+    )
+    close_parser.add_argument(
+        "--amount",
+        default=None,
+        metavar="QTY",
+        help="Partial close size in contracts; default closes full position",
+    )
+    close_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     cancel_parser = subparsers.add_parser("cancel", help="Cancel an order by order_id")
     _add_env_file_after_subcommand(cancel_parser)
     cancel_parser.add_argument("--order-id", required=True, help="Deribit order id")
@@ -132,6 +175,66 @@ def main(argv: list[str] | None = None) -> int:
     stress_parser.add_argument("--shocks", default="0.10,0.20,0.30,0.40,0.50,0.60", help="Comma-separated magnitudes, e.g. 0.1,0.2")
     stress_parser.add_argument("--report", default="reports/current_black_swan.md", help="Output markdown path")
     stress_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    trades_parser = subparsers.add_parser(
+        "user-trades",
+        help="Query fills: by wallet currency (get_user_trades_by_currency), by contract (--instrument), or transaction log",
+    )
+    _add_env_file_after_subcommand(trades_parser)
+    trades_parser.add_argument(
+        "--currency",
+        default=None,
+        metavar="CCY",
+        help="Wallet currency for by-currency or for --from-transaction-log: BTC, ETH, USDC … "
+        "Linear options (BTC_USDC-*, ETH_USDC-*) settle under USDC. Omit if only --instrument.",
+    )
+    trades_parser.add_argument(
+        "--instrument",
+        default=None,
+        metavar="NAME",
+        help="Full contract name, e.g. BTC_USDC-27MAR26-90000-P (private/get_user_trades_by_instrument)",
+    )
+    trades_parser.add_argument("--count", type=int, default=50, help="Max trades (1–1000, default 50)")
+    trades_parser.add_argument(
+        "--subaccount-id",
+        type=int,
+        default=None,
+        metavar="ID",
+        help="Subaccount user id (main-account API key only)",
+    )
+    trades_parser.add_argument(
+        "--historical",
+        action="store_true",
+        help="Use historical index (older than ~24h); excludes very recent fills",
+    )
+    trades_parser.add_argument(
+        "--kind",
+        default=None,
+        help="With by-currency only: instrument kind filter — option, future, spot, any, … (omit = all kinds)",
+    )
+    trades_parser.add_argument(
+        "--sorting",
+        default=None,
+        help="Optional: asc | desc | default (omit for Deribit default ordering)",
+    )
+    trades_parser.add_argument(
+        "--recent-only",
+        action="store_true",
+        help="Only use the rolling ~24h recent trades index (do not auto-retry with historical=true)",
+    )
+    trades_parser.add_argument(
+        "--from-transaction-log",
+        action="store_true",
+        help="Use private/get_transaction_log with query=trade (last --log-days, max 250 rows); needs account:read",
+    )
+    trades_parser.add_argument(
+        "--log-days",
+        type=int,
+        default=30,
+        metavar="N",
+        help="With --from-transaction-log: window length in days (default 30)",
+    )
+    trades_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     fe_parser = subparsers.add_parser("frontend", help="Serve local HTML dashboard at http://host:port")
     _add_env_file_after_subcommand(fe_parser)
@@ -160,6 +263,110 @@ def main(argv: list[str] | None = None) -> int:
             enable_scheduler=not args.no_scheduler,
             snapshot_interval_sec=args.snapshot_interval_sec,
             log_level=args.log_level,
+        )
+        return 0
+    if args.command == "user-trades":
+        from .utils import utc_now_ms
+
+        cfg = load_config(args.env_file, require_private=True)
+        client = DeribitClient(cfg)
+        sorting = args.sorting
+        if sorting is not None and str(sorting).strip().lower() in {"", "none"}:
+            sorting = None
+
+        if args.from_transaction_log and args.instrument:
+            raise SystemExit("user-trades: do not combine --from-transaction-log with --instrument")
+
+        if args.from_transaction_log:
+            if not args.currency:
+                raise SystemExit("user-trades: --currency is required with --from-transaction-log")
+        elif args.instrument:
+            pass
+        elif not args.currency:
+            raise SystemExit("user-trades: pass --currency (by wallet) or --instrument (by contract name)")
+
+        if args.from_transaction_log:
+            now_ms = utc_now_ms()
+            span_ms = max(1, int(args.log_days)) * 86_400_000
+            logs = client.get_transaction_log(
+                currency=args.currency,
+                start_timestamp=now_ms - span_ms,
+                end_timestamp=now_ms,
+                count=250,
+                subaccount_id=args.subaccount_id,
+                query="trade",
+            )
+            render(
+                {
+                    "action": "user-trades",
+                    "source": "transaction_log",
+                    "currency": str(args.currency).upper(),
+                    "deribit_env": cfg.env,
+                    "note": "Rows are in result.logs (not result.trades). Filter query=trade; fields differ from get_user_trades.",
+                    "result": {"logs": logs, "count": len(logs)},
+                },
+                args.json,
+            )
+            return 0
+
+        instrument = str(args.instrument).strip() if args.instrument else ""
+
+        def _fetch_currency(*, historical: bool) -> dict:
+            assert args.currency is not None
+            return client.get_user_trades_by_currency(
+                args.currency,
+                kind=args.kind,
+                count=args.count,
+                sorting=sorting,
+                historical=historical,
+                subaccount_id=args.subaccount_id,
+            )
+
+        def _fetch_instrument(*, historical: bool) -> dict:
+            return client.get_user_trades_by_instrument(
+                instrument,
+                count=args.count,
+                sorting=sorting,
+                historical=historical,
+                subaccount_id=args.subaccount_id,
+            )
+
+        _fetch = _fetch_instrument if instrument else _fetch_currency
+        source = "get_user_trades_by_instrument" if instrument else "get_user_trades_by_currency"
+
+        used_historical = bool(args.historical)
+        if args.historical:
+            payload = _fetch(historical=True)
+        else:
+            payload = _fetch(historical=False)
+            trades = list(payload.get("trades") or [])
+            if not trades and not args.recent_only:
+                historical_payload = _fetch(historical=True)
+                historical_trades = list(historical_payload.get("trades") or [])
+                if historical_trades:
+                    payload = historical_payload
+                    used_historical = True
+
+        out_currency = str(args.currency).upper() if args.currency else None
+        render(
+            {
+                "action": "user-trades",
+                "source": source,
+                "currency": out_currency,
+                "instrument": instrument or None,
+                "kind_filter": (args.kind or None) if not instrument else None,
+                "deribit_env": cfg.env,
+                "used_historical_index": used_historical,
+                "note": (
+                    "By-currency without --kind returns options+futures+perp+spot for that wallet. "
+                    "Use --kind option for options only, or --instrument NAME for one series. "
+                    "Linear options (BTC_USDC-…) live under currency=USDC. "
+                    "Deribit splits indexes: recent (~24h) vs historical=true for older fills "
+                    "(auto-retried when empty unless --recent-only)."
+                ),
+                "result": payload,
+            },
+            args.json,
         )
         return 0
     bot = build_bot(args)
@@ -261,6 +468,24 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "panic-close":
             render(bot.panic_close(live=args.live), args.json)
+            return 0
+        if args.command == "close-position":
+            instruments = _parse_instrument_names(args.instrument)
+            if not args.list and not instruments:
+                raise SystemExit("close-position: pass --instrument NAME or use --list")
+            amount = to_decimal(args.amount) if args.amount is not None else None
+            if amount is not None and amount <= 0:
+                raise SystemExit("close-position: --amount must be positive")
+            render(
+                bot.close_positions(
+                    instruments=instruments,
+                    list_only=args.list,
+                    live=args.live,
+                    order_type=args.order_type,
+                    amount=amount,
+                ),
+                args.json,
+            )
             return 0
         if args.command == "cancel":
             render(bot.cancel(args.order_id), args.json)

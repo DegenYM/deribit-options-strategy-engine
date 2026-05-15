@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from .client import DeribitClient
 from .config import BotConfig
-from .exceptions import ExchangeError
+from .exceptions import AuthenticationError, ExchangeError
 from .fees import option_trade_fee_usdc, premium_value_usdc
 from .margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
@@ -424,6 +424,253 @@ class DeribitOptionTrialBot:
             self.sleep_fn(sleep_seconds)
         return {"action": "run", "cycles": iteration, "results": cycle_results}
 
+    def close_positions(
+        self,
+        *,
+        instruments: list[str] | None = None,
+        list_only: bool = False,
+        live: bool = False,
+        order_type: str = "market",
+        amount: Decimal | None = None,
+    ) -> dict[str, Any]:
+        """Close specific exchange positions (options or perps), without portfolio-wide panic logic."""
+        normalized_order_type = str(order_type or "market").strip().lower()
+        if normalized_order_type not in {"market", "limit"}:
+            raise ExchangeError(f"close-position: unsupported order_type {order_type!r}")
+
+        if not self.config.has_private_credentials:
+            raise AuthenticationError("close-position requires private API credentials")
+
+        positions = [
+            Position.from_api(row) for row in self.client.get_positions(currency="any", kind="any")
+        ]
+        open_positions = [item for item in positions if abs(item.size) > 0]
+
+        if list_only:
+            return {
+                "action": "close-position",
+                "live": live,
+                "list_only": True,
+                "positions": [self._position_close_row(item) for item in open_positions],
+                "targets": [],
+                "skipped": [],
+            }
+
+        requested = [str(name).strip() for name in (instruments or []) if str(name).strip()]
+        if not requested:
+            raise ExchangeError("close-position: pass --instrument NAME or use --list")
+
+        by_name = {item.instrument_name: item for item in open_positions}
+        targets: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        context = self._load_runtime() if live else None
+
+        for instrument_name in requested:
+            position = by_name.get(instrument_name)
+            if position is None:
+                skipped.append({"instrument_name": instrument_name, "reason": "no_open_position"})
+                continue
+
+            close_qty = abs(position.size)
+            if amount is not None and amount > 0:
+                close_qty = min(close_qty, amount)
+            close_side = "buy" if position.direction == "sell" else "sell"
+            is_option = position.kind == "option"
+            is_perp = position.kind in {"future", "future_combo"} or "PERPETUAL" in position.instrument_name
+
+            if not live:
+                targets.append(
+                    self._close_position_preview(
+                        position,
+                        close_qty=close_qty,
+                        close_side=close_side,
+                        order_type=normalized_order_type,
+                        is_option=is_option,
+                        is_perp=is_perp,
+                    )
+                )
+                continue
+
+            assert context is not None
+            label = f"{self.config.order_label_prefix}-manual-close"
+            if is_option:
+                targets.append(
+                    self._close_option_position_live(
+                        context,
+                        position=position,
+                        close_qty=close_qty,
+                        close_side=close_side,
+                        label=label,
+                        order_type=normalized_order_type,
+                    )
+                )
+            elif is_perp:
+                action = self._close_perp_position(position, live=True)
+                if action is None:
+                    skipped.append({"instrument_name": instrument_name, "reason": "zero_size"})
+                else:
+                    targets.append({**action, "status": "submitted"})
+            else:
+                response = self.client.close_position(
+                    instrument_name,
+                    order_type=normalized_order_type,
+                )
+                targets.append(
+                    {
+                        "instrument_name": instrument_name,
+                        "kind": position.kind,
+                        "close_side": close_side,
+                        "amount": format_decimal(close_qty, 8),
+                        "order_type": normalized_order_type,
+                        "status": "submitted",
+                        "method": "close_position",
+                        "response": response,
+                    }
+                )
+
+        return {
+            "action": "close-position",
+            "live": live,
+            "list_only": False,
+            "order_type": normalized_order_type,
+            "positions": [self._position_close_row(item) for item in open_positions],
+            "targets": targets,
+            "skipped": skipped,
+        }
+
+    def _position_close_row(self, position: Position) -> dict[str, Any]:
+        return {
+            "instrument_name": position.instrument_name,
+            "kind": position.kind,
+            "direction": position.direction,
+            "size": format_decimal(abs(position.size), 8),
+            "mark_price": format_decimal(position.mark_price, 8),
+            "floating_profit_loss": format_decimal(position.floating_profit_loss, 8),
+        }
+
+    def _close_position_preview(
+        self,
+        position: Position,
+        *,
+        close_qty: Decimal,
+        close_side: str,
+        order_type: str,
+        is_option: bool,
+        is_perp: bool,
+    ) -> dict[str, Any]:
+        if is_option:
+            method = "reduce_only_limit_ioc" if order_type == "limit" else "reduce_only_market"
+        elif is_perp:
+            method = "close_position"
+        else:
+            method = "close_position"
+        return {
+            "instrument_name": position.instrument_name,
+            "kind": position.kind,
+            "direction": position.direction,
+            "size": format_decimal(abs(position.size), 8),
+            "close_side": close_side,
+            "amount": format_decimal(close_qty, 8),
+            "order_type": order_type,
+            "status": "preview",
+            "method": method,
+        }
+
+    def _close_option_position_live(
+        self,
+        context: RuntimeContext,
+        *,
+        position: Position,
+        close_qty: Decimal,
+        close_side: str,
+        label: str,
+        order_type: str,
+    ) -> dict[str, Any]:
+        instrument_name = position.instrument_name
+        if order_type == "limit":
+            instrument = self._find_instrument(context, instrument_name)
+            book = self._get_orderbook(instrument_name, context.orderbook_cache)
+            initial_price = (
+                self.strategy.close_buy_price(instrument, book)
+                if close_side == "buy"
+                else self.strategy.close_sell_price(instrument, book)
+            )
+            result = self._close_leg_with_retry(
+                context,
+                instrument_name=instrument_name,
+                quantity=close_qty,
+                direction=close_side,
+                label=label,
+                initial_price=initial_price,
+            )
+            if result["unfilled"] <= 0:
+                status = "filled"
+            elif result["filled"] > 0:
+                status = "partial"
+            else:
+                status = "failed"
+            return {
+                "instrument_name": instrument_name,
+                "kind": position.kind,
+                "close_side": close_side,
+                "amount": format_decimal(close_qty, 8),
+                "order_type": order_type,
+                "status": status,
+                "method": "reduce_only_limit_ioc",
+                "filled": format_decimal(result["filled"], 8),
+                "unfilled": format_decimal(result["unfilled"], 8),
+                "responses": result["responses"],
+            }
+
+        instrument = self._find_instrument(context, instrument_name)
+        requested = align_option_order_amount(close_qty, instrument.contract_size, instrument.min_trade_amount)
+        capacity = self._option_reduce_only_capacity(
+            instrument_name,
+            close_side,
+            option_positions=context.option_positions,
+        )
+        order_amount = align_option_order_amount(
+            min(requested, capacity),
+            instrument.contract_size,
+            instrument.min_trade_amount,
+        )
+        if order_amount <= 0:
+            return {
+                "instrument_name": instrument_name,
+                "kind": position.kind,
+                "close_side": close_side,
+                "amount": format_decimal(close_qty, 8),
+                "order_type": order_type,
+                "status": "failed",
+                "method": "reduce_only_market",
+                "reason": "zero_reduce_only_capacity",
+            }
+        place_fn = self.client.place_buy_order if close_side == "buy" else self.client.place_sell_order
+        response = place_fn(
+            instrument_name=instrument_name,
+            amount=order_amount,
+            label=label,
+            order_type="market",
+            reduce_only=True,
+        )
+        filled = self._response_filled_amount(response)
+        if filled >= order_amount:
+            status = "filled"
+        elif filled > 0:
+            status = "partial"
+        else:
+            status = "failed"
+        return {
+            "instrument_name": instrument_name,
+            "kind": position.kind,
+            "close_side": close_side,
+            "amount": format_decimal(order_amount, 8),
+            "order_type": order_type,
+            "status": status,
+            "method": "reduce_only_market",
+            "response": response,
+        }
+
     def panic_close(self, *, live: bool = False) -> dict[str, Any]:
         context = self._load_runtime()
         actions: list[dict[str, Any]] = []
@@ -493,6 +740,8 @@ class DeribitOptionTrialBot:
         self._update_recovery_counts(state, regime_by_currency)
         for group in self._open_groups(state):
             self._refresh_group(context_markets=markets_by_currency, group=group, orderbook_cache=orderbook_cache)
+        if self._is_covered_call_strategy():
+            self._clear_covered_call_book_cooldowns(state, summaries)
         snapshot = self._build_portfolio_snapshot(
             state=state,
             summaries=summaries,
@@ -945,21 +1194,27 @@ class DeribitOptionTrialBot:
                     f"{ccy}/{ccy} [covered_call]: no available {ccy} cover after existing covered_call reservations"
                 )
                 continue
-            ccy_ratios = snap.margin_ratios_by_currency.get(ccy)
-            if ccy_ratios:
-                ccy_im, ccy_mm = ccy_ratios
-                if ccy_im >= self.config.book_im_target:
-                    blockers.append(
-                        f"{ccy}/{ccy} [covered_call]: book im_ratio >= book_im_target "
-                        f"({format_decimal(ccy_im, 8)} >= {format_decimal(self.config.book_im_target, 6)})"
-                    )
-                    continue
-                if ccy_mm >= self.config.book_mm_target:
-                    blockers.append(
-                        f"{ccy}/{ccy} [covered_call]: book mm_ratio >= book_mm_target "
-                        f"({format_decimal(ccy_mm, 8)} >= {format_decimal(self.config.book_mm_target, 6)})"
-                    )
-                    continue
+            if not self._covered_call_book_im_mm_shielded(
+                context.state,
+                context.summaries,
+                ccy,
+                available_cover=available_cover,
+            ):
+                ccy_ratios = snap.margin_ratios_by_currency.get(ccy)
+                if ccy_ratios:
+                    ccy_im, ccy_mm = ccy_ratios
+                    if ccy_im >= self.config.book_im_target:
+                        blockers.append(
+                            f"{ccy}/{ccy} [covered_call]: book im_ratio >= book_im_target "
+                            f"({format_decimal(ccy_im, 8)} >= {format_decimal(self.config.book_im_target, 6)})"
+                        )
+                        continue
+                    if ccy_mm >= self.config.book_mm_target:
+                        blockers.append(
+                            f"{ccy}/{ccy} [covered_call]: book mm_ratio >= book_mm_target "
+                            f"({format_decimal(ccy_mm, 8)} >= {format_decimal(self.config.book_mm_target, 6)})"
+                        )
+                        continue
             collateral_markets = [
                 market
                 for market in context.markets_by_currency.get(ccy, [])
@@ -1326,8 +1581,17 @@ class DeribitOptionTrialBot:
                 collateral_summary = context.summaries.get(collateral_ccy)
                 if collateral_summary is None or collateral_summary.equity <= 0:
                     continue
+                skip_book_im_mm = False
+                if self.config.option_strategy == "covered_call":
+                    available_cover = self._available_covered_call_quantity(context, currency)
+                    skip_book_im_mm = self._covered_call_book_im_mm_shielded(
+                        context.state,
+                        context.summaries,
+                        collateral_ccy,
+                        available_cover=available_cover,
+                    )
                 ccy_ratios = context.snapshot.margin_ratios_by_currency.get(collateral_ccy)
-                if ccy_ratios:
+                if ccy_ratios and not skip_book_im_mm:
                     ccy_im, ccy_mm = ccy_ratios
                     if ccy_im >= self.config.book_im_target or ccy_mm >= self.config.book_mm_target:
                         continue
@@ -1426,6 +1690,11 @@ class DeribitOptionTrialBot:
     def _manage_group(self, context: RuntimeContext, group: TradeGroup, *, live: bool) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
         is_covered_call = self._is_covered_call_group(group)
+        if is_covered_call:
+            robust_exit_actions = self._maybe_covered_call_robust_spot_exit(context, group, live=live)
+            if robust_exit_actions is not None:
+                return robust_exit_actions
+            return actions
         soft_delta, hard_delta = self._defense_delta_thresholds(group)
         hard_trigger = not is_covered_call and (
             group.short_delta >= hard_delta
@@ -1543,6 +1812,71 @@ class DeribitOptionTrialBot:
                     )
                 )
         return actions
+
+    def _is_covered_call_strategy(self) -> bool:
+        return self.config.option_strategy == "covered_call"
+
+    def _available_covered_call_quantity_from_summaries(
+        self,
+        state: StrategyState,
+        summaries: dict[str, AccountSummary],
+        currency: str,
+    ) -> Decimal:
+        ccy = currency.upper()
+        summary = summaries.get(ccy)
+        if summary is None:
+            return Decimal("0")
+        reserved = self._reserved_covered_call_quantity(state, ccy)
+        return max(summary.equity - reserved, Decimal("0"))
+
+    def _covered_call_book_im_mm_shielded(
+        self,
+        state: StrategyState,
+        summaries: dict[str, AccountSummary],
+        currency: str,
+        *,
+        available_cover: Decimal | None = None,
+    ) -> bool:
+        """Skip book IM/MM gates when covered_call still has native spot backing."""
+        if not self._is_covered_call_strategy():
+            return False
+        ccy = currency.upper()
+        if available_cover is None:
+            available_cover = self._available_covered_call_quantity_from_summaries(state, summaries, ccy)
+        if available_cover > 0:
+            return True
+        return self._covered_call_book_fully_collateralized(state, summaries, ccy)
+
+    def _covered_call_book_fully_collateralized(
+        self,
+        state: StrategyState,
+        summaries: dict[str, AccountSummary],
+        currency: str,
+    ) -> bool:
+        """True when this collateral book still holds enough native equity for open covered calls."""
+        if not self._is_covered_call_strategy():
+            return False
+        ccy = currency.upper()
+        summary = summaries.get(ccy)
+        if summary is None or summary.equity <= 0:
+            return False
+        reserved = self._reserved_covered_call_quantity(state, ccy)
+        if reserved <= 0:
+            return False
+        return summary.equity >= reserved
+
+    def _clear_covered_call_book_cooldowns(
+        self,
+        state: StrategyState,
+        summaries: dict[str, AccountSummary],
+    ) -> None:
+        """Drop stale cooldowns once native book equity still covers open short calls."""
+        for ccy in summaries:
+            if not self._covered_call_book_fully_collateralized(state, summaries, ccy):
+                continue
+            state.cooldown_until_ms_by_book.pop(ccy.upper(), None)
+        if not any(not self._is_covered_call_group(group) for group in self._open_groups(state)):
+            state.cooldown_until_ms = None
 
     @staticmethod
     def _is_covered_call_group(group: TradeGroup) -> bool:
@@ -2338,6 +2672,7 @@ class DeribitOptionTrialBot:
             estimated_im_collateral=estimated_im_collateral,
             regime_at_entry=final_c.regime.value,
             entry_fee=short_entry_fee,
+            entry_net_apr=final_c.net_apr,
             short_label=labels["short"],
             hedge_label=labels["hedge"] if self.config.enable_perp_hedge else "",
             hedge_instrument_name=self._perp_instrument(final_c.currency) if self.config.enable_perp_hedge else "",
@@ -2501,6 +2836,7 @@ class DeribitOptionTrialBot:
             estimated_im_collateral=estimated_im_collateral,
             regime_at_entry=final_c.regime.value,
             entry_fee=short_fee + long_fee,
+            entry_net_apr=final_c.net_apr,
             short_label=labels["short"],
             long_label=labels["long"],
             hedge_label=labels["hedge"] if self.config.enable_perp_hedge else "",
@@ -2656,10 +2992,15 @@ class DeribitOptionTrialBot:
         open_groups = self._open_groups(state)
         crisis_open_group = any(regime_by_currency.get(group.currency, RiskRegime.CRISIS) is RiskRegime.CRISIS for group in open_groups)
         crisis_derisk = self.config.hard_derisk_on_crisis_open_group and crisis_open_group
+        hard_stop_groups = (
+            [group for group in open_groups if not self._is_covered_call_group(group)]
+            if self._is_covered_call_strategy()
+            else open_groups
+        )
         hard_stop_open_group = any(
             group.short_delta >= self._defense_delta_thresholds(group)[1]
             or group.loss_pct_of_max_loss >= self.config.hard_stop_loss_pct
-            for group in open_groups
+            for group in hard_stop_groups
         )
         per_currency_ratios = self._per_currency_margin_ratios(summaries)
         # Per-book gates. A single book breaching its hard IM/MM ceiling or its
@@ -2670,24 +3011,34 @@ class DeribitOptionTrialBot:
         book_hard_breaches: list[str] = []
 
         for book in per_book_equities:
+            shielded = self._covered_call_book_fully_collateralized(state, summaries, book)
             dd = per_book_drawdown.get(book, Decimal("0"))
-            if dd >= self.config.hard_derisk_drawdown_pct:
+            if not shielded and dd >= self.config.hard_derisk_drawdown_pct:
                 hard_derisk_by_book[book] = True
                 halt_reasons_by_book[book].append(
                     f"hard_derisk: day_drawdown_pct >= hard_derisk_drawdown_pct "
                     f"({format_decimal(dd, 8)} >= {format_decimal(self.config.hard_derisk_drawdown_pct, 6)})"
                 )
-            if dd >= self.config.halt_drawdown_pct:
+            if not shielded and dd >= self.config.halt_drawdown_pct:
                 halt_entries_by_book[book] = True
                 halt_reasons_by_book[book].append(
                     f"day_drawdown_pct >= halt_drawdown_pct "
                     f"({format_decimal(dd, 8)} >= {format_decimal(self.config.halt_drawdown_pct, 6)})"
                 )
-            if cooling_by_book.get(book):
+            if cooling_by_book.get(book) and not shielded:
                 halt_entries_by_book[book] = True
                 halt_reasons_by_book[book].append("cooldown_active")
 
         for collateral_ccy, (book_im, book_mm) in per_currency_ratios.items():
+            if self._covered_call_book_im_mm_shielded(
+                state,
+                summaries,
+                collateral_ccy,
+                available_cover=self._available_covered_call_quantity_from_summaries(
+                    state, summaries, collateral_ccy
+                ),
+            ):
+                continue
             if book_im >= self.config.book_im_hard:
                 breach = (
                     f"{collateral_ccy}: im_ratio>=book_im_hard "
@@ -3447,15 +3798,11 @@ class DeribitOptionTrialBot:
         )
 
     def _available_covered_call_quantity(self, context: RuntimeContext, currency: str) -> Decimal:
-        ccy = currency.upper()
-        summary = context.summaries.get(ccy)
-        if summary is None:
-            return Decimal("0")
-        reserved = self._reserved_covered_call_quantity(context.state, ccy)
-        # Cover sizing uses book equity in the native coin (spot + options MTM),
-        # not ``available_funds``. Margin from existing legs can depress the latter
-        # while the account still holds enough underlying notionally for covered calls.
-        return max(summary.equity - reserved, Decimal("0"))
+        return self._available_covered_call_quantity_from_summaries(
+            context.state,
+            context.summaries,
+            currency,
+        )
 
     def _naked_candidate_matches_open_group(self, state: StrategyState, candidate: NakedPutCandidate) -> bool:
         for group in self._open_groups(state):
@@ -4055,8 +4402,9 @@ class DeribitOptionTrialBot:
             else:
                 continue
 
-            inst = self._try_find_instrument(markets_by_currency, name)
-            if inst is None:
+            try:
+                inst = self._find_or_fetch_instrument(markets_by_currency, name)
+            except KeyError:
                 LOGGER.warning("adopt skipped: missing instrument metadata for %s", name)
                 continue
 
@@ -4435,15 +4783,26 @@ class DeribitOptionTrialBot:
             pass
         return Decimal("0")
 
+    def _stage_c_collateral_books(self) -> frozenset[str]:
+        """Pools included in Stage-C headline equity / margin rollups.
+
+        Matches :meth:`_book_equities_usdc` so dashboard ``total_equity_usdc``
+        does not pull in inverse dust when ``TRADED_COLLATERALS`` / scan scope
+        is USDC-only while ``MANAGED_CURRENCIES`` still lists BTC/ETH for
+        linear option discovery.
+        """
+        traded = {c.upper() for c in self.config.traded_collaterals}
+        scanned = {c.upper() for c in self.config.scan_underlyings}
+        books: set[str] = set()
+        for c in ("BTC", "ETH"):
+            if c in traded and c in scanned:
+                books.add(c)
+        if "USDC" in traded:
+            books.add("USDC")
+        return frozenset(books)
+
     def _total_equity_usdc(self, summaries: dict[str, AccountSummary], orderbook_cache: dict[str, OrderBookSnapshot]) -> Decimal:
-        total = Decimal("0")
-        for currency, summary in summaries.items():
-            if currency == "USDC":
-                total += summary.equity
-                continue
-            if currency in self.config.managed_currencies:
-                total += summary.equity * self._currency_index_price(currency, orderbook_cache)
-        return total
+        return sum(self._book_equities_usdc(summaries, orderbook_cache).values(), Decimal("0"))
 
     def _book_equities_usdc(
         self,
@@ -4508,14 +4867,18 @@ class DeribitOptionTrialBot:
         margin_kind: str,
     ) -> Decimal:
         total = Decimal("0")
-        for currency, summary in summaries.items():
+        scope = self._stage_c_collateral_books()
+        for currency in scope:
+            summary = summaries.get(currency)
+            if summary is None:
+                continue
             if margin_kind == "initial":
                 amount = summary.initial_margin
             else:
                 amount = summary.maintenance_margin
             if currency == "USDC":
                 total += amount
-            elif currency in self.config.managed_currencies:
+            else:
                 total += amount * self._currency_index_price(currency, orderbook_cache)
         return total
 
@@ -4524,8 +4887,9 @@ class DeribitOptionTrialBot:
     ) -> dict[str, tuple[Decimal, Decimal]]:
         """Per-account (im_ratio, mm_ratio) for each segregated margin account."""
         result: dict[str, tuple[Decimal, Decimal]] = {}
+        scope = self._stage_c_collateral_books()
         for currency, summary in summaries.items():
-            if currency not in self.config.managed_currencies and currency != "USDC":
+            if currency not in scope:
                 continue
             equity = summary.equity
             if equity <= 0:
@@ -4698,6 +5062,8 @@ class DeribitOptionTrialBot:
             "long_instrument_name": group.long_instrument_name or None,
             "entry_credit": group.entry_credit,
             "entry_fee": group.entry_fee,
+            "entry_net_apr": group.entry_net_apr,
+            "entry_timestamp_ms": group.entry_timestamp_ms,
             "max_loss": group.max_loss,
             "realized_close_debit": group.realized_close_debit,
             "realized_close_fee": group.realized_close_fee,
@@ -4736,6 +5102,8 @@ class DeribitOptionTrialBot:
             "covered_underlying_quantity": format_decimal(group.covered_underlying_quantity, 8),
             "entry_credit": format_decimal(group.entry_credit, 8),
             "entry_fee": format_decimal(group.entry_fee, 8),
+            "entry_net_apr": format_decimal(group.entry_net_apr, 8),
+            "entry_timestamp_ms": group.entry_timestamp_ms,
             "max_loss": format_decimal(group.max_loss, 8),
             "current_debit": format_decimal(group.current_debit, 8),
             "current_close_fee": format_decimal(group.current_close_fee, 8),
