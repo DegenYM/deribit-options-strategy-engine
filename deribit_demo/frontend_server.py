@@ -1177,6 +1177,7 @@ def create_app(
     account_env_files: tuple[str | Path, ...] | None = None,
     enable_scheduler: bool = True,
     snapshot_interval_sec: int | None = None,
+    investor_portal: bool = False,
 ) -> "Any":
     """Build the FastAPI application.
 
@@ -1188,7 +1189,7 @@ def create_app(
 
         from fastapi import FastAPI, HTTPException, Query
         from fastapi.middleware.cors import CORSMiddleware
-        from fastapi.responses import FileResponse, JSONResponse, Response
+        from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover — surfaces a clear hint.
         raise RuntimeError(
@@ -1455,6 +1456,12 @@ def create_app(
             return FileResponse(svg_path, media_type="image/svg+xml")
         return Response(status_code=204)
 
+    if investor_portal:
+
+        @app.get("/", include_in_schema=False)
+        def investor_portal_root() -> Any:
+            return RedirectResponse("/investor.html", status_code=302)
+
     if frontend_dir.is_dir():
         app.mount(
             "/",
@@ -1475,6 +1482,7 @@ def serve(
     account_env_files: tuple[str | Path, ...] | None = None,
     enable_scheduler: bool = True,
     snapshot_interval_sec: int | None = None,
+    investor_portal: bool = False,
     log_level: str = "info",
 ) -> None:
     try:
@@ -1489,6 +1497,7 @@ def serve(
         account_env_files=account_env_files,
         enable_scheduler=enable_scheduler,
         snapshot_interval_sec=snapshot_interval_sec,
+        investor_portal=investor_portal,
     )
     LOGGER.info("serving dashboard on http://%s:%s", host, port)
     uvicorn.run(app, host=host, port=int(port), log_level=log_level)

@@ -311,6 +311,7 @@ def main(argv: list[str] | None = None) -> int:
             account_env_files=tuple(parse_csv(args.account_env_files)) if args.account_env_files else None,
             enable_scheduler=not args.no_scheduler,
             snapshot_interval_sec=args.snapshot_interval_sec,
+            investor_portal=bool(getattr(args, "investor", None)),
             log_level=args.log_level,
         )
         return 0
