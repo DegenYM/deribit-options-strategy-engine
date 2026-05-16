@@ -9,6 +9,8 @@ from datetime import timedelta
 
 from .client import DeribitClient
 from .config import load_config
+from .env_layout import find_repo_root, load_investor_manifest
+from .exceptions import ConfigurationError
 from .backtest import BacktestConfig, run_backtest
 from .backtest_data import BacktestCache, BacktestDataClient
 from .engine import DeribitOptionTrialBot
@@ -52,6 +54,35 @@ def render(data, json_output: bool) -> None:
         print(json.dumps(data, default=json_default, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+def _apply_investor_cli_args(args: argparse.Namespace) -> None:
+    investor = getattr(args, "investor", None)
+    if not investor:
+        return
+    repo_root = find_repo_root(Path.cwd())
+    try:
+        manifest = load_investor_manifest(investor, repo_root=repo_root)
+    except ConfigurationError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    account_slug = getattr(args, "account", None)
+    if args.command == "frontend":
+        if not getattr(args, "account_env_files", None):
+            files = manifest.account_env_files()
+            if not files:
+                raise SystemExit(f"No enabled accounts in {manifest.root / 'accounts.toml'}")
+            args.account_env_files = ",".join(str(path) for path in files)
+        if account_slug:
+            args.env_file = str(manifest.env_for_slug(account_slug))
+        elif not getattr(args, "env_file_after_cmd", None) and args.env_file == ".env":
+            args.env_file = str(manifest.account_env_files()[0])
+        return
+
+    if not account_slug:
+        slugs = ", ".join(account.slug for account in manifest.accounts)
+        raise SystemExit(f"--account <slug> is required with --investor for `{args.command}` (known: {slugs})")
+    args.env_file = str(manifest.env_for_slug(account_slug))
+
+
 def _add_env_file_after_subcommand(sub: argparse.ArgumentParser) -> None:
     """Allow `./bot scan --env-file path` as well as `./bot --env-file path scan`."""
 
@@ -69,7 +100,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--env-file",
         default=".env",
-        help="Path to the .env file (may also appear after the subcommand; see subcommand help)",
+        help="Account env file (legacy: repo-root .env or .env.<strategy>_sub)",
+    )
+    parser.add_argument(
+        "--investor",
+        metavar="ID",
+        help="Investor id under config/investors/<ID> (uses accounts.toml)",
+    )
+    parser.add_argument(
+        "--account",
+        metavar="SLUG",
+        help="Sub-account slug from accounts.toml when using --investor",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -236,9 +277,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     trades_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
-    fe_parser = subparsers.add_parser("frontend", help="Serve local HTML dashboard at http://host:port")
+    fe_parser = subparsers.add_parser(
+        "frontend",
+        help="Serve HTML dashboard at http://host:port (use --host 0.0.0.0 behind TLS for remote access)",
+    )
     _add_env_file_after_subcommand(fe_parser)
-    fe_parser.add_argument("--host", default="127.0.0.1", help="Bind address (default 127.0.0.1)")
+    fe_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (default 127.0.0.1; 0.0.0.0 = all interfaces for LAN/VPS)",
+    )
     fe_parser.add_argument("--port", type=int, default=8765, help="Bind port (default 8765)")
     fe_parser.add_argument(
         "--account-env-files",
@@ -251,6 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if getattr(args, "env_file_after_cmd", None) is not None:
         args.env_file = args.env_file_after_cmd
+    _apply_investor_cli_args(args)
     configure_logging(args.verbose)
     if args.command == "frontend":
         from .frontend_server import serve as serve_frontend

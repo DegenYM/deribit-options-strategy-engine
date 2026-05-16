@@ -6,6 +6,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from .env_layout import env_layer_paths
 from .exceptions import ConfigurationError
 from .utils import parse_csv, to_decimal
 
@@ -436,51 +437,38 @@ def _env_values(env_file: str | Path) -> dict[str, str]:
     return {k: v for k, v in dotenv_values(env_file).items() if v is not None}
 
 
-def _strategy_profile_paths(env_path: Path, base_strategy: str) -> tuple[Path, ...]:
-    """Candidate ``.env.<strategy>`` paths, with legacy aliases as fallback.
-
-    ``naked_short`` is the canonical name for the single-leg short option
-    strategy. Older deployments still ship ``.env.naked_short_put``; treat
-    that file as a fallback so existing setups keep working until users
-    migrate to ``.env.naked_short``.
-    """
-    candidates = [env_path.parent / f".env.{base_strategy}"]
-    if base_strategy == "naked_short":
-        candidates.append(env_path.parent / ".env.naked_short_put")
-    return tuple(candidates)
-
-
 def _load_env_values_with_strategy_profile(
     env_file: str | Path,
     *,
     strategy_override: str | None = None,
 ) -> dict[str, str]:
     env_path = Path(env_file)
-    values = _env_values(env_path)
-    base_strategy = _option_strategy(
-        strategy_override or _optional(values, "OPTION_STRATEGY", "naked_short")
-    )
-    values["OPTION_STRATEGY"] = base_strategy
     if not env_path.exists():
-        return values
-    profile_path = next(
-        (path for path in _strategy_profile_paths(env_path, base_strategy) if path.exists()),
-        None,
+        raise ConfigurationError(f"Env file not found: {env_path}")
+
+    seed: dict[str, str] = {}
+    if env_path.is_file():
+        seed = _env_values(env_path)
+    base_strategy = _option_strategy(
+        strategy_override or _optional(seed, "OPTION_STRATEGY", "naked_short")
     )
-    if profile_path is None:
-        return values
 
-    profile_values = _env_values(profile_path)
-    profile_strategy_raw = _optional(profile_values, "OPTION_STRATEGY")
-    if profile_strategy_raw:
-        profile_strategy = _option_strategy(profile_strategy_raw)
-        if profile_strategy != base_strategy:
-            raise ConfigurationError(
-                f"{profile_path.name} OPTION_STRATEGY={profile_strategy} "
-                f"does not match base OPTION_STRATEGY={base_strategy}"
-            )
+    values: dict[str, str] = {}
+    for layer_path in env_layer_paths(env_path, base_strategy):
+        layer_values = _env_values(layer_path)
+        if layer_path == env_path:
+            values.update(layer_values)
+            continue
+        profile_strategy_raw = _optional(layer_values, "OPTION_STRATEGY")
+        if profile_strategy_raw:
+            profile_strategy = _option_strategy(profile_strategy_raw)
+            if profile_strategy != base_strategy:
+                raise ConfigurationError(
+                    f"{layer_path} OPTION_STRATEGY={profile_strategy} "
+                    f"does not match account OPTION_STRATEGY={base_strategy}"
+                )
+        values.update(layer_values)
 
-    values.update(profile_values)
     values["OPTION_STRATEGY"] = base_strategy
     return values
 

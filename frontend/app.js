@@ -3,6 +3,56 @@
 // renders cards / tables / Chart.js charts. No build step.
 
 (() => {
+  const DASHBOARD_MODE =
+    typeof window !== "undefined" && window.__DASHBOARD_MODE__ === "investor" ? "investor" : "ops";
+  const INVESTOR = DASHBOARD_MODE === "investor";
+
+  const INVESTOR_LOCALE = (() => {
+    if (!INVESTOR) return "en";
+    const raw = String(
+      (typeof window !== "undefined" && window.__INVESTOR_LOCALE__) || "en"
+    )
+      .trim()
+      .toLowerCase();
+    if (
+      raw === "zh-hant" ||
+      raw === "zh_tw" ||
+      raw === "zh-tw" ||
+      raw === "zh-hk" ||
+      raw === "zh"
+    ) {
+      return "zh";
+    }
+    return "en";
+  })();
+  const INVESTOR_ZH = INVESTOR && INVESTOR_LOCALE === "zh";
+
+  function i18n(en, zh) {
+    if (!INVESTOR) return en;
+    return INVESTOR_ZH ? zh : en;
+  }
+
+  function readApiBaseFromMeta() {
+    try {
+      const m = document.querySelector('meta[name="dashboard-api-base"]');
+      return m?.getAttribute("content")?.trim() || "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  /** Prefix relative ``/api/...`` URLs when static HTML is hosted away from the FastAPI dashboard. */
+  function resolveApiUrl(path) {
+    if (/^https?:\/\//i.test(path)) return path;
+    const fromWindow =
+      typeof window !== "undefined" && window.__API_BASE__
+        ? String(window.__API_BASE__).trim()
+        : "";
+    const base = (fromWindow || readApiBaseFromMeta()).replace(/\/$/, "");
+    const p = path.startsWith("/") ? path : `/${path}`;
+    return base ? `${base}${p}` : p;
+  }
+
   const fmt = {
     usd0: new Intl.NumberFormat("en-US", {
       style: "currency",
@@ -49,25 +99,34 @@
 
   const STRATEGIES = [
     {
+      id: "covered_call",
+      title: "Covered Call",
+      titleZh: "備兌買權",
+      short: "Covered Call",
+      shortZh: "備兌",
+      accentClass: "strategy-card-call",
+      description: "Short call backed by existing BTC/ETH spot collateral.",
+      descriptionZh: "在持有現貨擔保下賣出買權，以權利金增強收益。",
+    },
+    {
       id: "naked_short",
       title: "Naked Short",
+      titleZh: "單賣選擇權（裸賣）",
       short: "Naked Short",
+      shortZh: "裸賣",
       accentClass: "strategy-card-put",
       description: "Single-leg short option (put / call / both) with uncapped tail risk on the chosen side.",
+      descriptionZh: "單邊賣出買／賣權；在對應方向具尾部風險，需嚴格風控。",
     },
     {
       id: "bull_put_spread",
       title: "Bull Put Spread",
+      titleZh: "牛勢賣權價差",
       short: "Put Spread",
+      shortZh: "賣權價差",
       accentClass: "strategy-card-spread",
       description: "Short put paired with a lower-strike long put protection leg.",
-    },
-    {
-      id: "covered_call",
-      title: "Covered Call",
-      short: "Covered Call",
-      accentClass: "strategy-card-call",
-      description: "Short call backed by existing BTC/ETH spot collateral.",
+      descriptionZh: "賣出較高履約價賣權，並買入較低履約價賣權作保護。",
     },
   ];
 
@@ -639,7 +698,16 @@
 
   function strategyInfo(id) {
     const key = normalizeStrategyId(id);
-    if (STRATEGY_BY_ID[key]) return STRATEGY_BY_ID[key];
+    if (STRATEGY_BY_ID[key]) {
+      const base = STRATEGY_BY_ID[key];
+      if (!INVESTOR || !INVESTOR_ZH) return base;
+      return {
+        ...base,
+        title: base.titleZh || base.title,
+        short: base.shortZh || base.short,
+        description: base.descriptionZh || base.description,
+      };
+    }
     const label = key ? key.replaceAll("_", " ") : "—";
     return {
       id: key || "",
@@ -654,9 +722,17 @@
     return strategyInfo(id).title;
   }
 
+  function strategyChipClass(id) {
+    const key = normalizeStrategyId(id);
+    if (key === "naked_short") return "chip-strategy-naked";
+    if (key === "bull_put_spread") return "chip-strategy-spread";
+    if (key === "covered_call") return "chip-strategy-covered";
+    return "chip-strategy-unknown";
+  }
+
   function strategyChipHtml(id) {
     const info = strategyInfo(id);
-    const cls = STRATEGY_BY_ID[info.id] ? "chip-muted" : "chip-warn";
+    const cls = strategyChipClass(info.id || id);
     return `<span class="chip ${cls}">${escapeHtml(info.short)}</span>`;
   }
 
@@ -765,12 +841,15 @@
 
   function strategyLegDetail(g) {
     const longLeg = String(g?.long_instrument_name || "").trim();
-    if (longLeg) return `Long ${longLeg}`;
+    if (longLeg) return i18n(`Long ${longLeg}`, `買腿 ${longLeg}`);
     const covered = num(g?.covered_underlying_quantity);
     if (covered !== null && covered > 0) {
-      return `Covered ${fmtNum(covered, 4)} ${String(g.currency || "").toUpperCase()}`;
+      return i18n(
+        `Covered ${fmtNum(covered, 4)} ${String(g.currency || "").toUpperCase()}`,
+        `備兌 ${fmtNum(covered, 4)} ${String(g.currency || "").toUpperCase()}`
+      );
     }
-    return "Single short leg";
+    return i18n("Single short leg", "單邊賣出");
   }
 
   function accountHint(g) {
@@ -897,45 +976,99 @@
       .join("");
   }
 
-  function activityRowHtml(g, status, groups, { kind }) {
+  /** One row per trade group: closed list merged first so realized / close fields win over open snapshots. */
+  function recentActivityUnifiedRows(status, report, groups, limit = 20) {
+    const opened = recentOpenedRows(status, groups, limit);
+    const closed = recentClosedRows(report, groups, limit);
+    const merged = dedupeTradeGroups([...closed, ...opened]);
+    merged.sort((a, b) => {
+      const ra = activityRecencyMs(a);
+      const rb = activityRecencyMs(b);
+      return rb - ra;
+    });
+    return merged.slice(0, limit);
+  }
+
+  function activityRecencyMs(g) {
+    const c = closedTimestampMs(g);
+    if (c !== null && c > 0) return c;
+    return entryTimestampMs(g) || 0;
+  }
+
+  function activityLifecycleCardHtml(g, status, groups) {
     const id = strategyId(g);
     const book = String(g.collateral_currency || g.currency || "—").toUpperCase();
     const entryApr = groupEntryNetApr(g, status);
     const entryFee = groupEntryFeeUsd(g);
     const closeFee = groupCloseFeeUsd(g);
     const credit = num(g.entry_credit);
-    const ts =
-      kind === "closed" ? closedTimestampMs(g) : entryTimestampMs(g);
-    const tsLabel = kind === "closed" ? "Closed" : "Opened";
+    const entryMs = entryTimestampMs(g);
+    const closed = isClosedTradeGroup(g);
     const pnl = num(g.realized_pnl);
     const holding = groupHoldingDays(g);
     const title = tradeGroupActivityTitle(g);
-    const meta = [
-      [`${tsLabel}`, fmtTime(ts)],
-      entryApr !== null ? ["Net APR", fmtPct(entryApr, 1)] : null,
-      entryFee !== null ? ["Entry fee", fmtUsd(entryFee)] : null,
-      closeFee !== null && kind === "closed" ? ["Close fee", fmtUsd(closeFee)] : null,
-      closeFee !== null && kind === "open" ? ["Est. close fee", fmtUsd(closeFee)] : null,
-      credit !== null ? ["Credit", fmtUsd(credit)] : null,
-      kind === "closed" && pnl !== null ? ["PnL", fmtUsd(pnl)] : null,
-      kind === "closed" && holding !== null ? ["Held", `${fmtNum(holding, 1)}d`] : null,
-    ];
-    return `
-      <li class="activity-row">
-        <div class="activity-row-head">
-          ${strategyChipHtml(id)}
-          <span class="activity-row-title">${escapeHtml(title)}</span>
-          <span class="text-[11px] text-slate-500">${escapeHtml(book)}</span>
+    const entryMeta = [
+      [i18n("Opened", "開倉"), fmtTime(entryMs)],
+      entryApr !== null ? [i18n("Net APR", "淨年化報酬率"), fmtPct(entryApr, 1)] : null,
+      entryFee !== null ? [i18n("Entry fee", "進場手續費"), fmtUsd(entryFee)] : null,
+      credit !== null ? [i18n("Credit", "收權利金"), fmtUsd(credit)] : null,
+    ].filter(Boolean);
+    let exitInner = "";
+    if (closed) {
+      const exitMetaSecondary = [
+        [i18n("Closed", "平倉"), fmtTime(closedTimestampMs(g))],
+        closeFee !== null ? [i18n("Close fee", "平倉手續費"), fmtUsd(closeFee)] : null,
+        holding !== null
+          ? [i18n("Held", "持有"), `${fmtNum(holding, 1)}${INVESTOR_ZH ? " 天" : "d"}`]
+          : null,
+      ].filter(Boolean);
+      const pnlHero =
+        pnl !== null
+          ? `<div class="activity-closed-pnl">
+              <span class="activity-closed-pnl-label">${i18n("Realized PnL", "已實現損益")}</span>
+              <span class="activity-closed-pnl-value ${pnlClass(pnl)}">${fmtUsd(pnl)}</span>
+            </div>`
+          : `<div class="activity-closed-pnl">
+              <span class="activity-closed-pnl-label">${i18n("Realized PnL", "已實現損益")}</span>
+              <span class="activity-closed-pnl-value activity-closed-pnl-value-missing">—</span>
+            </div>`;
+      exitInner = `${pnlHero}<div class="activity-phase-meta activity-phase-meta-secondary">${activityDetailLine(
+        exitMetaSecondary
+      )}</div>`;
+    } else {
+      const exitMeta = [closeFee !== null ? [i18n("Est. close fee", "預估平倉費"), fmtUsd(closeFee)] : null].filter(
+        Boolean
+      );
+      exitInner = `<div class="activity-phase-meta">
+          <span class="activity-status-pill is-open">${i18n("Open", "持倉中")}</span>
           ${
-            accountHint(g)
-              ? `<span class="text-[11px] text-slate-500">${escapeHtml(accountHint(g))}</span>`
-              : ""
+            exitMeta.length
+              ? activityDetailLine(exitMeta)
+              : `<span>${i18n("Est. close fee", "預估平倉費")} <strong>—</strong></span>`
           }
+        </div>`;
+    }
+    const acct = !INVESTOR && accountHint(g) ? accountHint(g) : "";
+    return `
+      <li class="activity-card">
+        <div class="activity-card-head">
+          ${strategyChipHtml(id)}
+          <span class="activity-card-title">${escapeHtml(title)}</span>
+          <span class="text-[11px] text-slate-500">${escapeHtml(book)}</span>
+          ${acct ? `<span class="text-[11px] text-slate-500">${escapeHtml(acct)}</span>` : ""}
         </div>
-        <div class="activity-row-meta">${activityDetailLine(meta)}</div>
-        <div class="font-mono text-[10px] text-slate-600 mt-1 break-all">${escapeHtml(
-          g.short_instrument_name || ""
-        )}</div>
+        <div class="activity-card-instrument">${escapeHtml(g.short_instrument_name || "")}</div>
+        <div class="activity-lifecycle">
+          <div class="activity-phase activity-phase-entry">
+            <div class="activity-phase-label">${i18n("Entry", "進場")}</div>
+            <div class="activity-phase-meta">${activityDetailLine(entryMeta)}</div>
+          </div>
+          <div class="activity-phase-divider" aria-hidden="true"></div>
+          <div class="activity-phase activity-phase-exit">
+            <div class="activity-phase-label">${i18n("Exit", "出場")}</div>
+            ${exitInner}
+          </div>
+        </div>
       </li>`;
   }
 
@@ -974,11 +1107,12 @@
   }
 
   async function fetchJson(url, options = {}) {
+    const targetUrl = resolveApiUrl(url);
     const maxAttempts = FETCH_JSON_MAX_RETRIES + 1;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       let res;
       try {
-        res = await fetch(url, options);
+        res = await fetch(targetUrl, options);
       } catch (err) {
         if (attempt < maxAttempts - 1) {
           await delay(FETCH_JSON_RETRY_BASE_MS * (attempt + 1));
@@ -1006,52 +1140,74 @@
     if (!health) return;
     const env = (health.env || "").toLowerCase();
     const envBadge = document.getElementById("env-badge");
-    envBadge.textContent = `env: ${env || "?"}`;
-    envBadge.className =
-      "text-xs px-2 py-0.5 rounded-full border " +
-      (env === "mainnet"
-        ? "border-rose-500/50 bg-rose-500/10 text-rose-200"
-        : "border-emerald-500/50 bg-emerald-500/10 text-emerald-200");
+    if (envBadge) {
+      envBadge.textContent = INVESTOR
+        ? env === "mainnet"
+          ? i18n("Network: Mainnet", "網路：主網")
+          : env === "multi"
+          ? i18n("Network: Multi-account", "網路：多帳戶")
+          : env === "test"
+          ? i18n("Network: Test", "網路：測試")
+          : `${i18n("Network:", "網路：")} ${env || "—"}`
+        : `env: ${env || "?"}`;
+      envBadge.className =
+        "text-xs px-2 py-0.5 rounded-full border " +
+        (env === "mainnet"
+          ? "border-rose-500/50 bg-rose-500/10 text-rose-200"
+          : "border-emerald-500/50 bg-emerald-500/10 text-emerald-200");
+    }
 
     const strategyBadge = document.getElementById("strategy-badge");
     if (strategyBadge) {
       const strategy = normalizeStrategyId(health.option_strategy || "");
       const accountCount = health.accounts?.length || 0;
       strategyBadge.textContent = health.multi_account
-        ? `strategy: multi (${accountCount} accounts)`
+        ? i18n(`strategy: multi (${accountCount} accounts)`, `策略：多帳戶（${accountCount}）`)
+        : INVESTOR
+        ? `${i18n("Strategy:", "策略：")} ${strategy ? strategyTitle(strategy) : "—"}`
         : `strategy: ${strategy ? strategyTitle(strategy) : "?"}`;
       strategyBadge.className =
         "text-xs px-2 py-0.5 rounded-full border border-sky-500/50 bg-sky-500/10 text-sky-200";
     }
 
     const credsBadge = document.getElementById("creds-badge");
-    credsBadge.textContent = health.has_private_creds
-      ? "creds: ok"
-      : "creds: missing";
-    credsBadge.className =
-      "text-xs px-2 py-0.5 rounded-full border " +
-      (health.has_private_creds
-        ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
-        : "border-rose-500/50 bg-rose-500/10 text-rose-200");
+    if (credsBadge) {
+      credsBadge.textContent = health.has_private_creds
+        ? "creds: ok"
+        : "creds: missing";
+      credsBadge.className =
+        "text-xs px-2 py-0.5 rounded-full border " +
+        (health.has_private_creds
+          ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
+          : "border-rose-500/50 bg-rose-500/10 text-rose-200");
+    }
 
     const sched = document.getElementById("scheduler-badge");
-    if (health.scheduler_running) {
-      const sec = health.snapshot_interval_sec || 300;
-      const min = Math.round(sec / 60);
-      sched.textContent = `scheduler: on (every ${min} min)`;
-      sched.className =
-        "text-xs px-2 py-0.5 rounded-full border border-emerald-500/50 bg-emerald-500/10 text-emerald-200";
-    } else {
-      sched.textContent = "scheduler: off";
-      sched.className =
-        "text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-700/30 text-slate-300";
+    if (sched) {
+      if (health.scheduler_running) {
+        const sec = health.snapshot_interval_sec || 300;
+        const min = Math.round(sec / 60);
+        sched.textContent = i18n(`scheduler: on (every ${min} min)`, `快照排程：每 ${min} 分鐘`);
+        sched.className =
+          "text-xs px-2 py-0.5 rounded-full border border-emerald-500/50 bg-emerald-500/10 text-emerald-200";
+      } else {
+        sched.textContent = i18n("scheduler: off", "快照排程：關閉");
+        sched.className =
+          "text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-700/30 text-slate-300";
+      }
     }
   }
 
   function renderRegime(status) {
     const badge = document.getElementById("regime-badge");
+    if (!badge) return;
     const regime = status?.portfolio?.regime || "?";
-    badge.textContent = `regime: ${regime}`;
+    const regKey = String(regime).toLowerCase();
+    const regZh = { normal: "正常", elevated: "偏高", crisis: "警戒" };
+    const regEn = { normal: "Normal", elevated: "Elevated", crisis: "Crisis" };
+    badge.textContent = INVESTOR
+      ? `${i18n("Risk posture:", "風控狀態：")} ${INVESTOR_ZH ? regZh[regKey] || regime : regEn[regKey] || regime}`
+      : `regime: ${regime}`;
     const cls =
       regime === "normal"
         ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
@@ -1279,7 +1435,10 @@
     const summary = report?.summary;
 
     if (!portfolio && !summary) {
-      root.innerHTML = `<p class="text-sm text-slate-400">No status / report data yet.</p>`;
+      root.innerHTML = `<p class="text-sm text-slate-400">${i18n(
+        "No status / report data yet.",
+        "尚無即時帳戶或績效摘要資料。"
+      )}</p>`;
       return;
     }
 
@@ -1313,45 +1472,45 @@
     root.innerHTML = `
       <div class="grid grid-cols-2 md:grid-cols-4 gap-y-5 gap-x-6">
         <div>
-          <div class="text-xs text-slate-400">Total equity</div>
+          <div class="text-xs text-slate-400">${i18n("Total equity", "總權益（USDC 約當）")}</div>
           <div class="text-2xl font-mono">${fmtUsd(totalEquity)}</div>
-          <div class="text-xs text-slate-500">day-start ${fmtUsd(dayStart)}</div>
+          <div class="text-xs text-slate-500">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
         </div>
         <div>
-          <div class="text-xs text-slate-400">Day P&amp;L</div>
+          <div class="text-xs text-slate-400">${i18n("Day P&L", "本日損益")}</div>
           <div class="text-2xl font-mono ${pnlClass(dayPnl)}">${fmtUsd(dayPnl)}</div>
-          <div class="text-xs text-slate-500">drawdown ${fmtPct(dayDrawdown)}</div>
+          <div class="text-xs text-slate-500">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</div>
         </div>
         <div>
-          <div class="text-xs text-slate-400">Open credit</div>
+          <div class="text-xs text-slate-400">${i18n("Open credit", "未實現權利金（進場收斂）")}</div>
           <div class="text-2xl font-mono">${fmtUsd(openCredit)}</div>
-          <div class="text-xs text-slate-500">unrealized ${fmtUsd(openUnrealized)}</div>
+          <div class="text-xs text-slate-500">${i18n("unrealized MTM", "未實現損益約當")} ${fmtUsd(openUnrealized)}</div>
         </div>
         <div>
-          <div class="text-xs text-slate-400">Projected APR (open)</div>
+          <div class="text-xs text-slate-400">${i18n("Projected APR (open)", "持倉隱含年化（參考）")}</div>
           <div class="text-2xl font-mono">${fmtPct(projected)}</div>
-          <div class="text-xs text-slate-500">target progress ${fmtPct(targetProgress)}</div>
+          <div class="text-xs text-slate-500">${i18n("target progress", "目標達成度")} ${fmtPct(targetProgress)}</div>
         </div>
 
         <div>
-          <div class="text-xs text-slate-400">Total profit (lifetime)</div>
+          <div class="text-xs text-slate-400">${i18n("Total profit (lifetime)", "累計已實現損益")}</div>
           <div class="text-2xl font-mono ${pnlClass(lifetimePnl)}">${fmtUsd(lifetimePnl)}</div>
-          <div class="text-xs text-slate-500">${closedCount ?? 0} closed groups</div>
+          <div class="text-xs text-slate-500">${closedCount ?? 0} ${i18n("closed groups", "筆已平倉部位")}</div>
         </div>
         <div>
-          <div class="text-xs text-slate-400">Lifetime APR</div>
+          <div class="text-xs text-slate-400">${i18n("Lifetime APR", "存續期年化（已實現）")}</div>
           <div class="text-2xl font-mono">${fmtPct(lifetimeApr)}</div>
-          <div class="text-xs text-slate-500">target ${fmtPct(targetApr)}</div>
+          <div class="text-xs text-slate-500">${i18n("target", "目標")} ${fmtPct(targetApr)}</div>
         </div>
         <div>
-          <div class="text-xs text-slate-400">${windowDays ?? 30}d realized</div>
+          <div class="text-xs text-slate-400">${windowDays ?? 30}${i18n("d realized", " 日已實現")}</div>
           <div class="text-2xl font-mono ${pnlClass(windowPnl)}">${fmtUsd(windowPnl)}</div>
-          <div class="text-xs text-slate-500">window APR ${fmtPct(windowApr)}</div>
+          <div class="text-xs text-slate-500">${i18n("window APR", "區間年化")} ${fmtPct(windowApr)}</div>
         </div>
         <div>
-          <div class="text-xs text-slate-400">Win rate · avg holding</div>
-          <div class="text-2xl font-mono">${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}d</div>
-          <div class="text-xs text-slate-500">effective capital ${fmtUsd(effectiveCap)}</div>
+          <div class="text-xs text-slate-400">${i18n("Win rate · avg holding", "勝率 · 平均持有")}</div>
+          <div class="text-2xl font-mono">${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}${INVESTOR_ZH ? " 天" : "d"}</div>
+          <div class="text-xs text-slate-500">${i18n("effective capital", "參考資本")} ${fmtUsd(effectiveCap)}</div>
         </div>
       </div>
     `;
@@ -1496,180 +1655,36 @@
         </div>
         <div class="stat-grid mt-4">
           <div class="stat-tile">
-            <div class="label">Open groups</div>
+            <div class="label">${i18n("Open groups", "持倉筆數")}</div>
             <div class="value">${summary.openCount}</div>
           </div>
           <div class="stat-tile">
-            <div class="label">Realized APR</div>
+            <div class="label">${i18n("Realized APR", "已實現年化（加權）")}</div>
             <div class="value">${fmtPct(weightedAnn, 1)}</div>
           </div>
           <div class="stat-tile">
-            <div class="label">Unrealized P&amp;L</div>
+            <div class="label">${i18n("Unrealized P&amp;L", "未實現損益")}</div>
             <div class="value ${pnlClass(summary.unrealizedUsd)}">${fmtUsd(summary.unrealizedUsd)}</div>
           </div>
           <div class="stat-tile">
-            <div class="label">Realized P&amp;L</div>
+            <div class="label">${i18n("Realized P&amp;L", "已實現損益")}</div>
             <div class="value ${pnlClass(summary.realizedPnl)}">${fmtUsd(summary.realizedPnl)}</div>
           </div>
           <div class="stat-tile">
-            <div class="label">Win rate</div>
+            <div class="label">${i18n("Win rate", "勝率")}</div>
             <div class="value">${fmtPct(winRate, 1)}</div>
           </div>
           <div class="stat-tile">
-            <div class="label">Avg holding</div>
-            <div class="value">${avgHolding === null ? "—" : fmtNum(avgHolding, 2) + "d"}</div>
+            <div class="label">${i18n("Avg holding", "平均持有")}</div>
+            <div class="value">${avgHolding === null ? "—" : fmtNum(avgHolding, 2) + (INVESTOR_ZH ? " 天" : "d")}</div>
           </div>
         </div>
         <div class="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-          <span>${summary.closedCount} closed · books ${escapeHtml(books)}</span>
-          <span>weighted annualized ${fmtPct(weightedAnn, 1)}</span>
+          <span>${summary.closedCount} ${i18n("closed · books", "筆已平 · 帳本")} ${escapeHtml(books)}</span>
+          <span>${i18n("weighted annualized", "加權年化")} ${fmtPct(weightedAnn, 1)}</span>
         </div>
       </div>
     `;
-  }
-
-  function bullPutLegMiniCardHtml(g, status, groups, role) {
-    const instrument = openRowLegInstrumentName(g, role);
-    const title = role === "short" ? "Short leg" : "Long leg";
-    const badgeClass = role === "short" ? "chip-warn" : "chip-ok";
-    const amount = openRowLegSignedSizeForDisplay(g, status, role);
-    const strike = openRowLegStrike(g, role);
-    const avg = openRowLegFieldValue(g, status, role, "average_price");
-    const mark = openRowLegFieldValue(g, status, role, "mark_price");
-    const legPnlUsd = openRowLegPnlUsd(status, g, groups, role);
-    const coll = openRowBookCollateralUpper(g) || g.collateral_currency || "";
-    return `
-      <div class="rounded-xl border border-slate-800 bg-slate-950/40 px-3 py-2">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <span class="chip ${badgeClass}">${title}</span>
-          <span class="font-mono text-xs">${amount === null ? "—" : fmtNum(amount, 4)}</span>
-        </div>
-        <div class="font-mono text-[11px] break-all text-slate-200 mt-2">${escapeHtml(instrument || "—")}</div>
-        <div class="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-          <span class="text-slate-500">Strike</span>
-          <span class="text-right font-mono">${fmtStrike(strike)}</span>
-          <span class="text-slate-500">Avg</span>
-          <span class="text-right font-mono">${fmtDeribitPriceCell(avg, coll)}</span>
-          <span class="text-slate-500">Mark</span>
-          <span class="text-right font-mono">${fmtDeribitPriceCell(mark, coll)}</span>
-          <span class="text-slate-500">Leg PNL</span>
-          <span class="text-right font-mono ${pnlClass(legPnlUsd)}">${legPnlUsd === null ? "—" : fmtUsd(legPnlUsd)}</span>
-        </div>
-      </div>`;
-  }
-
-  function bullPutSpreadLegPriceStackHtml(g, status, coll, fieldName) {
-    const shortPrice = openRowLegFieldValue(g, status, "short", fieldName);
-    const longPrice = openRowLegFieldValue(g, status, "long", fieldName);
-    return `
-      <div>S ${fmtDeribitPriceCell(shortPrice, coll)}</div>
-      <div class="text-[11px] text-emerald-200/80 mt-1">L ${fmtDeribitPriceCell(longPrice, coll)}</div>`;
-  }
-
-  function bullPutSpreadLegPnlStackHtml(shortPnlUsd, longPnlUsd) {
-    if (shortPnlUsd === null && longPnlUsd === null) return "";
-    return `
-      <div class="text-[11px] text-slate-500 mt-1">
-        <span class="${pnlClass(shortPnlUsd)}">S ${shortPnlUsd === null ? "—" : fmtUsd(shortPnlUsd)}</span>
-        <span class="mx-1">·</span>
-        <span class="${pnlClass(longPnlUsd)}">L ${longPnlUsd === null ? "—" : fmtUsd(longPnlUsd)}</span>
-      </div>`;
-  }
-
-  /**
-   * Bull put numeric columns: single line (header = label), full wording in title tooltip.
-   */
-  function bullPutSpreadValueCellHtml(titleAttr, valueInnerHtml, extraClass = "") {
-    return `<td class="px-3 py-3 text-right font-mono align-middle tabular-nums ${extraClass}" title="${escapeHtml(
-      titleAttr
-    )}">${valueInnerHtml}</td>`;
-  }
-
-  function openSpreadLegGridCellHtml(g, status, groups, role) {
-    const title = role === "short" ? "Short leg" : "Long leg";
-    const chipClass = role === "short" ? "chip-warn" : "chip-ok";
-    const instrument = openRowLegInstrumentName(g, role);
-    const amount = openRowLegSignedSizeForDisplay(g, status, role);
-    const strike = openRowLegStrike(g, role);
-    const avg = openRowLegFieldValue(g, status, role, "average_price");
-    const mark = openRowLegFieldValue(g, status, role, "mark_price");
-    const legPnlUsd = openRowLegPnlUsd(status, g, groups, role);
-    const coll = openRowBookCollateralUpper(g) || g.collateral_currency || "";
-    return `
-      <div class="open-spread-leg-row">
-        <div class="open-spread-leg-name">
-          <span class="chip ${chipClass}">${title}</span>
-          <div class="font-mono text-xs break-all mt-1">${escapeHtml(instrument || "—")}</div>
-        </div>
-        <div class="open-spread-metric">
-          <span class="open-spread-label">Amount</span>
-          <span class="open-spread-value">${amount === null ? "—" : fmtNum(amount, 4)}</span>
-        </div>
-        <div class="open-spread-metric">
-          <span class="open-spread-label">Strike</span>
-          <span class="open-spread-value">${fmtStrike(strike)}</span>
-        </div>
-        <div class="open-spread-metric">
-          <span class="open-spread-label">Entry</span>
-          <span class="open-spread-value">${fmtDeribitPriceCell(avg, coll)}</span>
-        </div>
-        <div class="open-spread-metric">
-          <span class="open-spread-label">Mark</span>
-          <span class="open-spread-value">${fmtDeribitPriceCell(mark, coll)}</span>
-        </div>
-        <div class="open-spread-metric">
-          <span class="open-spread-label">Leg PNL</span>
-          <span class="open-spread-value ${pnlClass(legPnlUsd)}">${legPnlUsd === null ? "—" : fmtUsd(legPnlUsd)}</span>
-        </div>
-      </div>`;
-  }
-
-  function openSpreadTableRowHtml(g, status, groups) {
-    const dteVal = openRowDteDays(g);
-    const pnlUsd = openRowDisplayUnrealizedUsd(g, status, groups);
-    const coll = openRowBookCollateralUpper(g) || g.collateral_currency || "";
-    const strikeWidth = bullPutSpreadWidth(g);
-    const entryGap = openRowLegPriceGap(g, status, "average_price");
-    const markGap = openRowLegPriceGap(g, status, "mark_price");
-    const account = accountHint(g);
-    return `
-      <tr class="open-spread-table-row">
-        <td colspan="10" class="px-3 py-3">
-          <div class="open-spread-card">
-            <div class="open-spread-summary">
-              <div>
-                <div class="flex flex-wrap items-center gap-2">
-                  ${strategyChipHtml("bull_put_spread")}
-                  <span class="font-semibold text-slate-200">${escapeHtml(String(g.currency || "").toUpperCase() || "Spread")} put spread</span>
-                  <span class="text-xs text-slate-500">${escapeHtml(coll)} book</span>
-                </div>
-                <div class="text-xs text-slate-500 mt-1">
-                  Strike width ${fmtStrike(strikeWidth)} · entry gap ${fmtDeribitPriceCell(entryGap, coll)} · mark gap ${fmtDeribitPriceCell(markGap, coll)}
-                  ${account ? ` · ${escapeHtml(account)}` : ""}
-                </div>
-              </div>
-              <div class="open-spread-summary-metrics">
-                <div class="open-spread-metric">
-                  <span class="open-spread-label">DTE</span>
-                  <span class="open-spread-value">${dteVal !== null ? fmtNum(dteVal, 2) : "—"}</span>
-                </div>
-                <div class="open-spread-metric">
-                  <span class="open-spread-label">Net PNL</span>
-                  <span class="open-spread-value ${pnlClass(pnlUsd)}">${pnlUsd === null ? "—" : fmtUsd(pnlUsd)}</span>
-                </div>
-                <div class="open-spread-metric">
-                  <span class="open-spread-label">Credit kept</span>
-                  <span class="open-spread-value">${fmtPct(num(g.profit_capture), 1)}</span>
-                </div>
-              </div>
-            </div>
-            <div class="open-spread-leg-grid">
-              ${openSpreadLegGridCellHtml(g, status, groups, "short")}
-              ${openSpreadLegGridCellHtml(g, status, groups, "long")}
-            </div>
-          </div>
-        </td>
-      </tr>`;
   }
 
   function openPositionStrategyClass(id) {
@@ -1687,8 +1702,8 @@
 
   function openPositionStatusLabel(value) {
     const n = num(value);
-    if (n === null || Math.abs(n) < 0.005) return "Flat";
-    return n > 0 ? "In profit" : "Underwater";
+    if (n === null || Math.abs(n) < 0.005) return i18n("Flat", "持平");
+    return n > 0 ? i18n("In profit", "浮盈") : i18n("Underwater", "浮虧");
   }
 
   function creditCaptureBarHtml(value) {
@@ -1709,13 +1724,25 @@
   function openPositionTitle(g) {
     const ccy = String(g.currency || "").toUpperCase() || "Option";
     const id = strategyId(g);
-    if (id === "bull_put_spread") return `${ccy} put spread`;
-    return `${ccy} short ${optionPutCallLabel(g).toLowerCase()}`;
+    if (id === "bull_put_spread") {
+      return INVESTOR_ZH ? `${ccy} 賣權價差` : `${ccy} put spread`;
+    }
+    const side = optionPutCallLabel(g);
+    if (INVESTOR_ZH) {
+      const sideZh = side.toLowerCase() === "call" ? "買權" : "賣權";
+      return `${ccy} 賣出${sideZh}`;
+    }
+    return `${ccy} short ${side.toLowerCase()}`;
   }
 
   function openPositionLegCardHtml(g, status, groups, role) {
     const isShort = role === "short";
-    const title = isShort ? `Short ${optionPutCallLabel(g)}` : "Long protection";
+    const side = optionPutCallLabel(g);
+    const title = isShort
+      ? INVESTOR_ZH
+        ? `賣出${side === "Call" ? "買權" : "賣權"}`
+        : `Short ${side}`
+      : i18n("Long protection", "保護買腿");
     const instrument = openRowLegInstrumentName(g, role);
     const amount = openRowLegSignedSizeForDisplay(g, status, role);
     const strike = openRowLegStrike(g, role);
@@ -1732,11 +1759,11 @@
         </div>
         <div class="open-position-leg-instrument">${escapeHtml(instrument || "—")}</div>
         <div class="open-position-leg-metrics">
-          ${openPositionMetricHtml("Strike", fmtStrike(strike))}
-          ${openPositionMetricHtml("Entry", fmtDeribitPriceCell(avg, coll))}
-          ${openPositionMetricHtml("Mark", fmtDeribitPriceCell(mark, coll))}
+          ${openPositionMetricHtml(i18n("Strike", "履約價"), fmtStrike(strike))}
+          ${openPositionMetricHtml(i18n("Entry", "進場價"), fmtDeribitPriceCell(avg, coll))}
+          ${openPositionMetricHtml(i18n("Mark", "標記價"), fmtDeribitPriceCell(mark, coll))}
           ${openPositionMetricHtml(
-            "Leg PNL",
+            i18n("Leg PNL", "單腿損益"),
             legPnlUsd === null ? "—" : fmtUsd(legPnlUsd),
             pnlClass(legPnlUsd)
           )}
@@ -1752,12 +1779,12 @@
       const entryGap = openRowLegPriceGap(g, status, "average_price");
       const markGap = openRowLegPriceGap(g, status, "mark_price");
       return `
-        <span>Width ${fmtStrike(strikeWidth)}</span>
-        <span>Entry gap ${fmtDeribitPriceCell(entryGap, coll)}</span>
-        <span>Mark gap ${fmtDeribitPriceCell(markGap, coll)}</span>`;
+        <span>${i18n("Width", "價差寬度")} ${fmtStrike(strikeWidth)}</span>
+        <span>${i18n("Entry gap", "進場價差")} ${fmtDeribitPriceCell(entryGap, coll)}</span>
+        <span>${i18n("Mark gap", "市價價差")} ${fmtDeribitPriceCell(markGap, coll)}</span>`;
     }
     return `
-      <span>Strike ${fmtStrike(openRowLegStrike(g, "short"))}</span>
+      <span>${i18n("Strike", "履約價")} ${fmtStrike(openRowLegStrike(g, "short"))}</span>
       <span>${escapeHtml(strategyLegDetail(g))}</span>`;
   }
 
@@ -1771,9 +1798,10 @@
     const creditKept = num(g.profit_capture);
     const entryCredit = openRowEntryCreditUsd(g, status, groups);
     const longLeg = openRowLegInstrumentName(g, "long");
-    const account = accountHint(g);
+    const account = !INVESTOR && accountHint(g) ? accountHint(g) : "";
     const strategyClass = openPositionStrategyClass(id);
     const toneClass = openPositionToneClass(pnlUsd);
+    const bookPill = INVESTOR ? i18n(`${coll} book`, `${coll} 帳本`) : `${coll} book`;
     return `
       <article class="open-position-card ${strategyClass} ${toneClass}">
         <div class="open-position-glow"></div>
@@ -1782,12 +1810,12 @@
             <div class="open-position-title-row">
               ${strategyChipHtml(id)}
               <h3>${escapeHtml(openPositionTitle(g))}</h3>
-              <span class="open-book-pill">${escapeHtml(coll)} book</span>
+              <span class="open-book-pill">${escapeHtml(bookPill)}</span>
               <span class="open-status-pill">${openPositionStatusLabel(pnlUsd)}</span>
             </div>
             <div class="open-position-instruments">
               <span>${escapeHtml(g.short_instrument_name || "—")}</span>
-              ${isBullPutSpread && longLeg ? `<span>Long ${escapeHtml(longLeg)}</span>` : ""}
+              ${isBullPutSpread && longLeg ? `<span>${i18n("Long", "買入保護")} ${escapeHtml(longLeg)}</span>` : ""}
             </div>
             <div class="open-position-detail-row">
               ${openPositionDetailHtml(g, status, groups)}
@@ -1797,36 +1825,45 @@
           <div class="open-position-pnl-panel">
             <span class="open-position-label"${
               isBullPutSpread
-                ? ' title="Sum of leg mark MTM when both legs load; otherwise engine entry−debit (bid/ask close est.)."'
+                ? ` title="${i18n(
+                    "Sum of leg mark MTM when both legs load; otherwise engine entry−debit (bid/ask close est.).",
+                    "兩腿皆載入時為標記損益加總；否則為引擎進場收斂與現估平倉差額。"
+                  )}"`
                 : ""
-            }>Unrealized PNL</span>
+            }>${i18n("Unrealized PNL", "未實現損益")}</span>
             <strong class="${pnlClass(pnlUsd)}">${pnlUsd === null ? "—" : fmtUsd(pnlUsd)}</strong>
             <span class="open-position-native ${pnlClass(nativeUnr)}">${fmtNativeUnrealizedDisplay(nativeUnr, coll)}</span>
           </div>
         </div>
         <div class="open-position-kpis open-position-kpis-extended">
-          ${openPositionMetricHtml("DTE", dteVal !== null ? `${fmtNum(dteVal, 2)}d` : "—")}
           ${openPositionMetricHtml(
-            "Credit kept",
+            i18n("DTE", "距到期天數"),
+            dteVal !== null ? `${fmtNum(dteVal, 2)}${INVESTOR_ZH ? " 天" : "d"}` : "—"
+          )}
+          ${openPositionMetricHtml(
+            i18n("Credit kept", "已收權利金比例"),
             `${fmtPct(creditKept, 1)}${creditCaptureBarHtml(creditKept)}`
           )}
-          ${openPositionMetricHtml("Entry credit", entryCredit === null ? "—" : fmtUsd(entryCredit))}
+          ${openPositionMetricHtml(
+            i18n("Entry credit", "進場收斂"),
+            entryCredit === null ? "—" : fmtUsd(entryCredit)
+          )}
           ${(() => {
             const entryApr = groupEntryNetApr(g, status);
             const aprClass =
               entryApr !== null && entryApr >= 0.15 ? "pnl-pos" : "";
             return openPositionMetricHtml(
-              "Entry net APR",
+              i18n("Entry net APR", "進場淨年化"),
               entryApr === null ? "—" : fmtPct(entryApr, 1),
               aprClass
             );
           })()}
           ${openPositionMetricHtml(
-            "Entry fee",
+            i18n("Entry fee", "進場手續費"),
             groupEntryFeeUsd(g) === null ? "—" : fmtUsd(groupEntryFeeUsd(g))
           )}
           ${openPositionMetricHtml(
-            "Est. close fee",
+            i18n("Est. close fee", "預估平倉費"),
             groupCloseFeeUsd(g) === null ? "—" : fmtUsd(groupCloseFeeUsd(g))
           )}
         </div>
@@ -1837,159 +1874,26 @@
       </article>`;
   }
 
-  function bullPutSpreadOpenPanelHtml(rows, status, groups) {
-    const info = strategyInfo("bull_put_spread");
-    const body = rows
-      .map((g) => {
-        const dteVal = openRowDteDays(g);
-        const pnlUsd = openRowDisplayUnrealizedUsd(g, status, groups);
-        const coll = openRowBookCollateralUpper(g) || g.collateral_currency || "";
-        const strikeWidth = bullPutSpreadWidth(g);
-        const entryGap = openRowLegPriceGap(g, status, "average_price");
-        const markGap = openRowLegPriceGap(g, status, "mark_price");
-        return `
-          <tr>
-            <td class="px-3 py-3 min-w-[24rem]">
-              <div class="grid grid-cols-1 xl:grid-cols-2 gap-2">
-                ${bullPutLegMiniCardHtml(g, status, groups, "short")}
-                ${bullPutLegMiniCardHtml(g, status, groups, "long")}
-              </div>
-              ${
-                accountHint(g)
-                  ? `<div class="text-[11px] text-slate-500 mt-2">${escapeHtml(accountHint(g))}</div>`
-                  : ""
-              }
-            </td>
-            <td class="px-3 py-3 align-middle">${escapeHtml(coll)}</td>
-            ${bullPutSpreadValueCellHtml(
-              "Strike width: short strike minus long strike",
-              `<span class="text-slate-100">${fmtStrike(strikeWidth)}</span>`
-            )}
-            ${bullPutSpreadValueCellHtml(
-              "Entry gap: short average minus long average",
-              fmtDeribitPriceCell(entryGap, coll)
-            )}
-            ${bullPutSpreadValueCellHtml(
-              "Mark gap: short mark minus long mark",
-              fmtDeribitPriceCell(markGap, coll)
-            )}
-            ${bullPutSpreadValueCellHtml(
-              "Net credit received at entry (after fees)",
-              fmtUsd(openRowEntryCreditUsd(g, status, groups))
-            )}
-            ${bullPutSpreadValueCellHtml(
-              "Estimated debit to close (bid/ask + fees)",
-              fmtUsd(g.current_debit)
-            )}
-            <td
-              class="px-3 py-3 text-right font-mono align-middle text-base tabular-nums ${pnlClass(pnlUsd)}"
-              title="${escapeHtml(
-                [
-                  "Unrealized P&L",
-                  `${fmtPct(num(g.profit_capture), 1)} kept`,
-                  dteVal !== null ? `${fmtNum(dteVal, 2)} DTE` : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")
-              )}"
-            >
-              ${pnlUsd === null ? "—" : fmtUsd(pnlUsd)}
-            </td>
-          </tr>`;
-      })
-      .join("");
-
-    return `
-      <div class="overflow-x-auto rounded-2xl border ${info.accentClass} bg-slate-900/60">
-        <div class="flex flex-wrap items-baseline justify-between gap-2 px-4 py-3 border-b border-slate-800">
-          <div class="flex items-center gap-2">
-            <h3 class="text-sm font-semibold text-slate-200">${escapeHtml(info.title)} open positions</h3>
-            ${strategyChipHtml("bull_put_spread")}
-          </div>
-          <span class="text-xs text-slate-500">${rows.length} open · Unrealized = leg mark MTM sum when both legs load; else engine close est. (bid/ask)</span>
-        </div>
-        <table class="w-full text-sm">
-          <thead class="bg-slate-900/80 text-slate-400">
-            <tr>
-              <th class="text-left px-3 py-2 min-w-[24rem]">Short / long legs</th>
-              <th class="text-left px-3 py-2">Book</th>
-              <th class="text-right px-3 py-2 whitespace-nowrap">Spread</th>
-              <th class="text-right px-3 py-2 whitespace-nowrap">Avg gap</th>
-              <th class="text-right px-3 py-2 whitespace-nowrap">Mark gap</th>
-              <th class="text-right px-3 py-2 whitespace-nowrap">Net</th>
-              <th class="text-right px-3 py-2 whitespace-nowrap">Close</th>
-              <th class="text-right px-3 py-2 whitespace-nowrap">MTM</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-800">${body}</tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  function strategyOpenPanelHtml(id, rows, status, groups) {
+  /** One strategy playbook: header + stacked open-position cards (avoids repeating the same trades as tables + flat list). */
+  function strategyOpenGroupHtml(id, rows, status, groups) {
     const normalizedId = normalizeStrategyId(id) || id;
-    const spreadRows =
-      rows?.length &&
-      rows.every(
-        (g) =>
-          strategyId(g) === "bull_put_spread" ||
-          (String(g?.long_instrument_name || "").trim() && optionPutCallLabel(g).toLowerCase() === "put")
-      );
-    if (normalizedId === "bull_put_spread" || spreadRows) {
-      return bullPutSpreadOpenPanelHtml(rows, status, groups);
-    }
     const info = strategyInfo(normalizedId);
-    const body = rows
-      .map((g) => {
-        const dteVal = openRowDteDays(g);
-        const pnlUsd = openRowDisplayUnrealizedUsd(g, status, groups);
-        const coll = openRowBookCollateralUpper(g) || g.collateral_currency || "";
-        return `
-          <tr>
-            <td class="px-3 py-2">
-              <div class="font-mono text-[11px] break-all max-w-[18rem]">${escapeHtml(g.short_instrument_name || "")}</div>
-              <div class="text-[11px] text-slate-500 mt-1">${escapeHtml(
-                [accountHint(g), strategyLegDetail(g)].filter(Boolean).join(" · ")
-              )}</div>
-            </td>
-            <td class="px-3 py-2">${escapeHtml(coll)}</td>
-            <td class="px-3 py-2 text-right font-mono">${fmtShortAmountDisplay(g, status)}</td>
-            <td class="px-3 py-2 text-center font-mono text-xs">${escapeHtml(optionPutCallLabel(g))}</td>
-            <td class="px-3 py-2 text-right font-mono">${dteVal !== null ? fmtNum(dteVal, 2) : "—"}</td>
-            <td class="px-3 py-2 text-right font-mono ${pnlClass(pnlUsd)}">${pnlUsd === null ? "—" : fmtUsd(pnlUsd)}</td>
-            <td class="px-3 py-2 text-right font-mono">${fmtUsd(openRowEntryCreditUsd(g, status, groups))}</td>
-            <td class="px-3 py-2 text-right font-mono">${fmtPct(num(g.profit_capture), 1)}</td>
-          </tr>`;
-      })
-      .join("");
-
+    const cardsHtml = rows.map((g) => openPositionCardHtml(g, status, groups)).join("");
     return `
-      <div class="overflow-x-auto rounded-2xl border ${info.accentClass} bg-slate-900/60">
-        <div class="flex flex-wrap items-baseline justify-between gap-2 px-4 py-3 border-b border-slate-800">
-          <div class="flex items-center gap-2">
-            <h3 class="text-sm font-semibold text-slate-200">${escapeHtml(info.title)} open positions</h3>
+      <div class="rounded-2xl border ${info.accentClass} bg-slate-900/60 shadow overflow-hidden">
+        <div class="flex flex-wrap items-baseline justify-between gap-3 px-4 py-3 border-b border-slate-800 bg-slate-950/40">
+          <div class="flex flex-wrap items-center gap-2 min-w-0">
+            <h3 class="text-sm font-semibold text-slate-200">${escapeHtml(info.title)}</h3>
             ${strategyChipHtml(normalizedId)}
           </div>
-          <span class="text-xs text-slate-500">${rows.length} open</span>
+          <span class="text-xs text-slate-500">${rows.length} ${i18n("open", "筆持倉")}</span>
         </div>
-        <table class="w-full text-sm">
-          <thead class="bg-slate-900/80 text-slate-400">
-            <tr>
-              <th class="text-left px-3 py-2 min-w-[14rem]">Instrument / leg</th>
-              <th class="text-left px-3 py-2">Book</th>
-              <th class="text-right px-3 py-2">Amount</th>
-              <th class="text-center px-3 py-2">Put / Call</th>
-              <th class="text-right px-3 py-2">DTE</th>
-              <th class="text-right px-3 py-2">PNL（USD）</th>
-              <th class="text-right px-3 py-2">Entry credit</th>
-              <th class="text-right px-3 py-2">Credit kept</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-slate-800">${body}</tbody>
-        </table>
-      </div>
-    `;
+        <div class="p-4">
+          <div class="open-position-list">
+            ${cardsHtml}
+          </div>
+        </div>
+      </div>`;
   }
 
   function renderStrategyGroups(status, report, groups) {
@@ -2004,7 +1908,12 @@
     const activeStrategies = summaries.filter((s) => s.openCount || s.closedCount).length;
     setText(
       "strategy-meta",
-      `${totalOpen} open · ${totalClosed} closed · ${activeStrategies || 0} active strategy groups`
+      INVESTOR
+        ? i18n(
+            `${totalOpen} open · ${totalClosed} closed · ${activeStrategies || 0} active strategy groups`,
+            `${totalOpen} 筆持倉 · ${totalClosed} 筆已平 · ${activeStrategies || 0} 類策略`
+          )
+        : `${totalOpen} open · ${totalClosed} closed · ${activeStrategies || 0} active strategy groups`
     );
 
     if (cardsRoot) {
@@ -2015,7 +1924,7 @@
     if (!openRows.length) {
       openRoot.innerHTML = `
         <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 text-sm text-slate-400">
-          No open strategy positions.
+          ${i18n("No open strategy positions.", "目前沒有開倉中的策略部位。")}
         </div>`;
       return;
     }
@@ -2030,7 +1939,7 @@
     }
     openRoot.innerHTML = strategyOrder(ids)
       .filter((id) => byStrategy.has(id))
-      .map((id) => strategyOpenPanelHtml(id, byStrategy.get(id), status, groups))
+      .map((id) => strategyOpenGroupHtml(id, byStrategy.get(id), status, groups))
       .join("");
   }
 
@@ -2181,14 +2090,14 @@
         labels: books,
         datasets: [
           {
-            label: "Book equity (USDC eq.)",
+            label: i18n("Book equity (USDC eq.)", "帳本權益（USDC 約當）"),
             data: equityBars,
             backgroundColor: barColors.map((c) => c + "55"),
             borderColor: barColors,
             borderWidth: 1,
           },
           {
-            label: "Open credit",
+            label: i18n("Open credit", "未實現收斂"),
             data: creditBars,
             backgroundColor: "rgba(16, 185, 129, 0.36)",
             borderColor: "#34d399",
@@ -2210,7 +2119,9 @@
                 const eq = equityBars[i] ?? 0;
                 const credit = creditBars[i] ?? 0;
                 const r = eq > 0 ? credit / eq : null;
-                const lines = [`Open credit / equity: ${fmtPct(r, 2)}`];
+                const lines = [
+                  `${i18n("Open credit / equity: ", "收斂／權益比：")}${fmtPct(r, 2)}`,
+                ];
                 return lines;
               },
             },
@@ -2493,19 +2404,7 @@
 
   // ---------- tables ----------
 
-  function renderOpenTable(status, groups) {
-    const root = document.getElementById("open-rows");
-    if (!root) return;
-    const rows = currentOpenRows(status, groups);
-    setText("open-meta", `${rows.length} open`);
-    if (!rows.length) {
-      root.innerHTML = `<div class="open-empty-state">No open positions</div>`;
-      return;
-    }
-    root.innerHTML = rows.map((g) => openPositionCardHtml(g, status, groups)).join("");
-  }
-
-  function renderActivityList(root, rows, status, groups, kind, emptyLabel) {
+  function renderRecentActivityList(root, rows, status, groups, emptyLabel) {
     if (!root) return;
     if (!rows.length) {
       root.innerHTML = `<li class="activity-empty">${escapeHtml(emptyLabel)}</li>`;
@@ -2514,9 +2413,9 @@
     const html = [];
     for (const g of rows) {
       try {
-        html.push(activityRowHtml(g, status, groups, { kind }));
+        html.push(activityLifecycleCardHtml(g, status, groups));
       } catch (err) {
-        console.warn("activity row skipped", g?.group_id, err);
+        console.warn("activity card skipped", g?.group_id, err);
       }
     }
     root.innerHTML = html.length
@@ -2525,16 +2424,21 @@
   }
 
   function renderRecentActivity(status, report, groups) {
-    const openedRoot = document.getElementById("recent-opened-list");
-    const closedRoot = document.getElementById("recent-closed-list");
-    if (!openedRoot && !closedRoot) return;
-
-    const opened = recentOpenedRows(status, groups, 20);
-    const closed = recentClosedRows(report, groups, 20);
-    setText("activity-meta", `${opened.length} opened · ${closed.length} closed`);
-
-    renderActivityList(openedRoot, opened, status, groups, "open", "No recent opens");
-    renderActivityList(closedRoot, closed, status, groups, "closed", "No recent closes");
+    const root = document.getElementById("recent-activity-list");
+    if (!root) return;
+    const rows = recentActivityUnifiedRows(status, report, groups, 20);
+    const nOpen = rows.filter((g) => !isClosedTradeGroup(g)).length;
+    const nClosed = rows.filter((g) => isClosedTradeGroup(g)).length;
+    setText(
+      "activity-meta",
+      INVESTOR
+        ? i18n(
+            `${rows.length} positions · ${nOpen} open · ${nClosed} closed`,
+            `${rows.length} 筆紀錄 · ${nOpen} 持倉中 · ${nClosed} 已平倉`
+          )
+        : `${rows.length} positions · ${nOpen} open · ${nClosed} closed`
+    );
+    renderRecentActivityList(root, rows, status, groups, i18n("No recent activity", "尚無近期紀錄"));
   }
 
   function closedTimestampMs(g) {
@@ -2685,6 +2589,7 @@
   }
 
   function renderStress(stress) {
+    if (INVESTOR) return;
     const root = document.getElementById("stress-card");
     if (!root) return;
     if (!stress) {
@@ -2726,7 +2631,6 @@
       if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
       if (renderDependentViews) {
         renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
-        renderOpenTable(STATE.status, STATE.groups);
         renderRecentActivity(STATE.status, STATE.report, STATE.groups);
       }
     } catch (_) {
@@ -2741,12 +2645,18 @@
 
   async function refreshAll({ force = false, silentIfLimited = false } = {}) {
     if (STATE.refreshInFlight) {
-      if (!silentIfLimited) showToast("refresh already running");
+      if (!silentIfLimited) showToast(i18n("refresh already running", "已有更新正在進行"));
       return;
     }
     const waitMs = refreshWaitMs();
     if (!force && waitMs > 0) {
-      if (!silentIfLimited) showToast(`refresh rate limited; wait ${Math.ceil(waitMs / 1000)}s`);
+      if (!silentIfLimited)
+        showToast(
+          i18n(
+            `refresh rate limited; wait ${Math.ceil(waitMs / 1000)}s`,
+            `請稍候 ${Math.ceil(waitMs / 1000)} 秒後再試`
+          )
+        );
       return;
     }
 
@@ -2771,7 +2681,6 @@
           renderCumulativePnlChart();
           renderDailyPnlChart();
           renderAprChart();
-          renderOpenTable(STATE.status, STATE.groups);
           renderRecentActivity(STATE.status, STATE.report, STATE.groups);
           renderStress(STATE.stress);
         });
@@ -2833,15 +2742,20 @@
                 STATE.report = d;
                 scheduleRender();
               })
-              .catch((err) => showToast(`report: ${err.message}`)),
-          () =>
+              .catch((err) => showToast(`report: ${err.message}`))
+        );
+        if (!INVESTOR) {
+          taskFactories.push(() =>
             fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
               .then((d) => {
                 STATE.stress = d;
                 scheduleRender();
               })
               .catch((err) => showToast(`stress: ${err.message}`))
-        );
+          );
+        } else {
+          STATE.stress = null;
+        }
       } else {
         STATE.status = null;
         STATE.report = null;
@@ -2853,7 +2767,10 @@
       // One final render pass to ensure consistency.
       scheduleRender();
 
-      setText("last-refresh", `last refresh: ${luxon.DateTime.now().toFormat("HH:mm:ss")}`);
+      setText(
+        "last-refresh",
+        `${i18n("last refresh:", "上次更新：")} ${luxon.DateTime.now().toFormat("HH:mm:ss")}`
+      );
     } finally {
       STATE.refreshInFlight = false;
     }
@@ -2861,9 +2778,12 @@
 
   function setBookFilter(book) {
     STATE.bookFilter = book;
-    document.querySelectorAll("#book-filter button").forEach((btn) => {
-      btn.classList.toggle("filter-active", btn.dataset.book === book);
-    });
+    const filterRoot = document.querySelector("#book-filter");
+    if (filterRoot) {
+      filterRoot.querySelectorAll("button[data-book]").forEach((btn) => {
+        btn.classList.toggle("filter-active", btn.dataset.book === book);
+      });
+    }
     renderRiskVsCapitalChart();
     renderCumulativePnlChart();
     renderDailyPnlChart();
@@ -2871,6 +2791,7 @@
 
   function attachAutoRefresh() {
     const checkbox = document.getElementById("auto-refresh");
+    if (!checkbox) return;
     function reset() {
       if (STATE.autoRefreshHandle) {
         clearInterval(STATE.autoRefreshHandle);
@@ -2888,12 +2809,12 @@
   }
 
   function attachControls() {
-    document.getElementById("refresh-now").addEventListener("click", () => refreshAll());
-    document.getElementById("book-filter").addEventListener("click", (e) => {
+    document.getElementById("refresh-now")?.addEventListener("click", () => refreshAll());
+    document.getElementById("book-filter")?.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-book]");
       if (btn) setBookFilter(btn.dataset.book);
     });
-    document.getElementById("apr-window").addEventListener("change", async (e) => {
+    document.getElementById("apr-window")?.addEventListener("change", async (e) => {
       STATE.aprWindow = parseInt(e.target.value, 10) || 30;
       try {
         STATE.aprSeries = await fetchJson(

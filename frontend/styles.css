@@ -231,6 +231,28 @@
   color: rgb(203 213 225);
 }
 
+/* Strategy playbook labels — match ``strategy-card-*`` accent colors */
+.chip-strategy-naked {
+  border-color: rgba(251, 146, 60, 0.55);
+  background: rgba(251, 146, 60, 0.14);
+  color: rgb(254 215 170);
+}
+.chip-strategy-spread {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.14);
+  color: rgb(186 230 253);
+}
+.chip-strategy-covered {
+  border-color: rgba(52, 211, 153, 0.5);
+  background: rgba(16, 185, 129, 0.14);
+  color: rgb(167 243 208);
+}
+.chip-strategy-unknown {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.1);
+  color: rgb(253 230 138);
+}
+
 table tbody tr:hover {
   background: rgba(148, 163, 184, 0.04);
 }
@@ -531,32 +553,8 @@ table tbody tr:hover {
   }
 }
 
-.activity-panels {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 14px;
-}
-
-@media (min-width: 900px) {
-  .activity-panels {
-    grid-template-columns: 1fr 1fr;
-  }
-}
-
-.activity-panel {
-  border: 1px solid rgba(51, 65, 85, 0.55);
-  border-radius: 18px;
-  background: rgba(15, 23, 42, 0.45);
-  padding: 12px 14px;
-}
-
-.activity-panel-title {
-  margin: 0 0 10px;
-  color: rgb(148 163 184);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.activity-list-unified {
+  gap: 10px;
 }
 
 .activity-list {
@@ -568,28 +566,122 @@ table tbody tr:hover {
   gap: 8px;
 }
 
-.activity-row {
+.activity-card {
   border: 1px solid rgba(51, 65, 85, 0.45);
-  border-radius: 12px;
+  border-radius: 14px;
   background: rgba(2, 6, 23, 0.35);
-  padding: 10px 12px;
+  padding: 10px 12px 12px;
 }
 
-.activity-row-head {
+.activity-card-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
-.activity-row-title {
+.activity-card-title {
   color: rgb(226 232 240);
   font-size: 13px;
   font-weight: 600;
 }
 
-.activity-row-meta {
+.activity-card-instrument {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  color: rgb(71 85 105);
+  line-height: 1.35;
+  word-break: break-all;
+  margin-bottom: 10px;
+}
+
+.activity-lifecycle {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0;
+  border-radius: 10px;
+  border: 1px solid rgba(51, 65, 85, 0.35);
+  overflow: hidden;
+}
+
+@media (min-width: 720px) {
+  .activity-lifecycle {
+    grid-template-columns: 1fr auto 1fr;
+    align-items: stretch;
+  }
+}
+
+.activity-phase {
+  padding: 10px 12px;
+  background: rgba(15, 23, 42, 0.4);
+}
+
+.activity-phase-entry {
+  border-bottom: 1px solid rgba(51, 65, 85, 0.35);
+}
+
+@media (min-width: 720px) {
+  .activity-phase-entry {
+    border-bottom: none;
+    border-right: 1px solid rgba(51, 65, 85, 0.35);
+  }
+}
+
+.activity-phase-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgb(100 116 139);
+  margin-bottom: 6px;
+}
+
+.activity-phase-entry .activity-phase-label {
+  color: rgb(52 211 153 / 0.85);
+}
+
+.activity-phase-exit .activity-phase-label {
+  color: rgb(148 163 184);
+}
+
+.activity-closed-pnl {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.65);
+  border: 1px solid rgba(51, 65, 85, 0.55);
+}
+
+.activity-closed-pnl-label {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgb(148 163 184);
+  margin-bottom: 4px;
+}
+
+.activity-closed-pnl-value {
+  display: block;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.125rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.activity-closed-pnl-value-missing {
+  color: rgb(100 116 139);
+  font-weight: 600;
+}
+
+.activity-phase-meta-secondary {
+  margin-top: 0;
+}
+
+.activity-phase-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 12px;
@@ -598,10 +690,43 @@ table tbody tr:hover {
   line-height: 1.45;
 }
 
-.activity-row-meta strong {
+.activity-phase-meta strong {
   color: rgb(203 213 225);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-weight: 600;
+}
+
+.activity-phase-divider {
+  display: none;
+}
+
+@media (min-width: 720px) {
+  .activity-phase-divider {
+    display: block;
+    width: 1px;
+    background: rgba(51, 65, 85, 0.45);
+    min-height: 100%;
+  }
+}
+
+.activity-status-pill {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(51, 65, 85, 0.65);
+  color: rgb(148 163 184);
+  background: rgba(15, 23, 42, 0.6);
+}
+
+.activity-status-pill.is-open {
+  border-color: rgba(52, 211, 153, 0.35);
+  color: rgb(167 243 208);
+  background: rgba(6, 78, 59, 0.2);
 }
 
 .activity-empty {
@@ -833,4 +958,18 @@ table tbody tr:hover {
 canvas {
   width: 100% !important;
   height: 100% !important;
+}
+
+/* Investor-facing portal: slightly warmer accent, calmer chrome */
+.investor-portal .section-eyebrow {
+  color: rgb(251 191 36 / 0.92);
+}
+
+.investor-portal .overview-panel {
+  border-color: rgba(251, 191, 36, 0.22);
+  background: linear-gradient(135deg, rgba(15, 23, 42, 0.88), rgba(120, 53, 15, 0.1));
+}
+
+.investor-portal .app-header {
+  background: rgba(15, 23, 42, 0.88);
 }

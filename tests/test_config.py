@@ -221,5 +221,5 @@ def test_strategy_profile_mismatch_raises(tmp_path: Path):
     env_file.write_text("OPTION_STRATEGY=bull_put_spread\n")
     (tmp_path / ".env.bull_put_spread").write_text("OPTION_STRATEGY=covered_call\n")
 
-    with pytest.raises(ConfigurationError, match="does not match base OPTION_STRATEGY"):
+    with pytest.raises(ConfigurationError, match="does not match account OPTION_STRATEGY"):
         load_config(env_file, require_private=False)

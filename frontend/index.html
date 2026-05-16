@@ -139,21 +139,27 @@
         </div>
       </details>
 
-      <section class="section-card priority-section">
-        <div class="section-heading">
+      <details class="section-card collapsible-section" open>
+        <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Live risk board</p>
-            <h2 class="section-title">Open positions</h2>
+            <h2 class="section-title">Strategies &amp; open positions</h2>
             <p class="section-copy mt-1">
-              Each card is one strategy group. PnL, DTE, and credit capture are surfaced first.
+              Per-playbook rollup cards, then full position cards grouped by strategy — one source of truth, no duplicate tables.
             </p>
           </div>
-          <span class="open-meta-pill" id="open-meta">—</span>
+          <div class="section-summary-meta">
+            <span class="open-meta-pill" id="strategy-meta">—</span>
+            <span class="section-toggle" aria-hidden="true"></span>
+          </div>
+        </summary>
+        <div class="section-body">
+          <div id="strategy-cards" class="grid grid-cols-1 lg:grid-cols-3 gap-4"></div>
+          <div id="strategy-open-groups" class="mt-4 space-y-4">
+            <div class="open-empty-state">Loading…</div>
+          </div>
         </div>
-        <div id="open-rows" class="open-position-list">
-          <div class="open-empty-state">Loading…</div>
-        </div>
-      </section>
+      </details>
 
       <section class="section-card priority-section">
         <div class="section-heading">
@@ -161,50 +167,15 @@
             <p class="section-eyebrow">Activity</p>
             <h2 class="section-title">Recent opened &amp; closed</h2>
             <p class="section-copy mt-1">
-              Last 20 entries and exits with entry net APR, fees, and credit at a glance.
+              One card per position: shared contract and entry context, then exit when flat.
             </p>
           </div>
           <span class="open-meta-pill" id="activity-meta">—</span>
         </div>
-        <div id="activity-panels" class="activity-panels">
-          <div class="activity-panel">
-            <h3 class="activity-panel-title">Recently opened</h3>
-            <ul id="recent-opened-list" class="activity-list">
-              <li class="activity-empty">Loading…</li>
-            </ul>
-          </div>
-          <div class="activity-panel">
-            <h3 class="activity-panel-title">Recently closed</h3>
-            <ul id="recent-closed-list" class="activity-list">
-              <li class="activity-empty">Loading…</li>
-            </ul>
-          </div>
-        </div>
+        <ul id="recent-activity-list" class="activity-list activity-list-unified">
+          <li class="activity-empty">Loading…</li>
+        </ul>
       </section>
-
-      <details class="section-card collapsible-section">
-        <summary class="section-summary">
-          <div>
-            <p class="section-eyebrow">Strategy layer</p>
-            <h2 class="section-title">Strategy groups</h2>
-            <p class="section-copy">
-              The three configured strategies are split into separate cards.
-            </p>
-          </div>
-          <div class="section-summary-meta">
-            <span id="strategy-meta">—</span>
-            <span class="section-toggle" aria-hidden="true"></span>
-          </div>
-        </summary>
-        <div class="section-body">
-          <div id="strategy-cards" class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <!-- populated by app.js -->
-          </div>
-          <div id="strategy-open-groups" class="mt-4 space-y-4">
-            <!-- populated by app.js -->
-          </div>
-        </div>
-      </details>
 
       <details class="section-card collapsible-section">
         <summary class="section-summary">
@@ -304,6 +275,15 @@
       <footer class="text-xs text-slate-600 text-center pt-4 pb-8">
         Amounts are USDC-equivalent where noted. Spread report excludes perp hedge PnL.
         The scheduler can still append snapshots to <code>data/frontend_ledger/</code> for your own tooling.
+        <span class="block mt-2">
+          <a class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline" href="/investor.html"
+            >Investor summary (EN)</a
+          >
+          ·
+          <a class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline" href="/investor.zh.html"
+            >投資人摘要（繁中）</a
+          >
+        </span>
       </footer>
     </main>
 

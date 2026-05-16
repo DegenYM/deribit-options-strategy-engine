@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <!-- Optional: when this HTML is hosted separately (CDN / another domain), set the public dashboard origin (no trailing slash). -->
+    <!-- <meta name="dashboard-api-base" content="https://your-dashboard.example.com" /> -->
+    <title>Investor summary · Deribit options</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/vendor/tailwindcdn.min.js"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              mono: [
+                "ui-monospace",
+                "SFMono-Regular",
+                "Menlo",
+                "Consolas",
+                "monospace"
+              ]
+            }
+          }
+        },
+        darkMode: "class"
+      };
+    </script>
+    <script src="/vendor/chart.umd.min.js"></script>
+    <script src="/vendor/luxon.min.js"></script>
+    <script src="/vendor/chartjs-adapter-luxon.umd.min.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="app-body investor-portal text-slate-100 min-h-screen font-sans">
+    <script>
+      window.__DASHBOARD_MODE__ = "investor";
+      window.__INVESTOR_LOCALE__ = "en";
+      // When this file is served from static hosting, point API calls at your public dashboard URL (same host you bind with --host 0.0.0.0 or your reverse proxy):
+      // window.__API_BASE__ = "https://portfolio.yourcompany.com";
+    </script>
+    <header class="app-header sticky top-0 z-10">
+      <div class="dashboard-shell py-3 flex flex-wrap items-center gap-4">
+        <div class="min-w-[220px]">
+          <h1 class="text-lg font-semibold tracking-tight text-slate-50">Investor summary</h1>
+          <p class="text-xs text-slate-500">
+            Live equity and strategy snapshot. Not investment advice. For operational detail use the internal dashboard.
+          </p>
+        </div>
+        <span
+          id="env-badge"
+          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+        >Loading…</span>
+        <span
+          id="regime-badge"
+          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+        >Risk posture: —</span>
+        <span
+          id="strategy-badge"
+          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+        >Strategy: —</span>
+        <span id="header-spot-btc" class="text-xs font-mono text-emerald-200/90 tabular-nums">BTC —</span>
+        <span id="header-spot-eth" class="text-xs font-mono text-emerald-200/90 tabular-nums">ETH —</span>
+        <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
+          <span id="last-refresh">Last refresh: —</span>
+          <label class="inline-flex items-center gap-1 cursor-pointer select-none">
+            <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
+            Auto refresh
+          </label>
+          <button
+            id="refresh-now"
+            class="px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="dashboard-shell dashboard-main">
+      <section class="section-card priority-section">
+        <div class="section-heading">
+          <div>
+            <p class="section-eyebrow">Overview</p>
+            <h2 class="section-title">Portfolio headline metrics (USDC equivalent)</h2>
+          </div>
+          <p class="section-copy">
+            Equity, day P&amp;L, open premium collected, and realized history from the live Deribit link and on-disk state. Figures are indicative and may lag.
+          </p>
+        </div>
+        <div id="aggregate-card" class="overview-panel"></div>
+      </section>
+
+      <details class="section-card collapsible-section" open>
+        <summary class="section-summary">
+          <div>
+            <p class="section-eyebrow">Strategies &amp; positions</p>
+            <h2 class="section-title">Playbook rollups and open books</h2>
+            <p class="section-copy mt-1">
+              Strategy-level win rate and P&amp;L first, then each open group (including two-leg spreads).
+            </p>
+          </div>
+          <div class="section-summary-meta">
+            <span class="open-meta-pill" id="strategy-meta">—</span>
+            <span class="section-toggle" aria-hidden="true"></span>
+          </div>
+        </summary>
+        <div class="section-body">
+          <div id="strategy-cards" class="grid grid-cols-1 lg:grid-cols-3 gap-4"></div>
+          <div id="strategy-open-groups" class="mt-4 space-y-4">
+            <div class="open-empty-state">Loading…</div>
+          </div>
+        </div>
+      </details>
+
+      <section class="section-card priority-section">
+        <div class="section-heading">
+          <div>
+            <p class="section-eyebrow">Activity</p>
+            <h2 class="section-title">Recent opens and closes</h2>
+            <p class="section-copy mt-1">
+              One card per trade group: entry context on the left, exit or still-open status on the right.
+            </p>
+          </div>
+          <span class="open-meta-pill" id="activity-meta">—</span>
+        </div>
+        <ul id="recent-activity-list" class="activity-list activity-list-unified">
+          <li class="activity-empty">Loading…</li>
+        </ul>
+      </section>
+
+      <details class="section-card collapsible-section" open>
+        <summary class="section-summary">
+          <div>
+            <p class="section-eyebrow">Charts</p>
+            <h2 class="section-title">Capital, realized P&amp;L, rolling APR</h2>
+            <p class="section-copy">Filter by collateral book; adjust the APR window as needed.</p>
+          </div>
+          <span class="section-toggle" aria-hidden="true"></span>
+        </summary>
+
+        <div class="section-body">
+          <div class="flex gap-2 text-xs mb-4" id="book-filter">
+            <button data-book="ALL" class="filter-chip filter-active">All</button>
+            <button data-book="BTC" class="filter-chip">BTC</button>
+            <button data-book="ETH" class="filter-chip">ETH</button>
+            <button data-book="USDC" class="filter-chip">USDC</button>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">Open premium vs book equity (USDC)</h3>
+                <span class="text-xs text-slate-500" id="risk-capital-meta">—</span>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-risk-capital"></canvas>
+              </div>
+              <p class="text-xs text-slate-500 mt-2" id="risk-capital-hint">
+                Per-book <strong class="text-slate-400">open premium</strong> sums entry credits on open groups;
+                <strong class="text-slate-400">equity</strong> is USDC-equivalent from the live snapshot. Exposure view only — not a return guarantee.
+              </p>
+            </div>
+
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">Cumulative realized P&amp;L (USDC)</h3>
+                <span class="text-xs text-slate-500" id="cum-pnl-meta">—</span>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-cum-pnl"></canvas>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">Daily realized P&amp;L (USDC)</h3>
+                <span class="text-xs text-slate-500" id="daily-pnl-meta">—</span>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-daily-pnl"></canvas>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">Rolling APR vs reference capital</h3>
+                <div class="text-xs text-slate-400 flex gap-2 items-center">
+                  <label>
+                    Window
+                    <select id="apr-window" class="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-200">
+                      <option value="7">7d</option>
+                      <option value="14">14d</option>
+                      <option value="30" selected>30d</option>
+                      <option value="60">60d</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-apr"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <footer class="text-xs text-slate-600 text-center pt-4 pb-8 max-w-3xl mx-auto leading-relaxed">
+        For information only; not an offer or recommendation. Crypto and options are volatile and you can lose capital. Past performance does not guarantee future results.
+        USDC-equivalent amounts use live FX / index marks. Spread-style reports typically exclude perpetual hedge PnL.
+        <span class="block mt-2 text-slate-500">
+          <a href="/investor.zh.html" class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">繁中投資人摘要</a>
+          ·
+          <a href="/index.html" class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">Internal ops dashboard</a>
+          (paths, margin detail, stress scenarios)
+        </span>
+      </footer>
+    </main>
+
+    <div
+      id="toast"
+      class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
+    ></div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

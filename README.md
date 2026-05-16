@@ -73,14 +73,47 @@ cp .env.example .env
 - `DERIBIT_CLIENT_SECRET`
 - `ENABLE_PERP_HEDGE=false` 可停用 perpetual hedge；目前預設即為關閉
 - `OPTION_STRATEGY` 選擇 `naked_short`、`bull_put_spread` 或 `covered_call`（舊名 `naked_short_put` / `naked_short_call` 會被解析為 `naked_short`）
-- 其餘共用參數可直接從 [`.env.example`](.env.example) 複製；策略專屬參數已拆到 [`.env.naked_short`](.env.naked_short)、[`.env.bull_put_spread`](.env.bull_put_spread)、[`.env.covered_call`](.env.covered_call)。如果舊版 `.env.naked_short_put` 還留著，找不到 `.env.naked_short` 時會自動 fallback。
-- 子帳戶／專用 key 的帳戶層範本：[`.env.example_sub`](.env.example_sub)（複製為 `.env.<strategy>_sub`，實際憑證檔仍在 `.gitignore` 內）。
+- 其餘共用參數可直接從 [`.env.example`](.env.example) 複製。
+- **建議**：一位投資人一個目錄、底下最多數個子帳戶（各跑不同策略），見 [`config/investors/_example/`](config/investors/_example/)。
+- 策略 tuning 在 [`config/shared/strategies/`](config/shared/strategies/)；子帳至少放憑證與資金規模，有需要時也可在同一檔覆寫少數策略鍵（見下方載入順序）。
 
-### Recommended Env Profiles
+### Investor / Sub-account Layout（建議）
 
-設定載入順序是「account env -> `.env.<OPTION_STRATEGY>`」。例如 `.env` 或 `.env.bull_put_spread_sub` 裡設定 `OPTION_STRATEGY=bull_put_spread` 時，程式會自動讀取同目錄的 `.env.bull_put_spread`，並用 profile 內的 delta、OTM、APR、risk、defense、pacing 參數覆蓋 account env 的 fallback 值。
+```text
+config/shared/defaults.env              # 可選：全投資人共用 fallback
+config/shared/strategies/.env.<strategy>  # 策略參數（無 API key）
+config/investors/<investor_id>/
+  accounts.toml                         # 子帳清單（通常 ≤ 3；投資人 id 寫在這裡）
+  accounts/.env.<slug>                  # 子帳：憑證、STATE_FILE、資金規模；可選覆寫 shared 策略鍵
+```
 
-實盤多子帳戶建議使用本機帳戶 env：`.env.covered_call_sub`、`.env.naked_short_sub`、`.env.bull_put_spread_sub`。請以 [`.env.example_sub`](.env.example_sub) 為範本建立這些檔名；實際含密鑰的檔案已放進 `.gitignore`。每個檔案只填該 sub account 的 `DERIBIT_CLIENT_ID/SECRET`、`ORDER_LABEL_PREFIX` 與 `STATE_FILE`，策略參數仍由對應 `.env.<strategy>` profile 管理。
+設定載入順序（低 → 高；**子帳 env 最後**，可覆蓋 shared 策略檔）：
+
+1. `config/shared/defaults.env`（可選）
+2. `config/investors/<id>/.env.investor`（可選）
+3. `config/shared/strategies/.env.<OPTION_STRATEGY>`（或相容的 legacy 路徑）
+4. `accounts/.env.<slug>`
+
+若使用 repo 根目錄單一 `.env`（非 `config/investors/.../accounts/`），則仍為：defaults → 該 `.env` → 策略 profile（profile 優先於重疊鍵）。
+
+子帳 `.env.<slug>` 建議至少保留：
+
+`DERIBIT_*`、`OPTION_STRATEGY`、`ORDER_LABEL_PREFIX`、`STATE_FILE`、`REFERENCE_CAPITAL_USDC`、`TARGET_PORTFOLIO_APR`、`TOP_N`
+
+共用參數（delta、風控、流動性門檻等）預設放在策略 profile 或 `defaults.env`；某子帳若要偏離預設，在該子帳的 `accounts/.env.<slug>` 寫入同名鍵即可覆蓋。
+
+建立本機投資人目錄：
+
+```bash
+cp -R config/investors/_example config/investors/youming
+# 依 accounts/.env.<slug>.example 建立 .env.naked 等並填入 API key
+```
+
+更完整的指令整理見下文 **「常用指令」** 一節。
+
+### Recommended Env Profiles（策略 tuning）
+
+策略專屬參數請改 [`config/shared/strategies/`](config/shared/strategies/)。
 
 以下參數以 `REFERENCE_CAPITAL_USDC=1000` 的小資金試跑為基準，預設偏保守。實際上線前先用 `testnet` 與 dry-run 觀察 `scan --json` 的候選數量、rejection reason 與成交價差；若候選太少，優先放寬 `MIN_LIQUID_EXPIRIES_REQUIRED`、流動性門檻或 DTE，不要先大幅提高 delta。
 
@@ -191,7 +224,7 @@ naked_short:      STATE_FILE=.state/naked_short.json       ORDER_LABEL_PREFIX=na
 bull_put_spread:  STATE_FILE=.state/bull_put_spread.json   ORDER_LABEL_PREFIX=bull_put_spread
 ```
 
-下列三組內容已分別整理到 `.env.naked_short`、`.env.bull_put_spread`、`.env.covered_call`。
+下列三組策略參數在 `config/shared/strategies/`（`.env.naked_short`、`.env.bull_put_spread`、`.env.covered_call`）。
 
 `naked_short`：尾端風險最大，但收益性排在 covered call 之後、bull put spread 之前。`SHORT_OPTION_SIDE` 可選 `put` / `call` / `both`：選 `both` 時 put 與 call 候選會用同一個 sort key 一起排序、競爭 `TOP_N` 名額。
 
@@ -340,7 +373,69 @@ MAX_GROUPS_PER_CURRENCY=3
 - `status`、`enter-best --live`、`manage --live`、`run --live`、`panic-close --live`、`close-position --live`、`cancel` 需要私有憑證
 - Deribit 衍生品交易是否可用，取決於你的帳戶資格與司法管轄限制
 
-## Commands
+## 常用指令
+
+### 怎麼指定用哪個子帳
+
+| 方式 | 範例 |
+|------|------|
+| **投資人 + slug**（建議） | `./bot --investor youming --account naked <子命令>`；slug 見 `config/investors/<id>/accounts.toml` |
+| **直接 env 路徑** | `./bot --env-file config/investors/youming/accounts/.env.naked <子命令>`（路徑可寫在子命令前或後） |
+| **舊版單一 `.env`** | 不帶 `--investor`，預設讀 repo 根目錄 `.env` |
+
+`--investor` 與一般子命令並用時，**多數子命令必須加 `--account <slug>`**（`frontend` 例外：不帶 `--account` 時會聚合該投資人 `accounts.toml` 內所有 `enabled` 子帳）。
+
+- 預設 **dry-run**；要真的下單須加 `--live`（`enter-best`、`manage`、`run`、`panic-close`、`close-position`）。
+- 除 `ping` 外，需要連線與私有金鑰；實單前先在 `testnet` 或 dry-run 確認輸出。
+
+### 投資人子帳（youming 範例）
+
+```bash
+# 連線 / 部位 / 掃描 / 一輪管理（dry-run）
+./bot --investor youming --account naked ping --json
+./bot --investor youming --account naked status --json
+./bot --investor youming --account naked scan --currencies BTC,ETH --json
+./bot --investor youming --account naked manage --json
+
+# 下單與持續迴圈（--live 才實單）
+./bot --investor youming --account naked enter-best --currencies BTC,ETH --json
+./bot --investor youming --account naked enter-best --currencies BTC,ETH --live --json
+./bot --investor youming --account naked manage --live --json
+./bot --investor youming --account naked run --cycles 1 --json
+./bot --investor youming --account naked run --cycles 0 --live
+
+# 報表、壓力測試、成交查詢（依子帳 API）
+./bot --investor youming --account naked report --days 30 --json
+./bot --investor youming --account naked stress-current --json
+./bot --investor youming --account naked user-trades --currency USDC --count 50 --json
+
+# 緊急全平（取消掛單 + 平倉；--live 才送單）
+./bot --investor youming --account naked panic-close --json
+./bot --investor youming --account naked panic-close --live --json
+
+# 依 order id 取消單筆掛單
+./bot --investor youming --account naked cancel --order-id YOUR_ORDER_ID --json
+```
+
+### 儀表板與多子帳 live
+
+```bash
+# 本地 dashboard（預設 http://127.0.0.1:8765 ）
+./bot --investor youming frontend
+./bot --investor youming frontend --port 9000
+./bot frontend --account-env-files config/investors/youming/accounts/.env.naked,config/investors/youming/accounts/.env.bull_put
+
+# 同時啟動 accounts.toml 內所有 enabled 子帳的 `run --live`（預設 investor youming；log 在 logs/live/）
+python scripts/run_live_profiles.py --investor youming
+python scripts/run_live_profiles.py --investor alice
+
+# 不經 --investor，改用手動列出多個子帳 env：
+python scripts/run_live_profiles.py \
+  config/investors/youming/accounts/.env.naked \
+  config/investors/youming/accounts/.env.bull_put
+```
+
+### 單一 `.env`（未用 `config/investors/...` 時）
 
 ```bash
 ./bot ping
@@ -359,13 +454,15 @@ MAX_GROUPS_PER_CURRENCY=3
 ./bot cancel --order-id YOUR_ORDER_ID --json
 ```
 
+（也可用為除錯路徑單獨指定：`./bot --env-file ./.env scan --json`。）
+
 `scan --strategy` 可在不修改 `.env` 的情況下覆蓋本次掃描策略，並會套用同目錄對應的 `.env.<strategy>` profile。可用值為 `naked_short`、`bull_put_spread`、`covered_call`（舊名 `naked_short_put` / `naked_short_call` 仍會被接受並對應到 `naked_short`）。
 
 ### `close-position`（子帳精準平倉）
 
 關閉**指定合約**的交易所倉位，適合手動殘倉、單腿調整或只平某一張期權／永續。與 `panic-close` 不同：不會取消全部掛單、不平掉其他 group、不寫入 portfolio cooldown。
 
-**請用子帳專用 env**（API key 已限定該子帳），例如 `.env.naked_short_sub`、`.env.bull_put_spread_sub`、`.env.covered_call_sub`（範本見 [`.env.example_sub`](.env.example_sub)）。
+**請用子帳 env**（API key 已限定該子帳），例如 `config/investors/youming/accounts/.env.naked`，或 `./bot --investor youming --account naked`。
 
 | 參數 | 說明 |
 |------|------|
@@ -384,32 +481,20 @@ MAX_GROUPS_PER_CURRENCY=3
 
 ```bash
 # 1) 先看子帳有哪些倉位
-./bot --env-file .env.naked_short_sub status --json
-./bot --env-file .env.naked_short_sub close-position --list --json
+./bot --investor youming --account naked status --json
+./bot --investor youming --account naked close-position --list --json
 
 # 2) 預覽平某一張（不送單）
-./bot --env-file .env.naked_short_sub close-position \
+./bot --investor youming --account naked close-position \
   --instrument BTC_USDC-27MAR26-90000-P --json
 
 # 3) 市價全平該合約
-./bot --env-file .env.naked_short_sub close-position \
+./bot --investor youming --account naked close-position \
   --instrument BTC_USDC-27MAR26-90000-P --live --json
 
-# 4) 選擇權用 limit 平倉（較接近 manage 的平倉邏輯）
-./bot --env-file .env.bull_put_spread_sub close-position \
+# 4) 選擇權用 limit 平倉
+./bot --investor youming --account bull_put close-position \
   --instrument BTC_USDC-27MAR26-88000-P --order-type limit --live --json
-
-# 5) 一次平多個合約
-./bot --env-file .env.bull_put_spread_sub close-position \
-  --instrument BTC_USDC-27MAR26-90000-P,BTC_USDC-27MAR26-85000-P --live --json
-
-# 6) 部分平倉（0.05 張）
-./bot --env-file .env.naked_short_sub close-position \
-  --instrument BTC_USDC-27MAR26-90000-P --amount 0.05 --live --json
-
-# 7) 平永續對沖倉（若 ENABLE_PERP_HEDGE=true）
-./bot --env-file .env.naked_short_sub close-position \
-  --instrument BTC-PERPETUAL --live --json
 ```
 
 **與 `panic-close` 對照**
@@ -423,13 +508,7 @@ MAX_GROUPS_PER_CURRENCY=3
 
 手動平掉 bot 有追蹤的 spread 後，本地 `STATE_FILE` 可能與交易所不一致；之後可再跑 `manage` 讓 reconcile 收斂，或等 Phase 2 的 `--group-id` / `--sync-state`。
 
-一次啟動多個 live 設定檔：
-
-```bash
-python scripts/run_live_profiles.py .env.covered_call_sub .env.naked_short_sub .env.bull_put_spread_sub
-```
-
-不傳 env files 時，預設會跑上述三個 `*_sub` profile。每個 profile 會獨立執行 `run --cycles 0 --live`，log 寫到 `logs/live/<profile>.log`；按 `Ctrl-C` 會一起停止所有 live 程序。若想先跑有限輪數，可加 `--cycles 1`。
+（一次啟動多子帳 `run --live`：`python scripts/run_live_profiles.py`，詳見上方 **常用指令 → 儀表板與多子帳 live**。）
 
 ## Design Notes
 
@@ -439,7 +518,7 @@ python scripts/run_live_profiles.py .env.covered_call_sub .env.naked_short_sub .
 - 已平倉表的 **`Annualized`**：`(realized_pnl / 該本位總 IM) × (365 / holding days)`。`realized_pnl` 仍為 USDC 等價；分母為 `estimated_im_collateral`（舊 state 無該欄時用 `max_loss` 與指數回推 IM）。USDC 本位直接相除；BTC／ETH 本位先把 PnL 除以標的 USD 指數換成幣，再除以 IM（幣）
 - **`Return / max-loss`** 仍為 `realized_pnl / max_loss`（與上列年化分母口徑不同時，兩欄數字不必一致）
 - 所有 `credit / debit / max loss / report` 內部都統一換算成 `USDC equivalent`
-- 本地狀態保存在 `STATE_FILE`；多策略 / 多子帳戶時請使用 `.state/covered_call.json`、`.state/naked_short.json`、`.state/bull_put_spread.json` 等獨立檔案
+- 本地狀態保存在 `STATE_FILE`；多子帳建議使用 `.state/investors/<id>/<slug>.json`
 - `report` 讀本地 state 中已關閉 spread 的 realized 資料；若啟用 perp hedge，報表仍只統計 spread PnL，不含 perp hedge PnL
 - `run` 會先做 `manage`，再在條件允許時嘗試 `enter-best`
 
@@ -462,9 +541,7 @@ pip install -r requirements.txt
 ./bot frontend                       # 預設 http://127.0.0.1:8765
 ./bot frontend --port 9000           # 換埠
 ./bot frontend --no-scheduler        # 關掉背景 equity ledger
-./bot frontend --account-env-files .env,.env.naked_short_sub,.env.bull_put_spread_sub
-# 若 covered call 也改用本機帳戶 env：
-# ./bot frontend --account-env-files .env.covered_call_sub,.env.naked_short_sub,.env.bull_put_spread_sub
+./bot --investor youming frontend
 ```
 
 預設背景 scheduler 每 `FRONTEND_SNAPSHOT_INTERVAL_SEC` 秒（預設 300）讀一次帳戶
@@ -473,7 +550,11 @@ pip install -r requirements.txt
 依然可看 closed groups / 累積 PnL / APR 圖。
 前端頁面資料刷新有 30 秒節流上限；自動刷新與手動 `Refresh` 都會套用同一個限制。
 
-多子帳戶 dashboard 可用 `--account-env-files` 傳入多個策略 env。後端會保留同一個單頁前端格式，聚合各子帳戶的 `status`、`report`、open groups、closed trades、APR 與 stress；每個子帳戶仍需使用自己的 `DERIBIT_CLIENT_ID/SECRET`、`STATE_FILE` 與 `ORDER_LABEL_PREFIX`。主帳號若維持 covered call，也可以用 `.env,.env.naked_short_sub,.env.bull_put_spread_sub` 啟動。多帳戶模式下 equity ledger 會依 account name 分別寫入 `data/frontend_ledger/<account>/`，避免不同子帳戶快照混在同一個檔案。
+多子帳 dashboard 建議 `./bot --investor <id> frontend`，或 `--account-env-files` 傳入多個 `accounts/.env.<slug>`。equity ledger 依子帳 slug 寫入 `data/frontend_ledger/<slug>/`。
+
+**多名投資人**（各 `config/investors/<id>/` 一份資料）若需各自專屬對外網址：請為每位投資人各跑一個 `frontend`（例如不同 `--port`），再以 reverse proxy／Tunnel 將不同子網域指到對應埠；細節見 [docs/cloudflare-tunnel-investor.md](docs/cloudflare-tunnel-investor.md)。
+
+家用或無固定公網 IP 時，若要對投資人提供固定 **HTTPS** 連結，可使用 **Cloudflare Named Tunnel**（本機維持 `127.0.0.1` 即可）：步驟、 `config.yml` 範例、launchd 與 Access 建議見同一份文件。
 
 ## Tests
 

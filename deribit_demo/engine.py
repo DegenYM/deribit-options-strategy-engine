@@ -1689,21 +1689,11 @@ class DeribitOptionTrialBot:
 
     def _manage_group(self, context: RuntimeContext, group: TradeGroup, *, live: bool) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
-        is_covered_call = self._is_covered_call_group(group)
-        if is_covered_call:
-            robust_exit_actions = self._maybe_covered_call_robust_spot_exit(context, group, live=live)
-            if robust_exit_actions is not None:
-                return robust_exit_actions
-            return actions
+        if self._is_covered_call_group(group):
+            return self._manage_covered_call_group(context, group, live=live)
         soft_delta, hard_delta = self._defense_delta_thresholds(group)
-        hard_trigger = not is_covered_call and (
-            group.short_delta >= hard_delta
-            or group.loss_pct_of_max_loss >= self.config.hard_stop_loss_pct
-        )
-        soft_trigger = not is_covered_call and (
-            group.short_delta >= soft_delta
-            or group.loss_pct_of_max_loss >= self.config.soft_defense_loss_pct
-        )
+        hard_trigger = group.short_delta >= hard_delta or group.loss_pct_of_max_loss >= self.config.hard_stop_loss_pct
+        soft_trigger = group.short_delta >= soft_delta or group.loss_pct_of_max_loss >= self.config.soft_defense_loss_pct
         if hard_trigger:
             if self.config.enable_perp_hedge:
                 hedge_plan = self._build_hedge_plan(context, group.currency, mode="hard")
@@ -1733,6 +1723,32 @@ class DeribitOptionTrialBot:
                     actions.extend(self._close_group(context, group, reason="soft_stop_no_hedge", live=live))
             else:
                 actions.extend(self._close_group(context, group, reason="soft_stop", live=live))
+        return actions
+
+    def _manage_covered_call_group(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        live: bool,
+    ) -> list[dict[str, Any]]:
+        """Covered calls: OTM uses income exits (TP / early / time); ITM uses spot exit."""
+        if self._covered_call_itm(group, context):
+            robust_exit_actions = self._maybe_covered_call_robust_spot_exit(context, group, live=live)
+            if robust_exit_actions is not None:
+                return robust_exit_actions
+            return []
+        actions: list[dict[str, Any]] = []
+        if group.profit_capture >= self.config.tp_capture_pct:
+            actions.extend(self._close_group(context, group, reason="take_profit", live=live))
+            return actions
+        early_exit_reason = self._maybe_early_exit_reason(context, group)
+        if early_exit_reason is not None:
+            actions.extend(self._close_group(context, group, reason=early_exit_reason, live=live))
+            return actions
+        if group.dte_days <= self.config.time_exit_dte:
+            actions.extend(self._close_group(context, group, reason="time_exit", live=live))
+            return actions
         return actions
 
     def _defense_delta_thresholds(self, group: TradeGroup) -> tuple[Decimal, Decimal]:

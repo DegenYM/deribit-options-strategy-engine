@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>投資組合總覽 · Deribit 選擇權策略</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script src="/vendor/tailwindcdn.min.js"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              mono: [
+                "ui-monospace",
+                "SFMono-Regular",
+                "Menlo",
+                "Consolas",
+                "monospace"
+              ]
+            }
+          }
+        },
+        darkMode: "class"
+      };
+    </script>
+    <script src="/vendor/chart.umd.min.js"></script>
+    <script src="/vendor/luxon.min.js"></script>
+    <script src="/vendor/chartjs-adapter-luxon.umd.min.js"></script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body class="app-body investor-portal text-slate-100 min-h-screen font-sans">
+    <script>
+      window.__DASHBOARD_MODE__ = "investor";
+      window.__INVESTOR_LOCALE__ = "zh-Hant";
+    </script>
+    <header class="app-header sticky top-0 z-10">
+      <div class="dashboard-shell py-3 flex flex-wrap items-center gap-4">
+        <div class="min-w-[220px]">
+          <h1 class="text-lg font-semibold tracking-tight text-slate-50">投資組合總覽</h1>
+          <p class="text-xs text-slate-500">
+            即時權益與策略摘要；非投資建議。詳細營運請使用內部儀表板。
+          </p>
+        </div>
+        <span
+          id="env-badge"
+          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+        >載入中…</span>
+        <span
+          id="regime-badge"
+          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+        >風控狀態：—</span>
+        <span
+          id="strategy-badge"
+          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+        >策略：—</span>
+        <span id="header-spot-btc" class="text-xs font-mono text-emerald-200/90 tabular-nums">BTC —</span>
+        <span id="header-spot-eth" class="text-xs font-mono text-emerald-200/90 tabular-nums">ETH —</span>
+        <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
+          <span id="last-refresh">上次更新：—</span>
+          <label class="inline-flex items-center gap-1 cursor-pointer select-none">
+            <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
+            自動更新
+          </label>
+          <button
+            id="refresh-now"
+            class="px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition"
+          >
+            重新整理
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <main class="dashboard-shell dashboard-main">
+      <section class="section-card priority-section">
+        <div class="section-heading">
+          <div>
+            <p class="section-eyebrow">總覽</p>
+            <h2 class="section-title">帳戶核心指標（USDC 約當）</h2>
+          </div>
+          <p class="section-copy">
+            彙總權益、本日損益、已收權利金與歷史已實現表現；數字來自連線 Deribit 與本地狀態檔，延遲與估計誤差屬正常範圍。
+          </p>
+        </div>
+        <div id="aggregate-card" class="overview-panel"></div>
+      </section>
+
+      <details class="section-card collapsible-section" open>
+        <summary class="section-summary">
+          <div>
+            <p class="section-eyebrow">策略與部位</p>
+            <h2 class="section-title">依 playbook 彙總與目前持倉</h2>
+            <p class="section-copy mt-1">
+              先呈現各策略的勝率與損益輪廓，再展開單筆持倉卡片（含價差兩腿重點）。
+            </p>
+          </div>
+          <div class="section-summary-meta">
+            <span class="open-meta-pill" id="strategy-meta">—</span>
+            <span class="section-toggle" aria-hidden="true"></span>
+          </div>
+        </summary>
+        <div class="section-body">
+          <div id="strategy-cards" class="grid grid-cols-1 lg:grid-cols-3 gap-4"></div>
+          <div id="strategy-open-groups" class="mt-4 space-y-4">
+            <div class="open-empty-state">載入中…</div>
+          </div>
+        </div>
+      </details>
+
+      <section class="section-card priority-section">
+        <div class="section-heading">
+          <div>
+            <p class="section-eyebrow">進出場紀錄</p>
+            <h2 class="section-title">近期開倉與已平倉</h2>
+            <p class="section-copy mt-1">
+              每張卡片對應一筆策略群組：左側為進場脈絡，右側為出場或持倉狀態。
+            </p>
+          </div>
+          <span class="open-meta-pill" id="activity-meta">—</span>
+        </div>
+        <ul id="recent-activity-list" class="activity-list activity-list-unified">
+          <li class="activity-empty">載入中…</li>
+        </ul>
+      </section>
+
+      <details class="section-card collapsible-section" open>
+        <summary class="section-summary">
+          <div>
+            <p class="section-eyebrow">圖表分析</p>
+            <h2 class="section-title">資本、已實現損益與滾動年化</h2>
+            <p class="section-copy">可依帳本篩選；APR 視窗可調整。</p>
+          </div>
+          <span class="section-toggle" aria-hidden="true"></span>
+        </summary>
+
+        <div class="section-body">
+          <div class="flex gap-2 text-xs mb-4" id="book-filter">
+            <button data-book="ALL" class="filter-chip filter-active">全部</button>
+            <button data-book="BTC" class="filter-chip">BTC</button>
+            <button data-book="ETH" class="filter-chip">ETH</button>
+            <button data-book="USDC" class="filter-chip">USDC</button>
+          </div>
+
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">未實現收斂 vs 帳本權益（USDC）</h3>
+                <span class="text-xs text-slate-500" id="risk-capital-meta">—</span>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-risk-capital"></canvas>
+              </div>
+              <p class="text-xs text-slate-500 mt-2" id="risk-capital-hint">
+                各帳本<strong class="text-slate-400">未實現收斂</strong>為開倉群組進場權利金加總；<strong class="text-slate-400">權益</strong>為即時快照之
+                USDC 約當。此為曝險參考，非保證報酬。
+              </p>
+            </div>
+
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">累計已實現損益（USDC）</h3>
+                <span class="text-xs text-slate-500" id="cum-pnl-meta">—</span>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-cum-pnl"></canvas>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">每日已實現損益（USDC）</h3>
+                <span class="text-xs text-slate-500" id="daily-pnl-meta">—</span>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-daily-pnl"></canvas>
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+              <div class="flex justify-between items-baseline mb-2">
+                <h3 class="text-sm font-semibold text-slate-200">滾動年化報酬率（相對參考資本）</h3>
+                <div class="text-xs text-slate-400 flex gap-2 items-center">
+                  <label>
+                    視窗
+                    <select id="apr-window" class="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-200">
+                      <option value="7">7 日</option>
+                      <option value="14">14 日</option>
+                      <option value="30" selected>30 日</option>
+                      <option value="60">60 日</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div class="h-72 relative">
+                <canvas id="chart-apr"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      <footer class="text-xs text-slate-600 text-center pt-4 pb-8 max-w-3xl mx-auto leading-relaxed">
+        本頁面僅供資訊揭露與溝通，不構成買賣建議。加密資產與選擇權具高波動與本金虧損風險；過去績效不代表未來結果。
+        金額以 USDC 約當列示者依當下匯率與標的指數換算。價差策略之報表通常不含永續對沖部位之損益。
+        <span class="block mt-2 text-slate-500">
+          <a href="/investor.html" class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">English investor view</a>
+          ·
+          <a href="/index.html" class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">內部營運儀表板</a>
+          （含帳戶路徑、保證金細節與壓力情境）
+        </span>
+      </footer>
+    </main>
+
+    <div
+      id="toast"
+      class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
+    ></div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

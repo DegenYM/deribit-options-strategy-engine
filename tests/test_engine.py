@@ -1,5 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -461,7 +462,7 @@ def test_covered_call_high_delta_skips_hard_derisk_and_cooldown(tmp_path):
     assert not any(action.get("action") == "cooldown_started" for action in result["actions"])
 
 
-def test_covered_call_manage_skips_take_profit_and_time_exit(tmp_path):
+def test_covered_call_otm_take_profit_when_capture_exceeds_threshold(tmp_path):
     config = make_config(
         tmp_path,
         option_strategy="covered_call",
@@ -472,13 +473,93 @@ def test_covered_call_manage_skips_take_profit_and_time_exit(tmp_path):
         covered_call_spot_exit_enabled=False,
     )
     engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
-    group = _covered_call_group(dte_days=14)
+    group = _covered_call_group(dte_days=14, strike=Decimal("77000"))
     group.profit_capture = Decimal("0.9")
+    ctx = SimpleNamespace(
+        orderbook_cache={
+            group.short_instrument_name: _tight_book(
+                group.short_instrument_name,
+                bid="50",
+                ask="51",
+                index_price="70000",
+            )
+        }
+    )
 
-    actions = engine._manage_group(SimpleNamespace(orderbook_cache={}), group, live=False)
+    with patch.object(
+        engine,
+        "_close_group",
+        return_value=[{"action": "close_group_preview", "reason": "take_profit"}],
+    ) as close_mock:
+        actions = engine._manage_covered_call_group(ctx, group, live=False)
 
+    close_mock.assert_called_once_with(ctx, group, reason="take_profit", live=False)
+    assert actions[0]["reason"] == "take_profit"
+
+
+def test_covered_call_itm_skips_take_profit_until_robust_exit(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        tp_capture_pct=Decimal("0.55"),
+        time_exit_dte=4,
+        enable_early_exit=True,
+        covered_call_spot_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group(dte_days=14, strike=Decimal("69000"))
+    group.profit_capture = Decimal("0.9")
+    ctx = SimpleNamespace(
+        orderbook_cache={
+            group.short_instrument_name: _tight_book(
+                group.short_instrument_name,
+                bid="50",
+                ask="51",
+            )
+        }
+    )
+
+    with patch.object(engine, "_close_group") as close_mock:
+        actions = engine._manage_covered_call_group(ctx, group, live=False)
+
+    close_mock.assert_not_called()
     assert actions == []
-    assert group.status == "open"
+
+
+def test_covered_call_otm_time_exit_near_expiry(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        tp_capture_pct=Decimal("0.95"),
+        time_exit_dte=4,
+        enable_early_exit=False,
+        covered_call_spot_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group(dte_days=3, strike=Decimal("77000"))
+    group.profit_capture = Decimal("0.2")
+    ctx = SimpleNamespace(
+        orderbook_cache={
+            group.short_instrument_name: _tight_book(
+                group.short_instrument_name,
+                bid="50",
+                ask="51",
+                index_price="70000",
+            )
+        }
+    )
+
+    with patch.object(
+        engine,
+        "_close_group",
+        return_value=[{"action": "close_group_preview", "reason": "time_exit"}],
+    ) as close_mock:
+        actions = engine._manage_covered_call_group(ctx, group, live=False)
+
+    close_mock.assert_called_once_with(ctx, group, reason="time_exit", live=False)
+    assert actions[0]["reason"] == "time_exit"
 
 
 def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake_client):
@@ -1022,7 +1103,13 @@ def test_dvol_ratio_returns_none_when_client_errors(tmp_path):
     assert engine._dvol_ratio("BTC") is None
 
 
-def _tight_book(instrument: str, *, bid: str, ask: str) -> OrderBookSnapshot:
+def _tight_book(
+    instrument: str,
+    *,
+    bid: str,
+    ask: str,
+    index_price: str = "70000",
+) -> OrderBookSnapshot:
     return OrderBookSnapshot(
         instrument_name=instrument,
         best_bid_price=Decimal(bid),
@@ -1030,7 +1117,7 @@ def _tight_book(instrument: str, *, bid: str, ask: str) -> OrderBookSnapshot:
         best_ask_price=Decimal(ask),
         best_ask_amount=Decimal("1"),
         mark_price=(Decimal(bid) + Decimal(ask)) / Decimal("2"),
-        index_price=Decimal("70000"),
+        index_price=Decimal(index_price),
         delta=Decimal("-0.05"),
         iv=Decimal("0.5"),
         open_interest=Decimal("100"),

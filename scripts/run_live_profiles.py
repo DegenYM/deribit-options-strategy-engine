@@ -11,15 +11,22 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-DEFAULT_ENV_FILES = (
-    ".env.covered_call_sub",
-    ".env.naked_short_sub",
-    ".env.bull_put_spread_sub",
-)
+DEFAULT_INVESTOR_ID = "youming"
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def _env_files_for_investor(repo_root: Path, investor_id: str) -> list[Path]:
+    sys.path.insert(0, str(repo_root))
+    try:
+        from deribit_demo.env_layout import load_investor_manifest
+
+        return list(load_investor_manifest(investor_id, repo_root=repo_root).account_env_files())
+    finally:
+        if sys.path and sys.path[0] == str(repo_root):
+            sys.path.pop(0)
 
 
 def _resolve_existing_env_files(repo_root: Path, raw_env_files: list[str]) -> list[Path]:
@@ -98,8 +105,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "env_files",
         nargs="*",
-        default=list(DEFAULT_ENV_FILES),
-        help="Env files to run live. Defaults to the three *_sub profiles.",
+        default=None,
+        help="Account env files. Omit with --investor to use accounts.toml.",
+    )
+    parser.add_argument(
+        "--investor",
+        metavar="ID",
+        default=None,
+        help=f"Load enabled accounts from config/investors/<ID>/accounts.toml (default id: {DEFAULT_INVESTOR_ID})",
     )
     parser.add_argument("--cycles", type=int, default=0, help="Cycles per profile; 0 means forever.")
     parser.add_argument("--currencies", help="Comma-separated currencies passed to each run, e.g. BTC,ETH.")
@@ -120,7 +133,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     repo_root = _repo_root()
-    env_files = _resolve_existing_env_files(repo_root, args.env_files)
+    if args.env_files:
+        env_files = _resolve_existing_env_files(repo_root, args.env_files)
+    else:
+        investor_id = args.investor or DEFAULT_INVESTOR_ID
+        try:
+            env_files = _env_files_for_investor(repo_root, investor_id)
+        except Exception as exc:
+            if args.investor:
+                raise SystemExit(str(exc)) from exc
+            env_files = []
+        if env_files:
+            missing = [path for path in env_files if not path.is_file()]
+            if missing:
+                joined = ", ".join(str(path) for path in missing)
+                raise SystemExit(f"Missing account env file(s) for investor {investor_id!r}: {joined}")
+        else:
+            raise SystemExit(
+                f"No enabled accounts for investor {investor_id!r}; "
+                f"check {repo_root / 'config/investors' / investor_id / 'accounts.toml'}"
+            )
     log_dir = Path(args.log_dir).expanduser()
     if not log_dir.is_absolute():
         log_dir = repo_root / log_dir

@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from .client import DeribitClient
 from .config import BotConfig, load_config
+from .env_layout import account_slug_from_env_path
 from .current_stress import compute_current_stress
 from .engine import DeribitOptionTrialBot
 from .exceptions import ConfigurationError
@@ -42,6 +43,7 @@ LEDGER_DIR = Path("data/frontend_ledger")
 DEFAULT_SNAPSHOT_INTERVAL_SEC = 300
 STATUS_CACHE_TTL_SEC = 15
 REPORT_CACHE_TTL_SEC = 15
+STRATEGY_DISPLAY_ORDER = ("covered_call", "naked_short", "bull_put_spread")
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +274,9 @@ def _slugify_account_name(raw: str) -> str:
 
 
 def _default_account_name(env_file: Path, config: BotConfig) -> str:
+    slug = account_slug_from_env_path(env_file)
+    if slug:
+        return _slugify_account_name(slug)
     name = env_file.name
     if name.startswith(".env."):
         name = name.removeprefix(".env.")
@@ -1149,7 +1154,15 @@ def _aggregate_stress(accounts: list[DashboardAccount], *, shocks: list[Decimal]
         _add_stress_result(strategy_bucket, account, result)
 
     payload = _finalize_stress_bucket(aggregate)
-    payload["strategy_stresses"] = [_finalize_stress_bucket(bucket) for bucket in strategy_buckets.values()]
+    order_rank = {name: index for index, name in enumerate(STRATEGY_DISPLAY_ORDER)}
+    ordered_buckets = sorted(
+        strategy_buckets.values(),
+        key=lambda bucket: order_rank.get(
+            normalize_strategy_name(bucket.get("option_strategy") or ""),
+            len(STRATEGY_DISPLAY_ORDER),
+        ),
+    )
+    payload["strategy_stresses"] = [_finalize_stress_bucket(bucket) for bucket in ordered_buckets]
     return payload
 
 

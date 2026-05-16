@@ -2,13 +2,19 @@
 .env
 .env.*
 !.env.example
-!.env.example_sub
+config/shared/defaults.env
+config/shared/.env.defaults
+config/investors/*
+!config/investors/_example/
+!config/investors/_example/**
 .DS_Store
 .venv/
 .pytest_cache/
 __pycache__/
 *.pyc
 .state/
+# Cloudflare Tunnel 憑證 JSON（應只放在 ~/.cloudflared；勿複製進 repo）
+.cloudflared/*.json
 data/backtest_cache/
 data/frontend_ledger/
 logs/

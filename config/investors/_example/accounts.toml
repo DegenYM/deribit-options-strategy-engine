@@ -1,0 +1,24 @@
+# Investor manifest: one row per Deribit sub-account (typically ≤ 3 strategies).
+# Copy _example/ to config/investors/<your_id>/ and fill accounts/.env.<slug> from *.example.
+
+[investor]
+id = "demo"
+display_name = "Demo Investor"
+
+[[accounts]]
+slug = "covered_call"
+strategy = "covered_call"
+display_name = "Covered call (BTC/ETH inventory)"
+enabled = true
+
+[[accounts]]
+slug = "naked"
+strategy = "naked_short"
+display_name = "Naked short (USDC linear)"
+enabled = true
+
+[[accounts]]
+slug = "bull_put"
+strategy = "bull_put_spread"
+display_name = "Bull put spread"
+enabled = true
