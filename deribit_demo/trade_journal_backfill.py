@@ -468,8 +468,6 @@ def backfill_account(
 
     metrics_ok = False
     if sync_metrics:
-        from .state import load_trade_groups
-
         groups_after = load_trade_groups(state_path)
         closed_payloads = [g.to_dict() for g in groups_after if g.status == "closed"]
         if closed_payloads:

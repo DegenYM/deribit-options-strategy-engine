@@ -297,6 +297,11 @@ def main(argv: list[str] | None = None) -> int:
     fe_parser.add_argument("--no-scheduler", action="store_true", help="Disable equity-snapshot background loop")
     fe_parser.add_argument("--snapshot-interval-sec", type=int, default=None, help="Override scheduler tick interval")
     fe_parser.add_argument("--log-level", default="info", help="uvicorn log level (default info)")
+    fe_parser.add_argument(
+        "--investor-portal",
+        action="store_true",
+        help="Redirect / to /investor.html (for external investor URLs; pair with --investor)",
+    )
 
     backfill_parser = subparsers.add_parser(
         "backfill-trade-journal",
@@ -378,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
             account_env_files=tuple(parse_csv(args.account_env_files)) if args.account_env_files else None,
             enable_scheduler=not args.no_scheduler,
             snapshot_interval_sec=args.snapshot_interval_sec,
-            investor_portal=bool(getattr(args, "investor", None)),
+            investor_portal=bool(getattr(args, "investor_portal", False)),
             log_level=args.log_level,
         )
         return 0
