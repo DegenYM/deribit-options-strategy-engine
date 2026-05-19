@@ -9,6 +9,7 @@ config/investors/*
 !config/investors/_example/**
 .DS_Store
 .venv/
+.pip_packages/
 .pytest_cache/
 __pycache__/
 *.pyc
