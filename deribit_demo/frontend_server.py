@@ -20,7 +20,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -29,10 +29,14 @@ from .client import DeribitClient
 from .config import BotConfig, load_config
 from .env_layout import account_slug_from_env_path
 from .current_stress import compute_current_stress
-from .engine import DeribitOptionTrialBot
+from .engine import DeribitOptionTrialBot, ExchangePrefetch
 from .exceptions import ConfigurationError
-from .models import OrderBookSnapshot, normalize_strategy_name
+from .models import OrderBookSnapshot, TradeGroup, normalize_strategy_name
 from .stress import black_swan_strategy_analysis
+from .metrics_store import MetricsStore, fingerprint_from_cache_key, performance_scope_key
+from .realized_summary import realized_summary_from_closed
+from .trade_journal import TradeJournalStore, journal_db_path_for_state, scope_key_for_state
+from .trade_journal_backfill import sync_incremental_journal
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
 from .fees import annualized_return
 from .utils import format_decimal, json_default, to_decimal, utc_now, utc_now_ms
@@ -40,9 +44,15 @@ from .utils import format_decimal, json_default, to_decimal, utc_now, utc_now_ms
 LOGGER = logging.getLogger(__name__)
 
 LEDGER_DIR = Path("data/frontend_ledger")
+METRICS_DB_PATH = LEDGER_DIR / "metrics.db"
 DEFAULT_SNAPSHOT_INTERVAL_SEC = 300
+DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC = 300
 STATUS_CACHE_TTL_SEC = 15
 REPORT_CACHE_TTL_SEC = 15
+GROUPS_CACHE_TTL_SEC = 15
+SPOT_CACHE_TTL_SEC = 10
+SERIES_CACHE_TTL_SEC = 30
+ROLLING_APR_MAX_CHART_DAYS = 730
 STRATEGY_DISPLAY_ORDER = ("covered_call", "naked_short", "bull_put_spread")
 
 
@@ -425,18 +435,103 @@ class EquitySnapshotScheduler:
             self.state.last_error = str(exc)
 
 
+@dataclass
+class TradeJournalSyncState:
+    last_attempt_ms: int | None = None
+    last_success_ms: int | None = None
+    last_error: str | None = None
+    last_inserted: int = 0
+    running: bool = False
+
+
+class TradeJournalSyncScheduler:
+    """Background incremental sync of Deribit fills into trade_journal.db."""
+
+    def __init__(
+        self,
+        *,
+        accounts: list[DashboardAccount],
+        interval_sec: int,
+    ) -> None:
+        self._accounts = accounts
+        self._interval_sec = max(60, int(interval_sec))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.state = TradeJournalSyncState()
+
+    def start(self) -> None:
+        if not any(_has_private_creds(account.config) for account in self._accounts):
+            LOGGER.info("trade journal sync scheduler disabled: no private creds")
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="trade-journal-sync", daemon=True)
+        self.state.running = True
+        self._thread.start()
+        LOGGER.info("trade journal sync scheduler started (interval=%ss)", self._interval_sec)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        self.state.running = False
+
+    def run_once(self) -> dict[str, Any]:
+        """Run a single sync pass (used by scheduler tick and manual API)."""
+        self.state.last_attempt_ms = utc_now_ms()
+        results: list[dict[str, Any]] = []
+        total_inserted = 0
+        errors: list[str] = []
+        for account in self._accounts:
+            if not _has_private_creds(account.config):
+                results.append({"account": account.name, "skipped": True, "reason": "no_credentials"})
+                continue
+            try:
+                row = sync_incremental_journal(account.env_file)
+                total_inserted += int(row.get("api_inserted") or 0)
+                row["account"] = account.name
+                results.append(row)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{account.name}: {exc}")
+                results.append({"account": account.name, "error": str(exc)})
+        self.state.last_inserted = total_inserted
+        if errors:
+            self.state.last_error = "; ".join(errors)
+            LOGGER.warning("trade journal sync had errors: %s", self.state.last_error)
+        else:
+            self.state.last_success_ms = utc_now_ms()
+            self.state.last_error = None
+            if total_inserted:
+                LOGGER.info("trade journal sync inserted %s fill(s)", total_inserted)
+        return {"accounts": results, "api_inserted": total_inserted}
+
+    def _loop(self) -> None:
+        self._tick()
+        while not self._stop.wait(self._interval_sec):
+            self._tick()
+
+    def _tick(self) -> None:
+        try:
+            self.run_once()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("trade journal sync failed: %s", exc)
+            self.state.last_error = str(exc)
+
+
 # ---------------------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------------------
 
 
 class _TtlCache:
-    """Trivial single-key TTL cache — just enough to avoid hammering Deribit."""
+    """Trivial TTL cache — just enough to avoid hammering Deribit."""
 
     def __init__(self, ttl_seconds: float) -> None:
         self._ttl = ttl_seconds
         self._lock = threading.Lock()
         self._store: dict[Any, tuple[float, Any]] = {}
+        self._inflight: dict[Any, threading.Event] = {}
 
     def get_or_set(self, key: Any, factory: Callable[[], Any]) -> Any:
         now = time.monotonic()
@@ -444,32 +539,159 @@ class _TtlCache:
             cached = self._store.get(key)
             if cached is not None and (now - cached[0]) < self._ttl:
                 return cached[1]
-        value = factory()
-        with self._lock:
-            self._store[key] = (time.monotonic(), value)
-        return value
+            event = self._inflight.get(key)
+            if event is None:
+                event = threading.Event()
+                self._inflight[key] = event
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            event.wait(timeout=120)
+            with self._lock:
+                cached = self._store.get(key)
+                if cached is not None:
+                    return cached[1]
+            return factory()
+        try:
+            value = factory()
+            with self._lock:
+                self._store[key] = (time.monotonic(), value)
+            return value
+        finally:
+            with self._lock:
+                done = self._inflight.pop(key, None)
+            if done is not None:
+                done.set()
 
 
 # ---------------------------------------------------------------------------
 # Domain helpers (closed-group → time series)
 # ---------------------------------------------------------------------------
 
+_closed_groups_payload_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_closed_groups_payload_cache_lock = threading.Lock()
+_closed_groups_payload_load_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
-def _closed_groups_payload(state_path: Path) -> dict[str, Any]:
+
+def _state_path_mtime(state_path: Path) -> float:
+    try:
+        return state_path.stat().st_mtime if state_path.is_file() else 0.0
+    except OSError:
+        return 0.0
+
+
+def _spot_index_decimals(spot_payload: dict[str, Any] | None) -> dict[str, Decimal]:
+    out: dict[str, Decimal] = {}
+    for sym in ("BTC", "ETH"):
+        px = _dec((spot_payload or {}).get(sym))
+        if px > 0:
+            out[sym] = px
+    return out
+
+
+def _backfill_row_collateral_native(
+    row: dict[str, Any],
+    spot_index: dict[str, Decimal],
+    *,
+    state_path: Path | None = None,
+) -> None:
+    if str(row.get("status") or "").lower() != "closed":
+        return
+    book = str(row.get("collateral_currency") or row.get("currency") or "").upper()
+    spot = spot_index.get(book)
+    if book not in {"BTC", "ETH"}:
+        return
+    group = TradeGroup.from_dict(row)
+    journal_rows = None
+    if state_path is not None and group.group_id:
+        journal_rows = _journal_executions_for_group(state_path, group.group_id)
+    group.backfill_realized_pnl_collateral_native(
+        spot_index_usd=spot if spot is not None and spot > 0 else None,
+        journal_executions=journal_rows,
+    )
+    if group.realized_pnl_collateral_native is not None:
+        row["realized_pnl_collateral_native"] = format_decimal(group.realized_pnl_collateral_native, 12)
+    if group.realized_pnl is not None and spot is not None and spot > 0:
+        row["realized_pnl"] = format_decimal(group.realized_pnl, 8)
+
+
+def _apply_spot_native_backfill(payload: dict[str, Any], spot_index: dict[str, Decimal]) -> None:
+    if not spot_index:
+        return
+    for row in payload.get("closed") or []:
+        if isinstance(row, dict):
+            _backfill_row_collateral_native(row, spot_index)
+
+
+def _journal_executions_for_group(state_path: Path, group_id: str) -> list[dict[str, Any]]:
+    journal_path = journal_db_path_for_state(state_path)
+    if not journal_path.is_file():
+        return []
+    store = TradeJournalStore(journal_path)
+    scope = scope_key_for_state(state_path)
+    return store.list_executions(scope, group_id=group_id, limit=50)
+
+
+def _load_closed_groups_payload(
+    state_path: Path,
+    *,
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
     if not state_path.exists():
-        return {"open": [], "closed": []}
+        return {"open": [], "closed": [], "performance_excluded_closed_group_count": 0, "next_group_id": None}
     store = StrategyStateStore(state_path)
     state = store.load()
     excluded_group_ids = load_performance_exclusion_group_ids(state_path)
     open_groups = [g.to_dict() for g in state.groups if g.status != "closed"]
     all_closed_groups = [g for g in state.groups if g.status == "closed"]
-    closed_groups = [g.to_dict() for g in all_closed_groups if g.group_id not in excluded_group_ids]
-    return {
+    closed_groups = []
+    for g in all_closed_groups:
+        if g.group_id in excluded_group_ids:
+            continue
+        book = (g.collateral_currency or g.currency or "").upper()
+        spot = (spot_index or {}).get(book)
+        journal_rows = _journal_executions_for_group(state_path, g.group_id) if g.is_coin_collateral() else None
+        g.backfill_realized_pnl_collateral_native(
+            spot_index_usd=spot if spot is not None and spot > 0 else None,
+            journal_executions=journal_rows,
+        )
+        closed_groups.append(g.to_dict())
+    payload = {
         "open": _decimalize(open_groups),
         "closed": _decimalize(closed_groups),
         "performance_excluded_closed_group_count": len(all_closed_groups) - len(closed_groups),
         "next_group_id": state.next_group_id,
     }
+    _apply_spot_native_backfill(payload, spot_index or {})
+    return payload
+
+
+def _closed_groups_payload(
+    state_path: Path,
+    *,
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
+    """Load open/closed groups from disk; memoized by path + mtime to cut lock/parse churn."""
+    key = str(state_path.resolve())
+    mtime = _state_path_mtime(state_path)
+    with _closed_groups_payload_cache_lock:
+        cached = _closed_groups_payload_cache.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+    with _closed_groups_payload_load_locks[key]:
+        with _closed_groups_payload_cache_lock:
+            cached = _closed_groups_payload_cache.get(key)
+            if cached is not None and cached[0] == mtime:
+                return cached[1]
+        payload = _load_closed_groups_payload(state_path, spot_index=spot_index)
+        mtime = _state_path_mtime(state_path)
+        with _closed_groups_payload_cache_lock:
+            _closed_groups_payload_cache[key] = (mtime, payload)
+    if spot_index:
+        payload = copy.deepcopy(payload)
+        _apply_spot_native_backfill(payload, spot_index)
+    return payload
 
 
 def _entry_dte_days_at_open(group: dict[str, Any]) -> Decimal:
@@ -490,8 +712,19 @@ def _ensure_entry_net_apr(
         return
     credit_usdc = _dec(group.get("entry_credit"))
     dte = _entry_dte_days_at_open(group)
-    coll = str(group.get("collateral_currency") or group.get("currency") or "USDC").upper()
-    equity = equity_by_book.get(coll) or Decimal("0")
+    name = str(group.get("short_instrument_name") or "")
+    coll = str(group.get("collateral_currency") or "").upper()
+    if coll not in ("BTC", "ETH", "USDC"):
+        if "_USDC-" in name:
+            coll = "USDC"
+        elif name.startswith("BTC-"):
+            coll = "BTC"
+        elif name.startswith("ETH-"):
+            coll = "ETH"
+        else:
+            coll = str(group.get("currency") or "USDC").upper()
+    snap_equity = _dec(group.get("entry_book_equity"))
+    equity = snap_equity if snap_equity > 0 else (equity_by_book.get(coll) or Decimal("0"))
     if credit_usdc <= 0 or dte <= 0 or equity <= 0:
         group["entry_net_apr"] = format_decimal(Decimal("0"), 8)
         return
@@ -509,15 +742,18 @@ def _ensure_entry_net_apr(
     group["entry_net_apr"] = format_decimal(apr, 8)
 
 
-def _enrich_groups_payload_open_unrealized(bot: DeribitOptionTrialBot, payload: dict[str, Any]) -> None:
+def _enrich_groups_payload_open_unrealized(
+    bot: DeribitOptionTrialBot,
+    payload: dict[str, Any],
+    *,
+    exchange_prefetch: ExchangePrefetch | None = None,
+) -> None:
     """Mirror engine open-row fields so the UI works from ``/api/groups`` alone.
 
     Persisted state rows omit ``unrealized_*`` and index data; without this,
     BTC/ETH collateral rows can show USD unrealized while native stays ``—``.
     """
     open_rows = payload.get("open") or []
-    if not open_rows:
-        return
     cache: dict[str, OrderBookSnapshot] = {}
     underlying: dict[str, str] = {}
     index_usd: dict[str, Decimal] = {}
@@ -528,9 +764,16 @@ def _enrich_groups_payload_open_unrealized(bot: DeribitOptionTrialBot, payload: 
             index_usd[sym] = idx
     index_usd["USDC"] = Decimal("1")
     payload["underlying_index_usd"] = underlying
+    if not open_rows:
+        return
     equity_by_book: dict[str, Decimal] = {}
     try:
-        for ccy, summary in bot._account_summaries_by_currency().items():
+        summaries = (
+            exchange_prefetch.summaries
+            if exchange_prefetch is not None
+            else bot._account_summaries_by_currency()
+        )
+        for ccy, summary in summaries.items():
             book = str(ccy).upper()
             eq = to_decimal(summary.equity)
             if eq > 0:
@@ -558,6 +801,74 @@ def _enrich_groups_payload_open_unrealized(bot: DeribitOptionTrialBot, payload: 
 
 def _bucket_day_utc(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime("%Y-%m-%d")
+
+
+def _metrics_store() -> MetricsStore:
+    return MetricsStore(METRICS_DB_PATH)
+
+
+def _ensure_daily_pnl_synced(
+    accounts: list[DashboardAccount],
+    *,
+    store: MetricsStore | None = None,
+) -> MetricsStore:
+    """Load daily realized PnL buckets from SQLite; rebuild when state files change."""
+    metrics = store or _metrics_store()
+    scope_key = performance_scope_key(accounts)
+    fingerprint = fingerprint_from_cache_key(_closed_groups_cache_key(accounts))
+    if metrics.is_synced(scope_key, fingerprint):
+        return metrics
+    closed = _aggregate_closed_groups(accounts)
+    metrics.sync_from_closed(
+        scope_key,
+        fingerprint,
+        closed,
+        synced_at_ms=utc_now_ms(),
+    )
+    return metrics
+
+
+def _cumulative_pnl_series_from_daily(
+    daily_by_book: dict[str, dict[str, Decimal]],
+    daily_total: dict[str, Decimal],
+    *,
+    realized_count: int,
+) -> dict[str, Any]:
+    days_sorted = sorted(daily_total.keys())
+    books_sorted = sorted(daily_by_book.keys())
+
+    cumulative_total: list[dict[str, Any]] = []
+    running_total = Decimal("0")
+    for day in days_sorted:
+        running_total += daily_total[day]
+        cumulative_total.append({"date": day, "pnl_usdc": str(running_total)})
+
+    cumulative_by_book: dict[str, list[dict[str, Any]]] = {}
+    for book in books_sorted:
+        running = Decimal("0")
+        rows: list[dict[str, Any]] = []
+        for day in days_sorted:
+            running += daily_by_book[book].get(day, Decimal("0"))
+            rows.append({"date": day, "pnl_usdc": str(running)})
+        cumulative_by_book[book] = rows
+
+    daily_total_rows = [{"date": day, "pnl_usdc": str(daily_total[day])} for day in days_sorted]
+    daily_by_book_rows = {
+        book: [
+            {"date": day, "pnl_usdc": str(daily_by_book[book].get(day, Decimal("0")))}
+            for day in days_sorted
+        ]
+        for book in books_sorted
+    }
+
+    return {
+        "books": books_sorted,
+        "cumulative_total": cumulative_total,
+        "cumulative_by_book": cumulative_by_book,
+        "daily_total": daily_total_rows,
+        "daily_by_book": daily_by_book_rows,
+        "realized_count": realized_count,
+    }
 
 
 def _cumulative_pnl_series(closed: list[dict[str, Any]]) -> dict[str, Any]:
@@ -609,14 +920,59 @@ def _cumulative_pnl_series(closed: list[dict[str, Any]]) -> dict[str, Any]:
         for book in books_sorted
     }
 
-    return {
-        "books": books_sorted,
-        "cumulative_total": cumulative_total,
-        "cumulative_by_book": cumulative_by_book,
-        "daily_total": daily_total_rows,
-        "daily_by_book": daily_by_book_rows,
-        "realized_count": len(realized),
-    }
+    return _cumulative_pnl_series_from_daily(
+        {book: dict(days) for book, days in daily_by_book.items()},
+        dict(daily_total),
+        realized_count=len(realized),
+    )
+
+
+def _rolling_apr_from_daily_totals(
+    pnl_by_day: dict[date, Decimal],
+    *,
+    window_days: int,
+    effective_capital_usdc: Decimal,
+    max_chart_days: int = ROLLING_APR_MAX_CHART_DAYS,
+) -> list[dict[str, Any]]:
+    """Rolling annualized APR sampled per UTC day (O(n) sliding window)."""
+    if effective_capital_usdc <= 0 or window_days < 1 or not pnl_by_day:
+        return []
+
+    first_day = min(pnl_by_day.keys())
+    last_day = max(pnl_by_day.keys())
+    today = datetime.now(tz=UTC).date()
+    if today > last_day:
+        last_day = today
+
+    chart_start = first_day
+    if max_chart_days > 0 and (last_day - first_day).days + 1 > max_chart_days:
+        chart_start = last_day - timedelta(days=max_chart_days - 1)
+
+    sample_days = Decimal(str(window_days))
+    capital = effective_capital_usdc
+    rows: list[dict[str, Any]] = []
+    cursor = chart_start
+    window_pnl = Decimal("0")
+    warm = cursor - timedelta(days=window_days - 1)
+    while warm <= cursor:
+        window_pnl += pnl_by_day.get(warm, Decimal("0"))
+        warm += timedelta(days=1)
+
+    while True:
+        annualized = (window_pnl * Decimal("365") / sample_days) / capital
+        rows.append(
+            {
+                "date": cursor.strftime("%Y-%m-%d"),
+                "apr": str(annualized),
+                "window_pnl_usdc": str(window_pnl),
+            }
+        )
+        if cursor >= last_day:
+            break
+        drop = cursor - timedelta(days=window_days - 1)
+        cursor += timedelta(days=1)
+        window_pnl += pnl_by_day.get(cursor, Decimal("0")) - pnl_by_day.get(drop, Decimal("0"))
+    return rows
 
 
 def _rolling_apr_series(
@@ -624,43 +980,49 @@ def _rolling_apr_series(
     *,
     window_days: int,
     effective_capital_usdc: Decimal,
+    max_chart_days: int = ROLLING_APR_MAX_CHART_DAYS,
 ) -> list[dict[str, Any]]:
-    """Rolling annualized APR sampled per UTC day."""
-    if effective_capital_usdc <= 0:
-        return []
-    realized = sorted(
-        [
-            g for g in closed
-            if g.get("closed_timestamp_ms") is not None and g.get("realized_pnl") is not None
-        ],
-        key=lambda g: int(g["closed_timestamp_ms"]),
+    pnl_by_day: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
+    for group in closed:
+        ts_raw = group.get("closed_timestamp_ms")
+        pnl_raw = group.get("realized_pnl")
+        if ts_raw is None or pnl_raw is None:
+            continue
+        day = datetime.fromtimestamp(int(ts_raw) / 1000, tz=UTC).date()
+        pnl_by_day[day] += to_decimal(pnl_raw)
+    return _rolling_apr_from_daily_totals(
+        dict(pnl_by_day),
+        window_days=window_days,
+        effective_capital_usdc=effective_capital_usdc,
+        max_chart_days=max_chart_days,
     )
-    if not realized:
-        return []
-    first_day = datetime.fromtimestamp(int(realized[0]["closed_timestamp_ms"]) / 1000, tz=UTC).date()
-    last_day = datetime.fromtimestamp(int(realized[-1]["closed_timestamp_ms"]) / 1000, tz=UTC).date()
-    today = datetime.now(tz=UTC).date()
-    if today > last_day:
-        last_day = today
-    pnl_by_day: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    for g in realized:
-        day = _bucket_day_utc(int(g["closed_timestamp_ms"]))
-        pnl_by_day[day] += to_decimal(g["realized_pnl"])
 
-    rows: list[dict[str, Any]] = []
-    cursor = first_day
-    while cursor <= last_day:
-        window_start = cursor - timedelta(days=window_days - 1)
-        window_pnl = Decimal("0")
-        d = window_start
-        while d <= cursor:
-            window_pnl += pnl_by_day.get(d.strftime("%Y-%m-%d"), Decimal("0"))
-            d = d + timedelta(days=1)
-        sample_days = Decimal(str(window_days))
-        annualized = (window_pnl * Decimal("365") / sample_days) / effective_capital_usdc
-        rows.append({"date": cursor.strftime("%Y-%m-%d"), "apr": str(annualized), "window_pnl_usdc": str(window_pnl)})
-        cursor = cursor + timedelta(days=1)
-    return rows
+
+def _cumulative_pnl_series_from_store(accounts: list[DashboardAccount]) -> dict[str, Any]:
+    metrics = _ensure_daily_pnl_synced(accounts)
+    scope_key = performance_scope_key(accounts)
+    daily_by_book, daily_total = metrics.load_daily_by_book(scope_key)
+    return _cumulative_pnl_series_from_daily(
+        daily_by_book,
+        daily_total,
+        realized_count=metrics.closed_count(scope_key),
+    )
+
+
+def _rolling_apr_series_from_store(
+    accounts: list[DashboardAccount],
+    *,
+    window_days: int,
+    effective_capital_usdc: Decimal,
+) -> list[dict[str, Any]]:
+    metrics = _ensure_daily_pnl_synced(accounts)
+    scope_key = performance_scope_key(accounts)
+    pnl_by_day = metrics.load_daily_totals(scope_key)
+    return _rolling_apr_from_daily_totals(
+        pnl_by_day,
+        window_days=window_days,
+        effective_capital_usdc=effective_capital_usdc,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -672,6 +1034,21 @@ def _bot_for_account(account: DashboardAccount, *, require_private: bool) -> Der
     cfg = load_config(account.env_file, require_private=require_private)
     client = DeribitClient(cfg)
     return DeribitOptionTrialBot(cfg, client)
+
+
+def _exchange_prefetch_for_account(
+    account: DashboardAccount,
+    *,
+    cache: _TtlCache,
+) -> ExchangePrefetch | None:
+    if not _has_private_creds(account.config):
+        return None
+    key = _live_api_identity(account)
+
+    def _fetch() -> ExchangePrefetch:
+        return _bot_for_account(account, require_private=True).fetch_exchange_prefetch()
+
+    return cache.get_or_set(key, _fetch)
 
 
 def _tag_row(row: dict[str, Any], account: DashboardAccount) -> dict[str, Any]:
@@ -879,7 +1256,11 @@ def _aggregate_portfolios(
     }
 
 
-def _aggregate_status(accounts: list[DashboardAccount]) -> dict[str, Any]:
+def _aggregate_status(
+    accounts: list[DashboardAccount],
+    *,
+    exchange_prefetch_cache: _TtlCache,
+) -> dict[str, Any]:
     statuses: list[dict[str, Any]] = []
     trade_groups: list[dict[str, Any]] = []
     open_orders: list[dict[str, Any]] = []
@@ -889,7 +1270,12 @@ def _aggregate_status(accounts: list[DashboardAccount]) -> dict[str, Any]:
     seen_balance_identity: set[str] = set()
 
     for account in accounts:
-        payload = _bot_for_account(account, require_private=True).status()
+        bot = _bot_for_account(account, require_private=True)
+        prefetch = _exchange_prefetch_for_account(account, cache=exchange_prefetch_cache)
+        if prefetch is not None:
+            payload = bot.status_with_exchange_prefetch(prefetch)
+        else:
+            payload = bot.status()
         statuses.append(payload)
         for key, value in (payload.get("underlying_index_usd") or {}).items():
             if _dec(value) > 0:
@@ -930,6 +1316,7 @@ def _aggregate_status(accounts: list[DashboardAccount]) -> dict[str, Any]:
                 "env": status.get("env"),
                 "option_strategy": account.config.option_strategy,
                 "portfolio": status.get("portfolio"),
+                "accounts": status.get("accounts") or {},
                 "trade_group_count": status.get("trade_group_count"),
             }
             for account, status in zip(accounts, statuses, strict=False)
@@ -937,7 +1324,85 @@ def _aggregate_status(accounts: list[DashboardAccount]) -> dict[str, Any]:
     }
 
 
-def _aggregate_groups(accounts: list[DashboardAccount]) -> dict[str, Any]:
+def _closed_groups_cache_key(accounts: list[DashboardAccount]) -> tuple[Any, ...]:
+    parts: list[Any] = []
+    for account in accounts:
+        path = account.state_path
+        try:
+            mtime = path.stat().st_mtime if path.is_file() else 0.0
+        except OSError:
+            mtime = 0.0
+        journal_path = journal_db_path_for_state(path)
+        try:
+            journal_mtime = journal_path.stat().st_mtime if journal_path.is_file() else 0.0
+        except OSError:
+            journal_mtime = 0.0
+        parts.append((account.name, str(path), mtime, str(journal_path), journal_mtime))
+    return tuple(parts)
+
+
+def invalidate_closed_groups_payload_cache() -> None:
+    with _closed_groups_payload_cache_lock:
+        _closed_groups_payload_cache.clear()
+
+
+def _aggregate_realized_summary(
+    accounts: list[DashboardAccount],
+    *,
+    days: int = 30,
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
+    """Lightweight report summary from on-disk closed groups (no per-account bot.report())."""
+    closed: list[dict[str, Any]] = []
+    excluded = 0
+    open_count = 0
+    for account in accounts:
+        payload = _closed_groups_payload(account.state_path, spot_index=spot_index)
+        closed.extend(_tag_rows(payload.get("closed") or [], account))
+        excluded += int(payload.get("performance_excluded_closed_group_count") or 0)
+        open_count += len(payload.get("open") or [])
+    closed = _dedupe_trade_group_rows(closed)
+    capital = sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
+    target_num = sum(
+        (account.config.target_portfolio_apr * account.config.reference_capital_usdc for account in accounts),
+        Decimal("0"),
+    )
+    target_apr = _ratio(target_num, capital)
+    summary = realized_summary_from_closed(
+        closed,
+        effective_capital_usdc=capital,
+        target_portfolio_apr=target_apr,
+        window_days=days,
+    )
+    summary["open_group_count"] = str(open_count)
+    summary["performance_excluded_closed_group_count"] = str(excluded)
+    recent_closed = [row for row in closed if row.get("realized_pnl") is not None]
+    recent_closed.sort(key=lambda row: int(row.get("closed_timestamp_ms") or 0), reverse=True)
+    return {
+        "action": "report",
+        "generated_at": utc_now(),
+        "note": "Summary from local state; trade journal stores API fills incrementally.",
+        "summary": summary,
+        "recent_closed_trades": recent_closed[:20],
+        "open_trades": [],
+    }
+
+
+def _aggregate_closed_groups(accounts: list[DashboardAccount]) -> list[dict[str, Any]]:
+    """Closed trade groups from on-disk state only (no Deribit enrichment)."""
+    merged_closed: list[dict[str, Any]] = []
+    for account in accounts:
+        payload = _closed_groups_payload(account.state_path)
+        merged_closed.extend(_tag_rows(payload.get("closed") or [], account))
+    return _dedupe_trade_group_rows(merged_closed)
+
+
+def _aggregate_groups(
+    accounts: list[DashboardAccount],
+    *,
+    exchange_prefetch_cache: _TtlCache,
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
     merged_open: list[dict[str, Any]] = []
     merged_closed: list[dict[str, Any]] = []
     underlying_index_usd: dict[str, str] = {}
@@ -945,12 +1410,18 @@ def _aggregate_groups(accounts: list[DashboardAccount]) -> dict[str, Any]:
     excluded_closed_count = 0
 
     for account in accounts:
-        payload = _closed_groups_payload(account.state_path)
+        payload = copy.deepcopy(_closed_groups_payload(account.state_path, spot_index=spot_index))
         if _has_private_creds(account.config):
             try:
+                bot = _bot_for_account(account, require_private=True)
+                prefetch = _exchange_prefetch_for_account(
+                    account,
+                    cache=exchange_prefetch_cache,
+                )
                 _enrich_groups_payload_open_unrealized(
-                    _bot_for_account(account, require_private=True),
+                    bot,
                     payload,
+                    exchange_prefetch=prefetch,
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.debug("groups enrich skipped for %s: %s", account.name, exc)
@@ -1207,12 +1678,22 @@ def create_app(
         if snapshot_interval_sec is not None
         else os.environ.get("FRONTEND_SNAPSHOT_INTERVAL_SEC", DEFAULT_SNAPSHOT_INTERVAL_SEC)
     )
+    journal_interval = int(
+        os.environ.get(
+            "FRONTEND_TRADE_JOURNAL_SYNC_INTERVAL_SEC",
+            DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC,
+        )
+    )
     state_path = accounts[0].state_path
     ledger_root = accounts[0].ledger_root if not multi_account else accounts[0].ledger_root.parent
 
     status_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
     report_cache = _TtlCache(REPORT_CACHE_TTL_SEC)
+    groups_cache = _TtlCache(GROUPS_CACHE_TTL_SEC)
+    exchange_prefetch_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
+    spot_cache = _TtlCache(SPOT_CACHE_TTL_SEC)
     stress_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
+    series_cache = _TtlCache(SERIES_CACHE_TTL_SEC)
     # Serialize heavy portfolio endpoints so parallel browser tabs / dashboard waves
     # do not stack duplicate Deribit JSON-RPC bursts (often surfaced as 502/timeouts).
     _heavy_portfolio_lock = threading.Lock()
@@ -1220,7 +1701,7 @@ def create_app(
     def _account_bot_factory(account: DashboardAccount) -> Callable[[], DeribitOptionTrialBot]:
         return lambda: _bot_for_account(account, require_private=True)
 
-    schedulers = [
+    equity_schedulers = [
         EquitySnapshotScheduler(
             account_name=account.name,
             bot_factory=_account_bot_factory(account),
@@ -1230,16 +1711,18 @@ def create_app(
         )
         for account in accounts
     ]
+    journal_scheduler = TradeJournalSyncScheduler(accounts=accounts, interval_sec=journal_interval)
+    background_schedulers: list[Any] = [*equity_schedulers, journal_scheduler]
 
     @asynccontextmanager
     async def _lifespan(_app: "FastAPI"):
         if enable_scheduler:
-            for scheduler in schedulers:
+            for scheduler in background_schedulers:
                 scheduler.start()
         try:
             yield
         finally:
-            for scheduler in schedulers:
+            for scheduler in background_schedulers:
                 scheduler.stop()
 
     app = FastAPI(
@@ -1258,31 +1741,38 @@ def create_app(
     # Endpoints
     # ------------------------------------------------------------------
 
+    def _fetch_spot() -> dict[str, Any]:
+        client = DeribitClient(config_public)
+        btc_raw = client.get_index_price("btc_usd")
+        eth_raw = client.get_index_price("eth_usd")
+        btc_px = to_decimal(btc_raw.get("index_price") or 0)
+        eth_px = to_decimal(eth_raw.get("index_price") or 0)
+        return {
+            "BTC": str(btc_px) if btc_px > 0 else None,
+            "ETH": str(eth_px) if eth_px > 0 else None,
+        }
+
     @app.get("/api/spot")
     def api_spot() -> dict[str, Any]:
         """Public BTC/ETH USD index for dashboard header (no private auth)."""
         try:
-            client = DeribitClient(config_public)
-            btc_raw = client.get_index_price("btc_usd")
-            eth_raw = client.get_index_price("eth_usd")
-            btc_px = to_decimal(btc_raw.get("index_price") or 0)
-            eth_px = to_decimal(eth_raw.get("index_price") or 0)
-            return {
-                "BTC": str(btc_px) if btc_px > 0 else None,
-                "ETH": str(eth_px) if eth_px > 0 else None,
-            }
+            return spot_cache.get_or_set("spot", _fetch_spot)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"spot failed: {exc}") from exc
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         all_have_creds = all(_has_private_creds(account.config) for account in accounts)
-        any_scheduler_running = any(scheduler.state.running for scheduler in schedulers)
-        last_attempts = [s.state.last_attempt_ms for s in schedulers if s.state.last_attempt_ms is not None]
-        last_successes = [s.state.last_success_ms for s in schedulers if s.state.last_success_ms is not None]
+        any_scheduler_running = any(scheduler.state.running for scheduler in background_schedulers)
+        last_attempts = [
+            s.state.last_attempt_ms for s in equity_schedulers if s.state.last_attempt_ms is not None
+        ]
+        last_successes = [
+            s.state.last_success_ms for s in equity_schedulers if s.state.last_success_ms is not None
+        ]
         last_errors = [
             f"{account.name}: {scheduler.state.last_error}"
-            for account, scheduler in zip(accounts, schedulers, strict=False)
+            for account, scheduler in zip(accounts, equity_schedulers, strict=False)
             if scheduler.state.last_error
         ]
         return {
@@ -1293,6 +1783,12 @@ def create_app(
             "last_snapshot_attempt_ms": max(last_attempts, default=None),
             "last_snapshot_success_ms": max(last_successes, default=None),
             "last_snapshot_error": "; ".join(last_errors) if last_errors else None,
+            "trade_journal_sync_running": journal_scheduler.state.running,
+            "trade_journal_sync_interval_sec": journal_interval,
+            "last_trade_journal_sync_attempt_ms": journal_scheduler.state.last_attempt_ms,
+            "last_trade_journal_sync_success_ms": journal_scheduler.state.last_success_ms,
+            "last_trade_journal_sync_error": journal_scheduler.state.last_error,
+            "last_trade_journal_sync_inserted": journal_scheduler.state.last_inserted,
             "state_file": str(state_path) if not multi_account else "multi",
             "ledger_dir": str(ledger_root),
             "managed_currencies": list(config_public.managed_currencies),
@@ -1326,7 +1822,7 @@ def create_app(
 
     def _locked_aggregate_status() -> dict[str, Any]:
         with _heavy_portfolio_lock:
-            return _aggregate_status(accounts)
+            return _aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
 
     def _locked_aggregate_report(d: int) -> dict[str, Any]:
         with _heavy_portfolio_lock:
@@ -1395,11 +1891,21 @@ def create_app(
 
     @app.get("/api/groups")
     def api_groups() -> Any:
+        cache_key = ("groups", _closed_groups_cache_key(accounts))
+
+        def _compute() -> dict[str, Any]:
+            return _aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+
         try:
-            payload = _aggregate_groups(accounts)
+            payload = copy.deepcopy(groups_cache.get_or_set(cache_key, _compute))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"groups failed: {exc}") from exc
-        return JSONResponse(payload)
+        try:
+            spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+            _apply_spot_native_backfill(payload, spot_idx)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("groups spot native backfill skipped: %s", exc)
+        return JSONResponse(_decimalize(payload))
 
     @app.get("/api/equity_series")
     def api_equity_series(days: int = Query(default=30, ge=1, le=3650)) -> Any:
@@ -1414,10 +1920,71 @@ def create_app(
             "rows": rows,
         })
 
+    @app.get("/api/trade_journal/sync")
+    def api_trade_journal_sync() -> Any:
+        """Manual one-shot journal sync (normally runs on a background scheduler)."""
+        return JSONResponse(journal_scheduler.run_once())
+
+    @app.get("/api/realized_summary")
+    def api_realized_summary(
+        days: int = Query(default=30, ge=0, le=3650),
+    ) -> Any:
+        cache_key = ("realized_summary", days, _closed_groups_cache_key(accounts))
+
+        def _compute() -> dict[str, Any]:
+            return _aggregate_realized_summary(accounts, days=days)
+
+        try:
+            payload = copy.deepcopy(series_cache.get_or_set(cache_key, _compute))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"realized summary failed: {exc}") from exc
+        try:
+            spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+            for row in payload.get("recent_closed_trades") or []:
+                if isinstance(row, dict):
+                    _backfill_row_collateral_native(row, spot_idx)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("realized summary spot native backfill skipped: %s", exc)
+        return JSONResponse(_decimalize(payload))
+
+    @app.get("/api/trade_executions")
+    def api_trade_executions(
+        limit: int = Query(default=200, ge=1, le=2000),
+        since_days: int = Query(default=90, ge=1, le=3650),
+        group_id: str | None = Query(default=None),
+    ) -> Any:
+        since_ms = utc_now_ms() - since_days * 86400 * 1000
+        rows: list[dict[str, Any]] = []
+        per_account = max(1, limit // max(len(accounts), 1))
+        for account in accounts:
+            store = TradeJournalStore(journal_db_path_for_state(account.state_path))
+            scope = scope_key_for_state(account.state_path)
+            for row in store.list_executions(
+                scope,
+                limit=per_account,
+                since_ms=since_ms,
+                group_id=group_id,
+            ):
+                row["account_name"] = account.name
+                rows.append(row)
+        rows.sort(key=lambda item: int(item.get("ts_ms") or 0), reverse=True)
+        return JSONResponse({
+            "since_days": since_days,
+            "row_count": len(rows[:limit]),
+            "rows": rows[:limit],
+        })
+
     @app.get("/api/cumulative_pnl_series")
     def api_cumulative_pnl_series() -> Any:
-        groups_payload = _aggregate_groups(accounts)
-        series = _cumulative_pnl_series(groups_payload["closed"])
+        cache_key = ("cumulative_pnl", _closed_groups_cache_key(accounts))
+
+        def _compute() -> dict[str, Any]:
+            return _cumulative_pnl_series_from_store(accounts)
+
+        try:
+            series = series_cache.get_or_set(cache_key, _compute)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"cumulative pnl failed: {exc}") from exc
         return JSONResponse(series)
 
     @app.get("/api/apr_series")
@@ -1425,22 +1992,35 @@ def create_app(
         window_days: int = Query(default=30, ge=1, le=365),
         effective_capital_usdc: float | None = Query(default=None, ge=0),
     ) -> Any:
-        groups_payload = _aggregate_groups(accounts)
         capital = (
             Decimal(str(effective_capital_usdc))
             if effective_capital_usdc is not None and effective_capital_usdc > 0
             else sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
         )
-        rows = _rolling_apr_series(
-            groups_payload["closed"],
-            window_days=window_days,
-            effective_capital_usdc=capital,
+        cache_key = (
+            "apr_series",
+            window_days,
+            str(capital),
+            _closed_groups_cache_key(accounts),
         )
-        return JSONResponse({
-            "window_days": window_days,
-            "effective_capital_usdc": str(capital),
-            "rows": rows,
-        })
+
+        def _compute() -> dict[str, Any]:
+            rows = _rolling_apr_series_from_store(
+                accounts,
+                window_days=window_days,
+                effective_capital_usdc=capital,
+            )
+            return {
+                "window_days": window_days,
+                "effective_capital_usdc": str(capital),
+                "rows": rows,
+            }
+
+        try:
+            payload = series_cache.get_or_set(cache_key, _compute)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"apr series failed: {exc}") from exc
+        return JSONResponse(payload)
 
     # ------------------------------------------------------------------
     # Static frontend

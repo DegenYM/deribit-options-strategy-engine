@@ -31,7 +31,7 @@
     <script src="/vendor/chartjs-adapter-luxon.umd.min.js"></script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body class="app-body investor-portal text-slate-100 min-h-screen font-sans">
+  <body class="app-body investor-portal investor-blocking-load text-slate-100 min-h-screen font-sans">
     <script>
       window.__DASHBOARD_MODE__ = "investor";
       window.__INVESTOR_LOCALE__ = "en";
@@ -217,10 +217,31 @@
     </main>
 
     <div
+      id="investor-load-overlay"
+      class="investor-load-overlay"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div class="investor-load-card">
+        <p class="investor-load-eyebrow" data-investor-load-eyebrow>Please wait</p>
+        <h2 class="investor-load-title" data-investor-load-title>Loading your portfolio</h2>
+        <p class="investor-load-step" data-investor-load-step>Starting…</p>
+        <div class="investor-load-bar" aria-hidden="true">
+          <div id="investor-load-bar-fill" class="investor-load-bar-fill"></div>
+        </div>
+        <p class="investor-load-pct" data-investor-load-pct>0%</p>
+        <p class="investor-load-hint" data-investor-load-hint>
+          Fetching live prices, positions, and P&amp;L from Deribit. This usually takes a few seconds.
+        </p>
+      </div>
+    </div>
+
+    <div
       id="toast"
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script src="/app.js" defer></script>
+    <script src="/app.js?v=20260519b" defer></script>
   </body>
 </html>

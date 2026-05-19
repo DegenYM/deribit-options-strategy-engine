@@ -5,7 +5,10 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from .fees import premium_value_native
 from .utils import dte_days, parse_option_name, safe_div, to_decimal
+
+_COIN_COLLATERAL_BOOKS = frozenset({"BTC", "ETH"})
 
 
 class OptionSide(str, Enum):
@@ -477,8 +480,18 @@ class TradeGroup:
     # collateral is coin-based.
     estimated_im_collateral: Decimal = Decimal("0")
     entry_fee: Decimal = Decimal("0")
+    #: Short-leg average fill price at entry (option premium in coin for inverse).
+    short_entry_average_price: Decimal = Decimal("0")
+    #: Long-leg average fill price at entry (bull put spread).
+    long_entry_average_price: Decimal = Decimal("0")
+    #: Long-leg average fill price at close (bull put spread).
+    long_close_average_price: Decimal | None = None
+    #: Index (USD) at entry — used to recover entry premium for legacy rows.
+    entry_index_usd: Decimal = Decimal("0")
     #: Net APR at entry (net credit / book equity, annualized by entry DTE).
     entry_net_apr: Decimal = Decimal("0")
+    #: Book equity (native unit) snapshotted at open — used for entry APR, not live equity.
+    entry_book_equity: Decimal = Decimal("0")
     hedge_instrument_name: str = ""
     hedge_size_base: Decimal = Decimal("0")
     current_debit: Decimal = Decimal("0")
@@ -491,9 +504,19 @@ class TradeGroup:
     close_reason: str = ""
     realized_close_debit: Decimal | None = None
     realized_close_fee: Decimal | None = None
+    #: Short-leg average fill price at close (buy-to-close for short options).
+    short_close_average_price: Decimal | None = None
+    #: Index (USD) at close.
+    close_index_usd: Decimal | None = None
+    #: Realized PnL in collateral coin (ETH/BTC), from fill prices minus fees.
+    realized_pnl_collateral_native: Decimal | None = None
     realized_pnl: Decimal | None = None
     realized_return_on_max_loss: Decimal | None = None
     realized_annualized_return: Decimal | None = None
+    #: Book equity (native unit) snapshotted at close.
+    close_book_equity: Decimal | None = None
+    #: ``realized_pnl / close_book_equity``, annualized by holding days (frozen at close).
+    realized_apr_on_equity: Decimal | None = None
     short_label: str = ""
     hedge_label: str = ""
     option_type: str = "put"
@@ -527,6 +550,339 @@ class TradeGroup:
         elapsed_ms = max(self.closed_timestamp_ms - self.entry_timestamp_ms, 0)
         return Decimal(str(elapsed_ms)) / Decimal("86400000")
 
+    def collateral_book(self) -> str:
+        return (self.collateral_currency or self.currency or "USDC").upper()
+
+    def is_coin_collateral(self) -> bool:
+        return self.collateral_book() in _COIN_COLLATERAL_BOOKS
+
+    @staticmethod
+    def _resolved_index_usd(*candidates: Decimal | None) -> Decimal | None:
+        for candidate in candidates:
+            if candidate is not None and candidate > 0:
+                return candidate
+        return None
+
+    def _premium_native_from_price(
+        self,
+        price: Decimal | None,
+        *,
+        index_usd: Decimal | None,
+        gross_usdc: Decimal | None = None,
+    ) -> Decimal | None:
+        if self.quantity <= 0:
+            return None
+        if price is not None and price > 0:
+            return premium_value_native(premium=price, quantity=self.quantity)
+        if gross_usdc is not None and index_usd is not None and index_usd > 0:
+            return gross_usdc / index_usd
+        return None
+
+    def _premium_price_plausible(self, price: Decimal) -> bool:
+        """Reject journal rows that stored USDC/qty instead of coin premium."""
+        if price <= 0:
+            return False
+        book = self.collateral_book()
+        if book == "ETH":
+            return price < Decimal("3")
+        if book == "BTC":
+            return price < Decimal("0.25")
+        return True
+
+    @staticmethod
+    def _journal_row_priority(row: dict[str, Any]) -> int:
+        extra = row.get("extra")
+        if not isinstance(extra, dict):
+            extra = {}
+        if extra.get("source") == "deribit_api" or str(row.get("source_action") or "") == "backfill_api":
+            return 0
+        if extra.get("synthetic") or str(row.get("source_action") or "") == "backfill_state":
+            return 10
+        return 5
+
+    def infer_indices_from_fill_prices(self) -> None:
+        """Derive USD indices from coin fill prices + USDC ledger (legacy state)."""
+        qty = self.quantity
+        if qty <= 0:
+            return
+        if self.short_entry_average_price > 0 and self.entry_index_usd <= 0:
+            gross = self.entry_credit + (self.entry_fee or Decimal("0"))
+            denom = self.short_entry_average_price * qty
+            if denom > 0 and gross > 0:
+                self.entry_index_usd = gross / denom
+        if (
+            self.short_close_average_price is not None
+            and self.short_close_average_price > 0
+            and (self.close_index_usd is None or self.close_index_usd <= 0)
+            and self.realized_close_debit is not None
+        ):
+            close_fee = self.realized_close_fee or Decimal("0")
+            premium_usdc = max(self.realized_close_debit - close_fee, Decimal("0"))
+            denom = self.short_close_average_price * qty
+            if denom > 0 and premium_usdc > 0:
+                self.close_index_usd = premium_usdc / denom
+
+    def enrich_fill_prices_from_journal(self, executions: list[dict[str, Any]]) -> None:
+        """Backfill missing fill prices / indices from ``trade_executions`` rows."""
+        if not executions or not self.short_instrument_name:
+            return
+        target = self.short_instrument_name
+        best_open: tuple[int, Decimal] | None = None
+        best_close: tuple[int, Decimal] | None = None
+        for row in executions:
+            if str(row.get("instrument_name") or "") != target:
+                continue
+            leg = str(row.get("leg") or "short")
+            if leg not in {"", "short"}:
+                continue
+            price = to_decimal(row.get("price"))
+            if not self._premium_price_plausible(price):
+                continue
+            event = str(row.get("event_type") or "").lower()
+            rank = self._journal_row_priority(row)
+            if event == "open":
+                if best_open is None or rank < best_open[0]:
+                    best_open = (rank, price)
+            elif event == "close":
+                if best_close is None or rank < best_close[0]:
+                    best_close = (rank, price)
+        if best_open is not None and self.short_entry_average_price <= 0:
+            self.short_entry_average_price = best_open[1]
+        if best_close is not None and (
+            self.short_close_average_price is None or self.short_close_average_price <= 0
+        ):
+            self.short_close_average_price = best_close[1]
+        self.infer_indices_from_fill_prices()
+
+    def _ledger_entry_amount_from_close_index(self) -> Decimal | None:
+        """When only the close fill is known, infer open premium from USDC ledger."""
+        if self.realized_close_debit is None:
+            return None
+        self.infer_indices_from_fill_prices()
+        idx = self._resolved_index_usd(self.close_index_usd, self.entry_index_usd)
+        if idx is None:
+            return None
+        gross = self.entry_credit + (self.entry_fee or Decimal("0"))
+        if gross <= 0:
+            return None
+        return gross / idx
+
+    def enrich_fill_prices_from_ledger_spot(self, spot_index_usd: Decimal) -> None:
+        """Last resort: derive coin premiums from USDC ledger when journal lacks fills."""
+        if not self.is_coin_collateral() or spot_index_usd <= 0 or self.quantity <= 0:
+            return
+        qty = self.quantity
+        if self.short_entry_average_price <= 0:
+            gross = self.entry_credit + (self.entry_fee or Decimal("0"))
+            if gross > 0:
+                px = gross / (qty * spot_index_usd)
+                if self._premium_price_plausible(px):
+                    self.short_entry_average_price = px
+        if (
+            (self.short_close_average_price is None or self.short_close_average_price <= 0)
+            and self.realized_close_debit is not None
+        ):
+            close_fee = self.realized_close_fee or Decimal("0")
+            premium_usdc = max(self.realized_close_debit - close_fee, Decimal("0"))
+            if premium_usdc > 0:
+                px = premium_usdc / (qty * spot_index_usd)
+                if self._premium_price_plausible(px):
+                    self.short_close_average_price = px
+        self.infer_indices_from_fill_prices()
+
+    def _ledger_exit_amount_from_entry_index(self) -> Decimal | None:
+        """When only the open fill is known, infer close premium from USDC ledger."""
+        if self.realized_close_debit is None:
+            return None
+        self.infer_indices_from_fill_prices()
+        idx = self._resolved_index_usd(self.entry_index_usd, self.close_index_usd)
+        if idx is None:
+            return None
+        close_fee = self.realized_close_fee or Decimal("0")
+        gross = max(self.realized_close_debit - close_fee, Decimal("0"))
+        if gross <= 0:
+            return None
+        return gross / idx
+
+    def entry_amount_native(self, *, index_fallback_usd: Decimal | None = None) -> Decimal | None:
+        """Gross option premium received at open (collateral coin)."""
+        idx_entry = self._resolved_index_usd(self.entry_index_usd)
+        gross_usdc = self.entry_credit + (self.entry_fee or Decimal("0"))
+        short = self._premium_native_from_price(
+            self.short_entry_average_price if self.short_entry_average_price > 0 else None,
+            index_usd=idx_entry,
+            gross_usdc=gross_usdc if idx_entry is not None else None,
+        )
+        if short is None:
+            short = self._ledger_entry_amount_from_close_index()
+        if short is None:
+            return None
+        if not self.long_instrument_name:
+            return short
+        long_px = self.long_entry_average_price if self.long_entry_average_price > 0 else None
+        long = self._premium_native_from_price(long_px, index_usd=idx_entry)
+        if long is None:
+            return short
+        return short - long
+
+    def exit_amount_native(self, *, index_fallback_usd: Decimal | None = None) -> Decimal | None:
+        """Gross option premium paid at close (collateral coin)."""
+        close_debit = self.realized_close_debit
+        close_fee = self.realized_close_fee or Decimal("0")
+        gross_usdc: Decimal | None = None
+        if close_debit is not None:
+            gross_usdc = max(close_debit - close_fee, Decimal("0"))
+        idx_close = self._resolved_index_usd(self.close_index_usd, self.entry_index_usd)
+        short_px = self.short_close_average_price
+        short = self._premium_native_from_price(
+            short_px if short_px is not None and short_px > 0 else None,
+            index_usd=idx_close,
+            gross_usdc=gross_usdc,
+        )
+        if short is None:
+            short = self._ledger_exit_amount_from_entry_index()
+        if short is None:
+            return None
+        if not self.long_instrument_name:
+            return short
+        long_px = self.long_close_average_price
+        long = self._premium_native_from_price(
+            long_px if long_px is not None and long_px > 0 else None,
+            index_usd=idx_close,
+        )
+        if long is None:
+            return short
+        return short - long
+
+    def fees_native(self, *, index_fallback_usd: Decimal | None = None) -> Decimal | None:
+        """Entry + close fees in collateral coin."""
+        idx_close = self._resolved_index_usd(self.close_index_usd, index_fallback_usd)
+        idx_entry = self._resolved_index_usd(self.entry_index_usd, idx_close, index_fallback_usd)
+        total = Decimal("0")
+        entry_fee = self.entry_fee or Decimal("0")
+        if entry_fee > 0:
+            if idx_entry is None:
+                return None
+            total += entry_fee / idx_entry
+        close_fee = self.realized_close_fee or Decimal("0")
+        if close_fee > 0:
+            if idx_close is None:
+                return None
+            total += close_fee / idx_close
+        return total
+
+    def compute_realized_pnl_native(self, *, index_fallback_usd: Decimal | None = None) -> Decimal | None:
+        """Coin collateral: ``entry_amount - exit_amount - fee``."""
+        if not self.is_coin_collateral():
+            return None
+        entry_amount = self.entry_amount_native(index_fallback_usd=index_fallback_usd)
+        exit_amount = self.exit_amount_native(index_fallback_usd=index_fallback_usd)
+        fees = self.fees_native(index_fallback_usd=index_fallback_usd)
+        if entry_amount is None or exit_amount is None or fees is None:
+            return None
+        return entry_amount - exit_amount - fees
+
+    def resolved_short_entry_price(self) -> Decimal:
+        if self.short_entry_average_price > 0:
+            return self.short_entry_average_price
+        if self.long_instrument_name:
+            return Decimal("0")
+        idx = self.entry_index_usd
+        if idx <= 0 and self.close_index_usd is not None and self.close_index_usd > 0:
+            idx = self.close_index_usd
+        if idx <= 0 or self.quantity <= 0:
+            return Decimal("0")
+        gross_usdc = self.entry_credit + self.entry_fee
+        return safe_div(gross_usdc, self.quantity * idx)
+
+    def resolved_short_close_price(self) -> Decimal:
+        if self.short_close_average_price is not None and self.short_close_average_price > 0:
+            return self.short_close_average_price
+        idx = self.close_index_usd or self.entry_index_usd
+        if idx is None or idx <= 0 or self.quantity <= 0 or self.realized_close_debit is None:
+            return Decimal("0")
+        fee = self.realized_close_fee or Decimal("0")
+        premium_usdc = max(self.realized_close_debit - fee, Decimal("0"))
+        return safe_div(premium_usdc, self.quantity * idx)
+
+    def economic_close_debit_usdc(self) -> Decimal | None:
+        """USDC close cost including fees.
+
+        ``realized_close_debit`` normally already includes ``realized_close_fee``.
+        Legacy rows stored premium-only in ``realized_close_debit`` while keeping
+        the fee in a separate column; those rows match ``realized_pnl`` only when
+        the fee is added back here.
+        """
+        if self.realized_close_debit is None:
+            return None
+        close_debit = self.realized_close_debit
+        close_fee = self.realized_close_fee or Decimal("0")
+        if close_fee <= 0:
+            return close_debit
+        if self.realized_pnl is not None:
+            entry_net = self.entry_credit
+            if abs(self.realized_pnl - (entry_net - close_debit)) <= Decimal("0.000001"):
+                return close_debit + close_fee
+        return close_debit
+
+    def entry_credit_net_usdc(self) -> Decimal:
+        """Entry credit net of entry fees (handles legacy gross ``entry_credit`` rows)."""
+        fee = self.entry_fee or Decimal("0")
+        if fee <= 0:
+            return self.entry_credit
+        idx = self.entry_index_usd
+        if self.short_entry_average_price > 0 and idx > 0 and self.quantity > 0:
+            gross = self.short_entry_average_price * self.quantity * idx
+            tol = max(Decimal("0.01"), abs(gross) * Decimal("0.001"))
+            if abs(gross - self.entry_credit) <= tol:
+                return self.entry_credit - fee
+            if abs(gross - (self.entry_credit + fee)) <= tol:
+                return self.entry_credit
+        return self.entry_credit
+
+    def backfill_realized_pnl_usdc(self, *, spot_index_usd: Decimal | None = None) -> None:
+        """Recompute fee-inclusive realized PnL in USDC equivalent."""
+        if self.status != "closed":
+            return
+        if self.is_coin_collateral():
+            if self.realized_pnl_collateral_native is None:
+                self.backfill_realized_pnl_collateral_native(spot_index_usd=spot_index_usd)
+            native = self.realized_pnl_collateral_native
+            spot = spot_index_usd if spot_index_usd is not None and spot_index_usd > 0 else None
+            if native is not None and spot is not None:
+                self.realized_pnl = native * spot
+            return
+        close_total = self.economic_close_debit_usdc()
+        if close_total is None:
+            return
+        self.realized_pnl = self.entry_credit_net_usdc() - close_total
+
+    def backfill_realized_pnl_collateral_native(
+        self,
+        *,
+        spot_index_usd: Decimal | None = None,
+        journal_executions: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Coin PnL: ``entry_amount - exit_amount - fee`` (collateral native)."""
+        if self.status != "closed" or not self.is_coin_collateral():
+            return
+        spot = spot_index_usd if spot_index_usd is not None and spot_index_usd > 0 else None
+        if journal_executions:
+            self.enrich_fill_prices_from_journal(journal_executions)
+        if spot is not None and (
+            self.short_entry_average_price <= 0
+            or self.short_close_average_price is None
+            or self.short_close_average_price <= 0
+        ):
+            self.enrich_fill_prices_from_ledger_spot(spot)
+        self.infer_indices_from_fill_prices()
+        self.realized_pnl_collateral_native = None
+        native = self.compute_realized_pnl_native(index_fallback_usd=spot)
+        if native is None:
+            return
+        self.realized_pnl_collateral_native = native
+        self.backfill_realized_pnl_usdc(spot_index_usd=spot)
+
     def to_dict(self) -> dict[str, Any]:
         strategy = normalize_strategy_name(self.strategy, default="naked_short")
         payload = {
@@ -542,7 +898,12 @@ class TradeGroup:
             "entry_credit": self.entry_credit,
             "original_entry_credit": self.original_entry_credit,
             "entry_fee": self.entry_fee,
+            "short_entry_average_price": self.short_entry_average_price,
+            "long_entry_average_price": self.long_entry_average_price,
+            "long_close_average_price": self.long_close_average_price,
+            "entry_index_usd": self.entry_index_usd,
             "entry_net_apr": self.entry_net_apr,
+            "entry_book_equity": self.entry_book_equity,
             "max_loss": self.max_loss,
             "estimated_im_collateral": self.estimated_im_collateral,
             "regime_at_entry": self.regime_at_entry,
@@ -558,9 +919,14 @@ class TradeGroup:
             "close_reason": self.close_reason,
             "realized_close_debit": self.realized_close_debit,
             "realized_close_fee": self.realized_close_fee,
+            "short_close_average_price": self.short_close_average_price,
+            "close_index_usd": self.close_index_usd,
+            "realized_pnl_collateral_native": self.realized_pnl_collateral_native,
             "realized_pnl": self.realized_pnl,
             "realized_return_on_max_loss": self.realized_return_on_max_loss,
             "realized_annualized_return": self.realized_annualized_return,
+            "close_book_equity": self.close_book_equity,
+            "realized_apr_on_equity": self.realized_apr_on_equity,
             "short_label": self.short_label,
             "hedge_label": self.hedge_label,
             "option_type": self.option_type,
@@ -624,7 +990,14 @@ class TradeGroup:
             entry_credit=to_decimal(payload.get("entry_credit")),
             original_entry_credit=to_decimal(payload.get("original_entry_credit") or payload.get("entry_credit")),
             entry_fee=to_decimal(payload.get("entry_fee")),
+            short_entry_average_price=to_decimal(payload.get("short_entry_average_price")),
+            long_entry_average_price=to_decimal(payload.get("long_entry_average_price")),
+            long_close_average_price=to_decimal(payload.get("long_close_average_price"))
+            if payload.get("long_close_average_price") is not None
+            else None,
+            entry_index_usd=to_decimal(payload.get("entry_index_usd")),
             entry_net_apr=to_decimal(payload.get("entry_net_apr")),
+            entry_book_equity=to_decimal(payload.get("entry_book_equity")),
             max_loss=to_decimal(payload.get("max_loss")),
             estimated_im_collateral=to_decimal(payload.get("estimated_im_collateral")),
             regime_at_entry=str(payload.get("regime_at_entry") or RiskRegime.NORMAL.value),
@@ -640,12 +1013,25 @@ class TradeGroup:
             close_reason=str(payload.get("close_reason") or ""),
             realized_close_debit=to_decimal(payload.get("realized_close_debit")) if payload.get("realized_close_debit") is not None else None,
             realized_close_fee=to_decimal(payload.get("realized_close_fee")) if payload.get("realized_close_fee") is not None else None,
+            short_close_average_price=to_decimal(payload.get("short_close_average_price"))
+            if payload.get("short_close_average_price") is not None
+            else None,
+            close_index_usd=to_decimal(payload.get("close_index_usd")) if payload.get("close_index_usd") is not None else None,
+            realized_pnl_collateral_native=to_decimal(payload.get("realized_pnl_collateral_native"))
+            if payload.get("realized_pnl_collateral_native") is not None
+            else None,
             realized_pnl=to_decimal(payload.get("realized_pnl")) if payload.get("realized_pnl") is not None else None,
             realized_return_on_max_loss=to_decimal(payload.get("realized_return_on_max_loss"))
             if payload.get("realized_return_on_max_loss") is not None
             else None,
             realized_annualized_return=to_decimal(payload.get("realized_annualized_return"))
             if payload.get("realized_annualized_return") is not None
+            else None,
+            close_book_equity=to_decimal(payload.get("close_book_equity"))
+            if payload.get("close_book_equity") is not None
+            else None,
+            realized_apr_on_equity=to_decimal(payload.get("realized_apr_on_equity"))
+            if payload.get("realized_apr_on_equity") is not None
             else None,
             short_label=str(payload.get("short_label") or ""),
             hedge_label=str(payload.get("hedge_label") or ""),

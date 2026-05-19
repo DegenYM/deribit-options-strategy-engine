@@ -11,7 +11,13 @@ from typing import Any, Callable
 from .client import DeribitClient
 from .config import BotConfig
 from .exceptions import AuthenticationError, ExchangeError
-from .fees import option_trade_fee_usdc, premium_value_usdc
+from .fees import (
+    annualized_return,
+    option_trade_fee_native,
+    option_trade_fee_usdc,
+    premium_value_native,
+    premium_value_usdc,
+)
 from .margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
     linear_usdc_short_put_initial_per_contract_usdc,
@@ -36,6 +42,12 @@ from .models import (
     normalize_strategy_name,
 )
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
+from .trade_journal import (
+    TradeJournalStore,
+    ingest_engine_actions,
+    journal_db_path_for_state,
+    scope_key_for_state,
+)
 from .strategy import StrategySelector
 from .utils import (
     align_option_order_amount,
@@ -54,6 +66,19 @@ LOG_REASON_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 _MAX_SCAN_BLOCKER_LOG_LINES = 36
 # Append at most this many `example_messages` from scan rejection detail per side.
 _MAX_SCAN_REJECTION_EXAMPLE_LOG_LINES = 10
+
+
+@dataclass(frozen=True)
+class ExchangePrefetch:
+    """Deribit account snapshot shared across strategy state files on the same login."""
+
+    summaries: dict[str, AccountSummary]
+    open_orders: list[OpenOrder]
+    positions: list[Position]
+    option_positions: list[Position]
+    future_positions: list[Position]
+    future_markets_by_name: dict[str, OptionInstrument]
+    markets_by_currency: dict[str, list[OptionInstrument]]
 
 
 @dataclass
@@ -90,6 +115,253 @@ class DeribitOptionTrialBot:
         # to the last known regime rather than mis-classifying the market as crisis.
         self._last_regime_cache: dict[str, tuple[RiskRegime, int]] = {}
         self._instrument_metadata_cache: dict[str, OptionInstrument] = {}
+        self._trade_journal_store: TradeJournalStore | None = None
+
+    def _journal_scope_key(self) -> str:
+        return scope_key_for_state(self.config.state_file)
+
+    def _trade_journal(self) -> TradeJournalStore:
+        if self._trade_journal_store is None:
+            self._trade_journal_store = TradeJournalStore(journal_db_path_for_state(self.config.state_file))
+        return self._trade_journal_store
+
+    def _persist_trade_journal_actions(self, actions: list[dict[str, Any]]) -> None:
+        if not actions:
+            return
+        try:
+            inserted = ingest_engine_actions(
+                self._trade_journal(),
+                scope_key=self._journal_scope_key(),
+                actions=actions,
+                default_strategy=self.config.option_strategy,
+            )
+            if inserted:
+                LOGGER.debug("trade journal: recorded %s fill(s)", inserted)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("trade journal persist failed: %s", exc)
+
+    def _persist_trade_journal_result(self, result: dict[str, Any] | None) -> None:
+        if not result:
+            return
+        self._persist_trade_journal_actions([result])
+
+    def _book_equity_native(
+        self,
+        collateral_currency: str,
+        summaries: dict[str, AccountSummary] | None = None,
+    ) -> Decimal:
+        book = str(collateral_currency or "USDC").upper()
+        rows = summaries if summaries is not None else self._account_summaries_by_currency()
+        summary = rows.get(book)
+        if summary is None:
+            return Decimal("0")
+        return summary.equity
+
+    def _realized_pnl_native_for_apr_book(
+        self,
+        group: TradeGroup,
+        realized_pnl_usdc: Decimal,
+        *,
+        index_price_usd: Decimal,
+    ) -> Decimal:
+        book = self._group_collateral_currency(group).upper()
+        if book == "USDC":
+            return realized_pnl_usdc
+        if group.realized_pnl_collateral_native is not None:
+            return group.realized_pnl_collateral_native
+        if index_price_usd <= 0:
+            return Decimal("0")
+        return realized_pnl_usdc / index_price_usd
+
+    def _option_fee_native(
+        self,
+        *,
+        premium: Decimal,
+        quantity: Decimal,
+        index_price: Decimal,
+        quote_currency: str,
+        settlement_currency: str,
+    ) -> Decimal:
+        return option_trade_fee_native(
+            index_price=index_price,
+            premium=premium,
+            quantity=quantity,
+            fee_rate=self.config.option_fee_rate,
+            fee_cap_rate=self.config.option_fee_cap_rate,
+            quote_currency=quote_currency,
+            settlement_currency=settlement_currency,
+        )
+
+    def _compute_realized_pnl_collateral_native(
+        self,
+        group: TradeGroup,
+        *,
+        short_entry_price: Decimal,
+        short_close_price: Decimal,
+        index_at_entry: Decimal,
+        index_at_close: Decimal,
+        short_instrument: OptionInstrument,
+        long_entry_price: Decimal | None = None,
+        long_close_price: Decimal | None = None,
+        long_instrument: OptionInstrument | None = None,
+        realized_pnl_usdc: Decimal | None = None,
+    ) -> Decimal | None:
+        book = self._group_collateral_currency(group).upper()
+        if book == "USDC":
+            return realized_pnl_usdc
+        if short_entry_price > 0:
+            group.short_entry_average_price = short_entry_price
+        if short_close_price > 0:
+            group.short_close_average_price = short_close_price
+        if index_at_entry > 0:
+            group.entry_index_usd = index_at_entry
+        if index_at_close > 0:
+            group.close_index_usd = index_at_close
+        if long_entry_price is not None and long_entry_price > 0:
+            group.long_entry_average_price = long_entry_price
+        if long_close_price is not None and long_close_price > 0:
+            group.long_close_average_price = long_close_price
+        return group.compute_realized_pnl_native()
+
+    def _finalize_close_collateral_native(
+        self,
+        group: TradeGroup,
+        *,
+        realized_pnl_usdc: Decimal,
+        short_close_price: Decimal,
+        index_at_close: Decimal,
+        short_instrument: OptionInstrument,
+        long_close_price: Decimal | None = None,
+        long_instrument: OptionInstrument | None = None,
+    ) -> None:
+        group.short_close_average_price = short_close_price
+        group.close_index_usd = index_at_close
+        entry_price = group.resolved_short_entry_price()
+        index_at_entry = group.entry_index_usd if group.entry_index_usd > 0 else index_at_close
+        native = self._compute_realized_pnl_collateral_native(
+            group,
+            short_entry_price=entry_price,
+            short_close_price=short_close_price,
+            index_at_entry=index_at_entry,
+            index_at_close=index_at_close,
+            short_instrument=short_instrument,
+            long_entry_price=group.long_entry_average_price if group.long_entry_average_price > 0 else None,
+            long_close_price=long_close_price,
+            long_instrument=long_instrument,
+            realized_pnl_usdc=realized_pnl_usdc,
+        )
+        if native is not None:
+            group.realized_pnl_collateral_native = native
+            book = self._group_collateral_currency(group).upper()
+            if book == "USDC":
+                group.realized_pnl = realized_pnl_usdc
+            elif index_at_close > 0:
+                group.backfill_realized_pnl_usdc(spot_index_usd=index_at_close)
+
+    def _attach_open_group_stats(self, group: TradeGroup) -> None:
+        """Snapshot book equity at open; persist to state + trade journal DB."""
+        book = self._group_collateral_currency(group)
+        summaries = self._account_summaries_by_currency()
+        equity = self._book_equity_native(book, summaries)
+        group.entry_book_equity = equity
+        if group.entry_index_usd <= 0 and book.upper() != "USDC":
+            cache: dict[str, OrderBookSnapshot] = {}
+            group.entry_index_usd = self._currency_index_price(group.currency, cache)
+        dte = group.dte_days
+        net_credit = group.entry_credit
+        if book.upper() != "USDC":
+            cache: dict[str, OrderBookSnapshot] = {}
+            idx = self._currency_index_price(group.currency, cache)
+            if idx > 0:
+                net_credit = group.entry_credit / idx
+        if equity > 0 and net_credit > 0 and dte > 0:
+            group.entry_net_apr = annualized_return(
+                net_credit=net_credit,
+                capital_base=equity,
+                dte_days=dte,
+            )
+        try:
+            self._trade_journal().record_group_stats_open(
+                scope_key=self._journal_scope_key(),
+                group_id=group.group_id,
+                collateral_book=book,
+                opened_ts_ms=group.entry_timestamp_ms,
+                entry_book_equity=group.entry_book_equity,
+                entry_net_apr=group.entry_net_apr,
+                entry_credit_usdc=group.entry_credit,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("trade journal open stats failed for %s: %s", group.group_id, exc)
+
+    def _snapshot_close_apr_on_equity(
+        self,
+        group: TradeGroup,
+        *,
+        realized_pnl: Decimal,
+        closed_timestamp_ms: int,
+        summaries: dict[str, AccountSummary] | None = None,
+        index_price_usd: Decimal | None = None,
+    ) -> tuple[Decimal, Decimal]:
+        book = self._group_collateral_currency(group)
+        close_equity = self._book_equity_native(book, summaries)
+        holding_days = Decimal(str(max(closed_timestamp_ms - group.entry_timestamp_ms, 0))) / Decimal(
+            "86400000"
+        )
+        if close_equity <= 0 or holding_days <= 0:
+            return close_equity, Decimal("0")
+        idx = index_price_usd if index_price_usd is not None else Decimal("0")
+        if idx <= 0 and book.upper() != "USDC":
+            cache: dict[str, OrderBookSnapshot] = {}
+            idx = self._currency_index_price(group.currency, cache)
+        if group.realized_pnl_collateral_native is not None and book.upper() != "USDC":
+            pnl_native = group.realized_pnl_collateral_native
+        else:
+            pnl_native = self._realized_pnl_native_for_apr_book(
+                group,
+                realized_pnl,
+                index_price_usd=idx,
+            )
+        apr = annualized_return(
+            net_credit=pnl_native,
+            capital_base=close_equity,
+            dte_days=holding_days,
+        )
+        return close_equity, apr
+
+    def _persist_group_stats_close(self, group: TradeGroup) -> None:
+        if group.closed_timestamp_ms is None or group.realized_pnl is None:
+            return
+        if group.close_book_equity is None or group.realized_apr_on_equity is None:
+            return
+        try:
+            self._trade_journal().record_group_stats_close(
+                scope_key=self._journal_scope_key(),
+                group_id=group.group_id,
+                collateral_book=self._group_collateral_currency(group),
+                closed_ts_ms=group.closed_timestamp_ms,
+                close_book_equity=group.close_book_equity,
+                realized_pnl_usdc=group.realized_pnl,
+                realized_apr_on_equity=group.realized_apr_on_equity,
+                holding_days=group.holding_days,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("trade journal close stats failed for %s: %s", group.group_id, exc)
+
+    def _journal_reconcile_close(self, group: TradeGroup, *, closed_timestamp_ms: int) -> None:
+        try:
+            self._trade_journal().record_reconcile_close(
+                scope_key=self._journal_scope_key(),
+                group_id=group.group_id,
+                instrument_name=group.short_instrument_name,
+                strategy=group.strategy or self.config.option_strategy,
+                reason=group.close_reason or "reconciled_external",
+                quantity=group.quantity,
+                close_debit_usdc=group.realized_close_debit,
+                closed_timestamp_ms=closed_timestamp_ms,
+                realized_pnl=group.realized_pnl,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("trade journal reconcile failed for %s: %s", group.group_id, exc)
 
     def _linear_usdc_mode(self) -> bool:
         return self.config.option_markets_profile == "linear_usdc"
@@ -203,8 +475,42 @@ class DeribitOptionTrialBot:
         payload = self.client.ping()
         return {"env": self.config.env, "ok": True, "result": payload}
 
+    def fetch_exchange_prefetch(self) -> ExchangePrefetch:
+        """One Deribit round-trip bundle reused by multi-strategy dashboard rows."""
+        summaries = self._account_summaries_by_currency()
+        open_orders = (
+            [OpenOrder.from_api(row) for row in self.client.get_open_orders(kind="any")]
+            if self.config.has_private_credentials
+            else []
+        )
+        positions = (
+            [Position.from_api(row) for row in self.client.get_positions(currency="any", kind="any")]
+            if self.config.has_private_credentials
+            else []
+        )
+        option_positions = [item for item in positions if item.kind == "option"]
+        future_positions = [
+            item
+            for item in positions
+            if item.kind in {"future", "future_combo"} or "PERPETUAL" in item.instrument_name
+        ]
+        return ExchangePrefetch(
+            summaries=summaries,
+            open_orders=open_orders,
+            positions=positions,
+            option_positions=option_positions,
+            future_positions=future_positions,
+            future_markets_by_name=self._load_perpetual_markets(),
+            markets_by_currency=self._load_supported_option_markets(),
+        )
+
     def status(self) -> dict[str, Any]:
         context = self._load_runtime()
+        self.state_store.save(context.state)
+        return self._status_payload(context)
+
+    def status_with_exchange_prefetch(self, prefetch: ExchangePrefetch) -> dict[str, Any]:
+        context = self._load_runtime_from_exchange(prefetch)
         self.state_store.save(context.state)
         return self._status_payload(context)
 
@@ -310,6 +616,8 @@ class DeribitOptionTrialBot:
         result = self._enter_best_from_candidates(context, candidates=candidates, live=live)
         if result.get("group") is not None:
             context.state.groups.append(result["group"])
+        if live:
+            self._persist_trade_journal_result(result)
         self.state_store.save(context.state)
         return result
 
@@ -353,6 +661,8 @@ class DeribitOptionTrialBot:
                 if unwind is not None:
                     actions.append(unwind)
 
+        if live:
+            self._persist_trade_journal_actions(actions)
         self.state_store.save(context.state)
         return {
             "action": "manage",
@@ -410,6 +720,9 @@ class DeribitOptionTrialBot:
                 topup_actions = self._topup_existing_naked_groups(context, live=live)
                 if topup_actions:
                     cycle_result["topup"] = topup_actions
+            if live:
+                self._persist_trade_journal_result(cycle_result.get("entry"))
+                self._persist_trade_journal_actions(cycle_result.get("topup") or [])
             self.state_store.save(context.state)
             log_signature = self._cycle_log_signature(cycle_result)
             if log_signature != last_log_signature:
@@ -707,14 +1020,30 @@ class DeribitOptionTrialBot:
         return {"action": "cancelled", "order_id": order_id, "response": response}
 
     def _load_runtime(self) -> RuntimeContext:
+        if self.config.has_private_credentials:
+            return self._load_runtime_from_exchange(self.fetch_exchange_prefetch())
+        return self._load_runtime_from_exchange(None)
+
+    def _load_runtime_from_exchange(self, prefetch: ExchangePrefetch | None) -> RuntimeContext:
         state = self.state_store.load()
-        summaries = self._account_summaries_by_currency()
-        open_orders = [OpenOrder.from_api(row) for row in self.client.get_open_orders(kind="any")] if self.config.has_private_credentials else []
-        positions = [Position.from_api(row) for row in self.client.get_positions(currency="any", kind="any")] if self.config.has_private_credentials else []
-        option_positions = [item for item in positions if item.kind == "option"]
-        future_positions = [item for item in positions if item.kind in {"future", "future_combo"} or "PERPETUAL" in item.instrument_name]
-        future_markets_by_name = self._load_perpetual_markets()
-        markets_by_currency = self._load_supported_option_markets()
+        if prefetch is not None:
+            summaries = prefetch.summaries
+            open_orders = prefetch.open_orders
+            positions = prefetch.positions
+            option_positions = prefetch.option_positions
+            future_positions = prefetch.future_positions
+            future_markets_by_name = prefetch.future_markets_by_name
+            markets_by_currency = prefetch.markets_by_currency
+        else:
+            summaries = {}
+            open_orders = []
+            positions = []
+            option_positions = []
+            future_positions = []
+            future_markets_by_name = {}
+            markets_by_currency = {
+                currency: [] for currency in self.config.managed_currencies
+            }
         orderbook_cache: dict[str, OrderBookSnapshot] = {}
         state = self._reset_daily_state(state, summaries)
         # Refresh external cash-flow (deposit / withdrawal / transfer) tallies
@@ -2201,6 +2530,8 @@ class DeribitOptionTrialBot:
         )
         realized_close_debit += realized_close_fee
         long_response = None
+        long_close_price_for_native: Decimal | None = None
+        long_instrument_for_native: OptionInstrument | None = None
         if group.long_instrument_name:
             long_result = self._close_leg_with_retry(
                 context,
@@ -2218,6 +2549,8 @@ class DeribitOptionTrialBot:
                 LOGGER.warning("close_group %s: long leg unfilled=%s", group.group_id, long_result["unfilled"])
             long_close_price = long_result["average_price"]
             long_instrument = self._find_instrument(context, group.long_instrument_name)
+            long_close_price_for_native = long_close_price
+            long_instrument_for_native = long_instrument
             long_book = self._get_orderbook(group.long_instrument_name, context.orderbook_cache)
             long_credit = self._premium_value_usdc(
                 premium=long_close_price,
@@ -2235,14 +2568,16 @@ class DeribitOptionTrialBot:
             )
             realized_close_debit -= max(long_credit - long_fee, Decimal("0"))
             realized_close_fee += long_fee
-        realized_pnl = group.entry_credit - realized_close_debit
+        realized_pnl = group.entry_credit_net_usdc() - realized_close_debit
         realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss)
-        realized_annualized_return = self._realized_annualized_return_on_im_native(
+        self._finalize_close_collateral_native(
             group,
-            realized_pnl,
-            index_price_usd=short_book.index_price,
-            closed_timestamp_ms=closed_timestamp_ms,
-            orderbook_cache=context.orderbook_cache,
+            realized_pnl_usdc=realized_pnl,
+            short_close_price=short_close_price,
+            index_at_close=short_book.index_price,
+            short_instrument=short_instrument,
+            long_close_price=long_close_price_for_native,
+            long_instrument=long_instrument_for_native,
         )
         self._mark_group_closed(
             group,
@@ -2250,27 +2585,51 @@ class DeribitOptionTrialBot:
             closed_timestamp_ms=closed_timestamp_ms,
             realized_close_debit=realized_close_debit,
             realized_close_fee=realized_close_fee,
-            realized_pnl=realized_pnl,
+            realized_pnl=group.realized_pnl or realized_pnl,
             realized_return_on_max_loss=realized_return_on_max_loss,
-            realized_annualized_return=realized_annualized_return,
+            index_price_usd=short_book.index_price,
         )
-        return [
-            {
-                "action": "close_group",
-                "reason": reason,
-                "group_id": group.group_id,
-                "realized_close_debit": realized_close_debit,
-                "realized_close_fee": realized_close_fee,
-                "realized_pnl": realized_pnl,
-                "realized_return_on_max_loss": realized_return_on_max_loss,
-                "realized_annualized_return": realized_annualized_return,
-                "responses": {
-                    "short_leg": short_response,
-                    "short_attempts": short_result["responses"],
-                    "long_leg": long_response,
-                },
-            }
-        ]
+        close_action = {
+            "action": "close_group",
+            "reason": reason,
+            "group_id": group.group_id,
+            "realized_close_debit": realized_close_debit,
+            "realized_close_fee": realized_close_fee,
+            "realized_pnl": group.realized_pnl or realized_pnl,
+            "realized_return_on_max_loss": realized_return_on_max_loss,
+            "realized_annualized_return": group.realized_annualized_return,
+            "realized_apr_on_equity": group.realized_apr_on_equity,
+            "close_book_equity": group.close_book_equity,
+            "responses": {
+                "short_leg": short_response,
+                "short_attempts": short_result["responses"],
+                "long_leg": long_response,
+            },
+        }
+        close_action["trades"] = self._collect_close_trades(short_result, long_response)
+        return [close_action]
+
+    def _collect_close_trades(
+        self,
+        short_result: dict[str, Any],
+        long_result: dict[str, Any] | None,
+    ) -> dict[str, list[dict[str, Any]]]:
+        trades: dict[str, list[dict[str, Any]]] = {}
+        if isinstance(short_result, dict):
+            short_trades: list[dict[str, Any]] = []
+            for response in short_result.get("responses") or []:
+                if isinstance(response, dict):
+                    short_trades.extend(self._order_trades(response))
+            if short_trades:
+                trades["short_leg"] = short_trades
+        if isinstance(long_result, dict):
+            long_trades: list[dict[str, Any]] = []
+            for response in long_result.get("responses") or []:
+                if isinstance(response, dict):
+                    long_trades.extend(self._order_trades(response))
+            if long_trades:
+                trades["long_leg"] = long_trades
+        return trades
 
     def _close_leg_with_retry(
         self,
@@ -2688,6 +3047,8 @@ class DeribitOptionTrialBot:
             estimated_im_collateral=estimated_im_collateral,
             regime_at_entry=final_c.regime.value,
             entry_fee=short_entry_fee,
+            short_entry_average_price=primary_short_average_price,
+            entry_index_usd=idx,
             entry_net_apr=final_c.net_apr,
             short_label=labels["short"],
             hedge_label=labels["hedge"] if self.config.enable_perp_hedge else "",
@@ -2696,6 +3057,7 @@ class DeribitOptionTrialBot:
             strategy=final_c.strategy or "naked_short",
             covered_underlying_quantity=final_c.covered_underlying_quantity,
         )
+        self._attach_open_group_stats(group)
         action_name = f"{group.strategy}_entered"
         if group.strategy == "naked_short":
             action_name = f"naked_{final_c.option_type}_entered"
@@ -2852,6 +3214,9 @@ class DeribitOptionTrialBot:
             estimated_im_collateral=estimated_im_collateral,
             regime_at_entry=final_c.regime.value,
             entry_fee=short_fee + long_fee,
+            short_entry_average_price=short_avg,
+            long_entry_average_price=long_avg,
+            entry_index_usd=idx,
             entry_net_apr=final_c.net_apr,
             short_label=labels["short"],
             long_label=labels["long"],
@@ -2862,6 +3227,7 @@ class DeribitOptionTrialBot:
             long_instrument_name=candidate.long_leg.instrument_name,
             long_strike=candidate.long_leg.strike,
         )
+        self._attach_open_group_stats(group)
         responses: dict[str, Any] = {"long_leg": long_state, "short_leg": short_state, "short_attempts": execution["responses"]}
         if long_unwind is not None:
             responses["long_unwind"] = long_unwind
@@ -3878,6 +4244,7 @@ class DeribitOptionTrialBot:
         realized_pnl: Decimal | None = None,
         realized_return_on_max_loss: Decimal | None = None,
         realized_annualized_return: Decimal | None = None,
+        index_price_usd: Decimal | None = None,
     ) -> None:
         group.status = "closed"
         group.last_action = reason
@@ -3887,7 +4254,19 @@ class DeribitOptionTrialBot:
         group.realized_close_fee = realized_close_fee
         group.realized_pnl = realized_pnl
         group.realized_return_on_max_loss = realized_return_on_max_loss
-        group.realized_annualized_return = realized_annualized_return
+        if realized_pnl is not None:
+            close_equity, apr_on_equity = self._snapshot_close_apr_on_equity(
+                group,
+                realized_pnl=realized_pnl,
+                closed_timestamp_ms=closed_timestamp_ms,
+                index_price_usd=index_price_usd,
+            )
+            group.close_book_equity = close_equity
+            group.realized_apr_on_equity = apr_on_equity
+            group.realized_annualized_return = apr_on_equity
+        elif realized_annualized_return is not None:
+            group.realized_annualized_return = realized_annualized_return
+        self._persist_group_stats_close(group)
 
     def _spread_labels(self, currency: str, group_id: str) -> dict[str, str]:
         prefix = self.config.order_label_prefix
@@ -4525,6 +4904,8 @@ class DeribitOptionTrialBot:
                 estimated_im_collateral=estimated_im_collateral,
                 regime_at_entry=RiskRegime.NORMAL.value,
                 entry_fee=entry_fee,
+                short_entry_average_price=premium,
+                entry_index_usd=idx,
                 short_label=labels["short"],
                 option_type=option_type,
                 strategy=strategy,
@@ -4543,6 +4924,7 @@ class DeribitOptionTrialBot:
                 )
                 tracked_longs.add(long_instrument.instrument_name)
             group.last_action = "adopted_from_exchange"
+            self._attach_open_group_stats(group)
             state.groups.append(group)
             tracked_open.add(name)
             LOGGER.info(
@@ -4586,25 +4968,27 @@ class DeribitOptionTrialBot:
             if still_open:
                 continue
             closed_timestamp_ms = utc_now_ms()
-            estimated_close_debit = self._estimate_reconcile_close_debit(group, orderbook_cache)
+            estimated_close_debit = self._estimate_reconcile_close_debit(
+                group,
+                orderbook_cache,
+                markets_by_currency=markets_by_currency,
+            )
             realized_pnl: Decimal | None = None
             realized_return_on_max_loss: Decimal | None = None
-            realized_annualized_return: Decimal | None = None
-            idx_px = Decimal("0")
-            try:
-                idx_px = self._get_orderbook(group.short_instrument_name, orderbook_cache).index_price
-            except Exception:
-                idx_px = Decimal("0")
             if estimated_close_debit is not None:
-                realized_pnl = group.entry_credit - estimated_close_debit
+                realized_pnl = group.entry_credit_net_usdc() - estimated_close_debit
                 realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss)
-                realized_annualized_return = self._realized_annualized_return_on_im_native(
-                    group,
-                    realized_pnl,
-                    index_price_usd=idx_px,
-                    closed_timestamp_ms=closed_timestamp_ms,
-                    orderbook_cache=orderbook_cache,
-                )
+            else:
+                realized_pnl = None
+                realized_return_on_max_loss = None
+            close_index_usd: Decimal | None = None
+            try:
+                short_book = self._get_orderbook(group.short_instrument_name, orderbook_cache)
+                if short_book.index_price > 0:
+                    close_index_usd = short_book.index_price
+                    group.close_index_usd = close_index_usd
+            except Exception:
+                close_index_usd = None
             if (
                 self.config.covered_call_spot_exit_enabled
                 and not self.config.covered_call_robust_exit_enabled
@@ -4616,15 +5000,18 @@ class DeribitOptionTrialBot:
                 group.spot_exit_amount = group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
                 group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
                 group.spot_exit_reason = "covered_call_settlement_exit"
+            group.backfill_realized_pnl_collateral_native()
+            group.backfill_realized_pnl_usdc()
             self._mark_group_closed(
                 group,
                 reason="reconciled_external",
                 closed_timestamp_ms=closed_timestamp_ms,
                 realized_close_debit=estimated_close_debit,
-                realized_pnl=realized_pnl,
+                realized_pnl=group.realized_pnl or realized_pnl,
                 realized_return_on_max_loss=realized_return_on_max_loss,
-                realized_annualized_return=realized_annualized_return,
+                index_price_usd=close_index_usd,
             )
+            self._journal_reconcile_close(group, closed_timestamp_ms=closed_timestamp_ms)
             if realized_pnl is not None:
                 LOGGER.info("reconcile group=%s estimated_pnl=%s", group.group_id, realized_pnl)
             else:
@@ -4635,17 +5022,50 @@ class DeribitOptionTrialBot:
         self,
         group: TradeGroup,
         orderbook_cache: dict[str, OrderBookSnapshot],
+        *,
+        markets_by_currency: dict[str, list[OptionInstrument]] | None = None,
     ) -> Decimal | None:
         if group.current_debit > 0:
             return group.current_debit
+        markets = markets_by_currency or {}
         try:
             short_book = self._get_orderbook(group.short_instrument_name, orderbook_cache)
-            mark_debit = short_book.mark_price * group.quantity
-            if "_USDC-" in group.short_instrument_name:
-                return max(mark_debit, Decimal("0"))
-            index_price = short_book.index_price
-            if index_price > 0 and group.short_instrument_name.startswith(("BTC-", "ETH-")):
-                mark_debit *= index_price
+            short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
+            mark_premium = short_book.mark_price if short_book.mark_price > 0 else short_book.best_ask_price
+            mark_debit = self._premium_value_usdc(
+                premium=max(mark_premium, Decimal("0")),
+                quantity=group.quantity,
+                index_price=short_book.index_price,
+                instrument=short_instrument,
+            )
+            close_fee = self._option_fee_usdc(
+                premium=max(mark_premium, Decimal("0")),
+                quantity=group.quantity,
+                index_price=short_book.index_price,
+                base_currency=short_instrument.base_currency,
+                quote_currency=short_instrument.quote_currency,
+                settlement_currency=short_instrument.settlement_currency,
+            )
+            mark_debit += close_fee
+            if group.long_instrument_name:
+                long_book = self._get_orderbook(group.long_instrument_name, orderbook_cache)
+                long_instrument = self._find_or_fetch_instrument(markets, group.long_instrument_name)
+                long_premium = long_book.best_bid_price if long_book.best_bid_price > 0 else long_book.mark_price
+                long_credit = self._premium_value_usdc(
+                    premium=max(long_premium, Decimal("0")),
+                    quantity=group.quantity,
+                    index_price=long_book.index_price,
+                    instrument=long_instrument,
+                )
+                long_fee = self._option_fee_usdc(
+                    premium=max(long_premium, Decimal("0")),
+                    quantity=group.quantity,
+                    index_price=long_book.index_price,
+                    base_currency=long_instrument.base_currency,
+                    quote_currency=long_instrument.quote_currency,
+                    settlement_currency=long_instrument.settlement_currency,
+                )
+                mark_debit = max(mark_debit - max(long_credit - long_fee, Decimal("0")), Decimal("0"))
             return max(mark_debit, Decimal("0"))
         except Exception:
             if group.current_debit >= 0:
@@ -5061,11 +5481,14 @@ class DeribitOptionTrialBot:
         ]
 
     def _report_group_payload(self, group: TradeGroup) -> dict[str, Any]:
+        group.backfill_realized_pnl_collateral_native()
+        group.backfill_realized_pnl_usdc()
         return {
             "group_id": group.group_id,
             "currency": group.currency,
             "collateral_currency": self._group_collateral_currency(group),
             "strategy": group.strategy or "naked_short",
+            "option_type": group.option_type,
             "quantity": format_decimal(group.quantity, 8),
             "status": group.status,
             "regime_at_entry": group.regime_at_entry,
@@ -5076,16 +5499,33 @@ class DeribitOptionTrialBot:
             "close_reason": group.close_reason or group.last_action or None,
             "short_instrument_name": group.short_instrument_name,
             "long_instrument_name": group.long_instrument_name or None,
+            "short_entry_average_price": format_decimal(group.short_entry_average_price, 8)
+            if group.short_entry_average_price > 0
+            else None,
+            "short_close_average_price": format_decimal(group.short_close_average_price, 8)
+            if group.short_close_average_price is not None
+            else None,
+            "entry_index_usd": format_decimal(group.entry_index_usd, 8) if group.entry_index_usd > 0 else None,
+            "close_index_usd": format_decimal(group.close_index_usd, 8) if group.close_index_usd is not None else None,
             "entry_credit": group.entry_credit,
             "entry_fee": group.entry_fee,
             "entry_net_apr": group.entry_net_apr,
+            "entry_book_equity": group.entry_book_equity,
             "entry_timestamp_ms": group.entry_timestamp_ms,
             "max_loss": group.max_loss,
             "realized_close_debit": group.realized_close_debit,
             "realized_close_fee": group.realized_close_fee,
+            "realized_pnl_collateral_native": format_decimal(group.realized_pnl_collateral_native, 8)
+            if group.realized_pnl_collateral_native is not None
+            else None,
             "realized_pnl": group.realized_pnl,
             "realized_return_on_max_loss": group.realized_return_on_max_loss,
             "realized_annualized_return": group.realized_annualized_return,
+            "close_book_equity": group.close_book_equity,
+            "realized_apr_on_equity": group.realized_apr_on_equity,
+            "covered_underlying_quantity": format_decimal(group.covered_underlying_quantity, 8)
+            if group.covered_underlying_quantity > 0
+            else None,
             "spot_exit_status": group.spot_exit_status or None,
             "spot_exit_amount": group.spot_exit_amount if group.spot_exit_amount > 0 else None,
             "spot_exit_instrument_name": group.spot_exit_instrument_name or None,
@@ -5100,6 +5540,26 @@ class DeribitOptionTrialBot:
         short_position: Position | None = None,
         orderbook_cache: dict[str, OrderBookSnapshot] | None = None,
     ) -> dict[str, Any]:
+        spot_usd: Decimal | None = None
+        coll = self._group_collateral_currency(group).upper()
+        if coll in ("BTC", "ETH") and orderbook_cache is not None:
+            idx = self._currency_index_price(coll, orderbook_cache)
+            if idx > 0:
+                spot_usd = idx
+        journal_rows: list[dict[str, Any]] | None = None
+        if group.is_coin_collateral() and group.status == "closed":
+            try:
+                journal_rows = self._trade_journal().list_executions(
+                    self._journal_scope_key(),
+                    group_id=group.group_id,
+                    limit=50,
+                )
+            except Exception:
+                journal_rows = None
+        group.backfill_realized_pnl_collateral_native(
+            spot_index_usd=spot_usd,
+            journal_executions=journal_rows,
+        )
         expiry = ms_to_datetime(group.expiration_timestamp_ms)
         unrealized_usdc = group.entry_credit - group.current_debit
         payload: dict[str, Any] = {
@@ -5119,6 +5579,7 @@ class DeribitOptionTrialBot:
             "entry_credit": format_decimal(group.entry_credit, 8),
             "entry_fee": format_decimal(group.entry_fee, 8),
             "entry_net_apr": format_decimal(group.entry_net_apr, 8),
+            "entry_book_equity": format_decimal(group.entry_book_equity, 8),
             "entry_timestamp_ms": group.entry_timestamp_ms,
             "max_loss": format_decimal(group.max_loss, 8),
             "current_debit": format_decimal(group.current_debit, 8),
@@ -5137,12 +5598,25 @@ class DeribitOptionTrialBot:
             "spot_exit_reason": group.spot_exit_reason or None,
             "realized_close_debit": format_decimal(group.realized_close_debit, 8) if group.realized_close_debit is not None else None,
             "realized_close_fee": format_decimal(group.realized_close_fee, 8) if group.realized_close_fee is not None else None,
+            "short_close_average_price": format_decimal(group.short_close_average_price, 8)
+            if group.short_close_average_price is not None
+            else None,
+            "close_index_usd": format_decimal(group.close_index_usd, 8) if group.close_index_usd is not None else None,
+            "realized_pnl_collateral_native": format_decimal(group.realized_pnl_collateral_native, 8)
+            if group.realized_pnl_collateral_native is not None
+            else None,
             "realized_pnl": format_decimal(group.realized_pnl, 8) if group.realized_pnl is not None else None,
             "realized_return_on_max_loss": format_decimal(group.realized_return_on_max_loss, 8)
             if group.realized_return_on_max_loss is not None
             else None,
             "realized_annualized_return": format_decimal(group.realized_annualized_return, 8)
             if group.realized_annualized_return is not None
+            else None,
+            "close_book_equity": format_decimal(group.close_book_equity, 8)
+            if group.close_book_equity is not None
+            else None,
+            "realized_apr_on_equity": format_decimal(group.realized_apr_on_equity, 8)
+            if group.realized_apr_on_equity is not None
             else None,
             "unrealized_usdc_estimate": format_decimal(unrealized_usdc, 8),
             "unrealized_coin_native": None,

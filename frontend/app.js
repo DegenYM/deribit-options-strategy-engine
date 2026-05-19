@@ -92,7 +92,7 @@
   /** Auto-refresh cadence; longer interval reduces backend / Deribit fan-out under load. */
   const FRONTEND_REFRESH_INTERVAL_MS = 60_000;
   /** Max concurrent /api/* fetches per refresh wave (after spot + health). */
-  const FRONTEND_API_CONCURRENCY = 2;
+  const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 2;
   const FETCH_JSON_RETRYABLE_STATUS = new Set([502, 503, 504]);
   const FETCH_JSON_MAX_RETRIES = 2;
   const FETCH_JSON_RETRY_BASE_MS = 450;
@@ -145,6 +145,10 @@
     charts: {},
     autoRefreshHandle: null,
     refreshInFlight: false,
+    /** Investor portal: first full refresh completed (enables content + ends overlay). */
+    investorReady: false,
+    investorLoadTotal: 0,
+    investorLoadDone: 0,
     lastRefreshStartedMs: 0,
     statusErrorOnce: false,
     /** Last known positive BTC/ETH index (USD) for native unrealized fallback. */
@@ -652,6 +656,29 @@
     return dt.toLocal().toFormat("yyyy-LL-dd HH:mm");
   }
 
+  function fmtDate(msOrIso) {
+    if (msOrIso === null || msOrIso === undefined) return "—";
+    let dt;
+    if (typeof msOrIso === "number") dt = luxon.DateTime.fromMillis(msOrIso, { zone: "utc" });
+    else dt = luxon.DateTime.fromISO(String(msOrIso), { zone: "utc" });
+    if (!dt.isValid) return "—";
+    return dt.toLocal().toFormat("yyyy-LL-dd");
+  }
+
+  /** Earliest entry among realized closed groups (lifetime APR sample start). */
+  function lifetimePerformanceStartMs(report, groups) {
+    let min = null;
+    const consider = (g) => {
+      if (!g || num(g.realized_pnl) === null) return;
+      const entry = entryTimestampMs(g);
+      if (entry === null || entry <= 0) return;
+      if (min === null || entry < min) min = entry;
+    };
+    for (const g of groups?.closed || []) consider(g);
+    for (const g of report?.recent_closed_trades || []) consider(g);
+    return min;
+  }
+
   function looksLikeCoveredCallRow(g) {
     if (!g || optionPutCallLabel(g).toLowerCase() !== "call") return false;
     const covered = num(g.covered_underlying_quantity);
@@ -744,16 +771,50 @@
     ].join("\u0000");
   }
 
-  function dedupeTradeGroups(rows) {
-    const seen = new Set();
-    const out = [];
-    for (const g of rows || []) {
-      const key = tradeGroupKey(g);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(g);
+  const TRADE_GROUP_ENRICH_KEYS = [
+    "realized_pnl_collateral_native",
+    "short_entry_average_price",
+    "short_close_average_price",
+    "entry_index_usd",
+    "close_index_usd",
+    "realized_close_debit",
+    "realized_close_fee",
+    "entry_fee",
+    "entry_credit",
+    "collateral_currency",
+    "strategy",
+    "option_type",
+    "covered_underlying_quantity",
+    "realized_apr_on_equity",
+    "close_book_equity",
+    "quantity",
+    "realized_pnl",
+  ];
+
+  function hasTradeGroupValue(v) {
+    if (v === null || v === undefined || v === "") return false;
+    if (typeof v === "number" && !Number.isFinite(v)) return false;
+    return true;
+  }
+
+  /** Prefer ``groups.closed`` (a) enrich fields over ``report`` rows (b) when both exist. */
+  function mergeTradeGroupRow(a, b) {
+    const out = { ...b, ...a };
+    for (const key of TRADE_GROUP_ENRICH_KEYS) {
+      if (hasTradeGroupValue(a[key])) out[key] = a[key];
+      else if (hasTradeGroupValue(b[key])) out[key] = b[key];
     }
     return out;
+  }
+
+  function dedupeTradeGroups(rows) {
+    const byKey = new Map();
+    for (const g of rows || []) {
+      const key = tradeGroupKey(g);
+      const prev = byKey.get(key);
+      byKey.set(key, prev ? mergeTradeGroupRow(prev, g) : g);
+    }
+    return [...byKey.values()];
   }
 
   function isOpenTradeGroup(g) {
@@ -789,8 +850,8 @@
 
   function mergedClosedRows(report, groups, limit = 20) {
     const rows = dedupeTradeGroups([
-      ...(report?.recent_closed_trades || []),
       ...(groups?.closed || []),
+      ...(report?.recent_closed_trades || []),
     ]).filter(isClosedTradeGroup);
     rows.sort((a, b) => (closedTimestampMs(b) || 0) - (closedTimestampMs(a) || 0));
     return rows.slice(0, limit);
@@ -890,29 +951,292 @@
     return eq;
   }
 
+  /** APR 分母帳本：逆線 BTC/ETH、線性 USDC（與 ``openRowBookCollateralUpper`` 一致，非標的 ``currency``）。 */
+  function tradeGroupAprBook(g) {
+    return openRowBookCollateralUpper(g);
+  }
+
+  function accountStatusRow(status, accountName) {
+    const name = String(accountName || "").trim();
+    if (!name) return null;
+    return (status?.account_statuses || []).find((r) => String(r.name || "") === name) || null;
+  }
+
+  /**
+   * 該策略子帳戶在對應帳本上的 equity（原生單位：BTC 為 BTC 數量、USDC 為美元）。
+   * ``portfolio.equity_by_book`` 對 BTC/ETH 是 USDC 市值，不可作 APR 分母。
+   */
+  function strategyBookEquityNative(g, status) {
+    const book = tradeGroupAprBook(g);
+    const acct = accountStatusRow(status, g?.account_name);
+    const fromAcctNative = num(acct?.accounts?.[book]?.equity);
+    if (fromAcctNative !== null && fromAcctNative > 0) return fromAcctNative;
+    if (book === "USDC") {
+      const fromAcctUsd = num(acct?.portfolio?.equity_by_book?.[book]);
+      if (fromAcctUsd !== null && fromAcctUsd > 0) return fromAcctUsd;
+      const total = num(acct?.portfolio?.total_equity_usdc);
+      if (total !== null && total > 0) return total;
+    }
+    if (!acct) {
+      const fromAccounts = num(status?.accounts?.[book]?.equity);
+      if (fromAccounts !== null && fromAccounts > 0) return fromAccounts;
+    }
+    if (book === "USDC") {
+      const fromPortfolio = num(status?.portfolio?.equity_by_book?.[book]);
+      if (fromPortfolio !== null && fromPortfolio > 0) return fromPortfolio;
+    }
+    return null;
+  }
+
+  function collateralBookSpotUsd(g, status) {
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC") return null;
+    return (
+      num(status?.underlying_index_usd?.[book]) ??
+      num(STATE.groups?.underlying_index_usd?.[book]) ??
+      num(STATE.lastSpotUsd?.[book]) ??
+      num(g?.close_index_usd)
+    );
+  }
+
+  /** 逆線期權：幣本位已實現損益 = entry_amount − exit_amount − fee（ETH/BTC）。 */
+  function realizedPnlCoinNative(g, status) {
+    const stored = num(g?.realized_pnl_collateral_native);
+    if (stored !== null) return stored;
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC") return num(g?.realized_pnl);
+    const qty = num(g?.quantity);
+    if (qty === null || qty <= 0) return null;
+    let idxEntry = num(g?.entry_index_usd);
+    let idxClose = num(g?.close_index_usd) ?? idxEntry;
+    const entryFee = num(g?.entry_fee) ?? 0;
+    const closeFee = num(g?.realized_close_fee) ?? 0;
+    let entryAmount = null;
+    let exitAmount = null;
+    const entryPx = num(g?.short_entry_average_price);
+    const closePx = num(g?.short_close_average_price);
+    const entryCredit = num(g?.entry_credit);
+    let closeDebit = num(g?.realized_close_debit);
+    if (entryPx !== null && entryPx > 0) {
+      entryAmount = entryPx * qty;
+      if ((idxEntry === null || idxEntry <= 0) && entryCredit !== null) {
+        idxEntry = (entryCredit + entryFee) / (entryPx * qty);
+      }
+    } else if (entryCredit !== null && idxEntry !== null && idxEntry > 0) {
+      entryAmount = (entryCredit + entryFee) / idxEntry;
+    }
+    if (closePx !== null && closePx > 0) {
+      exitAmount = closePx * qty;
+      if ((idxClose === null || idxClose <= 0) && closeDebit !== null) {
+        idxClose = Math.max(0, closeDebit - closeFee) / (closePx * qty);
+      }
+    } else if (closeDebit !== null && idxClose !== null && idxClose > 0) {
+      exitAmount = Math.max(0, closeDebit - closeFee) / idxClose;
+    }
+    if (entryAmount === null || exitAmount === null) return null;
+    let fees = 0;
+    if (entryFee > 0) {
+      if (idxEntry === null || idxEntry <= 0) return null;
+      fees += entryFee / idxEntry;
+    }
+    if (closeFee > 0) {
+      if (idxClose === null || idxClose <= 0) return null;
+      fees += closeFee / idxClose;
+    }
+    return entryAmount - exitAmount - fees;
+  }
+
+  function isInverseCoinBookGroup(g) {
+    const book = tradeGroupAprBook(g);
+    return book === "BTC" || book === "ETH";
+  }
+
+  /** 逆線：USDC 標記 = 幣本位 × 現價（不用平倉指數）；USDC 帳本直接用 stored USDC。 */
+  function realizedPnlDisplayUsdc(g, status) {
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC") return num(g?.realized_pnl);
+    const native = realizedPnlCoinNative(g, status);
+    const spot = collateralBookSpotUsd(g, status);
+    if (native !== null && spot !== null && spot > 0) return native * spot;
+    return null;
+  }
+
+  /** 已實現損益換成 APR 帳本原生單位（優先幣本位，legacy 才 ÷ 指數）。 */
+  function realizedPnlInAprBookNative(g, status) {
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC") return num(g?.realized_pnl);
+    const native = realizedPnlCoinNative(g, status);
+    if (native !== null) return native;
+    const pnlUsd = num(g?.realized_pnl);
+    if (pnlUsd === null) return null;
+    const idx =
+      num(g?.close_index_usd) ??
+      num(status?.underlying_index_usd?.[book]) ??
+      num(STATE.groups?.underlying_index_usd?.[book]) ??
+      num(STATE.lastSpotUsd?.[book]);
+    if (idx === null || idx <= 0) return null;
+    return pnlUsd / idx;
+  }
+
+  function annualizedAprOnBookEquity(g, status, equityNative) {
+    const pnlN = realizedPnlInAprBookNative(g, status);
+    const holding = groupHoldingDays(g);
+    if (pnlN === null || equityNative === null || equityNative <= 0 || holding === null || holding <= 0) {
+      return null;
+    }
+    return (pnlN / equityNative) * (365 / holding);
+  }
+
+  /** 逆線：USDC 標記 = 幣本位 × 現價；USDC 帳本直接用 stored USDC。 */
+  function fmtRealizedPnlDisplay(g, status) {
+    const book = tradeGroupAprBook(g);
+    if (!isInverseCoinBookGroup(g)) {
+      const pnlUsd = num(g?.realized_pnl);
+      return pnlUsd === null ? "—" : fmtUsd(pnlUsd);
+    }
+    const native = realizedPnlCoinNative(g, status);
+    if (native === null) {
+      const pnlUsd = num(g?.realized_pnl);
+      return pnlUsd === null ? "—" : fmtUsd(pnlUsd);
+    }
+    const usdc = realizedPnlDisplayUsdc(g, status);
+    const places = book === "BTC" ? 5 : 4;
+    const nativeStr = `${fmtNum(native, places)} ${book}`;
+    return INVESTOR_ZH
+      ? `${fmtUsd(usdc)}（${nativeStr}）`
+      : `${fmtUsd(usdc)} (${nativeStr})`;
+  }
+
+  function fmtNativeBookAmount(native, book) {
+    const n = num(native);
+    if (n === null) return `— ${book || ""}`.trim();
+    const body = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 }).format(n);
+    return `${body} ${book}`;
+  }
+
+  function fmtUsdWithNativeBookAmount(usd, native, book) {
+    const usdStr = fmtUsd(usd);
+    if (native === null || !book || book === "USDC") return usdStr;
+    const nativeStr = fmtNativeBookAmount(native, book);
+    return INVESTOR_ZH ? `${usdStr}（${nativeStr}）` : `${usdStr} (${nativeStr})`;
+  }
+
+  function nativeFromUsdAtIndex(usd, indexUsd) {
+    const v = num(usd);
+    const idx = num(indexUsd);
+    if (v === null || idx === null || idx <= 0) return null;
+    return v / idx;
+  }
+
+  function entryIndexUsdForGroup(g, status) {
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC") return null;
+    return (
+      num(g?.entry_index_usd) ??
+      num(status?.underlying_index_usd?.[book]) ??
+      num(STATE.groups?.underlying_index_usd?.[book]) ??
+      num(STATE.lastSpotUsd?.[book])
+    );
+  }
+
+  function closeIndexUsdForGroup(g, status) {
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC") return null;
+    return (
+      num(g?.close_index_usd) ??
+      num(status?.underlying_index_usd?.[book]) ??
+      num(STATE.groups?.underlying_index_usd?.[book]) ??
+      num(STATE.lastSpotUsd?.[book]) ??
+      num(g?.entry_index_usd)
+    );
+  }
+
   /** Entry net APR: persisted at open, else estimate from entry credit / book equity / entry DTE. */
+  /**
+   * Closed-trade APR: frozen ``realized_apr_on_equity`` when present; otherwise
+   * ``realized_pnl / close_book_equity``; legacy rows use current book equity from status.
+   */
+  function groupRealizedApr(g, status) {
+    const pnl = num(g?.realized_pnl);
+    const holding = groupHoldingDays(g);
+    if (pnl === null || holding === null || holding <= 0) return null;
+
+    const book = tradeGroupAprBook(g);
+    let storedApr = num(g?.realized_apr_on_equity) ?? num(g?.realized_annualized_return);
+    const closeEq = num(g?.close_book_equity);
+    if (storedApr !== null && Math.abs(storedApr) <= 1e-10 && Math.abs(pnl) > 0.01) {
+      storedApr = null;
+    }
+    const closeEqNativePlausible =
+      closeEq !== null &&
+      closeEq > 0 &&
+      (book === "USDC" || closeEq < 5000);
+    const hasFrozenApr =
+      storedApr !== null && Math.abs(storedApr) > 1e-10 && closeEqNativePlausible;
+    if (hasFrozenApr) return storedApr;
+
+    if (closeEqNativePlausible) {
+      const fromClose = annualizedAprOnBookEquity(g, status, closeEq);
+      if (fromClose !== null && Math.abs(fromClose) > 1e-10) return fromClose;
+    }
+
+    return annualizedAprOnBookEquity(g, status, strategyBookEquityNative(g, status));
+  }
+
+  function activityAmountDisplay(g, status) {
+    const id = strategyId(g);
+    if (id === "bull_put_spread") {
+      const shortAmt = openRowLegSignedSizeForDisplay(g, status, "short");
+      const longAmt = openRowLegSignedSizeForDisplay(g, status, "long");
+      if (shortAmt === null && longAmt === null) {
+        const q = num(g.quantity);
+        if (q === null) return null;
+        return `${fmtNum(-Math.abs(q), 4)} / ${fmtNum(Math.abs(q), 4)}`;
+      }
+      const parts = [];
+      if (shortAmt !== null) parts.push(fmtNum(shortAmt, 4));
+      if (longAmt !== null) parts.push(fmtNum(longAmt, 4));
+      return parts.length ? parts.join(" / ") : null;
+    }
+    if (!isClosedTradeGroup(g)) {
+      const shown = fmtShortAmountDisplay(g, status);
+      return shown === "—" ? null : shown;
+    }
+    const q = num(g.quantity);
+    if (q === null) return null;
+    return fmtNum(-Math.abs(q), 4);
+  }
+
   function groupEntryNetApr(g, status) {
     const stored = num(g?.entry_net_apr);
     if (stored !== null && stored > 0) return stored;
+    const entryEq = num(g?.entry_book_equity);
     const credit = num(g?.entry_credit);
     const dte = groupEntryDteDaysAtOpen(g);
-    const book = String(g.collateral_currency || g.currency || "USDC").toUpperCase();
-    const equity = bookEquityNative(status, book);
+    if (entryEq !== null && entryEq > 0 && credit !== null && credit > 0 && dte !== null && dte > 0) {
+      return (credit / entryEq) * (365 / dte);
+    }
+    const book = tradeGroupAprBook(g);
+    const equity = strategyBookEquityNative(g, status);
     if (credit === null || dte === null || dte <= 0 || equity === null || equity <= 0) return null;
     let netCredit = credit;
-    let capital = equity;
     if (book !== "USDC") {
       const idx =
-        num(status?.underlying_index_usd?.[book]) ?? num(STATE.groups?.underlying_index_usd?.[book]) ?? num(STATE.lastSpotUsd?.[book]);
+        num(status?.underlying_index_usd?.[book]) ??
+        num(STATE.groups?.underlying_index_usd?.[book]) ??
+        num(STATE.lastSpotUsd?.[book]);
       if (idx === null || idx <= 0) return null;
       netCredit = credit / idx;
-      capital = equity;
     }
-    return (netCredit / capital) * (365 / dte);
+    return (netCredit / equity) * (365 / dte);
   }
 
   function groupEntryFeeUsd(g) {
     return num(g?.entry_fee);
+  }
+
+  function groupEntryFeeNative(g, status) {
+    return nativeFromUsdAtIndex(groupEntryFeeUsd(g), entryIndexUsdForGroup(g, status));
   }
 
   function groupCloseFeeUsd(g) {
@@ -921,8 +1245,18 @@
     return num(g?.realized_close_fee);
   }
 
+  function groupCloseFeeNative(g, status) {
+    const openEst = num(g?.current_close_fee);
+    const index = openEst !== null && openEst > 0 ? collateralBookSpotUsd(g, status) : closeIndexUsdForGroup(g, status);
+    return nativeFromUsdAtIndex(groupCloseFeeUsd(g), index);
+  }
+
   function groupEntryCreditUsd(g, status, groups) {
     return openRowEntryCreditUsd(g, status, groups);
+  }
+
+  function groupEntryCreditNative(g, status) {
+    return nativeFromUsdAtIndex(num(g?.entry_credit), entryIndexUsdForGroup(g, status));
   }
 
   function allTradeGroupsForActivity(status, groups) {
@@ -997,48 +1331,80 @@
 
   function activityLifecycleCardHtml(g, status, groups) {
     const id = strategyId(g);
-    const book = String(g.collateral_currency || g.currency || "—").toUpperCase();
+    const book = tradeGroupAprBook(g) || "—";
     const entryApr = groupEntryNetApr(g, status);
     const entryFee = groupEntryFeeUsd(g);
     const closeFee = groupCloseFeeUsd(g);
     const credit = num(g.entry_credit);
+    const entryFeeNative = groupEntryFeeNative(g, status);
+    const closeFeeNative = groupCloseFeeNative(g, status);
+    const creditNative = groupEntryCreditNative(g, status);
     const entryMs = entryTimestampMs(g);
     const closed = isClosedTradeGroup(g);
-    const pnl = num(g.realized_pnl);
+    const pnl = realizedPnlDisplayUsdc(g, status);
     const holding = groupHoldingDays(g);
+    const realizedApr = closed ? groupRealizedApr(g, status) : null;
+    const amountLabel = activityAmountDisplay(g, status);
     const title = tradeGroupActivityTitle(g);
-    const entryMeta = [
+    const entryCreditDisplay = credit === null ? "—" : fmtUsdWithNativeBookAmount(credit, creditNative, book);
+    const entryAprDisplay = entryApr === null ? "—" : fmtPct(entryApr, 1);
+    const entryFeeDisplay = entryFee === null ? null : fmtUsdWithNativeBookAmount(entryFee, entryFeeNative, book);
+    const entryMetaSecondary = [
       [i18n("Opened", "開倉"), fmtTime(entryMs)],
-      entryApr !== null ? [i18n("Net APR", "淨年化報酬率"), fmtPct(entryApr, 1)] : null,
-      entryFee !== null ? [i18n("Entry fee", "進場手續費"), fmtUsd(entryFee)] : null,
-      credit !== null ? [i18n("Credit", "收權利金"), fmtUsd(credit)] : null,
+      amountLabel !== null ? [i18n("Amount", "數量"), amountLabel] : null,
+      entryFeeDisplay ? [i18n("Entry fee", "進場手續費"), entryFeeDisplay] : null,
     ].filter(Boolean);
+    const entryInner = `<div class="activity-entry-metrics">
+        <div class="activity-entry-metric">
+          <span class="activity-entry-metric-label">${i18n("Credit", "收權利金")}</span>
+          <span class="activity-entry-metric-value ${pnlClass(credit)}">${escapeHtml(entryCreditDisplay)}</span>
+        </div>
+        <div class="activity-entry-metric">
+          <span class="activity-entry-metric-label">${i18n("Net APR", "淨年化報酬率")}</span>
+          <span class="activity-entry-metric-value ${pnlClass(entryApr)}">${escapeHtml(entryAprDisplay)}</span>
+        </div>
+      </div>
+      <div class="activity-phase-meta activity-phase-meta-secondary">
+        ${activityDetailLine(entryMetaSecondary)}
+      </div>`;
     let exitInner = "";
     if (closed) {
       const exitMetaSecondary = [
         [i18n("Closed", "平倉"), fmtTime(closedTimestampMs(g))],
-        closeFee !== null ? [i18n("Close fee", "平倉手續費"), fmtUsd(closeFee)] : null,
+        closeFee !== null
+          ? [i18n("Close fee", "平倉手續費"), fmtUsdWithNativeBookAmount(closeFee, closeFeeNative, book)]
+          : null,
         holding !== null
           ? [i18n("Held", "持有"), `${fmtNum(holding, 1)}${INVESTOR_ZH ? " 天" : "d"}`]
           : null,
       ].filter(Boolean);
-      const pnlHero =
+      const pnlValue =
         pnl !== null
-          ? `<div class="activity-closed-pnl">
-              <span class="activity-closed-pnl-label">${i18n("Realized PnL", "已實現損益")}</span>
-              <span class="activity-closed-pnl-value ${pnlClass(pnl)}">${fmtUsd(pnl)}</span>
-            </div>`
-          : `<div class="activity-closed-pnl">
-              <span class="activity-closed-pnl-label">${i18n("Realized PnL", "已實現損益")}</span>
-              <span class="activity-closed-pnl-value activity-closed-pnl-value-missing">—</span>
-            </div>`;
-      exitInner = `${pnlHero}<div class="activity-phase-meta activity-phase-meta-secondary">${activityDetailLine(
+          ? `<span class="activity-closed-pnl-value ${pnlClass(pnl)}">${fmtRealizedPnlDisplay(g, status)}</span>`
+          : `<span class="activity-closed-pnl-value activity-closed-pnl-value-missing">—</span>`;
+      const aprValue =
+        realizedApr !== null
+          ? `<span class="activity-closed-pnl-value ${pnlClass(realizedApr)}">${fmtPct(realizedApr, 1)}</span>`
+          : `<span class="activity-closed-pnl-value activity-closed-pnl-value-missing">—</span>`;
+      const closedMetrics = `<div class="activity-closed-metrics">
+          <div class="activity-closed-pnl">
+            <span class="activity-closed-pnl-label">${i18n("Realized PnL", "已實現損益")}</span>
+            ${pnlValue}
+          </div>
+          <div class="activity-closed-pnl">
+            <span class="activity-closed-pnl-label">${i18n("Realized APR", "實現年化報酬")}</span>
+            ${aprValue}
+          </div>
+        </div>`;
+      exitInner = `${closedMetrics}<div class="activity-phase-meta activity-phase-meta-secondary">${activityDetailLine(
         exitMetaSecondary
       )}</div>`;
     } else {
-      const exitMeta = [closeFee !== null ? [i18n("Est. close fee", "預估平倉費"), fmtUsd(closeFee)] : null].filter(
-        Boolean
-      );
+      const exitMeta = [
+        closeFee !== null
+          ? [i18n("Est. close fee", "預估平倉費"), fmtUsdWithNativeBookAmount(closeFee, closeFeeNative, book)]
+          : null,
+      ].filter(Boolean);
       exitInner = `<div class="activity-phase-meta">
           <span class="activity-status-pill is-open">${i18n("Open", "持倉中")}</span>
           ${
@@ -1061,7 +1427,7 @@
         <div class="activity-lifecycle">
           <div class="activity-phase activity-phase-entry">
             <div class="activity-phase-label">${i18n("Entry", "進場")}</div>
-            <div class="activity-phase-meta">${activityDetailLine(entryMeta)}</div>
+            ${entryInner}
           </div>
           <div class="activity-phase-divider" aria-hidden="true"></div>
           <div class="activity-phase activity-phase-exit">
@@ -1467,7 +1833,8 @@
     const windowDays = num(summary?.window_days_used);
     const windowPnl = num(summary?.window_realized_pnl_usdc);
     const windowApr = num(summary?.window_realized_apr);
-    const targetApr = num(summary?.target_portfolio_apr);
+    const lifetimeStartMs = lifetimePerformanceStartMs(report, STATE.groups);
+    const lifetimeNativeByBook = sumLifetimeRealizedPnlNativeByBook(report, STATE.groups, status);
 
     root.innerHTML = `
       <div class="grid grid-cols-2 md:grid-cols-4 gap-y-5 gap-x-6">
@@ -1495,12 +1862,17 @@
         <div>
           <div class="text-xs text-slate-400">${i18n("Total profit (lifetime)", "累計已實現損益")}</div>
           <div class="text-2xl font-mono ${pnlClass(lifetimePnl)}">${fmtUsd(lifetimePnl)}</div>
+          <div class="text-xs text-slate-500 mt-0.5">${fmtLifetimeRealizedNativeBreakdown(lifetimeNativeByBook)}</div>
           <div class="text-xs text-slate-500">${closedCount ?? 0} ${i18n("closed groups", "筆已平倉部位")}</div>
         </div>
         <div>
           <div class="text-xs text-slate-400">${i18n("Lifetime APR", "存續期年化（已實現）")}</div>
           <div class="text-2xl font-mono">${fmtPct(lifetimeApr)}</div>
-          <div class="text-xs text-slate-500">${i18n("target", "目標")} ${fmtPct(targetApr)}</div>
+          <div class="text-xs text-slate-500">${
+            lifetimeStartMs !== null
+              ? `${i18n("since", "自")} ${fmtDate(lifetimeStartMs)}`
+              : i18n("no realized history yet", "尚無已實現紀錄")
+          }</div>
         </div>
         <div>
           <div class="text-xs text-slate-400">${windowDays ?? 30}${i18n("d realized", " 日已實現")}</div>
@@ -1544,18 +1916,6 @@
     return map.get(key);
   }
 
-  function closedAnnualizedWeight(g, ann, pnl, holding) {
-    if (holding !== null && holding > 0) {
-      if (pnl !== null && ann !== null && ann !== 0 && pnl !== 0) {
-        const capitalDays = (pnl * 365) / ann;
-        if (Number.isFinite(capitalDays) && capitalDays > 0) return capitalDays;
-      }
-      const maxLoss = num(g.max_loss);
-      if (maxLoss !== null && maxLoss > 0) return maxLoss * holding;
-    }
-    return null;
-  }
-
   function closedBookEquityUsd(status, book) {
     const b = String(book || "USDC").toUpperCase();
     const fromPortfolio = num(status?.portfolio?.equity_by_book?.[b]);
@@ -1570,10 +1930,13 @@
 
   function closedAnnualizedEquityDaysWeight(g, status, holding) {
     if (holding === null || holding <= 0) return null;
-    const book = String(g.collateral_currency || g.currency || "USDC").toUpperCase();
-    const equityUsd = closedBookEquityUsd(status, book);
-    if (equityUsd === null || equityUsd <= 0) return null;
-    return equityUsd * holding;
+    const book = tradeGroupAprBook(g);
+    const native = strategyBookEquityNative(g, status);
+    if (native === null || native <= 0) return null;
+    if (book === "USDC") return native * holding;
+    const spot = num(status?.underlying_index_usd?.[book]) ?? num(STATE.lastSpotUsd?.[book]);
+    if (spot === null || spot <= 0) return null;
+    return native * spot * holding;
   }
 
   function buildStrategySummaries(status, report, groups) {
@@ -1601,7 +1964,7 @@
       if (!STRATEGY_BY_ID[id]) continue;
       const s = ensureStrategySummary(summaries, ids, id);
       s.closedCount += 1;
-      const pnl = num(g.realized_pnl);
+      const pnl = realizedPnlDisplayUsdc(g, status);
       if (pnl !== null) {
         s.realizedPnl += pnl;
         if (pnl > 0) s.wins += 1;
@@ -1611,15 +1974,11 @@
         s.holdingSum += holding;
         s.holdingCount += 1;
       }
-      const tableAnn = closedAnnualizedReturnOnEquity(g, status);
-      const ann = tableAnn ?? num(g.realized_annualized_return);
+      const ann = groupRealizedApr(g, status);
       if (ann !== null) {
         s.annualizedSum += ann;
         s.annualizedCount += 1;
-        const weight =
-          tableAnn !== null
-            ? closedAnnualizedEquityDaysWeight(g, status, holding)
-            : closedAnnualizedWeight(g, ann, pnl, holding);
+        const weight = closedAnnualizedEquityDaysWeight(g, status, holding);
         if (weight !== null) {
           s.annualizedWeightedSum += ann * weight;
           s.annualizedWeight += weight;
@@ -1797,6 +2156,11 @@
     const coll = openRowBookCollateralUpper(g) || g.collateral_currency || "";
     const creditKept = num(g.profit_capture);
     const entryCredit = openRowEntryCreditUsd(g, status, groups);
+    const entryCreditNative = groupEntryCreditNative(g, status);
+    const entryFee = groupEntryFeeUsd(g);
+    const entryFeeNative = groupEntryFeeNative(g, status);
+    const closeFee = groupCloseFeeUsd(g);
+    const closeFeeNative = groupCloseFeeNative(g, status);
     const longLeg = openRowLegInstrumentName(g, "long");
     const account = !INVESTOR && accountHint(g) ? accountHint(g) : "";
     const strategyClass = openPositionStrategyClass(id);
@@ -1846,7 +2210,7 @@
           )}
           ${openPositionMetricHtml(
             i18n("Entry credit", "進場收斂"),
-            entryCredit === null ? "—" : fmtUsd(entryCredit)
+            entryCredit === null ? "—" : fmtUsdWithNativeBookAmount(entryCredit, entryCreditNative, coll)
           )}
           ${(() => {
             const entryApr = groupEntryNetApr(g, status);
@@ -1860,11 +2224,11 @@
           })()}
           ${openPositionMetricHtml(
             i18n("Entry fee", "進場手續費"),
-            groupEntryFeeUsd(g) === null ? "—" : fmtUsd(groupEntryFeeUsd(g))
+            entryFee === null ? "—" : fmtUsdWithNativeBookAmount(entryFee, entryFeeNative, coll)
           )}
           ${openPositionMetricHtml(
             i18n("Est. close fee", "預估平倉費"),
-            groupCloseFeeUsd(g) === null ? "—" : fmtUsd(groupCloseFeeUsd(g))
+            closeFee === null ? "—" : fmtUsdWithNativeBookAmount(closeFee, closeFeeNative, coll)
           )}
         </div>
         <div class="open-position-legs ${isBullPutSpread ? "has-two-legs" : "has-one-leg"}">
@@ -2008,6 +2372,40 @@
       if (book === "BTC" || book === "ETH" || book === "USDC") out[book] += credit;
     }
     return out;
+  }
+
+  /** Closed groups with realized PnL (full ``groups.closed`` + report enrich). */
+  function lifetimeRealizedClosedRows(report, groups) {
+    return dedupeTradeGroups([
+      ...(groups?.closed || []),
+      ...(report?.recent_closed_trades || []),
+    ])
+      .filter(isClosedTradeGroup)
+      .filter((g) => num(g?.realized_pnl) !== null);
+  }
+
+  function sumLifetimeRealizedPnlNativeByBook(report, groups, status) {
+    const out = { BTC: 0, ETH: 0, USDC: 0 };
+    for (const g of lifetimeRealizedClosedRows(report, groups)) {
+      const book = tradeGroupAprBook(g);
+      if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
+      const native = realizedPnlInAprBookNative(g, status);
+      if (native === null) continue;
+      out[book] += native;
+    }
+    return out;
+  }
+
+  function fmtLifetimeRealizedNativeBreakdown(byBook) {
+    const sp = '<span class="text-slate-500">';
+    const ep = "</span>";
+    const sep = '<span class="text-slate-600">·</span>';
+    const parts = [
+      `${sp}₿${ep}\u00A0<span class="font-mono ${pnlClass(byBook.BTC)}">${fmtNum(byBook.BTC, 5)}</span>`,
+      `${sp}♦${ep}\u00A0<span class="font-mono ${pnlClass(byBook.ETH)}">${fmtNum(byBook.ETH, 4)}</span>`,
+      `${sp}($)${ep}\u00A0<span class="font-mono ${pnlClass(byBook.USDC)}">${fmtNum(byBook.USDC, 2)}</span>`,
+    ];
+    return parts.join(`\u00A0${sep}\u00A0`);
   }
 
   function openTradeGroupsForRisk() {
@@ -2453,34 +2851,13 @@
 
   /** Realized PnL in the book collateral native unit (USDC pnl ÷ index for inverse books). */
   function closedPnlInBookNativeUnits(g, status) {
-    const pnlUsd = num(g.realized_pnl);
-    if (pnlUsd === null) return null;
-    const book = String(g.collateral_currency || g.currency || "USDC").toUpperCase();
-    if (book === "USDC") return pnlUsd;
-    if (book !== "BTC" && book !== "ETH") return pnlUsd;
-    const idx =
-      num(status?.underlying_index_usd?.[book]) ?? num(STATE.lastSpotUsd?.[book]);
-    if (idx === null || idx <= 0) return null;
-    return pnlUsd / idx;
+    return realizedPnlInAprBookNative(g, status);
   }
 
-  function closedBookTotalEquityNative(status, book) {
-    const b = String(book || "USDC").toUpperCase();
-    const eq = num(status?.accounts?.[b]?.equity);
-    if (eq === null || eq <= 0) return null;
-    return eq;
-  }
-
-  /** ``365 × pnl_native / (equity_native × holding_days)`` using live book equity from ``/api/status``. */
+  /** ``365 × realized_pnl / (strategy book equity × holding_days)`` in native book units. */
   function closedAnnualizedReturnOnEquity(g, status) {
-    const holding = groupHoldingDays(g);
-    if (holding === null || holding <= 0) return null;
-    const book = String(g.collateral_currency || g.currency || "USDC").toUpperCase();
-    const equity = closedBookTotalEquityNative(status, book);
-    if (equity === null) return null;
-    const pnlN = closedPnlInBookNativeUnits(g, status);
-    if (pnlN === null) return null;
-    return (365 * pnlN) / (equity * holding);
+    const equity = strategyBookEquityNative(g, status);
+    return annualizedAprOnBookEquity(g, status, equity);
   }
 
   // ---------- stress card ----------
@@ -2618,20 +2995,166 @@
 
   // ---------- data refresh ----------
 
-  async function tickHeaderSpot({ renderDependentViews = true } = {}) {
+  function updateHeaderSpotDom() {
+    const elBtc = document.getElementById("header-spot-btc");
+    const elEth = document.getElementById("header-spot-eth");
+    const b = STATE.lastSpotUsd.BTC;
+    const e = STATE.lastSpotUsd.ETH;
+    if (elBtc) elBtc.textContent = b !== null && b > 0 ? `BTC ${fmt.usd2.format(b)}` : "BTC —";
+    if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
+  }
+
+  function renderDashboard() {
+    updateUnderlyingIndexCache(STATE.status, STATE.groups);
+    renderRegime(STATE.status);
+    renderTopBar(STATE.health);
+    updateHeaderSpotDom();
+    renderAccountCards(STATE.health, STATE.status);
+    renderBookCards(STATE.status);
+    renderAggregate(STATE.status, STATE.report);
+    renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
+    renderRiskVsCapitalChart();
+    renderCumulativePnlChart();
+    renderDailyPnlChart();
+    renderAprChart();
+    renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+    renderStress(STATE.stress);
+  }
+
+  const INVESTOR_LOAD_STEPS = {
+    spot: {
+      en: "Fetching BTC / ETH market prices…",
+      zh: "正在取得 BTC / ETH 即時報價…",
+    },
+    health: {
+      en: "Checking account connection…",
+      zh: "正在確認帳戶連線…",
+    },
+    groups: {
+      en: "Loading open positions and spreads…",
+      zh: "正在讀取持倉與價差部位…",
+    },
+    cumulative: {
+      en: "Loading realized P&L history…",
+      zh: "正在載入已實現損益歷史…",
+    },
+    apr: {
+      en: "Calculating rolling performance (APR)…",
+      zh: "正在計算滾動年化報酬…",
+    },
+    status: {
+      en: "Syncing live equity and margin…",
+      zh: "正在同步即時權益與保證金…",
+    },
+    summary: {
+      en: "Loading performance summary from local records…",
+      zh: "正在從本地紀錄載入績效摘要…",
+    },
+    render: {
+      en: "Preparing your dashboard…",
+      zh: "正在整理儀表板顯示…",
+    },
+    done: {
+      en: "Done",
+      zh: "完成",
+    },
+  };
+
+  function investorLoadLabel(stepKey) {
+    const s = INVESTOR_LOAD_STEPS[stepKey];
+    return s ? i18n(s.en, s.zh) : "";
+  }
+
+  function investorLoadStepCount(hasPrivateCreds, { includeCharts = true } = {}) {
+    let steps = 2 + 1 + (hasPrivateCreds ? 2 : 0) + 1;
+    if (includeCharts) steps += 2;
+    return steps;
+  }
+
+  function setInvestorLoadProgress(ratio, stepKey) {
+    const pct = Math.min(100, Math.max(0, Math.round(ratio * 100)));
+    const fill = document.getElementById("investor-load-bar-fill");
+    if (fill) fill.style.width = `${pct}%`;
+    const pctEl = document.querySelector("[data-investor-load-pct]");
+    if (pctEl) pctEl.textContent = `${pct}%`;
+    const stepEl = document.querySelector("[data-investor-load-step]");
+    if (stepEl && stepKey) stepEl.textContent = investorLoadLabel(stepKey);
+  }
+
+  function applyInvestorLoadCopy() {
+    if (!INVESTOR) return;
+    const set = (attr, en, zh) => {
+      const el = document.querySelector(`[data-investor-load-${attr}]`);
+      if (el) el.textContent = i18n(en, zh);
+    };
+    set("eyebrow", "Please wait", "請稍候");
+    set("title", "Loading your portfolio", "正在載入您的投資組合");
+    set(
+      "hint",
+      "Fetching live prices, positions, and P&L from Deribit. This usually takes a few seconds.",
+      "正在從 Deribit 取得即時報價、持倉與損益資料，通常需要數秒鐘。"
+    );
+  }
+
+  function beginInvestorLoad({ blocking = true } = {}) {
+    if (!INVESTOR) return;
+    STATE.investorLoadDone = 0;
+    STATE.investorLoadTotal = investorLoadStepCount(false);
+    document.body.classList.toggle("investor-blocking-load", blocking);
+    const overlay = document.getElementById("investor-load-overlay");
+    if (overlay) {
+      overlay.classList.remove("hidden");
+      overlay.classList.toggle("investor-load-overlay--refresh", !blocking);
+      overlay.setAttribute("aria-busy", "true");
+    }
+    const refreshBtn = document.getElementById("refresh-now");
+    if (refreshBtn) refreshBtn.disabled = true;
+    setInvestorLoadProgress(0, "spot");
+  }
+
+  function advanceInvestorLoad(stepKey) {
+    if (!INVESTOR) return;
+    STATE.investorLoadDone = Math.min(
+      STATE.investorLoadTotal || 1,
+      STATE.investorLoadDone + 1
+    );
+    const ratio =
+      STATE.investorLoadTotal > 0 ? STATE.investorLoadDone / STATE.investorLoadTotal : 0;
+    setInvestorLoadProgress(ratio, stepKey);
+  }
+
+  function setInvestorPageReady(ready) {
+    if (!INVESTOR) return;
+    if (!ready) {
+      beginInvestorLoad({ blocking: !STATE.investorReady });
+      return;
+    }
+    setInvestorLoadProgress(1, "done");
+    STATE.investorReady = true;
+    document.body.classList.remove("investor-blocking-load");
+    document.body.classList.add("investor-ready");
+    const overlay = document.getElementById("investor-load-overlay");
+    if (overlay) {
+      overlay.classList.add("hidden");
+      overlay.classList.remove("investor-load-overlay--refresh");
+      overlay.setAttribute("aria-busy", "false");
+    }
+    const refreshBtn = document.getElementById("refresh-now");
+    if (refreshBtn) refreshBtn.disabled = false;
+    Object.values(STATE.charts).forEach((chart) => chart?.resize?.());
+  }
+
+  async function tickHeaderSpot({ renderDependentViews = true, updateDom = true } = {}) {
     try {
       const d = await fetchJson("/api/spot");
       STATE.lastSpotUsd.BTC = num(d.BTC);
       STATE.lastSpotUsd.ETH = num(d.ETH);
-      const elBtc = document.getElementById("header-spot-btc");
-      const elEth = document.getElementById("header-spot-eth");
-      const b = STATE.lastSpotUsd.BTC;
-      const e = STATE.lastSpotUsd.ETH;
-      if (elBtc) elBtc.textContent = b !== null && b > 0 ? `BTC ${fmt.usd2.format(b)}` : "BTC —";
-      if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
-      if (renderDependentViews) {
-        renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
-        renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+      if (updateDom) {
+        updateHeaderSpotDom();
+        if (renderDependentViews) {
+          renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
+          renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+        }
       }
     } catch (_) {
       /* ignore */
@@ -2662,90 +3185,122 @@
 
     STATE.refreshInFlight = true;
     STATE.lastRefreshStartedMs = Date.now();
+    const investorFirstLoad = INVESTOR && !STATE.investorReady;
+    if (investorFirstLoad) {
+      beginInvestorLoad({ blocking: true });
+    }
     try {
-      // Progressive rendering: update UI as each endpoint resolves so the
-      // initial paint does not wait on the slowest API call (often /api/stress).
+      // Ops dashboard: progressive render as each endpoint resolves.
+      // Investor portal: batch render once all endpoints finish to avoid partial snapshots.
       let renderScheduled = false;
       function scheduleRender() {
+        if (INVESTOR) return;
         if (renderScheduled) return;
         renderScheduled = true;
         requestAnimationFrame(() => {
           renderScheduled = false;
-          updateUnderlyingIndexCache(STATE.status, STATE.groups);
-          renderRegime(STATE.status);
-          renderAccountCards(STATE.health, STATE.status);
-          renderBookCards(STATE.status);
-          renderAggregate(STATE.status, STATE.report);
-          renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
-          renderRiskVsCapitalChart();
-          renderCumulativePnlChart();
-          renderDailyPnlChart();
-          renderAprChart();
-          renderRecentActivity(STATE.status, STATE.report, STATE.groups);
-          renderStress(STATE.stress);
+          renderDashboard();
         });
       }
 
+      function investorFetch(stepKey, run) {
+        if (!investorFirstLoad) return run();
+        return run().finally(() => advanceInvestorLoad(stepKey));
+      }
+
       try {
-        await tickHeaderSpot({ renderDependentViews: false });
-        STATE.health = await fetchJson("/api/health");
-        renderTopBar(STATE.health);
+        const spotPromise = investorFetch("spot", () =>
+          tickHeaderSpot({
+            renderDependentViews: false,
+            updateDom: !INVESTOR,
+          })
+        );
+        const healthPromise = investorFetch("health", () =>
+          fetchJson("/api/health").then((d) => {
+            STATE.health = d;
+          })
+        );
+        await Promise.all([spotPromise, healthPromise]);
+        if (INVESTOR) {
+          STATE.investorLoadTotal = investorLoadStepCount(
+            Boolean(STATE.health?.has_private_creds),
+            { includeCharts: !investorFirstLoad }
+          );
+        }
+        if (!INVESTOR) renderTopBar(STATE.health);
       } catch (err) {
         showToast(`health failed: ${err.message}`);
       }
 
-      const taskFactories = [
-        () =>
-          fetchJson("/api/groups")
-            .then((d) => {
-              STATE.groups = d;
-              scheduleRender();
-            })
-            .catch((err) => {
-              showToast(`groups: ${err.message}`);
-            }),
-        () =>
-          fetchJson("/api/cumulative_pnl_series")
-            .then((d) => {
-              STATE.cumulativePnl = d;
-              scheduleRender();
-            })
-            .catch((err) => showToast(`cumulative pnl: ${err.message}`)),
-        () =>
-          fetchJson(`/api/apr_series?window_days=${STATE.aprWindow}`)
-            .then((d) => {
-              STATE.aprSeries = d;
-              scheduleRender();
-            })
-            .catch((err) => showToast(`apr series: ${err.message}`)),
+      const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
+
+      function fetchGroups() {
+        return fetchJson("/api/groups")
+          .then((d) => {
+            STATE.groups = d;
+            scheduleRender();
+          })
+          .catch((err) => {
+            showToast(`groups: ${err.message}`);
+          });
+      }
+
+      function fetchCumulative() {
+        return fetchJson("/api/cumulative_pnl_series")
+          .then((d) => {
+            STATE.cumulativePnl = d;
+            scheduleRender();
+          })
+          .catch((err) => showToast(`cumulative pnl: ${err.message}`));
+      }
+
+      function fetchApr() {
+        return fetchJson(`/api/apr_series?window_days=${STATE.aprWindow}`)
+          .then((d) => {
+            STATE.aprSeries = d;
+            scheduleRender();
+          })
+          .catch((err) => showToast(`apr series: ${err.message}`));
+      }
+
+      function fetchSummary() {
+        return fetchJson("/api/realized_summary?days=30")
+          .then((d) => {
+            STATE.report = d;
+            scheduleRender();
+          })
+          .catch((err) => showToast(`realized summary: ${err.message}`));
+      }
+
+      function fetchStatus() {
+        return fetchJson("/api/status")
+          .then((d) => {
+            STATE.status = d;
+            STATE.statusErrorOnce = false;
+            scheduleRender();
+          })
+          .catch((err) => {
+            STATE.status = null;
+            if (!STATE.statusErrorOnce) {
+              showToast(`status: ${err.message}`);
+              STATE.statusErrorOnce = true;
+            }
+          });
+      }
+
+      const criticalFactories = [() => investorFetch("groups", fetchGroups)];
+      const chartFactories = [
+        () => investorFetch("cumulative", fetchCumulative),
+        () => investorFetch("apr", fetchApr),
       ];
 
-      if (STATE.health?.has_private_creds) {
-        taskFactories.push(
-          () =>
-            fetchJson("/api/status")
-              .then((d) => {
-                STATE.status = d;
-                STATE.statusErrorOnce = false;
-                scheduleRender();
-              })
-              .catch((err) => {
-                STATE.status = null;
-                if (!STATE.statusErrorOnce) {
-                  showToast(`status: ${err.message}`);
-                  STATE.statusErrorOnce = true;
-                }
-              }),
-          () =>
-            fetchJson("/api/report?days=30")
-              .then((d) => {
-                STATE.report = d;
-                scheduleRender();
-              })
-              .catch((err) => showToast(`report: ${err.message}`))
+      if (hasPrivateCreds) {
+        criticalFactories.push(
+          () => investorFetch("summary", fetchSummary),
+          () => investorFetch("status", fetchStatus)
         );
         if (!INVESTOR) {
-          taskFactories.push(() =>
+          criticalFactories.push(() =>
             fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
               .then((d) => {
                 STATE.stress = d;
@@ -2762,10 +3317,18 @@
         STATE.stress = null;
       }
 
-      await promisePool(taskFactories, FRONTEND_API_CONCURRENCY);
+      await promisePool(criticalFactories, FRONTEND_API_CONCURRENCY);
 
-      // One final render pass to ensure consistency.
-      scheduleRender();
+      if (investorFirstLoad) {
+        advanceInvestorLoad("render");
+        renderDashboard();
+        setInvestorPageReady(true);
+        await promisePool(chartFactories, FRONTEND_API_CONCURRENCY);
+        renderDashboard();
+      } else {
+        await promisePool(chartFactories, FRONTEND_API_CONCURRENCY);
+        renderDashboard();
+      }
 
       setText(
         "last-refresh",
@@ -2839,6 +3402,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    applyInvestorLoadCopy();
     attachControls();
     attachExpandableSections();
     attachAutoRefresh();

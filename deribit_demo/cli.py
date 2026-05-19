@@ -78,6 +78,8 @@ def _apply_investor_cli_args(args: argparse.Namespace) -> None:
         return
 
     if not account_slug:
+        if args.command in {"backfill-trade-journal", "frontend"}:
+            return
         slugs = ", ".join(account.slug for account in manifest.accounts)
         raise SystemExit(f"--account <slug> is required with --investor for `{args.command}` (known: {slugs})")
     args.env_file = str(manifest.env_for_slug(account_slug))
@@ -296,11 +298,76 @@ def main(argv: list[str] | None = None) -> int:
     fe_parser.add_argument("--snapshot-interval-sec", type=int, default=None, help="Override scheduler tick interval")
     fe_parser.add_argument("--log-level", default="info", help="uvicorn log level (default info)")
 
+    backfill_parser = subparsers.add_parser(
+        "backfill-trade-journal",
+        help="Backfill trade_journal.db from Deribit API fills and local strategy state",
+    )
+    _add_env_file_after_subcommand(backfill_parser)
+    backfill_parser.add_argument(
+        "--all-accounts",
+        action="store_true",
+        help="With --investor: backfill every enabled account in accounts.toml",
+    )
+    backfill_parser.add_argument(
+        "--no-api",
+        action="store_true",
+        help="Skip Deribit get_user_trades (state-only synthetic rows)",
+    )
+    backfill_parser.add_argument(
+        "--no-state",
+        action="store_true",
+        help="Skip strategy state synthetic rows",
+    )
+    backfill_parser.add_argument(
+        "--no-metrics",
+        action="store_true",
+        help="Skip rebuilding metrics.db daily PnL buckets",
+    )
+    backfill_parser.add_argument(
+        "--force-state",
+        action="store_true",
+        help="Write state-derived rows even when the group already has journal entries",
+    )
+    backfill_parser.add_argument(
+        "--start-timestamp-ms",
+        type=int,
+        default=None,
+        help="Only fetch API trades at/after this UTC ms timestamp",
+    )
+    backfill_parser.add_argument(
+        "--recent-only",
+        action="store_true",
+        help="API: use rolling index only (no historical=true pagination)",
+    )
+    backfill_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     args = parser.parse_args(argv)
     if getattr(args, "env_file_after_cmd", None) is not None:
         args.env_file = args.env_file_after_cmd
     _apply_investor_cli_args(args)
     configure_logging(args.verbose)
+    if args.command == "backfill-trade-journal":
+        from .trade_journal_backfill import backfill_account, backfill_investor
+
+        repo_root = find_repo_root(Path.cwd())
+        kwargs = {
+            "use_api": not args.no_api,
+            "use_state": not args.no_state,
+            "sync_metrics": not args.no_metrics,
+            "historical": not args.recent_only,
+            "start_timestamp_ms": args.start_timestamp_ms,
+            "skip_state_if_group_has_journal": not args.force_state,
+        }
+        if args.investor and (args.all_accounts or not args.account):
+            summaries = backfill_investor(args.investor, **kwargs)
+            render(
+                {"action": "backfill-trade-journal", "accounts": [s.to_dict() for s in summaries]},
+                args.json,
+            )
+            return 0
+        summary = backfill_account(Path(args.env_file), **kwargs)
+        render({"action": "backfill-trade-journal", **summary.to_dict()}, args.json)
+        return 0
     if args.command == "frontend":
         from .frontend_server import serve as serve_frontend
 

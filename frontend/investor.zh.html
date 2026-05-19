@@ -29,7 +29,7 @@
     <script src="/vendor/chartjs-adapter-luxon.umd.min.js"></script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body class="app-body investor-portal text-slate-100 min-h-screen font-sans">
+  <body class="app-body investor-portal investor-blocking-load text-slate-100 min-h-screen font-sans">
     <script>
       window.__DASHBOARD_MODE__ = "investor";
       window.__INVESTOR_LOCALE__ = "zh-Hant";
@@ -213,10 +213,31 @@
     </main>
 
     <div
+      id="investor-load-overlay"
+      class="investor-load-overlay"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <div class="investor-load-card">
+        <p class="investor-load-eyebrow" data-investor-load-eyebrow>請稍候</p>
+        <h2 class="investor-load-title" data-investor-load-title>正在載入您的投資組合</h2>
+        <p class="investor-load-step" data-investor-load-step>準備中…</p>
+        <div class="investor-load-bar" aria-hidden="true">
+          <div id="investor-load-bar-fill" class="investor-load-bar-fill"></div>
+        </div>
+        <p class="investor-load-pct" data-investor-load-pct>0%</p>
+        <p class="investor-load-hint" data-investor-load-hint>
+          正在從 Deribit 取得即時報價、持倉與損益資料，通常需要數秒鐘。
+        </p>
+      </div>
+    </div>
+
+    <div
       id="toast"
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script src="/app.js" defer></script>
+    <script src="/app.js?v=20260519b" defer></script>
   </body>
 </html>

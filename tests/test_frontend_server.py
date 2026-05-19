@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import deribit_demo.frontend_server as frontend_server
 from deribit_demo.current_stress import CurrentStressResult
@@ -31,6 +33,101 @@ def _stress_result(strategy: str, book: str, loss: Decimal) -> CurrentStressResu
         ],
         notes=[],
     )
+
+
+def _rolling_apr_brute(
+    closed: list[dict],
+    *,
+    window_days: int,
+    effective_capital_usdc: Decimal,
+    max_chart_days: int = 730,
+) -> list[dict]:
+    """Reference implementation (slow) for regression tests."""
+    if effective_capital_usdc <= 0:
+        return []
+    realized = sorted(
+        [g for g in closed if g.get("closed_timestamp_ms") is not None and g.get("realized_pnl") is not None],
+        key=lambda g: int(g["closed_timestamp_ms"]),
+    )
+    if not realized:
+        return []
+    first_day = datetime.fromtimestamp(int(realized[0]["closed_timestamp_ms"]) / 1000, tz=UTC).date()
+    last_day = datetime.fromtimestamp(int(realized[-1]["closed_timestamp_ms"]) / 1000, tz=UTC).date()
+    today = datetime.now(tz=UTC).date()
+    if today > last_day:
+        last_day = today
+    chart_start = first_day
+    if max_chart_days > 0 and (last_day - first_day).days + 1 > max_chart_days:
+        chart_start = last_day - timedelta(days=max_chart_days - 1)
+    pnl_by_day: dict[str, Decimal] = {}
+    for g in realized:
+        day = frontend_server._bucket_day_utc(int(g["closed_timestamp_ms"]))
+        pnl_by_day[day] = pnl_by_day.get(day, Decimal("0")) + Decimal(str(g["realized_pnl"]))
+    rows: list[dict] = []
+    cursor = chart_start
+    while cursor <= last_day:
+        window_start = cursor - timedelta(days=window_days - 1)
+        window_pnl = Decimal("0")
+        d = window_start
+        while d <= cursor:
+            window_pnl += pnl_by_day.get(d.strftime("%Y-%m-%d"), Decimal("0"))
+            d += timedelta(days=1)
+        annualized = (window_pnl * Decimal("365") / Decimal(str(window_days))) / effective_capital_usdc
+        rows.append(
+            {
+                "date": cursor.strftime("%Y-%m-%d"),
+                "apr": str(annualized),
+                "window_pnl_usdc": str(window_pnl),
+            }
+        )
+        cursor += timedelta(days=1)
+    return rows
+
+
+def test_rolling_apr_series_matches_brute_force():
+    capital = Decimal("10000")
+    base_ms = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    closed = []
+    for i in range(120):
+        closed.append(
+            {
+                "closed_timestamp_ms": base_ms + i * 86400 * 1000,
+                "realized_pnl": str(Decimal("10") if i % 3 == 0 else Decimal("-2")),
+            }
+        )
+    for window_days in (7, 14, 30, 60):
+        fast = frontend_server._rolling_apr_series(
+            closed,
+            window_days=window_days,
+            effective_capital_usdc=capital,
+            max_chart_days=90,
+        )
+        slow = _rolling_apr_brute(
+            closed,
+            window_days=window_days,
+            effective_capital_usdc=capital,
+            max_chart_days=90,
+        )
+        assert fast == slow
+
+
+def test_rolling_apr_series_caps_chart_points():
+    capital = Decimal("5000")
+    base_ms = int(datetime(2020, 1, 1, tzinfo=UTC).timestamp() * 1000)
+    closed = [
+        {
+            "closed_timestamp_ms": base_ms + i * 86400 * 1000,
+            "realized_pnl": "1",
+        }
+        for i in range(2000)
+    ]
+    rows = frontend_server._rolling_apr_series(
+        closed,
+        window_days=30,
+        effective_capital_usdc=capital,
+        max_chart_days=100,
+    )
+    assert len(rows) <= 100
 
 
 def test_closed_groups_payload_excludes_performance_groups(tmp_path):
@@ -157,6 +254,55 @@ def test_aggregate_stress_normalizes_put_spread_alias(tmp_path, monkeypatch):
     assert per_strategy["bull_put_spread"]["strategy_analysis"]["label"] == "bull_put_spread"
 
 
+def test_aggregate_status_prefetch_once_per_api_identity(tmp_path, monkeypatch):
+    """Three strategy rows on one Deribit login should not triple Deribit fan-out."""
+    from deribit_demo.engine import ExchangePrefetch
+
+    cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="dup", client_secret="same")
+    cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="dup", client_secret="same")
+    env_a = tmp_path / "a.env"
+    env_b = tmp_path / "b.env"
+    accounts = [
+        DashboardAccount("a", env_a, cfg_a, cfg_a.state_file, tmp_path / "ledger-a"),
+        DashboardAccount("b", env_b, cfg_b, cfg_b.state_file, tmp_path / "ledger-b"),
+    ]
+    prefetch = ExchangePrefetch(
+        summaries={},
+        open_orders=[],
+        positions=[],
+        option_positions=[],
+        future_positions=[],
+        future_markets_by_name={},
+        markets_by_currency={"BTC": [], "ETH": []},
+    )
+    prefetch_calls = 0
+
+    class FakeBot:
+        def fetch_exchange_prefetch(self) -> ExchangePrefetch:
+            nonlocal prefetch_calls
+            prefetch_calls += 1
+            return prefetch
+
+        def status_with_exchange_prefetch(self, _prefetch: ExchangePrefetch) -> dict:
+            return {
+                "env": "testnet",
+                "portfolio": {"total_equity_usdc": Decimal("1000"), "equity_by_book": {"USDC": Decimal("1000")}},
+                "underlying_index_usd": {"BTC": "1", "ETH": "1"},
+                "accounts": {"USDC": {"equity": "1000"}},
+                "trade_groups": [],
+                "open_orders": [],
+                "positions": [],
+                "trade_group_count": 0,
+            }
+
+    monkeypatch.setattr(frontend_server, "_bot_for_account", lambda account, require_private=True: FakeBot())
+    cache = frontend_server._TtlCache(15.0)
+    payload = frontend_server._aggregate_status(accounts, exchange_prefetch_cache=cache)
+
+    assert prefetch_calls == 1
+    assert payload["trade_group_count"] == 0
+
+
 def test_aggregate_portfolios_sums_spot_excluded_day_pnl(tmp_path):
     cfg = make_config(tmp_path)
     accounts = [
@@ -255,3 +401,108 @@ def test_dedupe_merges_equity_by_book_for_shared_credentials(tmp_path):
     portfolio = frontend_server._aggregate_portfolios(accounts, statuses, equity_statuses=merged)
     assert portfolio["total_equity_usdc"] == Decimal("7000")
     assert portfolio["equity_by_book"]["USDC"] == Decimal("7000")
+
+
+def test_aggregate_realized_summary_is_json_serializable(tmp_path, monkeypatch) -> None:
+    import json
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=test\n", encoding="utf-8")
+    state_path = tmp_path / "bot.json"
+    cfg = make_config(state_file=state_path)
+    account = DashboardAccount(
+        name="test",
+        env_file=env_file,
+        config=cfg,
+        state_path=state_path,
+        ledger_root=tmp_path / "ledger",
+    )
+    payload = frontend_server._aggregate_realized_summary([account], days=30)
+    json.dumps(frontend_server._decimalize(payload))
+
+
+def test_trade_journal_sync_scheduler_run_once(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=test\n", encoding="utf-8")
+    cfg = make_config(state_file=tmp_path / "bot.json")
+    account = DashboardAccount(
+        name="test",
+        env_file=env_file,
+        config=cfg,
+        state_path=Path(cfg.state_file),
+        ledger_root=tmp_path / "ledger",
+    )
+    calls: list[Path] = []
+
+    def fake_sync(env_path: Path, **kwargs: object) -> dict[str, object]:
+        calls.append(env_path)
+        return {"api_inserted": 2}
+
+    monkeypatch.setattr(frontend_server, "_has_private_creds", lambda _cfg: True)
+    monkeypatch.setattr(frontend_server, "sync_incremental_journal", fake_sync)
+    scheduler = frontend_server.TradeJournalSyncScheduler(accounts=[account], interval_sec=120)
+    payload = scheduler.run_once()
+    assert calls == [env_file]
+    assert payload["api_inserted"] == 2
+    assert scheduler.state.last_inserted == 2
+    assert scheduler.state.last_success_ms is not None
+    assert scheduler.state.last_error is None
+
+
+def test_backfill_row_collateral_native_uses_spot_for_legacy_closed_row() -> None:
+    row = {
+        "status": "closed",
+        "group_id": "0040",
+        "short_instrument_name": "ETH-29MAY26-2300-C",
+        "collateral_currency": "ETH",
+        "currency": "ETH",
+        "quantity": "1",
+        "entry_credit": "38.044948",
+        "entry_fee": "0.663477",
+        "short_entry_average_price": "0.0175",
+        "short_close_average_price": "0.0065",
+        "entry_index_usd": "2211.88",
+        "close_index_usd": "2103.84",
+        "realized_close_debit": "14.306112",
+        "realized_close_fee": "0.631152",
+        "realized_pnl": "23.738836",
+    }
+    frontend_server._backfill_row_collateral_native(row, {"ETH": Decimal("2400")})
+    native = Decimal(str(row["realized_pnl_collateral_native"]))
+    assert native > Decimal("0")
+    assert native < Decimal("0.0105")
+    assert abs(native * Decimal("2400") - Decimal(str(row["realized_pnl"]))) < Decimal("0.05")
+    assert isinstance(row["realized_pnl_collateral_native"], str)
+
+
+def test_aggregate_groups_payload_json_serializable_after_spot_backfill(tmp_path) -> None:
+    import json
+
+    state_path = tmp_path / "bot.json"
+    store = StrategyStateStore(state_path)
+    group = TradeGroup(
+        group_id="g1",
+        currency="ETH",
+        collateral_currency="ETH",
+        quantity=Decimal("1"),
+        entry_timestamp_ms=1_699_000_000_000,
+        expiration_timestamp_ms=future_expiry(30),
+        short_instrument_name="ETH-29MAR24-3000-C",
+        short_strike=Decimal("3000"),
+        entry_credit=Decimal("38"),
+        original_entry_credit=Decimal("38"),
+        max_loss=Decimal("250"),
+        regime_at_entry="normal",
+        entry_fee=Decimal("0.5"),
+        status="closed",
+        strategy="naked_short",
+        closed_timestamp_ms=1_700_000_000_000,
+        realized_pnl=Decimal("23"),
+        realized_close_debit=Decimal("14"),
+        realized_close_fee=Decimal("0.5"),
+    )
+    state = StrategyState(groups=[group], next_group_id=2)
+    store.save(state)
+    payload = frontend_server._closed_groups_payload(state_path)
+    frontend_server._apply_spot_native_backfill(payload, {"ETH": Decimal("2400")})
+    json.dumps(frontend_server._decimalize(payload))

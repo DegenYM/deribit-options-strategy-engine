@@ -645,14 +645,23 @@ table tbody tr:hover {
   color: rgb(148 163 184);
 }
 
-.activity-closed-pnl {
+.activity-entry-metrics,
+.activity-closed-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
   margin-bottom: 10px;
+}
+
+.activity-entry-metric,
+.activity-closed-pnl {
   padding: 8px 10px;
   border-radius: 8px;
   background: rgba(15, 23, 42, 0.65);
   border: 1px solid rgba(51, 65, 85, 0.55);
 }
 
+.activity-entry-metric-label,
 .activity-closed-pnl-label {
   display: block;
   font-size: 10px;
@@ -663,13 +672,25 @@ table tbody tr:hover {
   margin-bottom: 4px;
 }
 
+.activity-entry-metric-value,
 .activity-closed-pnl-value {
   display: block;
+  color: rgb(226 232 240);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 1.125rem;
   font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.25;
+}
+
+.activity-entry-metric-value.pnl-pos,
+.activity-closed-pnl-value.pnl-pos {
+  color: rgb(110 231 183);
+}
+
+.activity-entry-metric-value.pnl-neg,
+.activity-closed-pnl-value.pnl-neg {
+  color: rgb(253 164 175);
 }
 
 .activity-closed-pnl-value-missing {
@@ -972,4 +993,93 @@ canvas {
 
 .investor-portal .app-header {
   background: rgba(15, 23, 42, 0.88);
+}
+
+.investor-portal.investor-blocking-load .app-header,
+.investor-portal.investor-blocking-load .dashboard-main {
+  visibility: hidden;
+}
+
+.investor-load-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  background: rgba(2, 6, 23, 0.92);
+  backdrop-filter: blur(6px);
+}
+
+.investor-load-overlay.investor-load-overlay--refresh {
+  background: rgba(2, 6, 23, 0.72);
+}
+
+.investor-load-overlay.hidden {
+  display: none;
+}
+
+.investor-load-card {
+  width: min(100%, 26rem);
+  padding: 1.5rem 1.35rem 1.25rem;
+  border-radius: 1rem;
+  border: 1px solid rgba(251, 191, 36, 0.22);
+  background: linear-gradient(160deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.88));
+  box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+  text-align: center;
+}
+
+.investor-load-eyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgb(251 191 36 / 0.88);
+}
+
+.investor-load-title {
+  margin: 0 0 0.85rem;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: rgb(248 250 252);
+  letter-spacing: -0.01em;
+}
+
+.investor-load-step {
+  margin: 0 0 0.9rem;
+  min-height: 2.5rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: rgb(203 213 225);
+}
+
+.investor-load-bar {
+  height: 0.45rem;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(51, 65, 85, 0.65);
+}
+
+.investor-load-bar-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, rgb(251 191 36), rgb(245 158 11));
+  transition: width 0.35s ease;
+}
+
+.investor-load-pct {
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: rgb(148 163 184);
+}
+
+.investor-load-hint {
+  margin: 0.85rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: rgb(100 116 139);
 }
