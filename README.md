@@ -85,6 +85,13 @@ config/shared/strategies/.env.<strategy>  # 策略參數（無 API key）
 config/investors/<investor_id>/
   accounts.toml                         # 子帳清單（通常 ≤ 3；投資人 id 寫在這裡）
   accounts/.env.<slug>                  # 子帳：憑證、STATE_FILE、資金規模；可選覆寫 shared 策略鍵
+
+# 同 repo 多投資人時，執行期資料依 investor_id 分目錄（互不干擾）：
+.state/investors/<investor_id>/<slug>.json
+.state/investors/<investor_id>/<slug>.trade_journal.db
+data/frontend_ledger/<investor_id>/[<slug>/]equity_*.jsonl
+data/frontend_ledger/<investor_id>/metrics.db
+logs/live/<investor_id>/<slug>.log
 ```
 
 設定載入順序（低 → 高；**子帳 env 最後**，可覆蓋 shared 策略檔）：
@@ -110,6 +117,15 @@ cp -R config/investors/_example config/investors/youming
 ```
 
 更完整的指令整理見下文 **「常用指令」** 一節。
+
+### 同 repo 多投資人（frontend / live 隔離）
+
+- **策略狀態**：`STATE_FILE` 建議設為 `.state/investors/<investor_id>/<slug>.json`（範本已採此格式）。
+- **Dashboard**：`./bot --investor <id> frontend` 會自動寫入 `data/frontend_ledger/<investor_id>/`；多子帳時再分子目錄 `<slug>/`。`metrics.db` 為 `data/frontend_ledger/<investor_id>/metrics.db`。
+- **Live 監督**：`python scripts/run_live_profiles.py --investor <id>` 日誌預設在 `logs/live/<investor_id>/<slug>.log`。
+- **不可混用**：同一個 `frontend` 行程不要同時載入兩位投資人的 env；請各開一個 `--port`（對外 Tunnel 亦一人一路）。
+- **覆寫路徑**（進階）：`FRONTEND_LEDGER_DIR`、`FRONTEND_METRICS_DB`；live 則用 `--log-dir`。
+- **從舊版 flat ledger 遷移**（曾寫入 `data/frontend_ledger/naked/` 等）：搬到 `data/frontend_ledger/<investor_id>/naked/`，`metrics.db` 搬到 `data/frontend_ledger/<investor_id>/metrics.db`。
 
 ### Recommended Env Profiles（策略 tuning）
 
@@ -425,7 +441,7 @@ MAX_GROUPS_PER_CURRENCY=3
 ./bot --investor youming frontend --port 9000
 ./bot frontend --account-env-files config/investors/youming/accounts/.env.naked,config/investors/youming/accounts/.env.bull_put
 
-# 同時啟動 accounts.toml 內所有 enabled 子帳的 `run --live`（預設 investor youming；log 在 logs/live/）
+# 同時啟動 accounts.toml 內所有 enabled 子帳的 `run --live`（log：logs/live/<investor_id>/<slug>.log）
 python scripts/run_live_profiles.py --investor youming
 python scripts/run_live_profiles.py --investor alice
 
@@ -545,12 +561,12 @@ pip install -r requirements.txt
 ```
 
 預設背景 scheduler 每 `FRONTEND_SNAPSHOT_INTERVAL_SEC` 秒（預設 300）讀一次帳戶
-快照，append 到 `data/frontend_ledger/equity_<UTC date>.jsonl`（可給自備分析／之後圖表用）。
+快照，append 到 `data/frontend_ledger/<investor_id>/`（多子帳時為 `.../<investor_id>/<slug>/equity_<UTC date>.jsonl`）。
 沒設 `DERIBIT_CLIENT_ID/SECRET` 時 scheduler 自動跳過，但 server
 依然可看 closed groups / 累積 PnL / APR 圖。
 前端頁面資料刷新有 30 秒節流上限；自動刷新與手動 `Refresh` 都會套用同一個限制。
 
-多子帳 dashboard 建議 `./bot --investor <id> frontend`，或 `--account-env-files` 傳入多個 `accounts/.env.<slug>`。equity ledger 依子帳 slug 寫入 `data/frontend_ledger/<slug>/`。
+多子帳 dashboard 建議 `./bot --investor <id> frontend`，或 `--account-env-files` 傳入**同一位**投資人的多個 `accounts/.env.<slug>`。
 
 **多名投資人**（各 `config/investors/<id>/` 一份資料）若需各自專屬對外網址：請為每位投資人各跑一個 `frontend`（例如不同 `--port`），再以 reverse proxy／Tunnel 將不同子網域指到對應埠；細節見 [docs/cloudflare-tunnel-investor.md](docs/cloudflare-tunnel-investor.md)。
 

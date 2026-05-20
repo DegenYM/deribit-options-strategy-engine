@@ -26,6 +26,19 @@ from .utils import safe_div, to_decimal, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _default_metrics_db_for_env(env_file: Path) -> Path:
+    from .env_layout import find_repo_root, investor_id_from_account_env, investor_metrics_db_path
+
+    repo_root = find_repo_root(env_file)
+    investor_id = investor_id_from_account_env(env_file, repo_root=repo_root)
+    if investor_id and repo_root is not None:
+        return investor_metrics_db_path(repo_root, investor_id)
+    if investor_id:
+        return Path("data/frontend_ledger") / investor_id / "metrics.db"
+    return Path("data/frontend_ledger") / "metrics.db"
+
+
 _LABEL_RE = re.compile(
     r"^(?P<prefix>.+)-spread-(?P<ccy>[a-z]+)-(?P<gid>\d+)-(?P<leg>short|long)(?:-(?P<close>close))?$",
     re.IGNORECASE,
@@ -471,7 +484,7 @@ def backfill_account(
         groups_after = load_trade_groups(state_path)
         closed_payloads = [g.to_dict() for g in groups_after if g.status == "closed"]
         if closed_payloads:
-            db_path = metrics_db or (Path("data/frontend_ledger") / "metrics.db")
+            db_path = metrics_db or _default_metrics_db_for_env(env_file)
             _sync_metrics_from_state(state_path, closed_payloads, metrics_db=db_path)
             metrics_ok = True
 
@@ -547,10 +560,12 @@ def backfill_investor(
     repo_root: Path | None = None,
     **kwargs: Any,
 ) -> list[BackfillSummary]:
-    from .env_layout import find_repo_root, load_investor_manifest
+    from .env_layout import find_repo_root, investor_metrics_db_path, load_investor_manifest
 
     root = find_repo_root(repo_root or Path.cwd())
     manifest = load_investor_manifest(investor, repo_root=root)
+    if root is not None and kwargs.get("metrics_db") is None:
+        kwargs = {**kwargs, "metrics_db": investor_metrics_db_path(root, manifest.investor_id)}
     summaries: list[BackfillSummary] = []
     for account in manifest.enabled_accounts():
         LOGGER.info("Backfilling %s (%s)", account.slug, account.env_path)

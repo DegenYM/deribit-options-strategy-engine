@@ -3,7 +3,7 @@
 Exposes a small FastAPI app that re-uses :class:`DeribitOptionTrialBot` and
 ``compute_current_stress`` to surface the same data as the CLI but as JSON
 endpoints, plus a background scheduler that periodically appends an
-equity snapshot to ``data/frontend_ledger/equity_<UTC date>.jsonl``.
+equity snapshot to ``data/frontend_ledger/<investor_id>/`` (or legacy flat dir).
 
 The frontend (``frontend/index.html``) consumes those endpoints; static
 assets are mounted at ``/`` so the dashboard is reachable from a single URL.
@@ -27,7 +27,13 @@ from typing import Any, Callable
 
 from .client import DeribitClient
 from .config import BotConfig, load_config
-from .env_layout import account_slug_from_env_path
+from .env_layout import (
+    account_slug_from_env_path,
+    find_repo_root,
+    investor_frontend_ledger_dir,
+    investor_metrics_db_path,
+    resolve_investor_scope,
+)
 from .current_stress import compute_current_stress
 from .engine import DeribitOptionTrialBot, ExchangePrefetch
 from .exceptions import ConfigurationError
@@ -44,7 +50,8 @@ from .utils import format_decimal, json_default, to_decimal, utc_now, utc_now_ms
 LOGGER = logging.getLogger(__name__)
 
 LEDGER_DIR = Path("data/frontend_ledger")
-METRICS_DB_PATH = LEDGER_DIR / "metrics.db"
+LEGACY_METRICS_DB_PATH = LEDGER_DIR / "metrics.db"
+_active_metrics_db_path: Path | None = None
 DEFAULT_SNAPSHOT_INTERVAL_SEC = 300
 DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC = 300
 STATUS_CACHE_TTL_SEC = 15
@@ -297,6 +304,39 @@ def _default_account_name(env_file: Path, config: BotConfig) -> str:
     return _slugify_account_name(name)
 
 
+def _resolve_frontend_ledger_base(env_files: tuple[Path, ...]) -> Path:
+    """Ledger root: per-investor dir by default; legacy flat ``data/frontend_ledger`` otherwise."""
+    explicit = os.environ.get("FRONTEND_LEDGER_DIR")
+    if explicit:
+        return Path(explicit)
+    repo_root = find_repo_root(env_files[0] if env_files else Path.cwd())
+    investor_id = resolve_investor_scope(env_files, repo_root=repo_root)
+    if investor_id and repo_root is not None:
+        return investor_frontend_ledger_dir(repo_root, investor_id)
+    if investor_id:
+        return LEDGER_DIR / investor_id
+    return LEDGER_DIR
+
+
+def _configure_metrics_db(env_files: tuple[Path, ...]) -> Path:
+    global _active_metrics_db_path
+    explicit = os.environ.get("FRONTEND_METRICS_DB")
+    if explicit:
+        path = Path(explicit)
+    else:
+        repo_root = find_repo_root(env_files[0] if env_files else Path.cwd())
+        investor_id = resolve_investor_scope(env_files, repo_root=repo_root)
+        if investor_id and repo_root is not None:
+            path = investor_metrics_db_path(repo_root, investor_id)
+        elif investor_id:
+            path = LEDGER_DIR / investor_id / "metrics.db"
+        else:
+            path = LEGACY_METRICS_DB_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _active_metrics_db_path = path
+    return path
+
+
 def _make_dashboard_accounts(
     *,
     env_file: str | Path,
@@ -310,7 +350,7 @@ def _make_dashboard_accounts(
     if not env_files:
         env_files = (Path(env_file),)
 
-    ledger_base = Path(os.environ.get("FRONTEND_LEDGER_DIR", str(LEDGER_DIR)))
+    ledger_base = _resolve_frontend_ledger_base(env_files)
     multi = len(env_files) > 1
     seen: dict[str, int] = {}
     accounts: list[DashboardAccount] = []
@@ -804,7 +844,8 @@ def _bucket_day_utc(ts_ms: int) -> str:
 
 
 def _metrics_store() -> MetricsStore:
-    return MetricsStore(METRICS_DB_PATH)
+    path = _active_metrics_db_path or LEGACY_METRICS_DB_PATH
+    return MetricsStore(path)
 
 
 def _ensure_daily_pnl_synced(
@@ -1671,6 +1712,9 @@ def create_app(
         env_file=env_file,
         account_env_files=account_env_files,
     )
+    env_paths = tuple(account.env_file for account in accounts)
+    metrics_db_path = _configure_metrics_db(env_paths)
+    dashboard_investor_id = resolve_investor_scope(env_paths, repo_root=find_repo_root(env_paths[0]))
     config_public = accounts[0].config
     multi_account = len(accounts) > 1
     interval = int(
@@ -1791,6 +1835,8 @@ def create_app(
             "last_trade_journal_sync_inserted": journal_scheduler.state.last_inserted,
             "state_file": str(state_path) if not multi_account else "multi",
             "ledger_dir": str(ledger_root),
+            "investor_id": dashboard_investor_id,
+            "metrics_db": str(metrics_db_path),
             "managed_currencies": list(config_public.managed_currencies),
             "traded_collaterals": list(config_public.traded_collaterals),
             "option_strategy": "multi_account" if multi_account else config_public.option_strategy,

@@ -112,6 +112,68 @@ def resolve_investor_env_path(investor_dir: Path) -> Path | None:
     return None
 
 
+def investor_id_from_account_env(account_env: Path, *, repo_root: Path | str | None = None) -> str | None:
+    """Manifest ``[investor].id`` when ``account_env`` is under ``config/investors/<id>/accounts/``."""
+    investor_dir = investor_dir_for_account(account_env)
+    if investor_dir is None:
+        return None
+    root = repo_root or find_repo_root(account_env)
+    if root is not None:
+        manifest_path = investor_dir / ACCOUNTS_MANIFEST
+        if manifest_path.is_file():
+            try:
+                return load_investor_manifest(investor_dir.name, repo_root=root).investor_id
+            except ConfigurationError:
+                pass
+    return investor_dir.name
+
+
+def resolve_investor_scope(
+    account_envs: tuple[Path, ...] | list[Path],
+    *,
+    repo_root: Path | str | None = None,
+) -> str | None:
+    """Return a single investor id when all env files belong to one investor layout.
+
+    Returns ``None`` for legacy single-``.env`` layouts (no ``config/investors/...``).
+    Raises :class:`ConfigurationError` when env files span multiple investors.
+    """
+    if not account_envs:
+        return None
+    root = repo_root or find_repo_root(account_envs[0])
+    investor_ids: set[str] = set()
+    for account_env in account_envs:
+        investor_id = investor_id_from_account_env(account_env, repo_root=root)
+        if investor_id:
+            investor_ids.add(investor_id)
+    if len(investor_ids) > 1:
+        joined = ", ".join(sorted(investor_ids))
+        raise ConfigurationError(
+            f"Account env files span multiple investors ({joined}); "
+            "run one frontend or live supervisor per investor."
+        )
+    return next(iter(investor_ids)) if investor_ids else None
+
+
+def investor_frontend_ledger_dir(repo_root: Path | str, investor_id: str) -> Path:
+    """Per-investor dashboard data (equity jsonl + metrics.db)."""
+    return Path(repo_root) / "data" / "frontend_ledger" / investor_id
+
+
+def investor_live_log_dir(repo_root: Path | str, investor_id: str) -> Path:
+    """Per-investor live ``run --live`` supervisor logs."""
+    return Path(repo_root) / "logs" / "live" / investor_id
+
+
+def investor_metrics_db_path(repo_root: Path | str, investor_id: str) -> Path:
+    return investor_frontend_ledger_dir(repo_root, investor_id) / "metrics.db"
+
+
+def default_state_file(investor_id: str, slug: str) -> Path:
+    """Canonical ``STATE_FILE`` for a sub-account under ``config/investors/<id>/``."""
+    return Path(".state/investors") / investor_id / f"{slug}.json"
+
+
 def account_slug_from_env_path(account_env: Path) -> str | None:
     """Extract manifest slug from ``accounts/.env.<slug>`` (or legacy name)."""
     account_env = account_env.resolve()

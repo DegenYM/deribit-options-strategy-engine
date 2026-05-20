@@ -48,7 +48,17 @@ def _resolve_existing_env_files(repo_root: Path, raw_env_files: list[str]) -> li
     return env_files
 
 
-def _safe_log_name(env_file: Path) -> str:
+def _safe_log_name(env_file: Path, repo_root: Path) -> str:
+    sys.path.insert(0, str(repo_root))
+    try:
+        from deribit_demo.env_layout import account_slug_from_env_path
+
+        slug = account_slug_from_env_path(env_file)
+        if slug:
+            return slug
+    finally:
+        if sys.path and sys.path[0] == str(repo_root):
+            sys.path.pop(0)
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in env_file.name.strip("."))
 
 
@@ -117,7 +127,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cycles", type=int, default=0, help="Cycles per profile; 0 means forever.")
     parser.add_argument("--currencies", help="Comma-separated currencies passed to each run, e.g. BTC,ETH.")
     parser.add_argument("--bot", default="./bot", help="Bot entrypoint path.")
-    parser.add_argument("--log-dir", default="logs/live", help="Directory for per-profile logs.")
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Directory for per-profile logs (default: logs/live/<investor_id> when using --investor).",
+    )
     parser.add_argument("--json", action="store_true", help="Pass --json to each bot process.")
     parser.add_argument(
         "--keep-going",
@@ -153,9 +167,32 @@ def main(argv: list[str] | None = None) -> int:
                 f"No enabled accounts for investor {investor_id!r}; "
                 f"check {repo_root / 'config/investors' / investor_id / 'accounts.toml'}"
             )
-    log_dir = Path(args.log_dir).expanduser()
-    if not log_dir.is_absolute():
-        log_dir = repo_root / log_dir
+    if args.log_dir:
+        log_dir = Path(args.log_dir).expanduser()
+        if not log_dir.is_absolute():
+            log_dir = repo_root / log_dir
+    else:
+        sys.path.insert(0, str(repo_root))
+        try:
+            from deribit_demo.env_layout import (
+                investor_live_log_dir,
+                load_investor_manifest,
+                resolve_investor_scope,
+            )
+
+            scoped_investor: str | None = None
+            if args.investor or (not args.env_files):
+                manifest = load_investor_manifest(args.investor or DEFAULT_INVESTOR_ID, repo_root=repo_root)
+                scoped_investor = manifest.investor_id
+            elif env_files:
+                scoped_investor = resolve_investor_scope(env_files, repo_root=repo_root)
+            if scoped_investor:
+                log_dir = investor_live_log_dir(repo_root, scoped_investor)
+            else:
+                log_dir = repo_root / "logs" / "live"
+        finally:
+            if sys.path and sys.path[0] == str(repo_root):
+                sys.path.pop(0)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     processes: dict[subprocess.Popen[bytes], tuple[Path, Path]] = {}
@@ -173,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
 
     started_at = datetime.now(tz=UTC).isoformat()
     for env_file in env_files:
-        log_file = log_dir / f"{_safe_log_name(env_file)}.log"
+        log_file = log_dir / f"{_safe_log_name(env_file, repo_root)}.log"
         command = _build_command(args, repo_root, env_file)
         with log_file.open("ab", buffering=0) as log:
             log.write(f"\n--- started {started_at} ---\n".encode())
