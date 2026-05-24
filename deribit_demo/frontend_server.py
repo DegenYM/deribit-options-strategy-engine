@@ -1827,6 +1827,27 @@ def _aggregate_closed_groups(accounts: list[DashboardAccount]) -> list[dict[str,
     return _dedupe_trade_group_rows(merged_closed)
 
 
+def _groups_payload_for_account(
+    account: DashboardAccount,
+    *,
+    prefetches: dict[str, ExchangePrefetch | None],
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
+    payload = copy.deepcopy(_closed_groups_payload(account.state_path, spot_index=spot_index))
+    if _has_private_creds(account.config):
+        try:
+            bot = _bot_for_account(account, require_private=True)
+            prefetch = prefetches.get(_live_api_identity(account))
+            _enrich_groups_payload_open_unrealized(
+                bot,
+                payload,
+                exchange_prefetch=prefetch,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("groups enrich skipped for %s: %s", account.name, exc)
+    return payload
+
+
 def _aggregate_groups(
     accounts: list[DashboardAccount],
     *,
@@ -1841,19 +1862,20 @@ def _aggregate_groups(
 
     prefetches = _prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
 
-    for account in accounts:
-        payload = copy.deepcopy(_closed_groups_payload(account.state_path, spot_index=spot_index))
-        if _has_private_creds(account.config):
-            try:
-                bot = _bot_for_account(account, require_private=True)
-                prefetch = prefetches.get(_live_api_identity(account))
-                _enrich_groups_payload_open_unrealized(
-                    bot,
-                    payload,
-                    exchange_prefetch=prefetch,
-                )
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.debug("groups enrich skipped for %s: %s", account.name, exc)
+    def _fetch(account: DashboardAccount) -> tuple[DashboardAccount, dict[str, Any]]:
+        return account, _groups_payload_for_account(
+            account,
+            prefetches=prefetches,
+            spot_index=spot_index,
+        )
+
+    if len(accounts) <= 1:
+        pairs = [_fetch(account) for account in accounts]
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(accounts), 4)) as pool:
+            pairs = list(pool.map(_fetch, accounts))
+
+    for account, payload in pairs:
         for key, value in (payload.get("underlying_index_usd") or {}).items():
             if _dec(value) > 0:
                 underlying_index_usd[str(key).upper()] = str(value)

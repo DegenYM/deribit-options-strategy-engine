@@ -804,3 +804,61 @@ def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
 
     assert max_in_flight >= 2
     assert elapsed < 0.30
+
+
+def test_aggregate_groups_fetches_accounts_in_parallel(tmp_path, monkeypatch) -> None:
+    import threading
+    import time
+
+    from deribit_demo.engine import ExchangePrefetch
+
+    cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="a", client_secret="1")
+    cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="b", client_secret="2")
+    cfg_c = make_config(tmp_path, option_strategy="bull_put_spread", client_id="c", client_secret="3")
+    accounts = [
+        DashboardAccount("a", tmp_path / "a.env", cfg_a, cfg_a.state_file, tmp_path / "la"),
+        DashboardAccount("b", tmp_path / "b.env", cfg_b, cfg_b.state_file, tmp_path / "lb"),
+        DashboardAccount("c", tmp_path / "c.env", cfg_c, cfg_c.state_file, tmp_path / "lc"),
+    ]
+    for account in accounts:
+        StrategyStateStore(account.state_path).save(StrategyState())
+
+    prefetch = ExchangePrefetch(
+        summaries={},
+        open_orders=[],
+        positions=[],
+        option_positions=[],
+        future_positions=[],
+        future_markets_by_name={},
+        markets_by_currency={"BTC": [], "ETH": []},
+    )
+    lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    def slow_enrich(_bot, _payload, *, exchange_prefetch=None) -> None:
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.12)
+        with lock:
+            in_flight -= 1
+
+    monkeypatch.setattr(frontend_server, "_enrich_groups_payload_open_unrealized", slow_enrich)
+    monkeypatch.setattr(frontend_server, "_bot_for_account", lambda account, require_private=True: object())
+    monkeypatch.setattr(
+        frontend_server,
+        "_prefetch_all_accounts",
+        lambda _accounts, cache: {
+            frontend_server._live_api_identity(account): prefetch for account in accounts
+        },
+    )
+    cache = frontend_server._TtlCache(15.0)
+
+    started = time.monotonic()
+    frontend_server._aggregate_groups(accounts, exchange_prefetch_cache=cache)
+    elapsed = time.monotonic() - started
+
+    assert max_in_flight >= 2
+    assert elapsed < 0.30
