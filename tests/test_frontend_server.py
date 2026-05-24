@@ -742,6 +742,73 @@ def test_portfolio_snapshot_endpoint_no_deribit(tmp_path, monkeypatch) -> None:
     assert response.json()["portfolio"]["total_equity_usdc"] == "1234.56"
 
 
+def test_dashboard_bundle_endpoint_returns_sections(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    cfg = make_config(tmp_path, state_file=tmp_path / "bot.json", client_id="cid", client_secret="sec")
+    fake_status = {"portfolio": {"total_equity_usdc": "1000"}, "trade_groups": []}
+    fake_groups = {"open": [], "closed": [], "underlying_index_usd": {}}
+    fake_summary = {"summary": {"realized_pnl_usdc": "50"}, "recent_closed_trades": []}
+    aggregate_calls = {"status": 0, "groups": 0, "summary": 0}
+
+    def _fake_status(*_args, **_kwargs):
+        aggregate_calls["status"] += 1
+        return fake_status
+
+    def _fake_groups(*_args, **_kwargs):
+        aggregate_calls["groups"] += 1
+        return fake_groups
+
+    def _fake_summary(*_args, **_kwargs):
+        aggregate_calls["summary"] += 1
+        return fake_summary
+
+    monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
+    monkeypatch.setattr(frontend_server, "_aggregate_status", _fake_status)
+    monkeypatch.setattr(frontend_server, "_aggregate_groups", _fake_groups)
+    monkeypatch.setattr(frontend_server, "_aggregate_realized_summary", _fake_summary)
+    app = frontend_server.create_app(
+        env_file=env_file,
+        account_env_files=(env_file,),
+        enable_scheduler=False,
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/dashboard_bundle")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"]["portfolio"]["total_equity_usdc"] == "1000"
+    assert body["groups"]["closed"] == []
+    assert body["realized_summary"]["summary"]["realized_pnl_usdc"] == "50"
+    assert aggregate_calls == {"status": 1, "groups": 1, "summary": 1}
+
+    cached = client.get("/api/dashboard_bundle")
+    assert cached.status_code == 200
+    assert aggregate_calls == {"status": 1, "groups": 1, "summary": 1}
+
+
+def test_dashboard_bundle_endpoint_requires_private_creds(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    cfg = make_config(tmp_path, state_file=tmp_path / "bot.json", client_id="", client_secret="")
+    monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
+    app = frontend_server.create_app(
+        env_file=env_file,
+        account_env_files=(env_file,),
+        enable_scheduler=False,
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/dashboard_bundle")
+
+    assert response.status_code == 401
+
+
 def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) -> None:
     import threading
     import time

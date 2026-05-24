@@ -809,6 +809,11 @@ class _TtlCache:
                 return None
             return int((now - cached[0]) * 1000)
 
+    def seed(self, key: Any, value: Any) -> None:
+        """Store ``value`` under ``key`` as if freshly computed (for cross-endpoint cache warm-up)."""
+        with self._lock:
+            self._store[key] = (time.monotonic(), value)
+
 
 # ---------------------------------------------------------------------------
 # Domain helpers (closed-group → time series)
@@ -2164,6 +2169,7 @@ def create_app(
     status_cache = _TtlCache(status_ttl)
     report_cache = _TtlCache(REPORT_CACHE_TTL_SEC)
     groups_cache = _TtlCache(GROUPS_CACHE_TTL_SEC)
+    bundle_cache = _TtlCache(status_ttl)
     exchange_prefetch_cache = _TtlCache(status_ttl)
     spot_cache = _TtlCache(SPOT_CACHE_TTL_SEC)
     stress_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
@@ -2317,6 +2323,107 @@ def create_app(
     def _locked_aggregate_report(d: int) -> dict[str, Any]:
         with _heavy_portfolio_lock:
             return _aggregate_report(accounts, days=d)
+
+    def _locked_compute_dashboard_bundle(
+        *,
+        days: int,
+        override: Decimal | None,
+    ) -> dict[str, Any]:
+        with _heavy_portfolio_lock:
+            status = _aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+            groups = _aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+            summary = _aggregate_realized_summary(
+                accounts,
+                days=days,
+                status_payload=status,
+                effective_capital_override=override,
+            )
+        return {
+            "status": status,
+            "groups": groups,
+            "realized_summary": summary,
+        }
+
+    def _seed_bundle_component_caches(
+        *,
+        status: dict[str, Any],
+        groups: dict[str, Any],
+        summary: dict[str, Any],
+        days: int,
+        override: Decimal | None,
+    ) -> None:
+        status_cache.seed("status", status)
+        groups_cache.seed(("groups", _closed_groups_cache_key(accounts)), groups)
+        capital = _resolve_apr_effective_capital_usdc(
+            accounts,
+            override=override,
+            status_payload=status,
+        )
+        series_cache.seed(
+            (
+                "realized_summary",
+                days,
+                str(capital),
+                _ledger_equity_cache_key(accounts),
+                _closed_groups_cache_key(accounts),
+            ),
+            summary,
+        )
+
+    def _finalize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
+        out = copy.deepcopy(payload)
+        try:
+            spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+            _apply_spot_native_backfill(out.get("groups") or {}, spot_idx)
+            for row in (out.get("realized_summary") or {}).get("recent_closed_trades") or []:
+                if isinstance(row, dict):
+                    _backfill_row_collateral_native(row, spot_idx)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("dashboard bundle spot native backfill skipped: %s", exc)
+        return out
+
+    @app.get("/api/dashboard_bundle")
+    def api_dashboard_bundle(
+        days: int = Query(default=30, ge=0, le=3650),
+        effective_capital_usdc: float | None = Query(default=None, ge=0),
+    ) -> Any:
+        """Status + groups + realized summary in one Deribit prefetch pass."""
+        if not any(_has_private_creds(account.config) for account in accounts):
+            raise HTTPException(status_code=401, detail="DERIBIT_CLIENT_ID/SECRET not set in env")
+        override = (
+            Decimal(str(effective_capital_usdc))
+            if effective_capital_usdc is not None and effective_capital_usdc > 0
+            else None
+        )
+        cache_key = (
+            "dashboard_bundle",
+            days,
+            str(override) if override is not None else "",
+            _ledger_equity_cache_key(accounts),
+            _closed_groups_cache_key(accounts),
+        )
+
+        def _compute() -> dict[str, Any]:
+            payload = _locked_compute_dashboard_bundle(days=days, override=override)
+            _seed_bundle_component_caches(
+                status=payload["status"],
+                groups=payload["groups"],
+                summary=payload["realized_summary"],
+                days=days,
+                override=override,
+            )
+            return payload
+
+        try:
+            payload = copy.deepcopy(bundle_cache.get_or_set(cache_key, _compute))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("dashboard /api/dashboard_bundle failed: %s", exc, exc_info=True)
+            raise HTTPException(status_code=502, detail=f"dashboard bundle failed: {exc}") from exc
+        headers: dict[str, str] = {}
+        age_ms = bundle_cache.cache_age_ms(cache_key)
+        if age_ms is not None:
+            headers["X-Cache-Age-Ms"] = str(age_ms)
+        return JSONResponse(_decimalize(_finalize_dashboard_bundle(payload)), headers=headers)
 
     @app.get("/api/status")
     def api_status() -> Any:

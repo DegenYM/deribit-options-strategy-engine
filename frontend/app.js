@@ -93,6 +93,8 @@
   const FRONTEND_REFRESH_INTERVAL_MS = 180_000;
   /** Max concurrent /api/* fetches per refresh wave (after spot + health). */
   const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 3;
+  /** One /api/dashboard_bundle replaces groups + status + summary when creds exist. */
+  const USE_DASHBOARD_BUNDLE = true;
   const INVESTOR_STATUS_TIMEOUT_MS = 45_000;
   /** Full-screen overlay dismissed after health + snapshot (or this cap). */
   const INVESTOR_OVERLAY_MAX_MS = 3_000;
@@ -985,6 +987,27 @@
       url += `&effective_capital_usdc=${encodeURIComponent(String(cap))}`;
     }
     return url;
+  }
+
+  function dashboardBundleUrl(days = 30) {
+    let url = `/api/dashboard_bundle?days=${days}`;
+    const cap = aprEffectiveCapitalUsdc();
+    if (cap !== null) {
+      url += `&effective_capital_usdc=${encodeURIComponent(String(cap))}`;
+    }
+    return url;
+  }
+
+  function applyDashboardBundlePayload(d) {
+    if (d?.groups) STATE.groups = d.groups;
+    if (d?.status) {
+      STATE.status = d.status;
+      STATE.statusErrorOnce = false;
+      STATE.dataFreshness.source = "live";
+      STATE.dataFreshness.live = true;
+      STATE.dataFreshness.statusMs = 0;
+    }
+    if (d?.realized_summary) STATE.report = d.realized_summary;
   }
 
   /** Earliest entry among realized closed groups (lifetime APR sample start). */
@@ -4148,6 +4171,50 @@
     }
   }
 
+  async function fetchDashboardBundle({ backgroundOnTimeout = false } = {}) {
+    const timeoutMs = INVESTOR_STATUS_TIMEOUT_MS;
+    let timedOut = false;
+    const bundleRequest = fetchJson(dashboardBundleUrl(30));
+    const raced = INVESTOR
+      ? Promise.race([
+          bundleRequest,
+          delay(timeoutMs).then(() => {
+            timedOut = true;
+            throw new Error("dashboard bundle timeout");
+          }),
+        ])
+      : bundleRequest;
+    try {
+      applyDashboardBundlePayload(await raced);
+      return true;
+    } catch (err) {
+      if (INVESTOR && timedOut && STATE.portfolioSnapshot?.portfolio) {
+        if (!STATE.statusErrorOnce) {
+          showToast(
+            i18n(
+              "Live sync is slow; showing last snapshot.",
+              "即時同步較慢，先顯示最近快照。"
+            )
+          );
+          STATE.statusErrorOnce = true;
+        }
+        if (backgroundOnTimeout) {
+          fetchJson(dashboardBundleUrl(30))
+            .then((d) => {
+              applyDashboardBundlePayload(d);
+              renderDashboard();
+            })
+            .catch(() => {});
+        }
+        return false;
+      }
+      if (!INVESTOR || !timedOut) {
+        showToast(`dashboard bundle: ${err.message}`);
+      }
+      return false;
+    }
+  }
+
   async function loadChartDataIfNeeded({ force = false, investorFetchWrap = null } = {}) {
     if (!force && STATE.chartsDataLoaded) {
       renderPerformanceCharts();
@@ -4268,6 +4335,12 @@
         scheduleRender();
       }
 
+      const investorFetchWrap = investorFirstLoad
+        ? (stepKey, run) => investorFetch(stepKey, run)
+        : null;
+      const wrapStep = (stepKey, run) =>
+        investorFetchWrap ? investorFetchWrap(stepKey, run) : run();
+
       function fetchGroups() {
         return fetchJson("/api/groups")
           .then((d) => {
@@ -4313,29 +4386,44 @@
           .catch((err) => showToast(`stress: ${err.message}`));
       }
 
-      const investorFetchWrap = investorFirstLoad
-        ? (stepKey, run) => investorFetch(stepKey, run)
-        : null;
-      const wrapStep = (stepKey, run) =>
-        investorFetchWrap ? investorFetchWrap(stepKey, run) : run();
-
-      const wave = [() => wrapStep("groups", fetchGroups)];
-
-      if (hasPrivateCreds) {
+      async function fetchPortfolioDataIndividual() {
+        await wrapStep("groups", fetchGroups);
         if (INVESTOR) {
-          wave.push(() =>
-            wrapStep("status", () => fetchStatusWithTimeout().then(() => scheduleRender()))
-          );
-          wave.push(() => wrapStep("summary", fetchSummary));
+          await wrapStep("status", () => fetchStatusWithTimeout().then(() => scheduleRender()));
+          await wrapStep("summary", fetchSummary);
         } else {
-          wave.push(() => fetchStatusOp());
-          wave.push(() => fetchSummary());
-          wave.push(() => fetchStress());
+          await fetchStatusOp();
+          await fetchSummary();
         }
-      } else {
-        STATE.status = null;
-        STATE.report = null;
-        STATE.stress = null;
+      }
+
+      async function fetchPortfolioData() {
+        if (!hasPrivateCreds) {
+          await wrapStep("groups", fetchGroups);
+          STATE.status = null;
+          STATE.report = null;
+          STATE.stress = null;
+          return;
+        }
+        if (USE_DASHBOARD_BUNDLE) {
+          const ok = await fetchDashboardBundle({ backgroundOnTimeout: INVESTOR });
+          if (ok) {
+            if (investorFirstLoad) {
+              advanceInvestorLoad("groups");
+              advanceInvestorLoad("status");
+              advanceInvestorLoad("summary");
+            }
+            scheduleRender();
+            return;
+          }
+        }
+        await fetchPortfolioDataIndividual();
+      }
+
+      const wave = [() => fetchPortfolioData()];
+
+      if (hasPrivateCreds && !INVESTOR) {
+        wave.push(() => fetchStress());
       }
 
       if (INVESTOR && !snapshotFetchedThisRefresh) {
