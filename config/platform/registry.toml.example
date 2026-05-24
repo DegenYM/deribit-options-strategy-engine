@@ -1,0 +1,42 @@
+# Platform registry — ops metadata only (no API secrets).
+# Copy to registry.toml and edit paths/domain before ./bot investor init
+#
+# Strategy manifests stay in config/investors/<id>/accounts.toml (not merged here).
+
+[platform]
+repo_root = "/Users/youming/Desktop/deribit-options-strategy-engine"
+python_bin = "/Users/youming/miniforge3/envs/crypto/bin/python"
+domain = "portfolio.example.com"
+tunnel_name = "deribit-tunnel"
+next_frontend_port = 8769
+
+# Existing investors (optional — add rows as you onboard)
+[[investors]]
+id = "youming"
+display_name = "YouMing"
+dashboard_email = ""
+access_method = "email"
+hostname = "youming.portfolio.example.com"
+frontend_port = 8765
+live_enabled = true
+frontend_enabled = true
+
+[[investors]]
+id = "jack"
+display_name = "Jack"
+dashboard_email = ""
+access_method = "email"
+hostname = "jack.portfolio.example.com"
+frontend_port = 8766
+live_enabled = true
+frontend_enabled = true
+
+[[investors]]
+id = "an"
+display_name = "An"
+dashboard_email = ""
+access_method = "email"
+hostname = "an.portfolio.example.com"
+frontend_port = 8768
+live_enabled = true
+frontend_enabled = true

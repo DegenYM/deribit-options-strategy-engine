@@ -1,6 +1,9 @@
 from decimal import Decimal
 
-from deribit_demo.fees import linear_usdc_short_put_apr_premium_over_strike
+from deribit_demo.fees import (
+    linear_usdc_short_put_apr_premium_over_strike,
+    net_apr_inverse_short_per_contract,
+)
 from deribit_demo.models import NakedPutCandidate, OptionInstrument, OrderBookSnapshot, RiskRegime
 from deribit_demo.strategy import StrategySelector
 
@@ -266,6 +269,45 @@ def test_covered_call_scan_rejection_detail_summarizes_reasons(tmp_path):
     assert detail["after_liquidity_rejections"] == {}
     assert detail["instruments_passing_all_build_gates"] == 0
     assert detail["instrument_names_passing_all_build_gates"] == []
+
+
+def test_covered_call_scan_examples_only_show_otm_calls(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        min_net_apr=Decimal("0.01"),
+        entry_dte_min=7,
+        entry_dte_max=24,
+        btc_call_delta_min=Decimal("0.30"),
+        btc_call_delta_max=Decimal("0.50"),
+    )
+    selector = StrategySelector(config)
+    itm_payload, itm_book = _make_btc_call_payload(14, 65000, delta="0.55")
+    otm_payload, otm_book = _make_btc_call_payload(14, 77000, delta="0.11")
+    itm_inst = OptionInstrument.from_api(itm_payload)
+    otm_inst = OptionInstrument.from_api(otm_payload)
+    books = {
+        itm_inst.instrument_name: OrderBookSnapshot.from_api(itm_book),
+        otm_inst.instrument_name: OrderBookSnapshot.from_api(otm_book),
+    }
+
+    def loader(name):
+        return books[name]
+
+    detail = selector.covered_call_scan_rejection_detail(
+        "BTC",
+        [itm_inst, otm_inst],
+        loader,
+        regime=RiskRegime.NORMAL,
+        collateral_currency="BTC",
+        available_cover_quantity=Decimal("0.2"),
+        summary_equity=Decimal("1"),
+    )
+
+    assert detail["liquidity_rejections"]["delta_out_of_range"] == 2
+    assert len(detail["example_messages"]) == 1
+    assert "77000-C" in detail["example_messages"][0]
+    assert "65000-C" not in detail["example_messages"][0]
 
 
 def test_short_call_rejected_when_delta_out_of_range(tmp_path):
@@ -575,3 +617,156 @@ def test_scan_for_book_empty_when_calls_disabled(tmp_path, btc_book):
     )
     assert candidates == []
     assert option_type == "put"  # default when no fallback taken
+
+
+def _markets_and_loader(client: FakeClient, currency: str, *, put_open_interest: str = "60"):
+    instruments = [
+        OptionInstrument.from_api(item) for item in client.get_instruments(currency, kind="option", expired=False)
+    ]
+    for item in instruments:
+        if item.instrument_name.endswith("-P"):
+            payload = dict(client.get_order_book(item.instrument_name))
+            payload["open_interest"] = put_open_interest
+            client.order_book_overrides[item.instrument_name] = payload
+
+    def loader(name: str) -> OrderBookSnapshot:
+        return OrderBookSnapshot.from_api(client.get_order_book(name))
+
+    return instruments, loader
+
+
+def test_core_regime_liquidity_covered_call_ignores_put_liquidity(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        enable_short_put=False,
+        enable_short_call=True,
+        min_liquid_expiries_required=1,
+        entry_dte_min=7,
+        entry_dte_max=24,
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC", put_open_interest="0")
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, loader)
+
+    assert ok is True
+    assert notes == []
+
+
+def test_core_regime_liquidity_naked_short_put_fails_when_puts_illiquid(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        enable_short_put=True,
+        enable_short_call=False,
+        min_liquid_expiries_required=1,
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC", put_open_interest="0")
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, loader)
+
+    assert ok is False
+    assert any("put: liquid_expiries=0" in note for note in notes)
+
+
+def test_core_regime_liquidity_naked_short_call_only_ignores_puts(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        enable_short_put=False,
+        enable_short_call=True,
+        min_liquid_expiries_required=1,
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC", put_open_interest="0")
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, loader)
+
+    assert ok is True
+    assert notes == []
+
+
+def test_core_regime_liquidity_naked_short_both_passes_when_either_side_liquid(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        enable_short_put=True,
+        enable_short_call=True,
+        short_call_fallback_only=False,
+        min_liquid_expiries_required=1,
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC", put_open_interest="0")
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, loader)
+
+    assert ok is True
+    assert notes == []
+
+
+def test_core_regime_liquidity_bull_put_spread_requires_long_leg(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="bull_put_spread",
+        min_liquid_expiries_required=1,
+        bull_put_long_delta_min=Decimal("0.04"),
+        bull_put_long_delta_max=Decimal("0.06"),
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC")
+    for item in instruments:
+        if item.instrument_name.endswith("-P") and "62500" in item.instrument_name:
+            payload = dict(client.get_order_book(item.instrument_name))
+            payload["greeks"] = {"delta": "-0.20"}
+            client.order_book_overrides[item.instrument_name] = payload
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, loader)
+
+    assert ok is False
+    assert any("bull_put_spread: liquid_expiries=0" in note for note in notes)
+    assert any("no_valid_bull_put_spread_pair" in note for note in notes)
+
+
+def test_core_regime_liquidity_bull_put_spread_passes_with_short_and_long(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="bull_put_spread",
+        min_liquid_expiries_required=1,
+        bull_put_long_delta_min=Decimal("0.04"),
+        bull_put_long_delta_max=Decimal("0.06"),
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC")
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, loader)
+
+    assert ok is True
+    assert notes == []
+
+
+def test_inverse_covered_call_apr_uses_round_trip_fee_over_contract_notional():
+    """ETH short call: (bid - entry_fee - exit_fee) / 1 ETH / DTE * 365."""
+    premium = Decimal("0.007")
+    dte = Decimal("14")
+    fee_rate = Decimal("0.0003")
+    fee_cap = Decimal("0.125")
+    apr = net_apr_inverse_short_per_contract(
+        premium_per_contract=premium,
+        contract_size=Decimal("1"),
+        dte_days=dte,
+        fee_rate=fee_rate,
+        fee_cap_rate=fee_cap,
+    )
+    round_trip_fee = Decimal("0.0003") * 2
+    expected = ((premium - round_trip_fee) / Decimal("1")) * (Decimal("365") / dte)
+    assert apr == expected
+    assert apr > Decimal("0.15")
+    assert apr < Decimal("0.18")

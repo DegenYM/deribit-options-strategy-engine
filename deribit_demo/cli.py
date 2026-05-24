@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import timedelta
 
 from .client import DeribitClient
-from .config import load_config
+from .config import load_config, assert_trading_account
 from .env_layout import find_repo_root, load_investor_manifest
 from .exceptions import ConfigurationError
 from .backtest import BacktestConfig, run_backtest
@@ -33,6 +33,7 @@ def build_bot(args) -> DeribitOptionTrialBot:
         require_private=require_private,
         strategy_override=getattr(args, "strategy", None),
     )
+    assert_trading_account(config)
     client = DeribitClient(config)
     return DeribitOptionTrialBot(config, client)
 
@@ -55,6 +56,8 @@ def render(data, json_output: bool) -> None:
 
 
 def _apply_investor_cli_args(args: argparse.Namespace) -> None:
+    if getattr(args, "command", None) == "investor":
+        return
     investor = getattr(args, "investor", None)
     if not investor:
         return
@@ -67,18 +70,48 @@ def _apply_investor_cli_args(args: argparse.Namespace) -> None:
     account_slug = getattr(args, "account", None)
     if args.command == "frontend":
         if not getattr(args, "account_env_files", None):
-            files = manifest.account_env_files()
+            skipped = manifest.accounts_without_creds()
+            files = manifest.account_env_files(require_creds=True)
+            if skipped:
+                slugs = ", ".join(account.slug for account in skipped)
+                logging.getLogger(__name__).warning(
+                    "Skipping enabled account(s) without DERIBIT_CLIENT_ID/SECRET: %s",
+                    slugs,
+                )
             if not files:
-                raise SystemExit(f"No enabled accounts in {manifest.root / 'accounts.toml'}")
+                raise SystemExit(
+                    f"No enabled accounts with API credentials in {manifest.root / 'accounts.toml'}"
+                )
             args.account_env_files = ",".join(str(path) for path in files)
+            args.investor_skipped_accounts = tuple(
+                {
+                    "slug": account.slug,
+                    "strategy": account.strategy,
+                    "display_name": account.display_name or account.slug,
+                    "reason": "missing_api_creds",
+                }
+                for account in skipped
+            )
         if account_slug:
             args.env_file = str(manifest.env_for_slug(account_slug))
         elif not getattr(args, "env_file_after_cmd", None) and args.env_file == ".env":
             args.env_file = str(manifest.account_env_files()[0])
+        # External investor URLs should land on investor.html, not the ops index.
+        if not getattr(args, "investor_portal", False):
+            args.investor_portal = True
         return
 
     if not account_slug:
-        if args.command in {"backfill-trade-journal", "frontend"}:
+        if args.command in {
+            "backfill-trade-journal",
+            "frontend",
+            "fee-snapshot",
+            "fee-settle",
+            "fee-settle-period",
+            "fee-status",
+            "fee-flow-report",
+            "fee-report",
+        }:
             return
         slugs = ", ".join(account.slug for account in manifest.accounts)
         raise SystemExit(f"--account <slug> is required with --investor for `{args.command}` (known: {slugs})")
@@ -136,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     backtest_parser.add_argument("--end", default="today", help="YYYY-MM-DD or 'today'")
     backtest_parser.add_argument("--resolution", default="1D", help="TradingView resolution (e.g. 1D, 60)")
     backtest_parser.add_argument("--cache-root", default="data/backtest_cache", help="Cache directory for public data")
-    backtest_parser.add_argument("--report", default="reports/backtest_black_swan.md", help="Output markdown path")
+    backtest_parser.add_argument("--report", default="docs/backtest/backtest_black_swan.md", help="Output markdown path")
     backtest_parser.add_argument("--scan-params", action="store_true", help="Run baseline/conservative/profit-seek scan")
     backtest_parser.add_argument("--auto-fallback-window-days", type=int, default=30, help="If 0 trades, fallback to last N days (0 disables)")
     backtest_parser.add_argument("--currencies", help="Comma-separated currencies, e.g. BTC,ETH")
@@ -216,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     stress_parser = subparsers.add_parser("stress-current", help="Stress test current live positions (uses index)")
     _add_env_file_after_subcommand(stress_parser)
     stress_parser.add_argument("--shocks", default="0.10,0.20,0.30,0.40,0.50,0.60", help="Comma-separated magnitudes, e.g. 0.1,0.2")
-    stress_parser.add_argument("--report", default="reports/current_black_swan.md", help="Output markdown path")
+    stress_parser.add_argument("--report", default="docs/backtest/current_black_swan.md", help="Output markdown path")
     stress_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     trades_parser = subparsers.add_parser(
@@ -346,11 +379,427 @@ def main(argv: list[str] | None = None) -> int:
     )
     backfill_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    fee_snap_parser = subparsers.add_parser(
+        "fee-snapshot",
+        help="Capture investor-level NAV_perf snapshot for performance-fee billing",
+    )
+    _add_env_file_after_subcommand(fee_snap_parser)
+    fee_snap_parser.add_argument(
+        "--kind",
+        default="manual",
+        help="Snapshot kind stored in fee ledger (default: manual)",
+    )
+    fee_snap_parser.add_argument("--notes", default=None, help="Optional note")
+    fee_snap_parser.add_argument(
+        "--force-bootstrap",
+        action="store_true",
+        help="Re-fetch transaction log and overwrite HWM / flow baseline (fixes bad first run)",
+    )
+    fee_snap_parser.add_argument(
+        "--no-bootstrap",
+        action="store_true",
+        help="Skip auto-fetching cumulative deposits to set initial HWM on first run",
+    )
+    fee_snap_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    fee_settle_parser = subparsers.add_parser(
+        "fee-settle",
+        help="Settle a quarter: performance fee + HWM update",
+    )
+    _add_env_file_after_subcommand(fee_settle_parser)
+    fee_settle_parser.add_argument(
+        "--period",
+        required=True,
+        metavar="YYYY-QN",
+        help="Quarter to settle, e.g. 2026-Q1",
+    )
+    fee_settle_parser.add_argument(
+        "--net-flow-usdc",
+        default="0",
+        help="Net subscription adjustment for the quarter (positive=deposit, negative=withdrawal)",
+    )
+    fee_settle_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing settlement for the same period",
+    )
+    fee_settle_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    fee_period_parser = subparsers.add_parser(
+        "fee-settle-period",
+        help="Settle fees for a custom time window and write PDF/MD/CSV report",
+    )
+    _add_env_file_after_subcommand(fee_period_parser)
+    fee_period_parser.add_argument(
+        "--to",
+        required=True,
+        metavar="WHEN",
+        help="Period end: YYYY-MM-DD, ISO-8601, unix ms, or now",
+    )
+    fee_period_parser.add_argument(
+        "--from",
+        dest="from_ts",
+        default=None,
+        metavar="WHEN",
+        help="Period start (default: latest snapshot strictly before --to). Same formats as --to",
+    )
+    fee_period_parser.add_argument(
+        "--net-flow-usdc",
+        default=None,
+        help="Override net subscription for the window (default: Deribit transaction log)",
+    )
+    fee_period_parser.add_argument(
+        "--no-persist",
+        action="store_true",
+        help="Compute report only; do not save settlement or update HWM",
+    )
+    fee_period_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing settlement for the same auto period id",
+    )
+    fee_period_parser.add_argument(
+        "--no-report",
+        action="store_true",
+        help="Skip writing PDF/MD/CSV (JSON output only)",
+    )
+    fee_period_parser.add_argument(
+        "--format",
+        default="all",
+        choices=("both", "all", "pdf", "md", "csv"),
+        help="Report formats when not using --no-report (default: all)",
+    )
+    fee_period_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    fee_status_parser = subparsers.add_parser(
+        "fee-status",
+        help="Show HWM, latest NAV snapshot, and past settlements",
+    )
+    _add_env_file_after_subcommand(fee_status_parser)
+    fee_status_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    fee_flow_parser = subparsers.add_parser(
+        "fee-flow-report",
+        help="Show deposit/withdrawal breakdown from Deribit transaction log (read-only)",
+    )
+    _add_env_file_after_subcommand(fee_flow_parser)
+    fee_flow_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    fee_report_parser = subparsers.add_parser(
+        "fee-report",
+        help="Generate markdown fee report (initial bootstrap or quarterly settlement)",
+    )
+    _add_env_file_after_subcommand(fee_report_parser)
+    fee_report_parser.add_argument(
+        "--kind",
+        required=True,
+        choices=("initial", "settlement"),
+        help="initial = strategy start baseline; settlement = quarterly fee settlement",
+    )
+    fee_report_parser.add_argument(
+        "--period",
+        default=None,
+        metavar="YYYY-QN",
+        help="Required for --kind settlement (e.g. 2026-Q1 or fee-settle-period period id)",
+    )
+    fee_report_parser.add_argument(
+        "--output",
+        default=None,
+        metavar="PATH",
+        help="Output base path (.md and/or .pdf; default: data/fee_ledger/<id>/reports/...)",
+    )
+    fee_report_parser.add_argument(
+        "--format",
+        default="both",
+        choices=("both", "all", "pdf", "md", "csv"),
+        help="both=PDF+MD, all=PDF+MD+CSV, csv=flows+summary CSV only (default: both)",
+    )
+    fee_report_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    investor_parser = subparsers.add_parser(
+        "investor",
+        help="Investor onboarding: init, import handoff, validate, list (ops registry separate from accounts.toml)",
+    )
+    investor_sub = investor_parser.add_subparsers(dest="investor_command", required=True)
+
+    inv_init = investor_sub.add_parser("init", help="Scaffold config/investors/<id>/ and registry row")
+    inv_init.add_argument("investor_id", metavar="ID", help="New investor id (lowercase)")
+    inv_init.add_argument(
+        "--strategies",
+        default="naked",
+        help="Comma-separated strategy slugs: naked, bull_put, covered_call (default: naked)",
+    )
+    inv_init.add_argument("--display-name", default=None, help="Display name for manifest/registry")
+    inv_init.add_argument("--email", default=None, help="Dashboard Access email (stored in registry only)")
+    inv_init.add_argument(
+        "--deribit-env",
+        default="mainnet",
+        choices=("mainnet", "testnet"),
+        help="DERIBIT_ENV written into scaffolded account env files (default: mainnet)",
+    )
+    inv_init.add_argument(
+        "--no-register",
+        action="store_true",
+        help="Skip appending [[investors]] to config/platform/registry.toml",
+    )
+    inv_init.add_argument("--json", action="store_true", help="Emit JSON")
+
+    inv_import = investor_sub.add_parser(
+        "import-handoff",
+        help="Import secrets from handoff TOML into accounts/.env.*",
+    )
+    inv_import.add_argument("handoff_file", metavar="PATH", help="Handoff TOML path")
+    inv_import.add_argument("--investor", metavar="ID", default=None, help="Override [investor].id")
+    inv_import.add_argument("--json", action="store_true", help="Emit JSON")
+
+    inv_validate = investor_sub.add_parser("validate", help="Check manifest, registry, and Deribit API auth")
+    inv_validate.add_argument("investor_id", metavar="ID")
+    inv_validate.add_argument("--no-api", action="store_true", help="Skip live Deribit API checks")
+    inv_validate.add_argument(
+        "--no-bootstrap-hwm",
+        action="store_true",
+        help="Skip automatic initial HWM bootstrap after successful API checks",
+    )
+    inv_validate.add_argument("--json", action="store_true", help="Emit JSON")
+
+    inv_bootstrap = investor_sub.add_parser(
+        "bootstrap-hwm",
+        help="Bootstrap initial HWM from transaction log (or INITIAL_HWM_NAV_PERF)",
+    )
+    inv_bootstrap.add_argument("investor_id", metavar="ID")
+    inv_bootstrap.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run bootstrap even if fee ledger already has HWM / flow baseline",
+    )
+    inv_bootstrap.add_argument("--json", action="store_true", help="Emit JSON")
+
+    inv_list = investor_sub.add_parser("list", help="List investors from registry and disk")
+    inv_list.add_argument("--json", action="store_true", help="Emit JSON")
+
+    inv_launchd = investor_sub.add_parser(
+        "render-launchd",
+        help="Write launchd plists to config/platform/generated/launchd/",
+    )
+    inv_launchd.add_argument("investor_id", metavar="ID")
+    inv_launchd.add_argument("--port", type=int, default=None, help="Override frontend port in plist")
+    inv_launchd.add_argument("--json", action="store_true", help="Emit JSON")
+
+    inv_frontend = investor_sub.add_parser(
+        "frontend",
+        help="Start/stop/restart/status all investor frontends via launchd (macOS)",
+    )
+    inv_frontend_sub = inv_frontend.add_subparsers(dest="frontend_command", required=True)
+    for action in ("start", "stop", "restart", "status"):
+        p = inv_frontend_sub.add_parser(action, help=f"{action} frontend LaunchAgent(s)")
+        p.add_argument(
+            "--investor",
+            metavar="ID",
+            default=None,
+            help="Only this investor (default: all frontend_enabled in registry.toml)",
+        )
+        p.add_argument(
+            "--include-disabled",
+            action="store_true",
+            help="Include registry rows with frontend_enabled=false",
+        )
+        p.add_argument(
+            "--no-health",
+            action="store_true",
+            help="Skip local http://127.0.0.1:<port>/api/health probe",
+        )
+        p.add_argument("--json", action="store_true", help="Emit JSON")
+
+    inv_live = investor_sub.add_parser(
+        "live",
+        help="Start/stop/restart/status all investor live bots via launchd (macOS)",
+    )
+    inv_live_sub = inv_live.add_subparsers(dest="live_command", required=True)
+    for action in ("start", "stop", "restart", "status"):
+        p = inv_live_sub.add_parser(action, help=f"{action} live LaunchAgent(s)")
+        p.add_argument(
+            "--investor",
+            metavar="ID",
+            default=None,
+            help="Only this investor (default: all live_enabled in registry.toml)",
+        )
+        p.add_argument(
+            "--include-disabled",
+            action="store_true",
+            help="Include registry rows with live_enabled=false",
+        )
+        p.add_argument(
+            "--no-supervisor-check",
+            action="store_true",
+            help="Skip waiting for logs/live/<id>/supervisor.log started pid=",
+        )
+        p.add_argument("--json", action="store_true", help="Emit JSON")
+
     args = parser.parse_args(argv)
     if getattr(args, "env_file_after_cmd", None) is not None:
         args.env_file = args.env_file_after_cmd
     _apply_investor_cli_args(args)
     configure_logging(args.verbose)
+    if args.command == "investor":
+        from .investor_ops import (
+            bootstrap_initial_hwm,
+            import_handoff,
+            investor_init,
+            list_investors,
+            parse_strategy_slugs,
+            render_launchd_plists,
+            validate_investor,
+        )
+
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+
+        if args.investor_command == "init":
+            strategies = parse_strategy_slugs(args.strategies)
+            result = investor_init(
+                args.investor_id,
+                strategies=strategies,
+                display_name=args.display_name,
+                dashboard_email=args.email,
+                deribit_env=args.deribit_env,
+                register=not args.no_register,
+                repo_root=repo_root,
+            )
+            payload = {
+                "action": "investor-init",
+                "investor_id": result.investor_id,
+                "investor_dir": str(result.investor_dir),
+                "strategies": list(result.strategies),
+                "frontend_port": result.frontend_port,
+                "launchd_paths": [str(path) for path in result.launchd_paths],
+                "next_steps": [
+                    f"Fill secrets: ./bot investor import-handoff config/handoff/<id>.toml",
+                    f"Validate + initial HWM: ./bot investor validate {result.investor_id}",
+                    "Install launchd: see docs/operator-onboarding-zh-TW.md",
+                ],
+            }
+            render(payload, args.json)
+            return 0 if result.investor_id else 1
+
+        if args.investor_command == "import-handoff":
+            outcome = import_handoff(
+                Path(args.handoff_file),
+                investor_id=args.investor,
+                repo_root=repo_root,
+            )
+            render({"action": "investor-import-handoff", **outcome}, args.json)
+            return 0
+
+        if args.investor_command == "validate":
+            result = validate_investor(
+                args.investor_id,
+                check_api=not args.no_api,
+                bootstrap_hwm=not args.no_bootstrap_hwm,
+                repo_root=repo_root,
+            )
+            payload = {
+                "action": "investor-validate",
+                "investor_id": result.investor_id,
+                "ok": result.ok,
+                "issues": [
+                    {"level": issue.level, "code": issue.code, "message": issue.message}
+                    for issue in result.issues
+                ],
+                "api_checks": list(result.api_checks),
+                "hwm_bootstrap": result.hwm_bootstrap,
+            }
+            render(payload, args.json)
+            return 0 if result.ok else 1
+
+        if args.investor_command == "bootstrap-hwm":
+            outcome = bootstrap_initial_hwm(
+                args.investor_id,
+                repo_root=repo_root,
+                force=args.force,
+            )
+            render({"action": "investor-bootstrap-hwm", **outcome}, args.json)
+            return 0
+
+        if args.investor_command == "list":
+            rows = list_investors(repo_root=repo_root)
+            render({"action": "investor-list", "investors": rows}, args.json)
+            return 0
+
+        if args.investor_command == "render-launchd":
+            from .investor_registry import load_platform_registry
+
+            registry = load_platform_registry(repo_root=repo_root)
+            paths = render_launchd_plists(
+                args.investor_id,
+                repo_root=repo_root,
+                registry=registry,
+                frontend_port=args.port,
+            )
+            render(
+                {
+                    "action": "investor-render-launchd",
+                    "investor_id": args.investor_id,
+                    "paths": [str(path) for path in paths],
+                },
+                args.json,
+            )
+            return 0
+
+        if args.investor_command == "frontend":
+            from .investor_frontend_launchd import manage_frontend_launchd
+
+            results = manage_frontend_launchd(
+                args.frontend_command,
+                repo_root=repo_root,
+                investor_id=args.investor,
+                include_disabled=args.include_disabled,
+                check_health=not args.no_health,
+            )
+            payload = {
+                "action": f"investor-frontend-{args.frontend_command}",
+                "results": [row.to_dict() for row in results],
+            }
+            render(payload, args.json)
+            if not args.json:
+                for row in results:
+                    port = row.frontend_port if row.frontend_port is not None else "?"
+                    health = ""
+                    if row.health_ok is not None:
+                        health = " health=" + ("ok" if row.health_ok else "fail")
+                    mark = "ok" if row.ok else "FAIL"
+                    print(
+                        f"[{mark}] {row.investor_id} :{port} "
+                        f"{row.state} — {row.message}{health}"
+                    )
+            return 0 if all(row.ok for row in results) else 1
+
+        if args.investor_command == "live":
+            from .investor_live_launchd import manage_live_launchd
+
+            results = manage_live_launchd(
+                args.live_command,
+                repo_root=repo_root,
+                investor_id=args.investor,
+                include_disabled=args.include_disabled,
+                check_supervisor=not args.no_supervisor_check,
+            )
+            payload = {
+                "action": f"investor-live-{args.live_command}",
+                "results": [row.to_dict() for row in results],
+            }
+            render(payload, args.json)
+            if not args.json:
+                for row in results:
+                    supervisor = ""
+                    if row.supervisor_ok is not None:
+                        supervisor = " supervisor=" + ("ok" if row.supervisor_ok else "fail")
+                    mark = "ok" if row.ok else "FAIL"
+                    print(f"[{mark}] {row.investor_id} {row.state} — {row.message}{supervisor}")
+            return 0 if all(row.ok for row in results) else 1
+
+        raise SystemExit(2)
+
     if args.command == "backfill-trade-journal":
         from .trade_journal_backfill import backfill_account, backfill_investor
 
@@ -373,6 +822,206 @@ def main(argv: list[str] | None = None) -> int:
         summary = backfill_account(Path(args.env_file), **kwargs)
         render({"action": "backfill-trade-journal", **summary.to_dict()}, args.json)
         return 0
+    if args.command == "fee-snapshot":
+        from .investor_nav_snapshot import capture_investor_nav, store_nav_capture
+
+        if not args.investor:
+            raise SystemExit("fee-snapshot requires --investor <ID>")
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+        capture = capture_investor_nav(args.investor, repo_root=repo_root)
+        row_id, bootstrap = store_nav_capture(
+            capture,
+            repo_root=repo_root,
+            snapshot_kind=args.kind,
+            notes=args.notes,
+            bootstrap_hwm=not args.no_bootstrap,
+            force_bootstrap=bool(args.force_bootstrap),
+        )
+        payload = {
+            "action": "fee-snapshot",
+            "snapshot_id": row_id,
+            "investor_id": capture.investor_id,
+            "ts_ms": capture.ts_ms,
+            "total_equity_usdc": str(capture.total_equity_usdc),
+            "collateral_spot_usdc": str(capture.collateral_spot_usdc),
+            "nav_perf": str(capture.nav_perf),
+            "aum_mgmt": str(capture.aum_mgmt),
+            "index_btc_usd": str(capture.index_btc_usd),
+            "index_eth_usd": str(capture.index_eth_usd),
+            "equity_by_book": {k: str(v) for k, v in capture.equity_by_book.items()},
+            "hwm_bootstrap": bootstrap,
+        }
+        if isinstance(bootstrap, dict) and bootstrap.get("report_path"):
+            payload["report_path"] = bootstrap["report_path"]
+            if bootstrap.get("report_markdown_path"):
+                payload["report_markdown_path"] = bootstrap["report_markdown_path"]
+        render(payload, args.json)
+        return 0
+    if args.command == "fee-settle":
+        from .investor_nav_snapshot import settle_quarter
+
+        if not args.investor:
+            raise SystemExit("fee-settle requires --investor <ID>")
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+        result = settle_quarter(
+            args.investor,
+            args.period,
+            net_flow_usdc=to_decimal(args.net_flow_usdc),
+            repo_root=repo_root,
+            force=bool(args.force),
+        )
+        render({"action": "fee-settle", **result}, args.json)
+        return 0
+    if args.command == "fee-settle-period":
+        from .investor_nav_snapshot import parse_fee_timestamp, settle_period
+
+        if not args.investor:
+            raise SystemExit("fee-settle-period requires --investor <ID>")
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+        end_ms = parse_fee_timestamp(args.to, boundary="end")
+        start_ms = (
+            parse_fee_timestamp(args.from_ts, boundary="start") if args.from_ts else None
+        )
+        net_flow = (
+            to_decimal(args.net_flow_usdc) if args.net_flow_usdc is not None else None
+        )
+        write_pdf = args.format in {"both", "all", "pdf"}
+        write_md = args.format in {"both", "all", "md"}
+        write_csv = args.format in {"all", "csv"}
+        result = settle_period(
+            args.investor,
+            end_ms=end_ms,
+            start_ms=start_ms,
+            net_flow_usdc=net_flow,
+            repo_root=repo_root,
+            persist=not args.no_persist,
+            force=bool(args.force),
+            write_report=False,
+        )
+        payload: dict[str, Any] = {"action": "fee-settle-period", **result}
+        if not args.no_report:
+            from .investor_fee_report import write_settlement_fee_report
+
+            period_flow_lines = result.pop("period_flow_lines", None)
+            report_out = write_settlement_fee_report(
+                args.investor,
+                result["period"],
+                repo_root=repo_root,
+                settlement_payload=result,
+                period_flow_lines=period_flow_lines,
+                write_pdf=write_pdf,
+                write_markdown=write_md,
+                write_csv=write_csv,
+            )
+            payload["report_path"] = str(report_out.primary)
+            if report_out.pdf is not None:
+                payload["report_pdf_path"] = str(report_out.pdf)
+            if report_out.markdown is not None:
+                payload["report_markdown_path"] = str(report_out.markdown)
+            if report_out.flows_csv is not None:
+                payload["report_flows_csv_path"] = str(report_out.flows_csv)
+            if report_out.summary_csv is not None:
+                payload["report_summary_csv_path"] = str(report_out.summary_csv)
+            if report_out.trades_csv is not None:
+                payload["report_trades_csv_path"] = str(report_out.trades_csv)
+        render(payload, args.json)
+        return 0
+    if args.command == "fee-status":
+        from .investor_nav_snapshot import fee_status
+
+        if not args.investor:
+            raise SystemExit("fee-status requires --investor <ID>")
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+        render({"action": "fee-status", **fee_status(args.investor, repo_root=repo_root)}, args.json)
+        return 0
+    if args.command == "fee-flow-report":
+        from .investor_cash_flow import fetch_cumulative_net_flow_usdc, flow_report_dict
+        from .investor_nav_snapshot import capture_investor_nav
+
+        if not args.investor:
+            raise SystemExit("fee-flow-report requires --investor <ID>")
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+        manifest = load_investor_manifest(args.investor, repo_root=repo_root)
+        capture = capture_investor_nav(args.investor, repo_root=repo_root)
+        index_by_ccy = {
+            "BTC": capture.index_btc_usd,
+            "ETH": capture.index_eth_usd,
+            "USDC": to_decimal("1"),
+        }
+        flow = fetch_cumulative_net_flow_usdc(
+            manifest.root,
+            repo_root=repo_root,
+            index_by_ccy=index_by_ccy,
+        )
+        render(
+            {
+                "action": "fee-flow-report",
+                "investor_id": manifest.investor_id,
+                **flow_report_dict(flow, index_by_ccy=index_by_ccy),
+            },
+            args.json,
+        )
+        return 0
+    if args.command == "fee-report":
+        from .investor_fee_report import write_initial_fee_report, write_settlement_fee_report
+
+        if not args.investor:
+            raise SystemExit("fee-report requires --investor <ID>")
+        if args.kind == "settlement" and not args.period:
+            raise SystemExit("fee-report --kind settlement requires --period YYYY-QN")
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+        output = Path(args.output) if args.output else None
+        write_pdf = args.format in {"both", "all", "pdf"}
+        write_md = args.format in {"both", "all", "md"}
+        write_csv = args.format in {"all", "csv"}
+        if args.kind == "initial":
+            out = write_initial_fee_report(
+                args.investor,
+                repo_root=repo_root,
+                output_path=output,
+                write_pdf=write_pdf,
+                write_markdown=write_md,
+                write_csv=write_csv,
+            )
+        else:
+            out = write_settlement_fee_report(
+                args.investor,
+                args.period,
+                repo_root=repo_root,
+                output_path=output,
+                write_pdf=write_pdf,
+                write_markdown=write_md,
+                write_csv=write_csv,
+            )
+        payload = {
+            "action": "fee-report",
+            "kind": args.kind,
+            "report_path": str(out.primary),
+        }
+        if out.pdf is not None:
+            payload["report_pdf_path"] = str(out.pdf)
+        if out.markdown is not None:
+            payload["report_markdown_path"] = str(out.markdown)
+        if out.flows_csv is not None:
+            payload["report_flows_csv_path"] = str(out.flows_csv)
+        if out.summary_csv is not None:
+            payload["report_summary_csv_path"] = str(out.summary_csv)
+        if out.trades_csv is not None:
+            payload["report_trades_csv_path"] = str(out.trades_csv)
+        render(payload, args.json)
+        return 0
     if args.command == "frontend":
         from .frontend_server import serve as serve_frontend
 
@@ -385,6 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
             snapshot_interval_sec=args.snapshot_interval_sec,
             investor_portal=bool(getattr(args, "investor_portal", False)),
             log_level=args.log_level,
+            skipped_accounts=getattr(args, "investor_skipped_accounts", None),
         )
         return 0
     if args.command == "user-trades":

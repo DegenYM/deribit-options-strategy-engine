@@ -19,6 +19,7 @@ import re
 import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -26,12 +27,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .client import DeribitClient
-from .config import BotConfig, load_config
+from .config import BotConfig, has_private_creds_config, load_config
 from .env_layout import (
     account_slug_from_env_path,
     find_repo_root,
     investor_frontend_ledger_dir,
     investor_metrics_db_path,
+    load_investor_manifest,
     resolve_investor_scope,
 )
 from .current_stress import compute_current_stress
@@ -43,9 +45,10 @@ from .metrics_store import MetricsStore, fingerprint_from_cache_key, performance
 from .realized_summary import realized_summary_from_closed
 from .trade_journal import TradeJournalStore, journal_db_path_for_state, scope_key_for_state
 from .trade_journal_backfill import sync_incremental_journal
+from .models import is_phantom_reconcile_close, open_short_instrument_names
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
-from .fees import annualized_return
-from .utils import format_decimal, json_default, to_decimal, utc_now, utc_now_ms
+from .trade_apr import entry_dte_days_at_open, realized_apr_from_close
+from .utils import format_decimal, json_default, parse_option_name, to_decimal, utc_now, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
 
@@ -55,17 +58,104 @@ _active_metrics_db_path: Path | None = None
 DEFAULT_SNAPSHOT_INTERVAL_SEC = 300
 DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC = 300
 STATUS_CACHE_TTL_SEC = 15
+DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC = 60
 REPORT_CACHE_TTL_SEC = 15
 GROUPS_CACHE_TTL_SEC = 15
 SPOT_CACHE_TTL_SEC = 10
 SERIES_CACHE_TTL_SEC = 30
 ROLLING_APR_MAX_CHART_DAYS = 730
 STRATEGY_DISPLAY_ORDER = ("covered_call", "naked_short", "bull_put_spread")
+_INSTRUMENT_CONTRACT_SIZE_CACHE: dict[str, Decimal] = {}
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _group_collateral_currency(group: dict[str, Any]) -> str:
+    name = str(group.get("short_instrument_name") or "")
+    coll = str(group.get("collateral_currency") or "").upper()
+    if coll in ("BTC", "ETH", "USDC"):
+        return coll
+    if "_USDC-" in name:
+        return "USDC"
+    if name.startswith("BTC-"):
+        return "BTC"
+    if name.startswith("ETH-"):
+        return "ETH"
+    return str(group.get("currency") or "USDC").upper()
+
+
+def _group_strike(group: dict[str, Any]) -> Decimal:
+    strike = _dec(group.get("short_strike"))
+    if strike > 0:
+        return strike
+    parsed = parse_option_name(str(group.get("short_instrument_name") or ""))
+    if parsed:
+        return to_decimal(parsed.get("strike"))
+    return Decimal("0")
+
+
+def _group_option_type(group: dict[str, Any]) -> str:
+    opt = str(group.get("option_type") or "").lower()
+    if opt in ("call", "put"):
+        return opt
+    parsed = parse_option_name(str(group.get("short_instrument_name") or ""))
+    if parsed:
+        return str(parsed.get("option_type") or "put")
+    name = str(group.get("short_instrument_name") or "")
+    if name.endswith("-C"):
+        return "call"
+    return "put"
+
+
+def _group_index_usd_for_apr(group: dict[str, Any], index_usd: dict[str, Decimal]) -> Decimal:
+    coll = _group_collateral_currency(group)
+    if coll == "USDC":
+        if _group_option_type(group) == "call":
+            underlying = str(group.get("currency") or "BTC").upper()
+            spot = index_usd.get(underlying)
+            if spot is not None and spot > Decimal("100"):
+                return spot
+            for key in ("close_index_usd", "entry_index_usd"):
+                val = _dec(group.get(key))
+                if val > Decimal("100"):
+                    return val
+            strike = _dec(group.get("short_strike"))
+            if strike > Decimal("100"):
+                return strike
+            return Decimal("0")
+        return Decimal("0")
+    idx = index_usd.get(coll) or _dec(group.get("close_index_usd")) or _dec(group.get("entry_index_usd")) or Decimal("0")
+    return idx
+
+
+def _contract_size_for_instrument(
+    instrument_name: str,
+    *,
+    bot: DeribitOptionTrialBot,
+    prefetch: ExchangePrefetch | None = None,
+) -> Decimal:
+    if not instrument_name:
+        return Decimal("1")
+    cached = _INSTRUMENT_CONTRACT_SIZE_CACHE.get(instrument_name)
+    if cached is not None and cached > 0:
+        return cached
+    if prefetch is not None:
+        for markets in prefetch.markets_by_currency.values():
+            for inst in markets:
+                if inst.instrument_name == instrument_name and inst.contract_size > 0:
+                    _INSTRUMENT_CONTRACT_SIZE_CACHE[instrument_name] = inst.contract_size
+                    return inst.contract_size
+        future = prefetch.future_markets_by_name.get(instrument_name)
+        if future is not None and future.contract_size > 0:
+            _INSTRUMENT_CONTRACT_SIZE_CACHE[instrument_name] = future.contract_size
+            return future.contract_size
+    cs = bot._option_contract_size(instrument_name)
+    if cs > 0:
+        _INSTRUMENT_CONTRACT_SIZE_CACHE[instrument_name] = cs
+    return cs if cs > 0 else Decimal("1")
 
 
 def _decimalize(value: Any) -> Any:
@@ -74,7 +164,7 @@ def _decimalize(value: Any) -> Any:
 
 
 def _has_private_creds(config: BotConfig) -> bool:
-    return bool(config.client_id and config.client_secret)
+    return has_private_creds_config(config)
 
 
 def _live_api_identity_config(config: BotConfig, label: str) -> str:
@@ -255,6 +345,103 @@ def _append_ledger(root: Path, row: dict[str, Any]) -> None:
     line = json.dumps(row, default=json_default, ensure_ascii=False)
     with path.open("a", encoding="utf-8") as fp:
         fp.write(line + "\n")
+
+
+def _latest_ledger_row(root: Path) -> dict[str, Any] | None:
+    rows = _read_ledger(root)
+    return rows[-1] if rows else None
+
+
+def _latest_ledger_snapshot(
+    accounts: list[DashboardAccount],
+    *,
+    scheduler_states: list[SnapshotState] | None = None,
+    snapshot_interval_sec: int = DEFAULT_SNAPSHOT_INTERVAL_SEC,
+) -> dict[str, Any]:
+    """Aggregate last on-disk equity rows (no Deribit). De-dupe shared API identities."""
+    now_ms = utc_now_ms()
+    account_entries: list[dict[str, Any]] = []
+    seen_identity: set[str] = set()
+    included_rows: list[dict[str, Any]] = []
+
+    for account in accounts:
+        row = _latest_ledger_row(account.ledger_root)
+        if row is None:
+            continue
+        ts = int(row.get("ts_ms") or 0)
+        account_entries.append(
+            {
+                "name": account.name,
+                "env": row.get("env") or account.config.env,
+                "option_strategy": row.get("option_strategy") or account.config.option_strategy,
+                "ts_ms": ts,
+                "ledger_dir": str(account.ledger_root),
+            }
+        )
+        identity = _live_api_identity(account)
+        if identity in seen_identity:
+            continue
+        seen_identity.add(identity)
+        included_rows.append(row)
+
+    scheduler_info: dict[str, Any] = {}
+    if scheduler_states is not None:
+        last_attempts = [s.last_attempt_ms for s in scheduler_states if s.last_attempt_ms is not None]
+        last_successes = [s.last_success_ms for s in scheduler_states if s.last_success_ms is not None]
+        scheduler_info = {
+            "last_attempt_ms": max(last_attempts, default=None),
+            "last_success_ms": max(last_successes, default=None),
+            "interval_sec": snapshot_interval_sec,
+        }
+
+    if not account_entries:
+        return {
+            "source": "none",
+            "snapshot_ts_ms": None,
+            "freshness_ms": None,
+            "portfolio": {},
+            "accounts": [],
+            "scheduler": scheduler_info,
+        }
+
+    min_ts = min(int(r.get("ts_ms") or 0) for r in included_rows)
+    total_equity = sum((_dec(r.get("total_equity_usdc")) for r in included_rows), Decimal("0"))
+    day_start = sum((_dec(r.get("day_start_equity_usdc")) for r in included_rows), Decimal("0"))
+    day_net_flow = sum((_dec(r.get("day_net_flow_usdc")) for r in included_rows), Decimal("0"))
+    day_pnl = sum((_dec(r.get("day_pnl_usdc_ex_flow")) for r in included_rows), Decimal("0"))
+    day_pnl_ex_spot = sum((_dec(r.get("day_pnl_usdc_ex_flow_ex_spot")) for r in included_rows), Decimal("0"))
+    open_max_loss = sum((_dec(r.get("open_max_loss_usdc")) for r in included_rows), Decimal("0"))
+    equity_by_book: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    day_start_by_book: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    day_pnl_by_book: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    for row in included_rows:
+        for book, val in (row.get("equity_by_book") or {}).items():
+            equity_by_book[str(book).upper()] += _dec(val)
+        for book, val in (row.get("day_start_equity_by_book") or {}).items():
+            day_start_by_book[str(book).upper()] += _dec(val)
+        for book, val in (row.get("day_pnl_usdc_ex_flow_by_book") or {}).items():
+            day_pnl_by_book[str(book).upper()] += _dec(val)
+    drawdown_pct = max((_dec(r.get("day_drawdown_pct")) for r in included_rows), default=Decimal("0"))
+
+    return {
+        "source": "ledger",
+        "snapshot_ts_ms": min_ts,
+        "freshness_ms": max(0, now_ms - min_ts) if min_ts > 0 else None,
+        "portfolio": {
+            "total_equity_usdc": str(total_equity),
+            "day_start_equity_usdc": str(day_start),
+            "day_net_flow_usdc": str(day_net_flow),
+            "day_pnl_usdc_ex_flow": str(day_pnl),
+            "day_pnl_usdc_ex_flow_ex_spot": str(day_pnl_ex_spot),
+            "day_drawdown_pct": str(drawdown_pct),
+            "open_max_loss": str(open_max_loss),
+            "equity_by_book": {k: str(v) for k, v in sorted(equity_by_book.items())},
+            "day_start_equity_by_book": {k: str(v) for k, v in sorted(day_start_by_book.items())},
+            "day_pnl_usdc_ex_flow_by_book": {k: str(v) for k, v in sorted(day_pnl_by_book.items())},
+        },
+        "accounts": account_entries,
+        "scheduler": scheduler_info,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +791,24 @@ class _TtlCache:
             if done is not None:
                 done.set()
 
+    def try_get(self, key: Any) -> Any | None:
+        """Return cached value when present and fresh; otherwise ``None``."""
+        now = time.monotonic()
+        with self._lock:
+            cached = self._store.get(key)
+            if cached is not None and (now - cached[0]) < self._ttl:
+                return cached[1]
+        return None
+
+    def cache_age_ms(self, key: Any) -> int | None:
+        """Milliseconds since ``key`` was last stored (including fresh computes)."""
+        now = time.monotonic()
+        with self._lock:
+            cached = self._store.get(key)
+            if cached is None:
+                return None
+            return int((now - cached[0]) * 1000)
+
 
 # ---------------------------------------------------------------------------
 # Domain helpers (closed-group → time series)
@@ -683,11 +888,14 @@ def _load_closed_groups_payload(
     store = StrategyStateStore(state_path)
     state = store.load()
     excluded_group_ids = load_performance_exclusion_group_ids(state_path)
+    open_short_names = open_short_instrument_names(state.groups)
     open_groups = [g.to_dict() for g in state.groups if g.status != "closed"]
     all_closed_groups = [g for g in state.groups if g.status == "closed"]
     closed_groups = []
     for g in all_closed_groups:
         if g.group_id in excluded_group_ids:
+            continue
+        if is_phantom_reconcile_close(g, open_short_names=open_short_names):
             continue
         book = (g.collateral_currency or g.currency or "").upper()
         spot = (spot_index or {}).get(book)
@@ -735,51 +943,87 @@ def _closed_groups_payload(
 
 
 def _entry_dte_days_at_open(group: dict[str, Any]) -> Decimal:
-    entry_ms = int(group.get("entry_timestamp_ms") or 0)
-    exp_ms = int(group.get("expiration_timestamp_ms") or 0)
-    if entry_ms <= 0 or exp_ms <= entry_ms:
-        return Decimal("0")
-    return Decimal(str(exp_ms - entry_ms)) / Decimal("86400000")
+    return entry_dte_days_at_open(
+        entry_timestamp_ms=int(group.get("entry_timestamp_ms") or 0),
+        expiration_timestamp_ms=int(group.get("expiration_timestamp_ms") or 0),
+    )
 
 
 def _ensure_entry_net_apr(
     group: dict[str, Any],
     *,
-    equity_by_book: dict[str, Decimal],
+    config: BotConfig,
     index_usd: dict[str, Decimal],
+    contract_size: Decimal = Decimal("1"),
 ) -> None:
-    if _dec(group.get("entry_net_apr")) > 0:
-        return
-    credit_usdc = _dec(group.get("entry_credit"))
+    from .models import TradeGroup
+
     dte = _entry_dte_days_at_open(group)
-    name = str(group.get("short_instrument_name") or "")
-    coll = str(group.get("collateral_currency") or "").upper()
-    if coll not in ("BTC", "ETH", "USDC"):
-        if "_USDC-" in name:
-            coll = "USDC"
-        elif name.startswith("BTC-"):
-            coll = "BTC"
-        elif name.startswith("ETH-"):
-            coll = "ETH"
-        else:
-            coll = str(group.get("currency") or "USDC").upper()
-    snap_equity = _dec(group.get("entry_book_equity"))
-    equity = snap_equity if snap_equity > 0 else (equity_by_book.get(coll) or Decimal("0"))
-    if credit_usdc <= 0 or dte <= 0 or equity <= 0:
-        group["entry_net_apr"] = format_decimal(Decimal("0"), 8)
+    if dte <= 0:
         return
-    if coll == "USDC":
-        net_credit = credit_usdc
-        capital = equity
-    else:
-        idx = index_usd.get(coll) or Decimal("0")
-        if idx <= 0:
+    coll = _group_collateral_currency(group)
+    idx = _group_index_usd_for_apr(group, index_usd)
+    if coll != "USDC" and idx <= 0:
+        if _dec(group.get("entry_net_apr")) <= 0:
             group["entry_net_apr"] = format_decimal(Decimal("0"), 8)
-            return
-        net_credit = credit_usdc / idx
-        capital = equity
-    apr = annualized_return(net_credit=net_credit, capital_base=capital, dte_days=dte)
+        return
+    strike = _group_strike(group)
+    if strike > 0 and _dec(group.get("short_strike")) <= 0:
+        group["short_strike"] = format_decimal(strike, 8)
+
+    tg = TradeGroup.from_dict(group)
+    if tg.entry_index_usd <= 0 and idx > 0:
+        tg.entry_index_usd = idx
+    apr = tg.entry_net_apr_at_open(contract_size=contract_size)
+    if apr <= 0:
+        if _dec(group.get("entry_net_apr")) <= 0:
+            group["entry_net_apr"] = format_decimal(Decimal("0"), 8)
+        return
     group["entry_net_apr"] = format_decimal(apr, 8)
+
+
+def _ensure_realized_apr_on_equity(
+    group: dict[str, Any],
+    *,
+    index_usd: dict[str, Decimal],
+    contract_size: Decimal = Decimal("1"),
+) -> None:
+    closed_ms = int(group.get("closed_timestamp_ms") or 0)
+    entry_ms = int(group.get("entry_timestamp_ms") or 0)
+    if closed_ms <= entry_ms:
+        return
+    coll = _group_collateral_currency(group)
+    pnl_native = _dec(group.get("realized_pnl_collateral_native"))
+    if pnl_native == 0 and coll == "USDC":
+        pnl_native = _dec(group.get("realized_pnl"))
+    elif pnl_native == 0:
+        idx = index_usd.get(coll) or _dec(group.get("close_index_usd")) or Decimal("0")
+        pnl_usdc = _dec(group.get("realized_pnl"))
+        if idx > 0 and pnl_usdc != 0:
+            pnl_native = pnl_usdc / idx
+    if pnl_native == 0:
+        return
+    idx = _group_index_usd_for_apr(group, index_usd)
+    strike = _group_strike(group)
+    if strike > 0 and _dec(group.get("short_strike")) <= 0:
+        group["short_strike"] = format_decimal(strike, 8)
+    apr = realized_apr_from_close(
+        strategy=str(group.get("strategy") or ""),
+        collateral_currency=coll,
+        option_type=_group_option_type(group),
+        quantity=_dec(group.get("quantity")) or Decimal("1"),
+        contract_size=contract_size,
+        strike=strike,
+        index_price_usd=idx,
+        estimated_im_collateral=_dec(group.get("estimated_im_collateral")),
+        covered_underlying_quantity=_dec(group.get("covered_underlying_quantity")),
+        pnl_collateral_native=pnl_native,
+        entry_timestamp_ms=entry_ms,
+        closed_timestamp_ms=closed_ms,
+    )
+    group["realized_apr_on_equity"] = format_decimal(apr, 8)
+    if not group.get("realized_annualized_return"):
+        group["realized_annualized_return"] = group["realized_apr_on_equity"]
 
 
 def _enrich_groups_payload_open_unrealized(
@@ -804,24 +1048,25 @@ def _enrich_groups_payload_open_unrealized(
             index_usd[sym] = idx
     index_usd["USDC"] = Decimal("1")
     payload["underlying_index_usd"] = underlying
-    if not open_rows:
-        return
-    equity_by_book: dict[str, Decimal] = {}
-    try:
-        summaries = (
-            exchange_prefetch.summaries
-            if exchange_prefetch is not None
-            else bot._account_summaries_by_currency()
+    closed_rows = payload.get("closed") or []
+
+    def _contract_size_for(instrument_name: str) -> Decimal:
+        return _contract_size_for_instrument(
+            instrument_name,
+            bot=bot,
+            prefetch=exchange_prefetch,
         )
-        for ccy, summary in summaries.items():
-            book = str(ccy).upper()
-            eq = to_decimal(summary.equity)
-            if eq > 0:
-                equity_by_book[book] = eq
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.debug("entry_net_apr equity lookup skipped: %s", exc)
+
     for g in open_rows:
-        _ensure_entry_net_apr(g, equity_by_book=equity_by_book, index_usd=index_usd)
+        instrument_name = str(g.get("short_instrument_name") or "")
+        cs = _contract_size_for(instrument_name)
+        g["contract_size"] = format_decimal(cs, 8)
+        _ensure_entry_net_apr(
+            g,
+            config=bot.config,
+            index_usd=index_usd,
+            contract_size=cs,
+        )
         ec = to_decimal(g.get("entry_credit"))
         cd = to_decimal(g.get("current_debit"))
         unrealized_usdc = ec - cd
@@ -837,6 +1082,13 @@ def _enrich_groups_payload_open_unrealized(
                 g["unrealized_coin_native"] = None
         else:
             g["unrealized_coin_native"] = None
+
+    for g in closed_rows:
+        instrument_name = str(g.get("short_instrument_name") or "")
+        cs = _contract_size_for(instrument_name)
+        g["contract_size"] = format_decimal(cs, 8)
+        _ensure_entry_net_apr(g, config=bot.config, index_usd=index_usd, contract_size=cs)
+        _ensure_realized_apr_on_equity(g, index_usd=index_usd, contract_size=cs)
 
 
 def _bucket_day_utc(ts_ms: int) -> str:
@@ -968,15 +1220,69 @@ def _cumulative_pnl_series(closed: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
 
+def _daily_equity_by_utc_day(accounts: list[DashboardAccount]) -> dict[date, Decimal]:
+    """Last snapshot per UTC day per account, summed across dashboard accounts."""
+    last_by_day_account: dict[tuple[date, str], tuple[int, Decimal]] = {}
+    for account in accounts:
+        for row in _read_ledger(account.ledger_root):
+            ts = int(row.get("ts_ms") or 0)
+            if ts <= 0:
+                continue
+            equity = _dec(row.get("total_equity_usdc"))
+            if equity <= 0:
+                continue
+            day = datetime.fromtimestamp(ts / 1000, tz=UTC).date()
+            key = (day, account.name)
+            prev = last_by_day_account.get(key)
+            if prev is None or ts >= prev[0]:
+                last_by_day_account[key] = (ts, equity)
+    by_day: dict[date, Decimal] = defaultdict(lambda: Decimal("0"))
+    for (day, _account), (_ts, equity) in last_by_day_account.items():
+        by_day[day] += equity
+    return dict(by_day)
+
+
+def _equity_on_day(
+    equity_by_day: dict[date, Decimal],
+    day: date,
+    fallback: Decimal,
+) -> Decimal:
+    """Equity for APR denominator on ``day`` (carry backward within ledger, else fallback)."""
+    direct = equity_by_day.get(day)
+    if direct is not None and direct > 0:
+        return direct
+    prior_days = [d for d in equity_by_day if d <= day and equity_by_day[d] > 0]
+    if prior_days:
+        return equity_by_day[max(prior_days)]
+    return fallback if fallback > 0 else Decimal("0")
+
+
+def _ledger_equity_cache_key(accounts: list[DashboardAccount]) -> tuple[Any, ...]:
+    parts: list[Any] = []
+    for account in accounts:
+        for path in _iter_ledger_files(account.ledger_root):
+            try:
+                stat = path.stat()
+                parts.append((account.name, str(path), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                parts.append((account.name, str(path), 0, 0))
+    return tuple(parts)
+
+
 def _rolling_apr_from_daily_totals(
     pnl_by_day: dict[date, Decimal],
     *,
     window_days: int,
     effective_capital_usdc: Decimal,
+    equity_by_day: dict[date, Decimal] | None = None,
     max_chart_days: int = ROLLING_APR_MAX_CHART_DAYS,
 ) -> list[dict[str, Any]]:
-    """Rolling annualized APR sampled per UTC day (O(n) sliding window)."""
-    if effective_capital_usdc <= 0 or window_days < 1 or not pnl_by_day:
+    """Rolling annualized APR sampled per UTC day (O(n) sliding window).
+
+    Each sample divides by that day's total equity (from ledger snapshots) when
+    available, so a later deposit does not deflate earlier points on the chart.
+    """
+    if window_days < 1 or not pnl_by_day:
         return []
 
     first_day = min(pnl_by_day.keys())
@@ -990,7 +1296,7 @@ def _rolling_apr_from_daily_totals(
         chart_start = last_day - timedelta(days=max_chart_days - 1)
 
     sample_days = Decimal(str(window_days))
-    capital = effective_capital_usdc
+    equity_lookup = equity_by_day or {}
     rows: list[dict[str, Any]] = []
     cursor = chart_start
     window_pnl = Decimal("0")
@@ -1000,12 +1306,17 @@ def _rolling_apr_from_daily_totals(
         warm += timedelta(days=1)
 
     while True:
-        annualized = (window_pnl * Decimal("365") / sample_days) / capital
+        capital = _equity_on_day(equity_lookup, cursor, effective_capital_usdc)
+        if capital <= 0:
+            annualized = Decimal("0")
+        else:
+            annualized = (window_pnl * Decimal("365") / sample_days) / capital
         rows.append(
             {
                 "date": cursor.strftime("%Y-%m-%d"),
                 "apr": str(annualized),
                 "window_pnl_usdc": str(window_pnl),
+                "equity_usdc": str(capital),
             }
         )
         if cursor >= last_day:
@@ -1035,6 +1346,7 @@ def _rolling_apr_series(
         dict(pnl_by_day),
         window_days=window_days,
         effective_capital_usdc=effective_capital_usdc,
+        equity_by_day=None,
         max_chart_days=max_chart_days,
     )
 
@@ -1059,11 +1371,30 @@ def _rolling_apr_series_from_store(
     metrics = _ensure_daily_pnl_synced(accounts)
     scope_key = performance_scope_key(accounts)
     pnl_by_day = metrics.load_daily_totals(scope_key)
+    equity_by_day = _daily_equity_by_utc_day(accounts)
     return _rolling_apr_from_daily_totals(
         pnl_by_day,
         window_days=window_days,
         effective_capital_usdc=effective_capital_usdc,
+        equity_by_day=equity_by_day,
     )
+
+
+def _resolve_apr_effective_capital_usdc(
+    accounts: list[DashboardAccount],
+    *,
+    override: Decimal | None,
+    status_payload: dict[str, Any] | None,
+) -> Decimal:
+    """Match engine ``_effective_capital``: live equity when available, else reference."""
+    if override is not None and override > 0:
+        return override
+    if status_payload:
+        equity = _dec((status_payload.get("portfolio") or {}).get("total_equity_usdc"))
+        if equity > 0:
+            return equity
+    reference = sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
+    return reference if reference > 0 else Decimal("0")
 
 
 # ---------------------------------------------------------------------------
@@ -1090,6 +1421,38 @@ def _exchange_prefetch_for_account(
         return _bot_for_account(account, require_private=True).fetch_exchange_prefetch()
 
     return cache.get_or_set(key, _fetch)
+
+
+def _prefetch_all_accounts(
+    accounts: list[DashboardAccount],
+    *,
+    cache: _TtlCache,
+) -> dict[str, ExchangePrefetch | None]:
+    """One prefetch per unique Deribit API identity (shared across strategy rows)."""
+    prefetches: dict[str, ExchangePrefetch | None] = {}
+    for account in accounts:
+        if not _has_private_creds(account.config):
+            continue
+        key = _live_api_identity(account)
+        if key not in prefetches:
+            prefetches[key] = _exchange_prefetch_for_account(account, cache=cache)
+    return prefetches
+
+
+def _status_payload_for_account(
+    account: DashboardAccount,
+    *,
+    exchange_prefetch_cache: _TtlCache,
+    prefetches: dict[str, ExchangePrefetch | None] | None = None,
+) -> dict[str, Any]:
+    bot = _bot_for_account(account, require_private=True)
+    if prefetches is not None:
+        prefetch = prefetches.get(_live_api_identity(account))
+    else:
+        prefetch = _exchange_prefetch_for_account(account, cache=exchange_prefetch_cache)
+    if prefetch is not None:
+        return bot.status_with_exchange_prefetch(prefetch)
+    return bot.status()
 
 
 def _tag_row(row: dict[str, Any], account: DashboardAccount) -> dict[str, Any]:
@@ -1302,6 +1665,23 @@ def _aggregate_status(
     *,
     exchange_prefetch_cache: _TtlCache,
 ) -> dict[str, Any]:
+    prefetches = _prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
+    work = [account for account in accounts if _has_private_creds(account.config)]
+
+    def _fetch(account: DashboardAccount) -> tuple[DashboardAccount, dict[str, Any]]:
+        return account, _status_payload_for_account(
+            account,
+            exchange_prefetch_cache=exchange_prefetch_cache,
+            prefetches=prefetches,
+        )
+
+    if len(work) <= 1:
+        pairs = [_fetch(account) for account in work]
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(work), 4)) as pool:
+            pairs = list(pool.map(_fetch, work))
+
+    payload_by_name = {account.name: payload for account, payload in pairs}
     statuses: list[dict[str, Any]] = []
     trade_groups: list[dict[str, Any]] = []
     open_orders: list[dict[str, Any]] = []
@@ -1311,12 +1691,9 @@ def _aggregate_status(
     seen_balance_identity: set[str] = set()
 
     for account in accounts:
-        bot = _bot_for_account(account, require_private=True)
-        prefetch = _exchange_prefetch_for_account(account, cache=exchange_prefetch_cache)
-        if prefetch is not None:
-            payload = bot.status_with_exchange_prefetch(prefetch)
-        else:
-            payload = bot.status()
+        payload = payload_by_name.get(account.name)
+        if payload is None:
+            continue
         statuses.append(payload)
         for key, value in (payload.get("underlying_index_usd") or {}).items():
             if _dec(value) > 0:
@@ -1332,10 +1709,11 @@ def _aggregate_status(
                 for field, value in row.items():
                     account_summaries[book_key][field] += _dec(value)
 
-    equity_statuses = _dedupe_statuses_for_equity_aggregate(accounts, statuses)
+    active_accounts = [account for account in accounts if account.name in payload_by_name]
+    equity_statuses = _dedupe_statuses_for_equity_aggregate(active_accounts, statuses)
     return {
         "env": "multi" if len(accounts) > 1 else accounts[0].config.env,
-        "portfolio": _aggregate_portfolios(accounts, statuses, equity_statuses=equity_statuses),
+        "portfolio": _aggregate_portfolios(active_accounts, statuses, equity_statuses=equity_statuses),
         "underlying_index_usd": underlying_index_usd,
         "accounts": {book: dict(values) for book, values in sorted(account_summaries.items())},
         "trade_group_count": len(trade_groups),
@@ -1354,13 +1732,14 @@ def _aggregate_status(
         "account_statuses": [
             {
                 "name": account.name,
-                "env": status.get("env"),
+                "env": payload.get("env"),
                 "option_strategy": account.config.option_strategy,
-                "portfolio": status.get("portfolio"),
-                "accounts": status.get("accounts") or {},
-                "trade_group_count": status.get("trade_group_count"),
+                "portfolio": payload.get("portfolio"),
+                "accounts": payload.get("accounts") or {},
+                "trade_group_count": payload.get("trade_group_count"),
             }
-            for account, status in zip(accounts, statuses, strict=False)
+            for account in accounts
+            if (payload := payload_by_name.get(account.name)) is not None
         ],
     }
 
@@ -1392,6 +1771,8 @@ def _aggregate_realized_summary(
     *,
     days: int = 30,
     spot_index: dict[str, Decimal] | None = None,
+    status_payload: dict[str, Any] | None = None,
+    effective_capital_override: Decimal | None = None,
 ) -> dict[str, Any]:
     """Lightweight report summary from on-disk closed groups (no per-account bot.report())."""
     closed: list[dict[str, Any]] = []
@@ -1403,12 +1784,20 @@ def _aggregate_realized_summary(
         excluded += int(payload.get("performance_excluded_closed_group_count") or 0)
         open_count += len(payload.get("open") or [])
     closed = _dedupe_trade_group_rows(closed)
-    capital = sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
+    reference_capital = sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
+    equity_by_day = _daily_equity_by_utc_day(accounts)
+    fallback_capital = _resolve_apr_effective_capital_usdc(
+        accounts,
+        override=effective_capital_override,
+        status_payload=status_payload,
+    )
+    today = datetime.now(tz=UTC).date()
+    capital = _equity_on_day(equity_by_day, today, fallback_capital)
     target_num = sum(
         (account.config.target_portfolio_apr * account.config.reference_capital_usdc for account in accounts),
         Decimal("0"),
     )
-    target_apr = _ratio(target_num, capital)
+    target_apr = _ratio(target_num, reference_capital)
     summary = realized_summary_from_closed(
         closed,
         effective_capital_usdc=capital,
@@ -1450,15 +1839,14 @@ def _aggregate_groups(
     next_group_id: dict[str, Any] = {}
     excluded_closed_count = 0
 
+    prefetches = _prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
+
     for account in accounts:
         payload = copy.deepcopy(_closed_groups_payload(account.state_path, spot_index=spot_index))
         if _has_private_creds(account.config):
             try:
                 bot = _bot_for_account(account, require_private=True)
-                prefetch = _exchange_prefetch_for_account(
-                    account,
-                    cache=exchange_prefetch_cache,
-                )
+                prefetch = prefetches.get(_live_api_identity(account))
                 _enrich_groups_payload_open_unrealized(
                     bot,
                     payload,
@@ -1690,6 +2078,7 @@ def create_app(
     enable_scheduler: bool = True,
     snapshot_interval_sec: int | None = None,
     investor_portal: bool = False,
+    skipped_accounts: tuple[dict[str, str], ...] | None = None,
 ) -> "Any":
     """Build the FastAPI application.
 
@@ -1714,7 +2103,19 @@ def create_app(
     )
     env_paths = tuple(account.env_file for account in accounts)
     metrics_db_path = _configure_metrics_db(env_paths)
-    dashboard_investor_id = resolve_investor_scope(env_paths, repo_root=find_repo_root(env_paths[0]))
+    repo_root = find_repo_root(env_paths[0])
+    dashboard_investor_id = resolve_investor_scope(env_paths, repo_root=repo_root)
+    dashboard_investor_display_name: str | None = None
+    if dashboard_investor_id:
+        if repo_root is not None:
+            try:
+                dashboard_investor_display_name = load_investor_manifest(
+                    dashboard_investor_id, repo_root=repo_root
+                ).display_name
+            except ConfigurationError:
+                dashboard_investor_display_name = dashboard_investor_id
+        else:
+            dashboard_investor_display_name = dashboard_investor_id
     config_public = accounts[0].config
     multi_account = len(accounts) > 1
     interval = int(
@@ -1731,10 +2132,17 @@ def create_app(
     state_path = accounts[0].state_path
     ledger_root = accounts[0].ledger_root if not multi_account else accounts[0].ledger_root.parent
 
-    status_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
+    investor_status_ttl = int(
+        os.environ.get(
+            "FRONTEND_INVESTOR_STATUS_CACHE_TTL_SEC",
+            DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC,
+        )
+    )
+    status_ttl = investor_status_ttl if investor_portal else STATUS_CACHE_TTL_SEC
+    status_cache = _TtlCache(status_ttl)
     report_cache = _TtlCache(REPORT_CACHE_TTL_SEC)
     groups_cache = _TtlCache(GROUPS_CACHE_TTL_SEC)
-    exchange_prefetch_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
+    exchange_prefetch_cache = _TtlCache(status_ttl)
     spot_cache = _TtlCache(SPOT_CACHE_TTL_SEC)
     stress_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
     series_cache = _TtlCache(SERIES_CACHE_TTL_SEC)
@@ -1806,7 +2214,7 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        all_have_creds = all(_has_private_creds(account.config) for account in accounts)
+        any_have_creds = any(_has_private_creds(account.config) for account in accounts)
         any_scheduler_running = any(scheduler.state.running for scheduler in background_schedulers)
         last_attempts = [
             s.state.last_attempt_ms for s in equity_schedulers if s.state.last_attempt_ms is not None
@@ -1821,7 +2229,8 @@ def create_app(
         ]
         return {
             "env": "multi" if multi_account else config_public.env,
-            "has_private_creds": all_have_creds,
+            "has_private_creds": any_have_creds,
+            "skipped_accounts": list(skipped_accounts or ()),
             "scheduler_running": any_scheduler_running,
             "snapshot_interval_sec": interval,
             "last_snapshot_attempt_ms": max(last_attempts, default=None),
@@ -1836,6 +2245,7 @@ def create_app(
             "state_file": str(state_path) if not multi_account else "multi",
             "ledger_dir": str(ledger_root),
             "investor_id": dashboard_investor_id,
+            "investor_display_name": dashboard_investor_display_name,
             "metrics_db": str(metrics_db_path),
             "managed_currencies": list(config_public.managed_currencies),
             "traded_collaterals": list(config_public.traded_collaterals),
@@ -1866,6 +2276,18 @@ def create_app(
             "server_time_ms": utc_now_ms(),
         }
 
+    @app.get("/api/portfolio/snapshot")
+    def api_portfolio_snapshot() -> Any:
+        """Last on-disk equity snapshot (no Deribit); for fast investor first paint."""
+        payload = _latest_ledger_snapshot(
+            accounts,
+            scheduler_states=[s.state for s in equity_schedulers],
+            snapshot_interval_sec=interval,
+        )
+        if payload.get("source") == "none":
+            return JSONResponse(_decimalize(payload), status_code=200)
+        return JSONResponse(_decimalize(payload))
+
     def _locked_aggregate_status() -> dict[str, Any]:
         with _heavy_portfolio_lock:
             return _aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
@@ -1876,18 +2298,22 @@ def create_app(
 
     @app.get("/api/status")
     def api_status() -> Any:
-        if not all(_has_private_creds(account.config) for account in accounts):
+        if not any(_has_private_creds(account.config) for account in accounts):
             raise HTTPException(status_code=401, detail="DERIBIT_CLIENT_ID/SECRET not set in env")
         try:
             payload = status_cache.get_or_set("status", _locked_aggregate_status)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("dashboard /api/status aggregate failed: %s", exc, exc_info=True)
             raise HTTPException(status_code=502, detail=f"status failed: {exc}") from exc
-        return JSONResponse(_decimalize(payload))
+        headers: dict[str, str] = {}
+        age_ms = status_cache.cache_age_ms("status")
+        if age_ms is not None:
+            headers["X-Cache-Age-Ms"] = str(age_ms)
+        return JSONResponse(_decimalize(payload), headers=headers)
 
     @app.get("/api/report")
     def api_report(days: int = Query(default=30, ge=0, le=3650)) -> Any:
-        if not all(_has_private_creds(account.config) for account in accounts):
+        if not any(_has_private_creds(account.config) for account in accounts):
             raise HTTPException(status_code=401, detail="DERIBIT_CLIENT_ID/SECRET not set in env")
         try:
             payload = report_cache.get_or_set(("report", days), lambda: _locked_aggregate_report(days))
@@ -1898,7 +2324,7 @@ def create_app(
 
     @app.get("/api/stress")
     def api_stress(shocks: str = Query(default="0.10,0.20,0.30,0.40,0.50")) -> Any:
-        if not all(_has_private_creds(account.config) for account in accounts):
+        if not any(_has_private_creds(account.config) for account in accounts):
             raise HTTPException(status_code=401, detail="DERIBIT_CLIENT_ID/SECRET not set in env")
         shock_decimals: list[Decimal] = []
         for raw in str(shocks or "").split(","):
@@ -1974,11 +2400,34 @@ def create_app(
     @app.get("/api/realized_summary")
     def api_realized_summary(
         days: int = Query(default=30, ge=0, le=3650),
+        effective_capital_usdc: float | None = Query(default=None, ge=0),
     ) -> Any:
-        cache_key = ("realized_summary", days, _closed_groups_cache_key(accounts))
+        override = (
+            Decimal(str(effective_capital_usdc))
+            if effective_capital_usdc is not None and effective_capital_usdc > 0
+            else None
+        )
+        status_payload = status_cache.try_get("status")
+        capital = _resolve_apr_effective_capital_usdc(
+            accounts,
+            override=override,
+            status_payload=status_payload,
+        )
+        cache_key = (
+            "realized_summary",
+            days,
+            str(capital),
+            _ledger_equity_cache_key(accounts),
+            _closed_groups_cache_key(accounts),
+        )
 
         def _compute() -> dict[str, Any]:
-            return _aggregate_realized_summary(accounts, days=days)
+            return _aggregate_realized_summary(
+                accounts,
+                days=days,
+                status_payload=status_payload,
+                effective_capital_override=override,
+            )
 
         try:
             payload = copy.deepcopy(series_cache.get_or_set(cache_key, _compute))
@@ -2038,15 +2487,21 @@ def create_app(
         window_days: int = Query(default=30, ge=1, le=365),
         effective_capital_usdc: float | None = Query(default=None, ge=0),
     ) -> Any:
-        capital = (
+        override = (
             Decimal(str(effective_capital_usdc))
             if effective_capital_usdc is not None and effective_capital_usdc > 0
-            else sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
+            else None
+        )
+        capital = _resolve_apr_effective_capital_usdc(
+            accounts,
+            override=override,
+            status_payload=status_cache.try_get("status"),
         )
         cache_key = (
             "apr_series",
             window_days,
             str(capital),
+            _ledger_equity_cache_key(accounts),
             _closed_groups_cache_key(accounts),
         )
 
@@ -2058,6 +2513,7 @@ def create_app(
             )
             return {
                 "window_days": window_days,
+                "capital_basis": "daily_total_equity_usdc",
                 "effective_capital_usdc": str(capital),
                 "rows": rows,
             }
@@ -2089,6 +2545,41 @@ def create_app(
             return RedirectResponse("/investor.html", status_code=302)
 
     if frontend_dir.is_dir():
+
+        @app.get("/app.js", include_in_schema=False)
+        def app_js() -> Any:
+            """Always serve fresh app.js (investor portal caches aggressively via CDN)."""
+            path = frontend_dir / "app.js"
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="app.js not found")
+            return FileResponse(
+                path,
+                media_type="application/javascript",
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
+
+        for _html_name in ("index.html", "investor.html", "investor.zh.html"):
+            _html_path = frontend_dir / _html_name
+
+            def _make_html_handler(path: Path) -> Any:
+                def _html_handler() -> Any:
+                    if not path.is_file():
+                        raise HTTPException(status_code=404, detail=f"{path.name} not found")
+                    return FileResponse(
+                        path,
+                        media_type="text/html",
+                        headers={"Cache-Control": "no-cache, must-revalidate"},
+                    )
+
+                return _html_handler
+
+            app.add_api_route(
+                f"/{_html_name}",
+                _make_html_handler(_html_path),
+                methods=["GET"],
+                include_in_schema=False,
+            )
+
         app.mount(
             "/",
             StaticFiles(directory=str(frontend_dir), html=True),
@@ -2110,6 +2601,7 @@ def serve(
     snapshot_interval_sec: int | None = None,
     investor_portal: bool = False,
     log_level: str = "info",
+    skipped_accounts: tuple[dict[str, str], ...] | None = None,
 ) -> None:
     try:
         import uvicorn
@@ -2124,6 +2616,7 @@ def serve(
         enable_scheduler=enable_scheduler,
         snapshot_interval_sec=snapshot_interval_sec,
         investor_portal=investor_portal,
+        skipped_accounts=skipped_accounts,
     )
     LOGGER.info("serving dashboard on http://%s:%s", host, port)
     uvicorn.run(app, host=host, port=int(port), log_level=log_level)

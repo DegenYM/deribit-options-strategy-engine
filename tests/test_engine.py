@@ -12,7 +12,9 @@ from deribit_demo.models import (
     RiskRegime,
     StrategyState,
     TradeGroup,
+    is_phantom_reconcile_close,
 )
+from deribit_demo.utils import utc_now, utc_now_ms
 from deribit_demo.state import performance_exclusions_path
 
 from conftest import FakeClient, future_expiry, make_config
@@ -815,6 +817,31 @@ def test_panic_close_dry_run_lists_positions(tmp_path, fake_client):
     assert "actions" in result
 
 
+def test_run_survives_transient_exchange_error(tmp_path, fake_client):
+    from deribit_demo.exceptions import TransientExchangeError
+
+    config = make_config(tmp_path)
+    engine = DeribitOptionTrialBot(config, fake_client)
+    original_manage = engine.manage
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    def flaky_manage(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TransientExchangeError("public/get_instruments rate limited: HTTP 429")
+        return original_manage(**kwargs)
+
+    engine.manage = flaky_manage
+    engine.sleep_fn = sleeps.append
+
+    result = engine.run(live=False, cycles=2)
+
+    assert result["cycles"] == 2
+    assert len(sleeps) == 2
+    assert sleeps[0] >= 60
+
+
 def test_close_position_list_returns_open_positions(tmp_path, fake_client):
     instrument = "BTC_USDC-14APR30-63000-P"
     fake_client.positions = [
@@ -1307,6 +1334,40 @@ def test_reconcile_adopts_exchange_short_put_missing_from_state(tmp_path, fake_c
     assert open_groups[0].short_instrument_name == short
     assert open_groups[0].last_action == "adopted_from_exchange"
     assert open_groups[0].quantity == Decimal("0.1")
+
+
+def test_reconcile_defers_external_close_for_recent_open_group(tmp_path, fake_client):
+    short = "ETH_USDC-29MAY26-2350-C"
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    group = _build_group(short_instrument_name=short, currency="ETH", collateral_currency="USDC")
+    group.entry_timestamp_ms = utc_now_ms()
+    group.status = "open"
+    state.groups.append(group)
+    markets = engine._load_supported_option_markets()
+    engine._reconcile_state(
+        state,
+        option_positions=[],
+        orderbook_cache={},
+        markets_by_currency=markets,
+    )
+    assert group.status == "open"
+
+
+def test_is_phantom_reconcile_close_when_same_leg_still_open():
+    short = "ETH_USDC-29MAY26-2350-C"
+    phantom = _build_group(short_instrument_name=short, currency="ETH", collateral_currency="USDC")
+    phantom.status = "closed"
+    phantom.close_reason = "reconciled_external"
+    phantom.closed_timestamp_ms = phantom.entry_timestamp_ms + 3_000
+    phantom.realized_pnl = Decimal("-1")
+    live = _build_group(short_instrument_name=short, currency="ETH", collateral_currency="USDC")
+    live.group_id = "0002"
+    live.status = "open"
+    open_names = {g.short_instrument_name for g in [phantom, live] if g.status != "closed"}
+    assert is_phantom_reconcile_close(phantom, open_short_names=open_names)
+    assert not is_phantom_reconcile_close(phantom, open_short_names=set())
 
 
 def test_reconcile_adopts_short_call_via_exact_instrument_when_absent_from_bulk(tmp_path):
@@ -2002,6 +2063,135 @@ def test_drawdown_catches_loss_masked_by_deposit(tmp_path, fake_client):
     # Crosses halt threshold (0.025) but not hard-derisk (0.06).
     assert snapshot.halt_entries_by_book["USDC"] is True
     assert snapshot.hard_derisk_by_book["USDC"] is False
+
+
+def test_first_run_midday_deposit_does_not_double_count_flow(tmp_path, fake_client):
+    """First bot run mid-day must not re-count today's deposit in day_net_flow."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        scan_underlyings=("BTC",),
+        traded_collaterals=("BTC",),
+        halt_drawdown_pct=Decimal("0.025"),
+        hard_derisk_drawdown_pct=Decimal("0.06"),
+        cash_flow_query_interval_seconds=0,
+    )
+    deposit_ts = utc_now_ms() - 3_600_000
+    fake_client.transaction_log = {
+        "BTC": [{"type": "deposit", "change": "0.1", "timestamp": deposit_ts}],
+    }
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    summaries = {
+        "BTC": _make_summary("BTC", equity="0.1", initial_margin="0", maintenance_margin="0"),
+        "ETH": _make_summary("ETH", equity="0", initial_margin="0", maintenance_margin="0"),
+        "USDC": _make_summary("USDC", equity="0", initial_margin="0", maintenance_margin="0"),
+    }
+
+    state = engine._reset_daily_state(state, summaries)
+    engine._refresh_cash_flows_by_book(state, {})
+    snapshot = engine._build_portfolio_snapshot(
+        state=state,
+        summaries=summaries,
+        regime_by_currency={"BTC": RiskRegime.NORMAL},
+        regime_detail_by_currency={"BTC": ("market_conditions_normal",)},
+        future_positions=[],
+        orderbook_cache={},
+    )
+
+    assert state.day_net_flow_native_by_book.get("BTC", Decimal("0")) == Decimal("0")
+    assert snapshot.day_pnl_usdc_ex_flow_ex_spot == Decimal("0")
+    assert snapshot.day_drawdown_pct == Decimal("0")
+    assert snapshot.halt_new_entries is False
+    assert snapshot.hard_derisk is False
+
+
+def test_deposit_after_equity_anchor_still_counts_in_flow(tmp_path, fake_client):
+    """Deposits after day-start anchor must still appear in day_net_flow."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        scan_underlyings=("BTC",),
+        traded_collaterals=("BTC",),
+        cash_flow_query_interval_seconds=0,
+    )
+    anchor_ms = utc_now_ms() - 3_600_000
+    deposit_ts = utc_now_ms() - 1_800_000
+    fake_client.transaction_log = {
+        "BTC": [{"type": "deposit", "change": "0.02", "timestamp": deposit_ts}],
+    }
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    state.day_key = utc_now().strftime("%Y-%m-%d")
+    state.day_start_equity_by_book = {"BTC": Decimal("7700")}
+    state.day_start_equity_native_by_book = {"BTC": Decimal("0.1")}
+    state.day_equity_anchor_ms_by_book = {"BTC": anchor_ms}
+    summaries = {
+        "BTC": _make_summary("BTC", equity="0.12", initial_margin="0", maintenance_margin="0"),
+        "ETH": _make_summary("ETH", equity="0", initial_margin="0", maintenance_margin="0"),
+        "USDC": _make_summary("USDC", equity="0", initial_margin="0", maintenance_margin="0"),
+    }
+
+    engine._refresh_cash_flows_by_book(state, {})
+    snapshot = engine._build_portfolio_snapshot(
+        state=state,
+        summaries=summaries,
+        regime_by_currency={"BTC": RiskRegime.NORMAL},
+        regime_detail_by_currency={"BTC": ("market_conditions_normal",)},
+        future_positions=[],
+        orderbook_cache={},
+    )
+
+    assert state.day_net_flow_native_by_book["BTC"] == Decimal("0.02")
+    assert snapshot.day_pnl_usdc_ex_flow_ex_spot == Decimal("0")
+
+
+def test_legacy_flow_double_count_healed_on_reset(tmp_path, fake_client):
+    """Legacy state with duplicated deposit must self-heal on the next cycle."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        scan_underlyings=("BTC",),
+        traded_collaterals=("BTC",),
+        halt_drawdown_pct=Decimal("0.025"),
+        hard_derisk_drawdown_pct=Decimal("0.06"),
+        cash_flow_query_interval_seconds=0,
+    )
+    deposit_ts = utc_now_ms() - 3_600_000
+    fake_client.transaction_log = {
+        "BTC": [{"type": "deposit", "change": "0.1", "timestamp": deposit_ts}],
+    }
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    state.day_key = utc_now().strftime("%Y-%m-%d")
+    state.day_start_equity_by_book = {"BTC": Decimal("7724")}
+    state.day_start_equity_native_by_book = {"BTC": Decimal("0.1")}
+    state.day_net_flow_usdc_by_book = {"BTC": Decimal("7724")}
+    state.day_net_flow_native_by_book = {"BTC": Decimal("0.1")}
+    summaries = {
+        "BTC": _make_summary("BTC", equity="0.1", initial_margin="0", maintenance_margin="0"),
+        "ETH": _make_summary("ETH", equity="0", initial_margin="0", maintenance_margin="0"),
+        "USDC": _make_summary("USDC", equity="0", initial_margin="0", maintenance_margin="0"),
+    }
+
+    state = engine._reset_daily_state(state, summaries)
+    engine._refresh_cash_flows_by_book(state, {})
+    snapshot = engine._build_portfolio_snapshot(
+        state=state,
+        summaries=summaries,
+        regime_by_currency={"BTC": RiskRegime.NORMAL},
+        regime_detail_by_currency={"BTC": ("market_conditions_normal",)},
+        future_positions=[],
+        orderbook_cache={},
+    )
+
+    assert state.day_net_flow_native_by_book["BTC"] == Decimal("0")
+    assert "BTC" in state.day_equity_anchor_ms_by_book
+    assert snapshot.day_drawdown_pct == Decimal("0")
+    assert snapshot.halt_new_entries is False
 
 
 def test_trade_group_round_trips_without_spread_fields(tmp_path):

@@ -9,6 +9,32 @@ from .fees import premium_value_native
 from .utils import dte_days, parse_option_name, safe_div, to_decimal
 
 _COIN_COLLATERAL_BOOKS = frozenset({"BTC", "ETH"})
+_MIN_PLAUSIBLE_UNDERLYING_INDEX_USD = Decimal("100")
+# ``reconciled_external`` within this holding window while the same short leg is still open
+# is treated as a position-sync glitch (not a real close).
+PHANTOM_RECONCILE_MAX_HOLDING_MS = 300_000
+
+
+def open_short_instrument_names(groups: list[TradeGroup]) -> set[str]:
+    return {
+        g.short_instrument_name
+        for g in groups
+        if g.status != "closed" and g.short_instrument_name
+    }
+
+
+def is_phantom_reconcile_close(group: TradeGroup, *, open_short_names: set[str]) -> bool:
+    if group.status != "closed":
+        return False
+    if (group.close_reason or "").lower() != "reconciled_external":
+        return False
+    entry_ms = int(group.entry_timestamp_ms or 0)
+    closed_ms = group.closed_timestamp_ms
+    if not closed_ms or closed_ms <= entry_ms:
+        return False
+    if closed_ms - entry_ms > PHANTOM_RECONCILE_MAX_HOLDING_MS:
+        return False
+    return group.short_instrument_name in open_short_names
 
 
 class OptionSide(str, Enum):
@@ -234,6 +260,15 @@ EXTERNAL_FLOW_TRANSACTION_TYPES: frozenset[str] = frozenset(
     }
 )
 
+# Investor fee baseline: only true external in/out. Exclude ``transfer`` because
+# cross-book moves (USDC → BTC margin) are not net new capital.
+SUBSCRIPTION_FLOW_TRANSACTION_TYPES: frozenset[str] = frozenset(
+    {
+        "deposit",
+        "withdrawal",
+    }
+)
+
 
 @dataclass(frozen=True)
 class TransactionEntry:
@@ -270,6 +305,10 @@ class TransactionEntry:
     @property
     def is_external_flow(self) -> bool:
         return self.type in EXTERNAL_FLOW_TRANSACTION_TYPES
+
+    @property
+    def is_subscription_flow(self) -> bool:
+        return self.type in SUBSCRIPTION_FLOW_TRANSACTION_TYPES
 
 
 @dataclass(frozen=True)
@@ -488,7 +527,7 @@ class TradeGroup:
     long_close_average_price: Decimal | None = None
     #: Index (USD) at entry — used to recover entry premium for legacy rows.
     entry_index_usd: Decimal = Decimal("0")
-    #: Net APR at entry (net credit / book equity, annualized by entry DTE).
+    #: Net APR at entry (round-trip net premium / position collateral, annualized by entry DTE).
     entry_net_apr: Decimal = Decimal("0")
     #: Book equity (native unit) snapshotted at open — used for entry APR, not live equity.
     entry_book_equity: Decimal = Decimal("0")
@@ -515,7 +554,7 @@ class TradeGroup:
     realized_annualized_return: Decimal | None = None
     #: Book equity (native unit) snapshotted at close.
     close_book_equity: Decimal | None = None
-    #: ``realized_pnl / close_book_equity``, annualized by holding days (frozen at close).
+    #: ``realized_pnl / position collateral notional``, annualized by holding days (frozen at close).
     realized_apr_on_equity: Decimal | None = None
     short_label: str = ""
     hedge_label: str = ""
@@ -555,6 +594,30 @@ class TradeGroup:
 
     def is_coin_collateral(self) -> bool:
         return self.collateral_book() in _COIN_COLLATERAL_BOOKS
+
+    @staticmethod
+    def _plausible_underlying_index(value: Decimal | None) -> Decimal | None:
+        if value is None or value <= _MIN_PLAUSIBLE_UNDERLYING_INDEX_USD:
+            return None
+        return value
+
+    def underlying_index_usd_for_apr(self) -> Decimal:
+        """Underlying BTC/ETH spot for USDC linear call APR denominators."""
+        if self.collateral_book() != "USDC":
+            resolved = self._resolved_index_usd(self.entry_index_usd, self.close_index_usd)
+            return resolved if resolved is not None else Decimal("0")
+        if (self.option_type or "put").lower() != "call":
+            return Decimal("0")
+        for candidate in (self.entry_index_usd, self.close_index_usd):
+            plausible = self._plausible_underlying_index(candidate)
+            if plausible is not None:
+                return plausible
+        if self.short_strike > _MIN_PLAUSIBLE_UNDERLYING_INDEX_USD:
+            return self.short_strike
+        return Decimal("0")
+
+    def is_phantom_reconcile_close(self, *, open_short_names: set[str]) -> bool:
+        return is_phantom_reconcile_close(self, open_short_names=open_short_names)
 
     @staticmethod
     def _resolved_index_usd(*candidates: Decimal | None) -> Decimal | None:
@@ -605,6 +668,10 @@ class TradeGroup:
         qty = self.quantity
         if qty <= 0:
             return
+        # USDC linear premiums are already in USDC; gross/(premium*qty) ≈ 1 and must not
+        # overwrite a valid underlying BTC/ETH index stored in ``entry_index_usd``.
+        if not self.is_coin_collateral():
+            return
         if self.short_entry_average_price > 0 and self.entry_index_usd <= 0:
             gross = self.entry_credit + (self.entry_fee or Decimal("0"))
             denom = self.short_entry_average_price * qty
@@ -615,6 +682,7 @@ class TradeGroup:
             and self.short_close_average_price > 0
             and (self.close_index_usd is None or self.close_index_usd <= 0)
             and self.realized_close_debit is not None
+            and self.is_coin_collateral()
         ):
             close_fee = self.realized_close_fee or Decimal("0")
             premium_usdc = max(self.realized_close_debit - close_fee, Decimal("0"))
@@ -839,6 +907,56 @@ class TradeGroup:
             if abs(gross - (self.entry_credit + fee)) <= tol:
                 return self.entry_credit
         return self.entry_credit
+
+    def entry_net_credit_collateral(self) -> Decimal | None:
+        """Actual entry credit net of entry fee, in collateral book units."""
+        net_usdc = self.entry_credit_net_usdc()
+        if net_usdc <= 0:
+            return None
+        if self.collateral_book() == "USDC":
+            return net_usdc
+        idx = self._resolved_index_usd(self.entry_index_usd, self.close_index_usd)
+        if idx is None or idx <= 0:
+            return None
+        return net_usdc / idx
+
+    def entry_net_apr_at_open(self, *, contract_size: Decimal = Decimal("1")) -> Decimal:
+        """Entry APR from actual open ledger (net credit / open size, annualized)."""
+        from .trade_apr import entry_net_apr_from_actual_open
+
+        net = self.entry_net_credit_collateral()
+        if net is None or net <= 0:
+            return Decimal("0")
+        cs = contract_size if contract_size > 0 else Decimal("1")
+        qty = self.quantity if self.quantity > 0 else Decimal("1")
+        strategy = self.strategy or "naked_short"
+        if strategy != "covered_call" and self.covered_underlying_quantity > 0 and self.option_type == "call":
+            strategy = "covered_call"
+        if strategy == "covered_call" and self.covered_underlying_quantity <= 0:
+            self.covered_underlying_quantity = qty
+        book = self.collateral_book()
+        if book == "USDC":
+            idx = self.underlying_index_usd_for_apr()
+        else:
+            idx = self.entry_index_usd
+            if idx <= 0:
+                idx = self.close_index_usd or Decimal("0")
+        if book == "USDC" and (self.option_type or "").lower() == "call" and idx <= 0:
+            return Decimal("0")
+        return entry_net_apr_from_actual_open(
+            strategy=strategy,
+            collateral_currency=book,
+            option_type=self.option_type or "put",
+            quantity=qty,
+            contract_size=cs,
+            strike=self.short_strike,
+            index_price_usd=idx,
+            estimated_im_collateral=self.estimated_im_collateral,
+            covered_underlying_quantity=self.covered_underlying_quantity,
+            net_credit_collateral=net,
+            entry_timestamp_ms=self.entry_timestamp_ms,
+            expiration_timestamp_ms=self.expiration_timestamp_ms,
+        )
 
     def backfill_realized_pnl_usdc(self, *, spot_index_usd: Decimal | None = None) -> None:
         """Recompute fee-inclusive realized PnL in USDC equivalent."""
@@ -1201,6 +1319,10 @@ class StrategyState:
     # Last Deribit transaction_log query timestamp (ms) per book, to throttle
     # repeated API calls within the cash-flow refresh interval.
     last_flow_query_ms_by_book: dict[str, int] = field(default_factory=dict)
+    # UTC ms when each book's day-start equity was last established. Cash-flow
+    # queries use max(UTC midnight, anchor) so deposits already reflected in
+    # day-start are not counted again in day_net_flow.
+    day_equity_anchor_ms_by_book: dict[str, int] = field(default_factory=dict)
     next_group_id: int = 1
     normal_recovery_counts: dict[str, int] = field(default_factory=dict)
     groups: list[TradeGroup] = field(default_factory=list)
@@ -1220,6 +1342,7 @@ class StrategyState:
             "day_net_flow_usdc_by_book": dict(self.day_net_flow_usdc_by_book),
             "day_net_flow_native_by_book": dict(self.day_net_flow_native_by_book),
             "last_flow_query_ms_by_book": dict(self.last_flow_query_ms_by_book),
+            "day_equity_anchor_ms_by_book": dict(self.day_equity_anchor_ms_by_book),
             "next_group_id": self.next_group_id,
             "normal_recovery_counts": self.normal_recovery_counts,
             "groups": [group.to_dict() for group in self.groups],
@@ -1264,6 +1387,11 @@ class StrategyState:
             last_flow_query_ms_by_book={
                 str(k).upper(): int(v)
                 for k, v in (payload.get("last_flow_query_ms_by_book") or {}).items()
+                if v is not None
+            },
+            day_equity_anchor_ms_by_book={
+                str(k).upper(): int(v)
+                for k, v in (payload.get("day_equity_anchor_ms_by_book") or {}).items()
                 if v is not None
             },
             next_group_id=int(payload.get("next_group_id") or 1),

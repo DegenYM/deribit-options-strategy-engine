@@ -6,7 +6,12 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from .env_layout import env_layer_paths
+from .env_layout import (
+    ACCOUNT_ROLE_FEE,
+    _fee_account_layer_paths,
+    _is_fee_account_env_file,
+    env_layer_paths,
+)
 from .exceptions import ConfigurationError
 from .utils import parse_csv, to_decimal
 
@@ -173,6 +178,12 @@ class BotConfig:
     covered_call_robust_exit_dte: Decimal = Decimal("0.5")
     covered_call_itm_buffer_pct: Decimal = Decimal("0")
     covered_call_spot_order_type: str = "market"
+    # ``strategy`` = normal trading sub-account; ``fee`` = operator fee wallet only.
+    account_role: str = "strategy"
+
+    @property
+    def is_fee_collection_account(self) -> bool:
+        return self.account_role == ACCOUNT_ROLE_FEE
 
     @property
     def rest_base_url(self) -> str:
@@ -192,6 +203,19 @@ class BotConfig:
     def naked_scan_put_and_call_compete(self) -> bool:
         """True when scan ranks puts and calls together (not put-then-fallback)."""
         return self.enable_short_put and self.enable_short_call and not self.short_call_fallback_only
+
+    def regime_entry_option_sides(self) -> tuple[str, ...]:
+        """Option side(s) used for per-currency regime liquidity probes."""
+        if self.option_strategy == "covered_call":
+            return ("call",)
+        if self.option_strategy == "bull_put_spread":
+            return ("put",)
+        sides: list[str] = []
+        if self.enable_short_put:
+            sides.append("put")
+        if self.enable_short_call:
+            sides.append("call")
+        return tuple(sides) or ("put",)
 
     @property
     def target_annual_net_pnl_usdc(self) -> Decimal:
@@ -437,6 +461,15 @@ def _env_values(env_file: str | Path) -> dict[str, str]:
     return {k: v for k, v in dotenv_values(env_file).items() if v is not None}
 
 
+def assert_trading_account(config: BotConfig) -> None:
+    """Reject strategy commands on operator fee-collection wallets."""
+    if config.is_fee_collection_account:
+        raise ConfigurationError(
+            "Fee collection account (ACCOUNT_ROLE=fee) cannot run trading commands. "
+            "Use a strategy sub-account from accounts.toml."
+        )
+
+
 def _load_env_values_with_strategy_profile(
     env_file: str | Path,
     *,
@@ -449,6 +482,13 @@ def _load_env_values_with_strategy_profile(
     seed: dict[str, str] = {}
     if env_path.is_file():
         seed = _env_values(env_path)
+    if _optional(seed, "ACCOUNT_ROLE", "").lower() == ACCOUNT_ROLE_FEE or _is_fee_account_env_file(env_path):
+        values: dict[str, str] = {}
+        for layer_path in _fee_account_layer_paths(env_path):
+            values.update(_env_values(layer_path))
+        values["ACCOUNT_ROLE"] = ACCOUNT_ROLE_FEE
+        return values
+
     base_strategy = _option_strategy(
         strategy_override or _optional(seed, "OPTION_STRATEGY", "naked_short")
     )
@@ -473,6 +513,20 @@ def _load_env_values_with_strategy_profile(
     return values
 
 
+def has_private_creds_config(config: BotConfig) -> bool:
+    """True when both Deribit API credentials are present (non-empty after strip)."""
+    return bool(config.client_id.strip() and config.client_secret.strip())
+
+
+def has_private_creds_for_env(env_file: str | Path) -> bool:
+    """Load env layers and check for Deribit API credentials without requiring them."""
+    try:
+        config = load_config(env_file, require_private=False)
+    except ConfigurationError:
+        return False
+    return has_private_creds_config(config)
+
+
 def load_config(
     env_file: str | Path = ".env",
     require_private: bool = False,
@@ -488,6 +542,10 @@ def load_config(
         raise ConfigurationError("DERIBIT_ENV must be mainnet, testnet, or prod")
     if env == "prod":
         env = "mainnet"
+
+    account_role = _optional(values, "ACCOUNT_ROLE", "strategy").strip().lower()
+    if account_role not in {"strategy", ACCOUNT_ROLE_FEE}:
+        raise ConfigurationError("ACCOUNT_ROLE must be one of: strategy, fee")
 
     client_id = _optional(values, "DERIBIT_CLIENT_ID")
     client_secret = _optional(values, "DERIBIT_CLIENT_SECRET")
@@ -713,4 +771,5 @@ def load_config(
             _optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")
         ),
         covered_call_spot_order_type=covered_call_spot_order_type,
+        account_role=account_role,
     )

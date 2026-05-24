@@ -9,6 +9,9 @@ from .config import BotConfig
 from .fees import (
     annualized_return,
     inverse_option_fee_native_per_contract,
+    net_apr_inverse_short_per_contract,
+    net_apr_linear_usdc_short_call_per_contract,
+    net_apr_linear_usdc_short_put_per_contract,
     option_trade_fee_native,
     premium_value_usdc,
 )
@@ -30,14 +33,49 @@ class StrategySelector:
     def __init__(self, config: BotConfig):
         self.config = config
 
-    @staticmethod
-    def _net_credit_apr_over_equity(
+    def _screening_net_apr(
+        self,
         *,
-        net_credit: Decimal,
-        summary_equity: Decimal,
-        dte_days: Decimal,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        premium_per_contract: Decimal,
+        collateral_currency: str,
+        option_type: str,
+        net_credit_on_capital: Decimal | None = None,
+        capital_base: Decimal | None = None,
     ) -> Decimal:
-        return annualized_return(net_credit=net_credit, capital_base=summary_equity, dte_days=dte_days)
+        """Per-contract APR for MIN_NET_APR gates (round-trip fees; not book equity)."""
+        dte_days = instrument.dte_days()
+        if net_credit_on_capital is not None and capital_base is not None:
+            return annualized_return(
+                net_credit=net_credit_on_capital,
+                capital_base=capital_base,
+                dte_days=dte_days,
+            )
+        if collateral_currency.upper() == "USDC":
+            if option_type == "call":
+                return net_apr_linear_usdc_short_call_per_contract(
+                    premium_per_contract=premium_per_contract,
+                    index_price=book.index_price,
+                    dte_days=dte_days,
+                    fee_rate=self.config.option_fee_rate,
+                    fee_cap_rate=self.config.option_fee_cap_rate,
+                )
+            return net_apr_linear_usdc_short_put_per_contract(
+                premium_per_contract=premium_per_contract,
+                strike=instrument.strike,
+                dte_days=dte_days,
+                index_price=book.index_price,
+                fee_rate=self.config.option_fee_rate,
+                fee_cap_rate=self.config.option_fee_cap_rate,
+            )
+        return net_apr_inverse_short_per_contract(
+            premium_per_contract=premium_per_contract,
+            contract_size=instrument.contract_size,
+            dte_days=dte_days,
+            fee_rate=self.config.option_fee_rate,
+            fee_cap_rate=self.config.option_fee_cap_rate,
+        )
 
     def put_delta_min(self, currency: str) -> Decimal:
         return self.config.put_delta_bounds(currency)[0]
@@ -150,6 +188,27 @@ class StrategySelector:
         return (instrument.strike / book.index_price) - Decimal("1")
 
     @staticmethod
+    def _is_otm_call(instrument: OptionInstrument, book: OrderBookSnapshot) -> bool:
+        return book.index_price > 0 and instrument.strike > book.index_price
+
+    @staticmethod
+    def _covered_call_scan_pairs(
+        calls: list[OptionInstrument],
+        orderbook_loader: Callable[[str], OrderBookSnapshot],
+    ) -> list[tuple[OptionInstrument, OrderBookSnapshot]]:
+        """OTM calls first (ascending strike) so scan examples show relevant strikes above spot."""
+        pairs = [(inst, orderbook_loader(inst.instrument_name)) for inst in calls]
+        otm = sorted(
+            (pair for pair in pairs if StrategySelector._is_otm_call(*pair)),
+            key=lambda pair: pair[0].strike,
+        )
+        itm = sorted(
+            (pair for pair in pairs if not StrategySelector._is_otm_call(*pair)),
+            key=lambda pair: pair[0].strike,
+        )
+        return otm + itm
+
+    @staticmethod
     def _otm_ratio(instrument: OptionInstrument, book: OrderBookSnapshot, option_type: str) -> Decimal:
         if option_type == "call":
             return StrategySelector._call_otm_ratio(instrument, book)
@@ -258,15 +317,64 @@ class StrategySelector:
             return self._naked_short_call_rejection_reason(currency, instrument, book)
         return self._naked_short_put_rejection_reason(currency, instrument, book)
 
-    def core_naked_liquidity_detail(
+    def _core_option_side_liquidity_detail(
+        self,
+        currency: str,
+        markets: Iterable[OptionInstrument],
+        orderbook_loader: Callable[[str], OrderBookSnapshot],
+        option_type: str,
+    ) -> tuple[bool, list[str]]:
+        side = option_type.lower()
+        if side not in {"put", "call"}:
+            return False, [f"unsupported_regime_liquidity_side={side}"]
+        option_value = OptionSide.PUT.value if side == "put" else OptionSide.CALL.value
+        is_valid = (
+            self._is_valid_naked_short_put
+            if side == "put"
+            else self._is_valid_naked_short_call
+        )
+        instruments = [
+            item
+            for item in markets
+            if item.option_type == option_value
+            and self._instrument_active(item)
+            and self.config.entry_dte_min <= item.dte_days() <= self.config.entry_dte_max
+            and (side == "put" or item.strike > 0)
+        ]
+        expiries = sorted({item.expiration_timestamp_ms for item in instruments})
+        required = self.config.min_liquid_expiries_required
+        if len(expiries) < required:
+            return False, [
+                f"{side}: expiries_in_dte_window({self.config.entry_dte_min}-{self.config.entry_dte_max}d): "
+                f"count={len(expiries)} < min_liquid_expiries_required={required}",
+            ]
+        liquid_expiries = 0
+        dry_notes: list[str] = []
+        for expiry in expiries:
+            if any(
+                is_valid(currency, item, orderbook_loader(item.instrument_name))
+                for item in instruments
+                if item.expiration_timestamp_ms == expiry
+            ):
+                liquid_expiries += 1
+            else:
+                dry_notes.append(f"expiry={expiry}: no_valid_{side}")
+        if liquid_expiries < required:
+            notes = [f"{side}: liquid_expiries={liquid_expiries} < required={required}"]
+            notes.extend(dry_notes[:5])
+            return False, notes
+        return True, []
+
+    def _core_bull_put_spread_liquidity_detail(
         self,
         currency: str,
         markets: Iterable[OptionInstrument],
         orderbook_loader: Callable[[str], OrderBookSnapshot],
     ) -> tuple[bool, list[str]]:
+        markets_tuple = tuple(markets)
         puts = [
             item
-            for item in markets
+            for item in markets_tuple
             if item.option_type == OptionSide.PUT.value
             and self._instrument_active(item)
             and self.config.entry_dte_min <= item.dte_days() <= self.config.entry_dte_max
@@ -275,25 +383,78 @@ class StrategySelector:
         required = self.config.min_liquid_expiries_required
         if len(expiries) < required:
             return False, [
-                f"naked: expiries_in_dte_window({self.config.entry_dte_min}-{self.config.entry_dte_max}d): "
+                f"bull_put_spread: expiries_in_dte_window({self.config.entry_dte_min}-{self.config.entry_dte_max}d): "
                 f"count={len(expiries)} < min_liquid_expiries_required={required}",
             ]
         liquid_expiries = 0
         dry_notes: list[str] = []
         for expiry in expiries:
-            if any(
-                self._is_valid_naked_short_put(currency, item, orderbook_loader(item.instrument_name))
-                for item in puts
-                if item.expiration_timestamp_ms == expiry
-            ):
+            spread_ok = False
+            for item in puts:
+                if item.expiration_timestamp_ms != expiry:
+                    continue
+                book = orderbook_loader(item.instrument_name)
+                if self._naked_short_put_rejection_reason(currency, item, book) is not None:
+                    continue
+                short_leg = self._short_put_spread_leg(
+                    instrument=item,
+                    book=book,
+                    quantity=item.min_trade_amount,
+                    entry_price=book.best_bid_price,
+                    target_price=book.best_bid_price,
+                )
+                if self._long_put_candidates_for_short(
+                    currency=currency,
+                    markets=markets_tuple,
+                    orderbook_loader=orderbook_loader,
+                    short_leg=short_leg,
+                ):
+                    spread_ok = True
+                    break
+            if spread_ok:
                 liquid_expiries += 1
             else:
-                dry_notes.append(f"expiry={expiry}: no_valid_naked_put")
+                dry_notes.append(f"expiry={expiry}: no_valid_bull_put_spread_pair")
         if liquid_expiries < required:
-            notes = [f"naked: liquid_expiries={liquid_expiries} < required={required}"]
+            notes = [f"bull_put_spread: liquid_expiries={liquid_expiries} < required={required}"]
             notes.extend(dry_notes[:5])
             return False, notes
         return True, []
+
+    def core_regime_liquidity_detail(
+        self,
+        currency: str,
+        markets: Iterable[OptionInstrument],
+        orderbook_loader: Callable[[str], OrderBookSnapshot],
+    ) -> tuple[bool, list[str]]:
+        """Strategy-aware liquidity probe used before macro regime escalation."""
+        if self.config.option_strategy == "bull_put_spread":
+            return self._core_bull_put_spread_liquidity_detail(currency, markets, orderbook_loader)
+
+        sides = self.config.regime_entry_option_sides()
+        if not sides:
+            return False, ["no_regime_liquidity_sides_configured"]
+
+        failures: list[str] = []
+        for side in sides:
+            ok, notes = self._core_option_side_liquidity_detail(
+                currency,
+                markets,
+                orderbook_loader,
+                side,
+            )
+            if ok:
+                return True, []
+            failures.extend(notes)
+        return False, failures
+
+    def core_naked_liquidity_detail(
+        self,
+        currency: str,
+        markets: Iterable[OptionInstrument],
+        orderbook_loader: Callable[[str], OrderBookSnapshot],
+    ) -> tuple[bool, list[str]]:
+        return self.core_regime_liquidity_detail(currency, markets, orderbook_loader)
 
     def naked_put_sort_key(self, candidate: NakedPutCandidate) -> tuple:
         option_type = candidate.option_type or "put"
@@ -599,10 +760,12 @@ class StrategySelector:
             return None, "net_credit<=0"
         if summary_equity <= 0:
             return None, "summary_equity<=0"
-        net_apr = self._net_credit_apr_over_equity(
-            net_credit=net_credit,
-            summary_equity=summary_equity,
-            dte_days=instrument.dte_days(),
+        net_apr = self._screening_net_apr(
+            instrument=instrument,
+            book=book,
+            premium_per_contract=screening_bid,
+            collateral_currency=collateral_currency,
+            option_type="put",
         )
         if not relax_apr and net_apr < self.config.min_net_apr:
             return None, "net_apr_below_min"
@@ -1142,10 +1305,27 @@ class StrategySelector:
             return None
 
         dte = short_instrument.dte_days()
-        net_apr = self._net_credit_apr_over_equity(
-            net_credit=net_credit_native,
-            summary_equity=summary_equity,
-            dte_days=dte,
+        exit_short_fee = self._option_fee_native(
+            instrument=short_instrument,
+            book=short_book,
+            premium=short_price,
+            quantity=quantity,
+        )
+        exit_long_fee = self._option_fee_native(
+            instrument=long_instrument,
+            book=long_book,
+            premium=long_price,
+            quantity=quantity,
+        )
+        round_trip_net = gross_credit_native - fees_native - exit_short_fee - exit_long_fee
+        net_apr = self._screening_net_apr(
+            instrument=short_instrument,
+            book=short_book,
+            premium_per_contract=Decimal("0"),
+            collateral_currency=short_candidate.collateral_currency,
+            option_type="put",
+            net_credit_on_capital=round_trip_net,
+            capital_base=max_loss_collateral,
         )
         if net_apr < self.config.min_net_apr:
             return None
@@ -1324,10 +1504,12 @@ class StrategySelector:
             return None, "net_credit<=0"
         if summary_equity <= 0:
             return None, "summary_equity<=0"
-        net_apr = self._net_credit_apr_over_equity(
-            net_credit=net_credit,
-            summary_equity=summary_equity,
-            dte_days=instrument.dte_days(),
+        net_apr = self._screening_net_apr(
+            instrument=instrument,
+            book=book,
+            premium_per_contract=screening_bid,
+            collateral_currency=collateral_currency,
+            option_type="call",
         )
         if not relax_apr and net_apr < self.config.min_net_apr:
             return None, "net_apr_below_min"
@@ -1443,10 +1625,12 @@ class StrategySelector:
             return None, "net_premium<=0"
         if summary_equity <= 0:
             return None, "summary_equity<=0"
-        net_apr = self._net_credit_apr_over_equity(
-            net_credit=net_prem,
-            summary_equity=summary_equity,
-            dte_days=instrument.dte_days(),
+        net_apr = self._screening_net_apr(
+            instrument=instrument,
+            book=book,
+            premium_per_contract=screening_bid,
+            collateral_currency=collateral_currency,
+            option_type="call",
         )
         if net_apr < self.config.min_net_apr:
             return None, "net_apr_below_min"
@@ -1515,29 +1699,29 @@ class StrategySelector:
         buildable = 0
         buildable_names: list[str] = []
 
-        for inst in calls:
-            book = orderbook_loader(inst.instrument_name)
+        def maybe_append_example(message: str, inst: OptionInstrument, book: OrderBookSnapshot) -> None:
+            if len(examples) >= max_examples or not self._is_otm_call(inst, book):
+                return
+            examples.append(message)
+
+        for inst, book in self._covered_call_scan_pairs(calls, orderbook_loader):
             liq = self._naked_short_call_rejection_reason(currency, inst, book)
             if liq is not None:
                 liquidity_counts[liq] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [liquidity] {liq}")
+                maybe_append_example(f"{inst.instrument_name} [liquidity] {liq}", inst, book)
                 continue
 
             if collateral_currency.upper() != currency.upper() or (inst.settlement_currency or "").upper() != currency.upper():
                 after_counts["not_native_cover_book"] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [post] not_native_cover_book")
+                maybe_append_example(f"{inst.instrument_name} [post] not_native_cover_book", inst, book)
                 continue
             if available_cover_quantity <= 0:
                 after_counts["available_cover_quantity<=0"] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [post] available_cover_quantity<=0")
+                maybe_append_example(f"{inst.instrument_name} [post] available_cover_quantity<=0", inst, book)
                 continue
             if summary_equity <= 0:
                 after_counts["summary_equity<=0"] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [post] summary_equity<=0")
+                maybe_append_example(f"{inst.instrument_name} [post] summary_equity<=0", inst, book)
                 continue
 
             max_by_cover = floor_to_step(available_cover_quantity, inst.min_trade_amount)
@@ -1545,16 +1729,17 @@ class StrategySelector:
             quantity = min(max_by_cover, max_by_liquidity)
             if quantity < inst.min_trade_amount:
                 after_counts["quantity_below_min_trade"] += 1
-                if len(examples) < max_examples:
-                    caps = (("cover", max_by_cover), ("liq", max_by_liquidity))
-                    binding = min(caps, key=lambda kv: kv[1])[0]
-                    examples.append(
-                        f"{inst.instrument_name} [post] quantity_below_min_trade "
-                        f"bind={binding} q={format_decimal(quantity, 8)} "
-                        f"cover={format_decimal(max_by_cover, 8)} "
-                        f"liq={format_decimal(max_by_liquidity, 8)} "
-                        f"min={format_decimal(inst.min_trade_amount, 8)}"
-                    )
+                caps = (("cover", max_by_cover), ("liq", max_by_liquidity))
+                binding = min(caps, key=lambda kv: kv[1])[0]
+                maybe_append_example(
+                    f"{inst.instrument_name} [post] quantity_below_min_trade "
+                    f"bind={binding} q={format_decimal(quantity, 8)} "
+                    f"cover={format_decimal(max_by_cover, 8)} "
+                    f"liq={format_decimal(max_by_liquidity, 8)} "
+                    f"min={format_decimal(inst.min_trade_amount, 8)}",
+                    inst,
+                    book,
+                )
                 continue
 
             cand, breason = self._try_build_covered_call_for_quantity(
@@ -1571,8 +1756,7 @@ class StrategySelector:
                 buildable_names.append(inst.instrument_name)
             elif breason is not None:
                 after_counts[breason] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [build] {breason}")
+                maybe_append_example(f"{inst.instrument_name} [build] {breason}", inst, book)
 
         distinct_expiries = len({c.expiration_timestamp_ms for c in calls})
         note = (

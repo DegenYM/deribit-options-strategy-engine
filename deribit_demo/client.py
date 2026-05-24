@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import itertools
+import threading
 import time
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -9,7 +11,19 @@ import requests
 
 from .config import BotConfig
 from .exceptions import AuthenticationError, ExchangeError, TransientExchangeError
+from .exchange_throttle import pace_exchange_request
 from .utils import format_decimal, utc_now_ms
+
+
+@dataclass(frozen=True)
+class _CachedAuthTokens:
+    access_token: str
+    refresh_token: str | None
+    token_expiry_ms: int
+
+
+_AUTH_TOKEN_CACHE: dict[str, _CachedAuthTokens] = {}
+_AUTH_CACHE_LOCK = threading.Lock()
 
 
 class DeribitClient:
@@ -24,6 +38,7 @@ class DeribitClient:
     RETRYABLE_STATUS_CODES = {408, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
     RATE_LIMIT_STATUS = 429
     IDEMPOTENT_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+    AUTH_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
     UNSAFE_CONNECTION_RETRIES = 1
     TOKEN_REFRESH_SAFETY_SECONDS = 30
 
@@ -68,11 +83,54 @@ class DeribitClient:
         safety_ms = self.TOKEN_REFRESH_SAFETY_SECONDS * 1000
         return utc_now_ms() + safety_ms >= self._token_expiry_ms
 
+    def _auth_cache_key(self) -> str:
+        return (
+            f"{self.config.rest_base_url}\0"
+            f"{self.config.client_id.strip().lower()}\0"
+            f"{self.config.client_secret.strip()}"
+        )
+
+    def _hydrate_auth_from_cache(self) -> bool:
+        if not self.config.has_private_credentials:
+            return False
+        key = self._auth_cache_key()
+        with _AUTH_CACHE_LOCK:
+            cached = _AUTH_TOKEN_CACHE.get(key)
+        if cached is None:
+            return False
+        safety_ms = self.TOKEN_REFRESH_SAFETY_SECONDS * 1000
+        if utc_now_ms() + safety_ms >= cached.token_expiry_ms:
+            return False
+        self._access_token = cached.access_token
+        self._refresh_token = cached.refresh_token
+        self._token_expiry_ms = cached.token_expiry_ms
+        return True
+
+    def _publish_auth_to_cache(self) -> None:
+        if not self.config.has_private_credentials or not self._access_token:
+            return
+        entry = _CachedAuthTokens(
+            access_token=self._access_token,
+            refresh_token=self._refresh_token,
+            token_expiry_ms=self._token_expiry_ms,
+        )
+        with _AUTH_CACHE_LOCK:
+            _AUTH_TOKEN_CACHE[self._auth_cache_key()] = entry
+
+    def _invalidate_auth_cache(self) -> None:
+        if not self.config.has_private_credentials:
+            return
+        with _AUTH_CACHE_LOCK:
+            _AUTH_TOKEN_CACHE.pop(self._auth_cache_key(), None)
+
     def _ensure_access_token(self) -> str:
         if not self._token_expired():
             assert self._access_token is not None
             return self._access_token
         self._require_credentials()
+        if self._hydrate_auth_from_cache() and not self._token_expired():
+            assert self._access_token is not None
+            return self._access_token
 
         if self._refresh_token:
             try:
@@ -117,23 +175,38 @@ class DeribitClient:
         self._access_token = access_token
         self._refresh_token = refresh_token if isinstance(refresh_token, str) else None
         self._token_expiry_ms = utc_now_ms() + max(ttl_seconds, 0) * 1000
+        self._publish_auth_to_cache()
 
     def _call_auth(self, params: dict[str, Any]) -> dict[str, Any]:
-        payload = self._jsonrpc_body("public/auth", params)
-        response = self._post_raw(self.config.rest_base_url + "/public/auth", payload, headers={})
-        if response.status_code == self.RATE_LIMIT_STATUS:
-            raise TransientExchangeError("public/auth rate limited (HTTP 429)")
-        if response.status_code in self.RETRYABLE_STATUS_CODES:
-            raise TransientExchangeError(f"public/auth HTTP {response.status_code}")
-        if response.status_code >= 400:
-            raise AuthenticationError(
-                f"public/auth failed: HTTP {response.status_code} {response.text}"
-            )
-        data = self._parse_jsonrpc(response, "public/auth")
-        result = data.get("result")
-        if not isinstance(result, dict):
-            raise AuthenticationError("public/auth returned no result")
-        return result
+        url = self.config.rest_base_url + "/public/auth"
+        attempts = len(self.AUTH_RETRY_BACKOFF_SECONDS) + 1
+        for attempt in range(attempts):
+            payload = self._jsonrpc_body("public/auth", params)
+            response = self._post_raw(url, payload, headers={})
+            status = response.status_code
+            if status == self.RATE_LIMIT_STATUS:
+                if attempt < attempts - 1:
+                    wait = self._retry_after_seconds(response)
+                    if wait is None:
+                        wait = self.AUTH_RETRY_BACKOFF_SECONDS[attempt]
+                    time.sleep(wait)
+                    continue
+                raise TransientExchangeError("public/auth rate limited (HTTP 429)")
+            if status in self.RETRYABLE_STATUS_CODES:
+                if attempt < attempts - 1:
+                    time.sleep(self.AUTH_RETRY_BACKOFF_SECONDS[attempt])
+                    continue
+                raise TransientExchangeError(f"public/auth HTTP {status}")
+            if status >= 400:
+                raise AuthenticationError(
+                    f"public/auth failed: HTTP {status} {response.text}"
+                )
+            data = self._parse_jsonrpc(response, "public/auth")
+            result = data.get("result")
+            if not isinstance(result, dict):
+                raise AuthenticationError("public/auth returned no result")
+            return result
+        raise TransientExchangeError("public/auth failed after retries")
 
     # ------------------------------------------------------------------
     # Core request primitives
@@ -180,6 +253,7 @@ class DeribitClient:
         *,
         headers: dict[str, str],
     ) -> requests.Response:
+        pace_exchange_request()
         return self.session.post(
             url,
             json=payload,
@@ -271,6 +345,7 @@ class DeribitClient:
                 self._access_token = None
                 self._refresh_token = None
                 self._token_expiry_ms = 0
+                self._invalidate_auth_cache()
                 continue
             if status >= 400:
                 raise ExchangeError(
@@ -443,6 +518,40 @@ class DeribitClient:
             return [item for item in result if isinstance(item, dict)]
         return []
 
+    def _get_transaction_log_page(
+        self,
+        *,
+        currency: str,
+        start_timestamp: int,
+        end_timestamp: int,
+        count: int = 100,
+        subaccount_id: int | None = None,
+        query: str | None = None,
+        continuation: int | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "currency": currency.upper(),
+            "start_timestamp": int(start_timestamp),
+            "end_timestamp": int(end_timestamp),
+            "count": int(count),
+        }
+        if subaccount_id is not None:
+            params["subaccount_id"] = int(subaccount_id)
+        if query is not None and str(query).strip():
+            params["query"] = str(query).strip()
+        if continuation is not None:
+            params["continuation"] = int(continuation)
+        result = self._request(
+            "private/get_transaction_log",
+            params=params,
+            private=True,
+        )
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list):
+            return {"logs": [item for item in result if isinstance(item, dict)]}
+        return {"logs": []}
+
     def get_transaction_log(
         self,
         *,
@@ -465,31 +574,49 @@ class DeribitClient:
         Pass ``query`` (e.g. ``\"trade\"``) to use Deribit's server-side filter
         (see ``private/get_transaction_log`` docs).
         """
-        params: dict[str, Any] = {
-            "currency": currency.upper(),
-            "start_timestamp": int(start_timestamp),
-            "end_timestamp": int(end_timestamp),
-            "count": int(count),
-        }
-        if subaccount_id is not None:
-            params["subaccount_id"] = int(subaccount_id)
-        if query is not None and str(query).strip():
-            params["query"] = str(query).strip()
-        if continuation is not None:
-            params["continuation"] = int(continuation)
-        result = self._request(
-            "private/get_transaction_log",
-            params=params,
-            private=True,
+        page = self._get_transaction_log_page(
+            currency=currency,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+            count=count,
+            subaccount_id=subaccount_id,
+            query=query,
+            continuation=continuation,
         )
-        if isinstance(result, dict):
-            logs = result.get("logs")
-            if isinstance(logs, list):
-                return [item for item in logs if isinstance(item, dict)]
-            return []
-        if isinstance(result, list):
-            return [item for item in result if isinstance(item, dict)]
+        logs = page.get("logs")
+        if isinstance(logs, list):
+            return [item for item in logs if isinstance(item, dict)]
         return []
+
+    def iter_transaction_log(
+        self,
+        *,
+        currency: str,
+        start_timestamp: int,
+        end_timestamp: int,
+        count: int = 100,
+        subaccount_id: int | None = None,
+        query: str | None = None,
+    ):
+        """Yield all transaction-log rows in ``[start, end]``, following ``continuation``."""
+        continuation: int | None = None
+        while True:
+            page = self._get_transaction_log_page(
+                currency=currency,
+                start_timestamp=start_timestamp,
+                end_timestamp=end_timestamp,
+                count=count,
+                subaccount_id=subaccount_id,
+                query=query,
+                continuation=continuation,
+            )
+            logs = page.get("logs")
+            rows = [item for item in logs if isinstance(item, dict)] if isinstance(logs, list) else []
+            yield from rows
+            next_token = page.get("continuation")
+            if not rows or next_token in (None, "", 0):
+                break
+            continuation = int(next_token)
 
     def get_open_orders(self, *, kind: str = "any") -> list[dict[str, Any]]:
         params = {"kind": kind} if kind else None

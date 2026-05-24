@@ -80,7 +80,7 @@ def annualized_return(
     capital_base: Decimal,
     dte_days: Decimal,
 ) -> Decimal:
-    if net_credit <= 0 or capital_base <= 0 or dte_days <= 0:
+    if net_credit == 0 or capital_base <= 0 or dte_days <= 0:
         return Decimal("0")
     return (net_credit / capital_base) * (Decimal("365") / dte_days)
 
@@ -93,6 +93,113 @@ def inverse_option_fee_native_per_contract(
 ) -> Decimal:
     """Deribit inverse options: min(fee_rate, fee_cap_rate * premium) per contract (coin)."""
     return min(fee_rate, fee_cap_rate * premium)
+
+
+def inverse_option_round_trip_fee_per_contract(
+    *,
+    premium: Decimal,
+    fee_rate: Decimal,
+    fee_cap_rate: Decimal,
+) -> Decimal:
+    """Estimated entry + exit fee per inverse contract at the same premium."""
+    per_leg = inverse_option_fee_native_per_contract(
+        premium=premium,
+        fee_rate=fee_rate,
+        fee_cap_rate=fee_cap_rate,
+    )
+    return per_leg * 2
+
+
+def linear_usdc_option_round_trip_fee_per_contract(
+    *,
+    index_price: Decimal,
+    premium: Decimal,
+    fee_rate: Decimal,
+    fee_cap_rate: Decimal,
+) -> Decimal:
+    """Estimated entry + exit fee per USDC linear contract at the same premium."""
+    per_leg = option_trade_fee_native(
+        index_price=index_price,
+        premium=premium,
+        quantity=Decimal("1"),
+        fee_rate=fee_rate,
+        fee_cap_rate=fee_cap_rate,
+        quote_currency="USDC",
+        settlement_currency="USDC",
+    )
+    return per_leg * 2
+
+
+def net_apr_inverse_short_per_contract(
+    *,
+    premium_per_contract: Decimal,
+    contract_size: Decimal,
+    dte_days: Decimal,
+    fee_rate: Decimal,
+    fee_cap_rate: Decimal,
+) -> Decimal:
+    """Coin-native short option APR per contract.
+
+    ``(bid - entry_fee - exit_fee) / contract_size / DTE * 365`` — for inverse
+    options ``contract_size`` is typically 1 BTC/ETH of cover/collateral.
+    """
+    if dte_days <= 0:
+        return Decimal("0")
+    round_trip_fee = inverse_option_round_trip_fee_per_contract(
+        premium=premium_per_contract,
+        fee_rate=fee_rate,
+        fee_cap_rate=fee_cap_rate,
+    )
+    net_per = premium_per_contract - round_trip_fee
+    capital = contract_size if contract_size > 0 else Decimal("1")
+    return annualized_return(net_credit=net_per, capital_base=capital, dte_days=dte_days)
+
+
+def net_apr_linear_usdc_short_put_per_contract(
+    *,
+    premium_per_contract: Decimal,
+    strike: Decimal,
+    dte_days: Decimal,
+    index_price: Decimal,
+    fee_rate: Decimal,
+    fee_cap_rate: Decimal,
+) -> Decimal:
+    """USDC linear short put APR per contract: net premium / strike, annualized."""
+    if strike <= 0 or dte_days <= 0:
+        return Decimal("0")
+    round_trip_fee = linear_usdc_option_round_trip_fee_per_contract(
+        index_price=index_price,
+        premium=premium_per_contract,
+        fee_rate=fee_rate,
+        fee_cap_rate=fee_cap_rate,
+    )
+    net = premium_per_contract - round_trip_fee
+    if net <= 0:
+        return Decimal("0")
+    return (net / strike) * (Decimal("365") / dte_days)
+
+
+def net_apr_linear_usdc_short_call_per_contract(
+    *,
+    premium_per_contract: Decimal,
+    index_price: Decimal,
+    dte_days: Decimal,
+    fee_rate: Decimal,
+    fee_cap_rate: Decimal,
+) -> Decimal:
+    """USDC linear short call APR per contract: net premium / index, annualized."""
+    if index_price <= 0 or dte_days <= 0:
+        return Decimal("0")
+    round_trip_fee = linear_usdc_option_round_trip_fee_per_contract(
+        index_price=index_price,
+        premium=premium_per_contract,
+        fee_rate=fee_rate,
+        fee_cap_rate=fee_cap_rate,
+    )
+    net = premium_per_contract - round_trip_fee
+    if net <= 0:
+        return Decimal("0")
+    return (net / index_price) * (Decimal("365") / dte_days)
 
 
 def net_apr_coin_short_put(

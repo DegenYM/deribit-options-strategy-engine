@@ -27,7 +27,7 @@
     <script src="/vendor/chart.umd.min.js"></script>
     <script src="/vendor/luxon.min.js"></script>
     <script src="/vendor/chartjs-adapter-luxon.umd.min.js"></script>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=20260522f" />
   </head>
   <body class="app-body text-slate-100 min-h-screen font-sans">
     <header class="app-header sticky top-0 z-10">
@@ -161,20 +161,35 @@
         </div>
       </details>
 
-      <section class="section-card priority-section">
+      <section class="section-card priority-section" id="activity-section">
         <div class="section-heading">
           <div>
             <p class="section-eyebrow">Activity</p>
-            <h2 class="section-title">Recent opened &amp; closed</h2>
+            <h2 class="section-title">Open &amp; closed trades</h2>
             <p class="section-copy mt-1">
-              One card per position: shared contract and entry context, then exit when flat.
+              One card per position: entry context on the left, exit or still-open status on the right.
             </p>
           </div>
           <span class="open-meta-pill" id="activity-meta">—</span>
         </div>
-        <ul id="recent-activity-list" class="activity-list activity-list-unified">
-          <li class="activity-empty">Loading…</li>
-        </ul>
+        <div class="activity-zone">
+          <div class="activity-zone-head">
+            <h3 class="activity-zone-title">Open positions</h3>
+          </div>
+          <ul id="activity-open-list" class="activity-list activity-list-unified">
+            <li class="activity-empty">Loading…</li>
+          </ul>
+          <div id="activity-open-pagination" class="activity-pagination" hidden></div>
+        </div>
+        <div class="activity-zone">
+          <div class="activity-zone-head">
+            <h3 class="activity-zone-title">Closed trades</h3>
+          </div>
+          <ul id="activity-closed-list" class="activity-list activity-list-unified">
+            <li class="activity-empty">Loading…</li>
+          </ul>
+          <div id="activity-closed-pagination" class="activity-pagination" hidden></div>
+        </div>
       </section>
 
       <details class="section-card collapsible-section">
@@ -198,16 +213,14 @@
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
             <div class="flex justify-between items-baseline mb-2">
-              <h3 class="text-sm font-semibold text-slate-200">Open credit vs capital (USDC)</h3>
+              <h3 class="text-sm font-semibold text-slate-200">Total equity by book (USDC equivalent)</h3>
               <span class="text-xs text-slate-500" id="risk-capital-meta">—</span>
             </div>
-            <div class="h-72 relative">
+            <div class="h-72 relative chart-panel-canvas">
               <canvas id="chart-risk-capital"></canvas>
             </div>
             <p class="text-xs text-slate-500 mt-2" id="risk-capital-hint">
-              Per-book <strong class="text-slate-400">open credit</strong> sums entry credit on open
-              groups for that collateral book; <strong class="text-slate-400">equity</strong> is USDC-equivalent from the live snapshot.
-              This is a dashboard exposure view and no longer treats theoretical per-trade loss caps as the primary cross-margin metric.
+              Per-book equity in USDC equivalent from the live snapshot (or last saved snapshot).
             </p>
           </div>
 
@@ -216,7 +229,7 @@
               <h3 class="text-sm font-semibold text-slate-200">Cumulative realized PnL (USDC)</h3>
               <span class="text-xs text-slate-500" id="cum-pnl-meta">—</span>
             </div>
-            <div class="h-72 relative">
+            <div class="h-72 relative chart-panel-canvas">
               <canvas id="chart-cum-pnl"></canvas>
             </div>
           </div>
@@ -226,7 +239,7 @@
               <h3 class="text-sm font-semibold text-slate-200">Daily realized PnL (USDC)</h3>
               <span class="text-xs text-slate-500" id="daily-pnl-meta">—</span>
             </div>
-            <div class="h-72 relative">
+            <div class="h-72 relative chart-panel-canvas">
               <canvas id="chart-daily-pnl"></canvas>
             </div>
           </div>
@@ -234,7 +247,7 @@
           <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
             <div class="flex justify-between items-baseline mb-2">
               <h3 class="text-sm font-semibold text-slate-200">
-                Rolling APR (window vs effective capital)
+                Rolling APR (window vs daily total equity)
               </h3>
               <div class="text-xs text-slate-400 flex gap-2 items-center">
                 <label>
@@ -248,7 +261,7 @@
                 </label>
               </div>
             </div>
-            <div class="h-72 relative">
+            <div class="h-72 relative chart-panel-canvas">
               <canvas id="chart-apr"></canvas>
             </div>
           </div>
@@ -292,6 +305,6 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script src="/app.js?v=20260519b" defer></script>
+    <script src="/app.js?v=position-size-inline-20260523" defer></script>
   </body>
 </html>

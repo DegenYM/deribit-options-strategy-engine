@@ -154,10 +154,13 @@ cloudflared tunnel --config ~/.cloudflared/config.yml run
 
 ## 六、macOS launchd 常駐（建議）
 
-同一台 Mac 需長期跑 `**1 + N` 個行程**（`N` = 對外開放的投資人人數）：
+同一台 Mac 需長期跑 **`1 + N + M` 個行程**（`N` = 對外開放的投資人人數；`M` = 是否另跑 live bot，見 [`live-profiles-launchd-zh-TW.md`](live-profiles-launchd-zh-TW.md)）：
 
-1. **Dashboard**：每位投資人一個 `./bot --investor <id> frontend --port <port>`（監聽對應的本機埠）
+1. **Dashboard（frontend）**：每位投資人一個 `./bot --investor <id> frontend --port <port>`（監聽對應的本機埠）— **Tunnel 502 最常見原因是 frontend 未啟動**
 2. **Tunnel**：**一個** `cloudflared tunnel --config ~/.cloudflared/config.yml run`（ingress 含多個 hostname 時仍只跑這一個行程）
+3. **Live bot（可選）**：`run_live_profiles.py` 與 frontend 分開；`Label` 不可與 frontend 重複（例如 `com.deribit.live.youming` vs `com.deribit.frontend.youming`）
+
+**啟動順序**：先載入所有 frontend LaunchAgent → 確認 `http://127.0.0.1:<port>/api/health` 有回應 → 再載入 cloudflared。重開 Mac 後若 tunnel 先起、frontend 較晚起，短暫 502 屬預期。
 
 以下為 **LaunchAgent** 範本，路徑請改成你的環境；`Label` 需唯一。
 
@@ -200,9 +203,61 @@ Intel Mac 上 `cloudflared` 可能在 `/usr/local/bin/cloudflared`，請用 `whi
 launchctl load ~/Library/LaunchAgents/com.example.cloudflared.deribit-tunnel.plist
 ```
 
-### 6b. 專案 frontend（Python venv 範例）
+### 6b. 專案 frontend（repo 範本）
 
-每位投資人建議一個 plist，`Label` 必須不同（例如 `com.example.deribit.frontend.alice`）。`**--port**` 須與 `config.yml` 內該投資人 hostname 所對應的埠一致。
+Live / frontend 共用兩份 launchd 範本（[`com.deribit.frontend.plist.template`](../config/launchd/com.deribit.frontend.plist.template)）。埠須與 `~/.cloudflared/config.yml` ingress 及 `config/platform/registry.toml` 一致。
+
+**建議**：`./bot investor init` 後直接複製 `config/platform/generated/launchd/com.deribit.frontend.<id>.plist`，或 `./bot investor frontend start`。
+
+手動從範本產生時的佔位符：
+
+| 佔位符 | 說明 |
+|--------|------|
+| `__LABEL__` | 例如 `com.deribit.frontend.youming` |
+| `__REPO_ROOT__` | 本 repo 絕對路徑 |
+| `__PYTHON_BIN__` | 已裝依賴的 Python |
+| `__INVESTOR_ID__` | 投資人 id（小寫） |
+| `__FRONTEND_PORT__` | 本機監聽埠（registry 內 `frontend_port`） |
+
+安裝範例（以 youming 為例，埠 8765）：
+
+```bash
+REPO_ROOT="/Users/youming/Desktop/deribit-options-strategy-engine"
+PYTHON_BIN="/Users/youming/miniforge3/envs/crypto/bin/python"
+INVESTOR="youming"   # 或 jack、an
+FRONTEND_PORT="8765"
+
+mkdir -p "$REPO_ROOT/logs/frontend/$INVESTOR"
+mkdir -p ~/Library/LaunchAgents
+
+sed \
+  -e "s|__LABEL__|com.deribit.frontend.${INVESTOR}|g" \
+  -e "s|__REPO_ROOT__|$REPO_ROOT|g" \
+  -e "s|__PYTHON_BIN__|$PYTHON_BIN|g" \
+  -e "s|__INVESTOR_ID__|$INVESTOR|g" \
+  -e "s|__FRONTEND_PORT__|$FRONTEND_PORT|g" \
+  "$REPO_ROOT/config/launchd/com.deribit.frontend.plist.template" \
+  > ~/Library/LaunchAgents/com.deribit.frontend.${INVESTOR}.plist
+
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.deribit.frontend.${INVESTOR}.plist
+```
+
+**一次啟動／停止全部投資人 frontend**（讀 `config/platform/registry.toml` 的 `frontend_enabled`）：
+
+```bash
+./bot investor frontend start    # 或 stop / restart / status
+./scripts/frontend_launchd_all.sh start
+```
+
+確認本機有回應後再開 tunnel：
+
+```bash
+curl -sS "http://127.0.0.1:8765/api/health" | head
+```
+
+### 6c. 手寫 frontend plist（通用範本）
+
+若投資人 id 不在上表，可自訂 plist。`**--port**` 須與 `config.yml` 內該投資人 hostname 所對應的埠一致；`**Label**` 勿與 `com.deribit.live.*` 重複。
 
 存成 `~/Library/LaunchAgents/com.example.deribit.frontend.alice.plist`，將 `**WorkingDirectory**`、**venv 的 python**、**investor id**、**埠** 改為實際值：
 

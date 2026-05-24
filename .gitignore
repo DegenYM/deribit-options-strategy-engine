@@ -2,11 +2,17 @@
 .env
 .env.*
 !.env.example
+!config/shared/strategies/.env.*
+!config/investors/_example/**/.env.*
 config/shared/defaults.env
 config/shared/.env.defaults
 config/investors/*
 !config/investors/_example/
 !config/investors/_example/**
+config/platform/registry.toml
+config/platform/generated/
+config/handoff/*
+!config/handoff/handoff.template.toml
 .DS_Store
 .venv/
 .pip_packages/
@@ -14,9 +20,13 @@ config/investors/*
 __pycache__/
 *.pyc
 .state/
-# Cloudflare Tunnel 憑證 JSON（應只放在 ~/.cloudflared；勿複製進 repo）
-.cloudflared/*.json
 data/backtest_cache/
 data/frontend_ledger/
+data/fee_ledger/
 logs/
 .mplconfig/
+# 本機產生的 PDF（已納版交付物除外）
+output/pdf/*
+!output/pdf/Deribit_Strategies_Investor_Brief.pdf
+!output/pdf/Investor_Fee_Disclosure_en.pdf
+!output/pdf/Investor_Fee_Disclosure_zh-TW.pdf

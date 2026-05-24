@@ -9,6 +9,19 @@ from deribit_demo.exceptions import AuthenticationError, ExchangeError, Transien
 from conftest import make_config
 
 
+@pytest.fixture(autouse=True)
+def _disable_exchange_throttle(monkeypatch):
+    from deribit_demo.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
+
+    with _AUTH_CACHE_LOCK:
+        _AUTH_TOKEN_CACHE.clear()
+    monkeypatch.setattr("deribit_demo.client.pace_exchange_request", lambda: None)
+    monkeypatch.setenv("DERIBIT_MIN_REQUEST_INTERVAL_SEC", "0")
+    yield
+    with _AUTH_CACHE_LOCK:
+        _AUTH_TOKEN_CACHE.clear()
+
+
 class FakeResponse:
     def __init__(self, payload, *, status_code=200, text="", headers=None):
         self._payload = payload
@@ -154,6 +167,49 @@ def test_idempotent_request_respects_retry_after_header(tmp_path, monkeypatch):
 
     assert result == {"ok": True}
     assert sleeps == [2.5]
+
+
+def test_call_auth_retries_on_429(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda s: sleeps.append(s))
+    session = FakeSession(
+        [
+            FakeResponse({}, status_code=429, text="slow down", headers={"Retry-After": "1.0"}),
+            FakeResponse(_auth_result()),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    result = client._call_auth(
+        {
+            "grant_type": "client_credentials",
+            "client_id": client.config.client_id,
+            "client_secret": client.config.client_secret,
+        }
+    )
+    client._apply_auth_result(result)
+
+    assert sleeps == [1.0]
+    assert client._access_token == "token-a"
+
+
+def test_auth_token_cache_shared_across_clients(tmp_path, monkeypatch):
+    from deribit_demo.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
+
+    with _AUTH_CACHE_LOCK:
+        _AUTH_TOKEN_CACHE.clear()
+    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda _s: None)
+    auth = FakeResponse(_auth_result())
+    summaries = FakeResponse(_ok_body({"summaries": []}))
+    session_a = FakeSession([auth, summaries])
+    session_b = FakeSession([summaries])
+    client_a = _make_client(tmp_path, session_a)
+    client_b = _make_client(tmp_path, session_b)
+
+    client_a.get_account_summaries()
+    client_b.get_account_summaries()
+
+    assert [c["json"]["method"] for c in session_b.calls] == ["private/get_account_summaries"]
 
 
 def test_get_account_summaries_triggers_oauth_first(tmp_path):

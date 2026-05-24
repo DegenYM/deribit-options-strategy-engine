@@ -23,7 +23,7 @@ def _env_files_for_investor(repo_root: Path, investor_id: str) -> list[Path]:
     try:
         from deribit_demo.env_layout import load_investor_manifest
 
-        return list(load_investor_manifest(investor_id, repo_root=repo_root).account_env_files())
+        return list(load_investor_manifest(investor_id, repo_root=repo_root).account_env_files(require_creds=True))
     finally:
         if sys.path and sys.path[0] == str(repo_root):
             sys.path.pop(0)
@@ -83,6 +83,29 @@ def _build_command(args: argparse.Namespace, repo_root: Path, env_file: Path) ->
     return command
 
 
+def _spawn_profile(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    env_file: Path,
+    log_file: Path,
+    started_at: str | None = None,
+) -> subprocess.Popen[bytes]:
+    command = _build_command(args, repo_root, env_file)
+    stamp = started_at or datetime.now(tz=UTC).isoformat()
+    with log_file.open("ab", buffering=0) as log:
+        log.write(f"\n--- started {stamp} ---\n".encode())
+        log.write(("command: " + " ".join(command) + "\n").encode())
+        process = subprocess.Popen(
+            command,
+            cwd=repo_root,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    return process
+
+
 def _terminate_process(process: subprocess.Popen[bytes], grace_seconds: float) -> None:
     if process.poll() is not None:
         return
@@ -139,12 +162,25 @@ def main(argv: list[str] | None = None) -> int:
         help="Keep other profiles running if one profile exits.",
     )
     parser.add_argument(
+        "--restart-failed",
+        action="store_true",
+        help="Restart profiles that exit with a non-zero code (implies --keep-going).",
+    )
+    parser.add_argument(
+        "--restart-delay-seconds",
+        type=float,
+        default=15.0,
+        help="Wait before restarting a failed profile when --restart-failed is set.",
+    )
+    parser.add_argument(
         "--grace-seconds",
         type=float,
         default=10.0,
         help="Seconds to wait before force-killing processes on shutdown.",
     )
     args = parser.parse_args(argv)
+    if args.restart_failed:
+        args.keep_going = True
 
     repo_root = _repo_root()
     if args.env_files:
@@ -211,17 +247,13 @@ def main(argv: list[str] | None = None) -> int:
     started_at = datetime.now(tz=UTC).isoformat()
     for env_file in env_files:
         log_file = log_dir / f"{_safe_log_name(env_file, repo_root)}.log"
-        command = _build_command(args, repo_root, env_file)
-        with log_file.open("ab", buffering=0) as log:
-            log.write(f"\n--- started {started_at} ---\n".encode())
-            log.write(("command: " + " ".join(command) + "\n").encode())
-            process = subprocess.Popen(
-                command,
-                cwd=repo_root,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+        process = _spawn_profile(
+            args=args,
+            repo_root=repo_root,
+            env_file=env_file,
+            log_file=log_file,
+            started_at=started_at,
+        )
         processes[process] = (env_file, log_file)
         print(f"started {env_file.name} pid={process.pid} log={log_file}", flush=True)
 
@@ -236,7 +268,25 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{env_file.name} exited code={code} log={log_file}", flush=True)
                 if code != 0 and exit_code == 0:
                     exit_code = code
-                if not args.keep_going:
+                if args.restart_failed and not shutting_down and code not in (0, None):
+                    delay = max(0.0, float(args.restart_delay_seconds))
+                    if delay:
+                        print(
+                            f"restarting {env_file.name} in {delay:.0f}s after exit code={code}",
+                            flush=True,
+                        )
+                        time.sleep(delay)
+                    if shutting_down:
+                        continue
+                    process = _spawn_profile(
+                        args=args,
+                        repo_root=repo_root,
+                        env_file=env_file,
+                        log_file=log_file,
+                    )
+                    processes[process] = (env_file, log_file)
+                    print(f"restarted {env_file.name} pid={process.pid} log={log_file}", flush=True)
+                elif not args.keep_going:
                     shutting_down = True
 
             if shutting_down:

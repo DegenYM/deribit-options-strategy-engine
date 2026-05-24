@@ -75,6 +75,9 @@ cp .env.example .env
 - `OPTION_STRATEGY` 選擇 `naked_short`、`bull_put_spread` 或 `covered_call`（舊名 `naked_short_put` / `naked_short_call` 會被解析為 `naked_short`）
 - 其餘共用參數可直接從 [`.env.example`](.env.example) 複製。
 - **建議**：一位投資人一個目錄、底下最多數個子帳戶（各跑不同策略），見 [`config/investors/_example/`](config/investors/_example/)。
+- **投資人前置作業**（入金、子帳、API Key、Zero Trust Email）：[`docs/investor-onboarding-zh-TW.md`](docs/investor-onboarding-zh-TW.md)。
+- **管理方新增投資人**（CLI：`investor init` / `import-handoff` / `validate`；registry 與 `accounts.toml` 分離）：[`docs/operator-onboarding-zh-TW.md`](docs/operator-onboarding-zh-TW.md)。
+- **目錄架構與 legacy 遷移**：[`docs/repo-layout-zh-TW.md`](docs/repo-layout-zh-TW.md)。
 - 策略 tuning 在 [`config/shared/strategies/`](config/shared/strategies/)；子帳至少放憑證與資金規模，有需要時也可在同一檔覆寫少數策略鍵（見下方載入順序）。
 
 ### Investor / Sub-account Layout（建議）
@@ -83,8 +86,9 @@ cp .env.example .env
 config/shared/defaults.env              # 可選：全投資人共用 fallback
 config/shared/strategies/.env.<strategy>  # 策略參數（無 API key）
 config/investors/<investor_id>/
-  accounts.toml                         # 子帳清單（通常 ≤ 3；投資人 id 寫在這裡）
-  accounts/.env.<slug>                  # 子帳：憑證、STATE_FILE、資金規模；可選覆寫 shared 策略鍵
+  accounts.toml                         # 策略子帳清單（通常 ≤ 3；不含 fee）
+  accounts/.env.<slug>                  # 策略子帳：憑證、STATE_FILE、資金規模
+  accounts/.env.fee                       # 費用專戶（ACCOUNT_ROLE=fee；不在 accounts.toml）
 
 # 同 repo 多投資人時，執行期資料依 investor_id 分目錄（互不干擾）：
 .state/investors/<investor_id>/<slug>.json
@@ -99,7 +103,9 @@ logs/live/<investor_id>/<slug>.log
 1. `config/shared/defaults.env`（可選）
 2. `config/investors/<id>/.env.investor`（可選）
 3. `config/shared/strategies/.env.<OPTION_STRATEGY>`（或相容的 legacy 路徑）
-4. `accounts/.env.<slug>`
+4. `accounts/.env.<slug>`（策略子帳）
+
+**Fee 專戶**（`accounts/.env.fee`）只載入 defaults + `.env.investor` + 自身 env，**不**合併策略 profile；亦**不在** `accounts.toml`，因此不會被 live 監督或 frontend 聚合。誤用 `./bot run --env-file .../.env.fee` 會被 CLI 拒絕。
 
 若使用 repo 根目錄單一 `.env`（非 `config/investors/.../accounts/`），則仍為：defaults → 該 `.env` → 策略 profile（profile 優先於重疊鍵）。
 
@@ -122,12 +128,54 @@ cp -R config/investors/_example config/investors/youming
 
 - **策略狀態**：`STATE_FILE` 建議設為 `.state/investors/<investor_id>/<slug>.json`（範本已採此格式）。
 - **Dashboard**：`./bot --investor <id> frontend` 會自動寫入 `data/frontend_ledger/<investor_id>/`；多子帳時再分子目錄 `<slug>/`。`metrics.db` 為 `data/frontend_ledger/<investor_id>/metrics.db`。
-- **Live 監督**：`python scripts/run_live_profiles.py --investor <id>` 日誌預設在 `logs/live/<investor_id>/<slug>.log`。
+- **Live 監督**：`python scripts/run_live_profiles.py --investor <id> --restart-failed` 日誌預設在 `logs/live/<investor_id>/<slug>.log`；429 等暫時性 API 錯誤 bot 會退避重試，子程序異常退出時監督腳本會自動重啟該 profile。macOS 常駐範本（jack / youming / an）：[`docs/live-profiles-launchd-zh-TW.md`](docs/live-profiles-launchd-zh-TW.md)。
 - **不可混用**：同一個 `frontend` 行程不要同時載入兩位投資人的 env；請各開一個 `--port`（對外 Tunnel 亦一人一路）。
 - **覆寫路徑**（進階）：`FRONTEND_LEDGER_DIR`、`FRONTEND_METRICS_DB`；live 則用 `--log-dir`。
-- **從舊版 flat ledger 遷移**（曾寫入 `data/frontend_ledger/naked/` 等）：搬到 `data/frontend_ledger/<investor_id>/naked/`，`metrics.db` 搬到 `data/frontend_ledger/<investor_id>/metrics.db`。
+- **從舊版 flat ledger 遷移**（曾寫入 `data/frontend_ledger/naked/` 等）：搬到 `data/frontend_ledger/<investor_id>/naked/`，`metrics.db` 搬到 `data/frontend_ledger/<investor_id>/metrics.db`。可執行 `./scripts/cleanup_legacy_layout.sh` 自動清理本機 legacy 產物（詳見 [`docs/repo-layout-zh-TW.md`](docs/repo-layout-zh-TW.md)）。
 
-### Recommended Env Profiles（策略 tuning）
+### 績效費 NAV 快照（Performance fee）
+
+計費口徑見 [`docs/investor-fee-disclosure-zh-TW.md`](docs/investor-fee-disclosure-zh-TW.md)：`NAV_perf`（扣備兌現貨）、`AUM_mgmt`（含現貨）、HWM、10% 績效費。收取方式：投資人季末將帳單金額劃轉至獨立 **Fee 子帳**，管理方以該專戶 API（Wallet 讀寫）收取；策略子帳 API 不開 Wallet（見 [`docs/investor-onboarding-zh-TW.md`](docs/investor-onboarding-zh-TW.md) 第六節）。
+
+1. 在 `config/investors/<id>/.env.investor` 設定備兌現貨數量與費率（範本：[`config/investors/_example/.env.investor.example`](config/investors/_example/.env.investor.example)）。
+2. **首次** `./bot --investor <id> fee-snapshot` 會從 **accounts.toml 內所有已設 API 的子帳**加總 `deposit` + `withdrawal` + `transfer`（BTC/ETH/USDC 各帳本，再換算 USDC）。**子帳互轉**在加總時會互相抵銷；**主帳入金再轉入子帳**時，即使沒有主帳 API，也會算在子帳的 inbound `transfer` 上。若首次結果有誤可 `./bot --investor <id> fee-flow-report` 核對，再以 `--force-bootstrap` 重跑。
+
+```
+初始 HWM（NAV_perf）= max(0, 累計淨入金 USDC 等價 − 備兌現貨 USDC 等價)
+```
+
+若需手動指定起始高水位，可設 `INITIAL_HWM_NAV_PERF`。交易流水預設自 **2026-01-01 UTC** 起掃描（覆寫：`FEE_FLOW_START_DATE=YYYY-MM-DD`）。備兌現貨可選填 `COLLATERAL_SPOT_BTC` / `COLLATERAL_SPOT_ETH`（多數投資人留 0 即可）。
+3. 手動或排程快照，寫入 `data/fee_ledger/<investor_id>/snapshots.db`：
+
+```bash
+./bot --investor an fee-snapshot          # 立即快照
+./bot --investor an fee-status            # 查看 HWM / 最近快照 / 歷史結算
+./bot --investor an fee-settle --period 2026-Q1 --net-flow-usdc 0
+
+# 自訂區間結算 + 報表（PDF/MD/CSV）；淨申赎預設自 Deribit 流水計算
+./bot --investor an fee-settle-period --from 2026-05-01 --to 2026-05-21
+./bot --investor an fee-settle-period --to now                    # --to 之前最近一筆快照 → 現在
+./bot --investor an fee-settle-period --to 2026-05-21 --no-persist  # 試算，不寫入 HWM
+./bot --investor an fee-report --kind settlement --period 20260501T000000Z_20260521T235959Z
+
+# English reports for investors (PDF + Markdown; PDF is the primary deliverable)
+./bot --investor an fee-report --kind initial
+./bot --investor an fee-report --kind settlement --period 2026-Q1
+./bot --investor an fee-report --kind initial --format pdf    # PDF only
+./bot --investor an fee-report --kind initial --format csv   # Excel-friendly CSV only
+./bot --investor an fee-report --kind initial --format all    # PDF + MD + CSV
+
+# cron（建議每日 23:55 UTC，季末再 fee-settle）
+python3 scripts/snapshot_investor_fee_nav.py --investor an
+```
+
+- **Initial report**: auto-written on first `fee-snapshot` bootstrap to `data/fee_ledger/<id>/reports/initial/initial-YYYYMMDD.{pdf,md,-flows.csv,-summary.csv}`.
+- **Quarterly report**: auto-written after `fee-settle` to `data/fee_ledger/<id>/reports/YYYY-MM-DD/settlement-YYYY-QN.{pdf,md,-flows.csv,-summary.csv}` (date folder = period end, UTC).
+- **Period settlement** (`fee-settle-period`): same date layout under `reports/YYYY-MM-DD/settlement-<period-id>.*`.
+- **CSV**: `-summary.csv` = Day A/B balances, deposits, withdrawals, earned, fees; `-flows.csv` = period cash movements; `-trades.csv` = closed option groups in the period.
+
+快照會合併該投資人所有 enabled 子帳（同 API key 去重），並依 Deribit 指數價計算 `NAV_perf = 總權益 − 備兌現貨 USDC 等價`。
+
 
 策略專屬參數請改 [`config/shared/strategies/`](config/shared/strategies/)。
 
@@ -171,7 +219,9 @@ LINEAR_MAX_SPREAD_RATIO=0.14
 LINEAR_MIN_BOOK_NOTIONAL_USDC=4000
 
 # --- APR gates ---
-# APR = annualized net entry credit / that collateral book's equity.
+# APR = round-trip net premium per contract / that leg's collateral notional, annualized.
+# Inverse: (bid - entry_fee - exit_fee) / contract_size / DTE * 365 (typically contract_size = 1 BTC/ETH).
+# USDC put: net premium / strike; USDC call: net premium / index.
 MIN_NET_APR=0.08
 TARGET_NET_APR_MIN=0.10
 TARGET_NET_APR_MAX=0.18
@@ -184,7 +234,7 @@ BOOK_IM_TARGET=0.35
 BOOK_IM_HARD=0.45
 BOOK_MM_TARGET=0.22
 BOOK_MM_HARD=0.33
-OPEN_MAX_LOSS_HALT_RATIO=0.40
+# OPEN_MAX_LOSS_HALT_RATIO 省略時預設等於 BOOK_IM_HARD（見 config.py）。
 
 # --- Position management ---
 TP_CAPTURE_PCT=0.55
@@ -208,8 +258,7 @@ HARD_DERISK_ON_CRISIS_OPEN_GROUP=false
 
 # --- Hedging / pacing ---
 ENABLE_PERP_HEDGE=false
-MAX_CONCURRENT_GROUPS=9
-MAX_GROUPS_PER_BOOK=3
+MAX_CONCURRENT_GROUPS=6
 MAX_GROUPS_PER_CURRENCY=3
 ENTRY_COOLDOWN_MINUTES=20
 COOLDOWN_HOURS=12
@@ -379,8 +428,8 @@ COVERED_CALL_ROBUST_EXIT_DTE=0.5
 COVERED_CALL_ITM_BUFFER_PCT=0
 COVERED_CALL_SPOT_ORDER_TYPE=market
 
-MAX_GROUPS_PER_BOOK=3
 MAX_GROUPS_PER_CURRENCY=3
+MAX_CONCURRENT_GROUPS=6
 ```
 
 注意：
@@ -442,8 +491,8 @@ MAX_GROUPS_PER_CURRENCY=3
 ./bot frontend --account-env-files config/investors/youming/accounts/.env.naked,config/investors/youming/accounts/.env.bull_put
 
 # 同時啟動 accounts.toml 內所有 enabled 子帳的 `run --live`（log：logs/live/<investor_id>/<slug>.log）
-python scripts/run_live_profiles.py --investor youming
-python scripts/run_live_profiles.py --investor alice
+python scripts/run_live_profiles.py --investor youming --restart-failed
+python scripts/run_live_profiles.py --investor alice --restart-failed
 
 # 不經 --investor，改用手動列出多個子帳 env：
 python scripts/run_live_profiles.py \
@@ -531,7 +580,7 @@ python scripts/run_live_profiles.py \
 - 認證為了試用簡化，HTTP private request 直接走 Basic Auth
 - 掃描同時支援 `quote_currency=settlement_currency=USDC` 的線性 options，以及 `quote_currency=settlement_currency=BTC/ETH` 的 reversed options
 - `portfolio APR` 用 `annualized net pnl / REFERENCE_CAPITAL_USDC`
-- 已平倉表的 **`Annualized`**：`(realized_pnl / 該本位總 IM) × (365 / holding days)`。`realized_pnl` 仍為 USDC 等價；分母為 `estimated_im_collateral`（舊 state 無該欄時用 `max_loss` 與指數回推 IM）。USDC 本位直接相除；BTC／ETH 本位先把 PnL 除以標的 USD 指數換成幣，再除以 IM（幣）
+- 已平倉表的 **`Annualized`**：`(realized_pnl / 該筆倉位抵押名目) × (365 / holding days)`。covered call / 逆線 naked 分母通常為 `quantity`（1 BTC/ETH 每張）；USDC put 為 `strike × quantity`；bull put spread 為 `estimated_im_collateral`（max loss）。`realized_pnl` 仍為 USDC 等價；BTC／ETH 本位優先用 `realized_pnl_collateral_native`
 - **`Return / max-loss`** 仍為 `realized_pnl / max_loss`（與上列年化分母口徑不同時，兩欄數字不必一致）
 - 所有 `credit / debit / max loss / report` 內部都統一換算成 `USDC equivalent`
 - 本地狀態保存在 `STATE_FILE`；多子帳建議使用 `.state/investors/<id>/<slug>.json`
@@ -564,11 +613,15 @@ pip install -r requirements.txt
 快照，append 到 `data/frontend_ledger/<investor_id>/`（多子帳時為 `.../<investor_id>/<slug>/equity_<UTC date>.jsonl`）。
 沒設 `DERIBIT_CLIENT_ID/SECRET` 時 scheduler 自動跳過，但 server
 依然可看 closed groups / 累積 PnL / APR 圖。
-前端頁面資料刷新有 30 秒節流上限；自動刷新與手動 `Refresh` 都會套用同一個限制。
+前端頁面資料刷新有 3 分鐘節流上限；自動刷新與手動 `Refresh` 都會套用同一個限制。
 
 多子帳 dashboard 建議 `./bot --investor <id> frontend`，或 `--account-env-files` 傳入**同一位**投資人的多個 `accounts/.env.<slug>`。
 
 **多名投資人**（各 `config/investors/<id>/` 一份資料）若需各自專屬對外網址：請為每位投資人各跑一個 `frontend`（例如不同 `--port`），再以 reverse proxy／Tunnel 將不同子網域指到對應埠；細節見 [docs/cloudflare-tunnel-investor.md](docs/cloudflare-tunnel-investor.md)。
+
+**macOS 一鍵啟停全部 dashboard（launchd）**：`./bot investor frontend start|stop|restart|status`（依 `config/platform/registry.toml` 的 `frontend_enabled`）；包裝腳本 `./scripts/frontend_launchd_all.sh start`。
+
+**macOS 一鍵啟停全部 live bot（launchd）**：`./bot investor live start|stop|restart|status`（依 `live_enabled`）；包裝腳本 `./scripts/live_launchd_all.sh start`。細節見 [`docs/live-profiles-launchd-zh-TW.md`](docs/live-profiles-launchd-zh-TW.md)。
 
 家用或無固定公網 IP 時，若要對投資人提供固定 **HTTPS** 連結，可使用 **Cloudflare Named Tunnel**（本機維持 `127.0.0.1` 即可）：步驟、 `config.yml` 範例、launchd 與 Access 建議見同一份文件。
 

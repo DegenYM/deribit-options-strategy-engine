@@ -78,6 +78,7 @@ def _rolling_apr_brute(
                 "date": cursor.strftime("%Y-%m-%d"),
                 "apr": str(annualized),
                 "window_pnl_usdc": str(window_pnl),
+                "equity_usdc": str(effective_capital_usdc),
             }
         )
         cursor += timedelta(days=1)
@@ -130,6 +131,89 @@ def test_rolling_apr_series_caps_chart_points():
     assert len(rows) <= 100
 
 
+def test_rolling_apr_uses_equity_on_sample_day_not_later_deposit():
+    today = datetime.now(tz=UTC).date()
+    day = today - timedelta(days=10)
+    pnl_by_day = {day: Decimal("100")}
+    equity_by_day = {
+        day: Decimal("10000"),
+        day + timedelta(days=1): Decimal("100000"),
+    }
+    rows = frontend_server._rolling_apr_from_daily_totals(
+        pnl_by_day,
+        window_days=30,
+        effective_capital_usdc=Decimal("100000"),
+        equity_by_day=equity_by_day,
+        max_chart_days=90,
+    )
+    row = next(r for r in rows if r["date"] == day.strftime("%Y-%m-%d"))
+    apr = Decimal(row["apr"])
+    expected = (Decimal("100") * Decimal("365") / Decimal("30")) / Decimal("10000")
+    assert apr == expected
+    assert row["equity_usdc"] == "10000"
+
+
+def test_resolve_apr_effective_capital_prefers_equity(tmp_path):
+    cfg = make_config(tmp_path, reference_capital_usdc=Decimal("1000"))
+    account = DashboardAccount("a", tmp_path / "a.env", cfg, cfg.state_file, tmp_path / "ledger-a")
+    status = {"portfolio": {"total_equity_usdc": "25000"}}
+    assert frontend_server._resolve_apr_effective_capital_usdc(
+        [account],
+        override=None,
+        status_payload=status,
+    ) == Decimal("25000")
+    assert frontend_server._resolve_apr_effective_capital_usdc(
+        [account],
+        override=Decimal("18000"),
+        status_payload=status,
+    ) == Decimal("18000")
+
+
+def test_resolve_apr_effective_capital_falls_back_to_reference(tmp_path):
+    cfg = make_config(tmp_path, reference_capital_usdc=Decimal("1500"))
+    account = DashboardAccount("a", tmp_path / "a.env", cfg, cfg.state_file, tmp_path / "ledger-a")
+    assert frontend_server._resolve_apr_effective_capital_usdc(
+        [account],
+        override=None,
+        status_payload=None,
+    ) == Decimal("1500")
+
+
+def test_group_strike_parsed_from_instrument_name():
+    group = {"short_instrument_name": "ETH_USDC-24APR26-1700-P"}
+    assert frontend_server._group_strike(group) == Decimal("1700")
+
+
+def test_ensure_realized_apr_uses_strike_from_instrument_name():
+    group = {
+        "short_instrument_name": "ETH_USDC-24APR26-1700-P",
+        "collateral_currency": "USDC",
+        "option_type": "put",
+        "strategy": "naked_short",
+        "quantity": "1",
+        "realized_pnl": "-15",
+        "entry_timestamp_ms": 1_000_000,
+        "closed_timestamp_ms": 1_000_000 + 5 * 86_400_000,
+    }
+    frontend_server._ensure_realized_apr_on_equity(
+        group,
+        index_usd={"USDC": Decimal("1"), "ETH": Decimal("2000")},
+        contract_size=Decimal("0.1"),
+    )
+    apr = Decimal(group["realized_apr_on_equity"])
+    expected = (Decimal("-15") / Decimal("1700") / Decimal("5")) * Decimal("365")
+    assert abs(apr - expected) < Decimal("0.000001")
+    assert apr < 0
+    assert Decimal(group["short_strike"]) == Decimal("1700")
+
+
+def test_ttl_cache_try_get():
+    cache = frontend_server._TtlCache(60.0)
+    assert cache.try_get("missing") is None
+    assert cache.get_or_set("k", lambda: {"x": 1}) == {"x": 1}
+    assert cache.try_get("k") == {"x": 1}
+
+
 def test_closed_groups_payload_excludes_performance_groups(tmp_path):
     state_path = tmp_path / "covered_call.json"
     state = StrategyState()
@@ -164,6 +248,55 @@ def test_closed_groups_payload_excludes_performance_groups(tmp_path):
 
     assert [group["group_id"] for group in payload["closed"]] == ["0002"]
     assert payload["performance_excluded_closed_group_count"] == 1
+
+
+def test_closed_groups_payload_excludes_phantom_reconcile_close(tmp_path):
+    short = "ETH_USDC-29MAY26-2350-C"
+    state_path = tmp_path / "naked.json"
+    state = StrategyState()
+    phantom = TradeGroup(
+        group_id="0007",
+        currency="ETH",
+        collateral_currency="USDC",
+        quantity=Decimal("0.1"),
+        entry_timestamp_ms=1_000,
+        expiration_timestamp_ms=future_expiry(7),
+        short_instrument_name=short,
+        short_strike=Decimal("2350"),
+        entry_credit=Decimal("10"),
+        original_entry_credit=Decimal("10"),
+        max_loss=Decimal("50"),
+        regime_at_entry="normal",
+        status="closed",
+        close_reason="reconciled_external",
+        closed_timestamp_ms=4_000,
+        realized_pnl=Decimal("-3"),
+        strategy="naked_short",
+    )
+    live = TradeGroup(
+        group_id="0008",
+        currency="ETH",
+        collateral_currency="USDC",
+        quantity=Decimal("0.1"),
+        entry_timestamp_ms=20_000,
+        expiration_timestamp_ms=future_expiry(7),
+        short_instrument_name=short,
+        short_strike=Decimal("2350"),
+        entry_credit=Decimal("10"),
+        original_entry_credit=Decimal("10"),
+        max_loss=Decimal("50"),
+        regime_at_entry="normal",
+        status="open",
+        last_action="adopted_from_exchange",
+        strategy="naked_short",
+    )
+    state.groups.extend([phantom, live])
+    StrategyStateStore(state_path).save(state)
+
+    payload = frontend_server._closed_groups_payload(state_path)
+
+    assert payload["open"] and payload["open"][0]["group_id"] == "0008"
+    assert payload["closed"] == []
 
 
 def test_aggregate_stress_returns_per_strategy_sections(tmp_path, monkeypatch):
@@ -409,7 +542,7 @@ def test_aggregate_realized_summary_is_json_serializable(tmp_path, monkeypatch) 
     env_file = tmp_path / ".env.test"
     env_file.write_text("DERIBIT_ENV=test\n", encoding="utf-8")
     state_path = tmp_path / "bot.json"
-    cfg = make_config(state_file=state_path)
+    cfg = make_config(tmp_path, state_file=state_path)
     account = DashboardAccount(
         name="test",
         env_file=env_file,
@@ -424,7 +557,7 @@ def test_aggregate_realized_summary_is_json_serializable(tmp_path, monkeypatch) 
 def test_trade_journal_sync_scheduler_run_once(tmp_path, monkeypatch) -> None:
     env_file = tmp_path / ".env.test"
     env_file.write_text("DERIBIT_ENV=test\n", encoding="utf-8")
-    cfg = make_config(state_file=tmp_path / "bot.json")
+    cfg = make_config(tmp_path, state_file=tmp_path / "bot.json")
     account = DashboardAccount(
         name="test",
         env_file=env_file,
@@ -506,3 +639,168 @@ def test_aggregate_groups_payload_json_serializable_after_spot_backfill(tmp_path
     payload = frontend_server._closed_groups_payload(state_path)
     frontend_server._apply_spot_native_backfill(payload, {"ETH": Decimal("2400")})
     json.dumps(frontend_server._decimalize(payload))
+
+
+def _write_ledger_row(root: Path, *, ts_ms: int, equity: str, client_suffix: str = "a") -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    frontend_server._append_ledger(
+        root,
+        {
+            "ts_ms": ts_ms,
+            "account_name": f"acct-{client_suffix}",
+            "env": "testnet",
+            "option_strategy": "naked_short",
+            "total_equity_usdc": equity,
+            "day_start_equity_usdc": str(Decimal(equity) - Decimal("10")),
+            "day_net_flow_usdc": "0",
+            "day_pnl_usdc_ex_flow": "10",
+            "day_pnl_usdc_ex_flow_ex_spot": "10",
+            "day_drawdown_pct": "0.01",
+            "open_max_loss_usdc": "100",
+            "equity_by_book": {"USDC": equity},
+            "day_start_equity_by_book": {"USDC": str(Decimal(equity) - Decimal("10"))},
+            "day_pnl_usdc_ex_flow_by_book": {"USDC": "10"},
+        },
+    )
+
+
+def test_latest_ledger_snapshot_aggregates_multi_account(tmp_path) -> None:
+    cfg_a = make_config(tmp_path, client_id="acct-a", client_secret="secret-a")
+    cfg_b = make_config(tmp_path, client_id="acct-b", client_secret="secret-b")
+    env_a = tmp_path / "a.env"
+    env_b = tmp_path / "b.env"
+    ledger_a = tmp_path / "ledger-a"
+    ledger_b = tmp_path / "ledger-b"
+    _write_ledger_row(ledger_a, ts_ms=1_000, equity="5000", client_suffix="a")
+    _write_ledger_row(ledger_b, ts_ms=2_000, equity="6000", client_suffix="b")
+    accounts = [
+        DashboardAccount("a", env_a, cfg_a, cfg_a.state_file, ledger_a),
+        DashboardAccount("b", env_b, cfg_b, cfg_b.state_file, ledger_b),
+    ]
+
+    snap = frontend_server._latest_ledger_snapshot(accounts)
+
+    assert snap["source"] == "ledger"
+    assert snap["snapshot_ts_ms"] == 1_000
+    assert Decimal(snap["portfolio"]["total_equity_usdc"]) == Decimal("11000")
+    assert len(snap["accounts"]) == 2
+
+
+def test_latest_ledger_snapshot_dedupes_shared_api_identity(tmp_path) -> None:
+    cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="dup", client_secret="same")
+    cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="dup", client_secret="same")
+    env_a = tmp_path / "a.env"
+    env_b = tmp_path / "b.env"
+    ledger_a = tmp_path / "ledger-a"
+    ledger_b = tmp_path / "ledger-b"
+    _write_ledger_row(ledger_a, ts_ms=1_000, equity="5000")
+    _write_ledger_row(ledger_b, ts_ms=2_000, equity="9999")
+    accounts = [
+        DashboardAccount("a", env_a, cfg_a, cfg_a.state_file, ledger_a),
+        DashboardAccount("b", env_b, cfg_b, cfg_b.state_file, ledger_b),
+    ]
+
+    snap = frontend_server._latest_ledger_snapshot(accounts)
+
+    assert len(snap["accounts"]) == 2
+    assert Decimal(snap["portfolio"]["total_equity_usdc"]) == Decimal("5000")
+
+
+def test_portfolio_snapshot_endpoint_no_deribit(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    cfg = make_config(tmp_path, state_file=tmp_path / "bot.json")
+
+    def _no_deribit(*_args, **_kwargs):
+        raise AssertionError("DeribitClient must not be used for /api/portfolio/snapshot")
+
+    def _fake_snapshot(_accounts, **_kwargs):
+        return {
+            "source": "ledger",
+            "snapshot_ts_ms": 5_000,
+            "freshness_ms": 100,
+            "portfolio": {"total_equity_usdc": "1234.56"},
+            "accounts": [],
+            "scheduler": {},
+        }
+
+    monkeypatch.setattr(frontend_server, "DeribitClient", _no_deribit)
+    monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
+    monkeypatch.setattr(frontend_server, "_latest_ledger_snapshot", _fake_snapshot)
+    app = frontend_server.create_app(
+        env_file=env_file,
+        account_env_files=(env_file,),
+        enable_scheduler=False,
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/portfolio/snapshot")
+
+    assert response.status_code == 200
+    assert response.json()["portfolio"]["total_equity_usdc"] == "1234.56"
+
+
+def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) -> None:
+    import threading
+    import time
+
+    from deribit_demo.engine import ExchangePrefetch
+
+    cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="a", client_secret="1")
+    cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="b", client_secret="2")
+    cfg_c = make_config(tmp_path, option_strategy="bull_put_spread", client_id="c", client_secret="3")
+    accounts = [
+        DashboardAccount("a", tmp_path / "a.env", cfg_a, cfg_a.state_file, tmp_path / "la"),
+        DashboardAccount("b", tmp_path / "b.env", cfg_b, cfg_b.state_file, tmp_path / "lb"),
+        DashboardAccount("c", tmp_path / "c.env", cfg_c, cfg_c.state_file, tmp_path / "lc"),
+    ]
+    prefetch = ExchangePrefetch(
+        summaries={},
+        open_orders=[],
+        positions=[],
+        option_positions=[],
+        future_positions=[],
+        future_markets_by_name={},
+        markets_by_currency={"BTC": [], "ETH": []},
+    )
+    lock = threading.Lock()
+    in_flight = 0
+    max_in_flight = 0
+
+    class SlowBot:
+        def fetch_exchange_prefetch(self) -> ExchangePrefetch:
+            return prefetch
+
+        def status_with_exchange_prefetch(self, _prefetch: ExchangePrefetch) -> dict:
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.12)
+            with lock:
+                in_flight -= 1
+            return {
+                "env": "testnet",
+                "portfolio": {
+                    "total_equity_usdc": Decimal("1000"),
+                    "equity_by_book": {"USDC": Decimal("1000")},
+                },
+                "underlying_index_usd": {},
+                "accounts": {"USDC": {"equity": "1000"}},
+                "trade_groups": [],
+                "open_orders": [],
+                "positions": [],
+                "trade_group_count": 0,
+            }
+
+    monkeypatch.setattr(frontend_server, "_bot_for_account", lambda account, require_private=True: SlowBot())
+    cache = frontend_server._TtlCache(15.0)
+
+    started = time.monotonic()
+    frontend_server._aggregate_status(accounts, exchange_prefetch_cache=cache)
+    elapsed = time.monotonic() - started
+
+    assert max_in_flight >= 2
+    assert elapsed < 0.30

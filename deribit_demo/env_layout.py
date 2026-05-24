@@ -26,6 +26,8 @@ CONFIG_STRATEGIES = CONFIG_SHARED / "strategies"
 CONFIG_INVESTORS = Path("config/investors")
 ACCOUNTS_MANIFEST = "accounts.toml"
 EXAMPLE_INVESTOR_ID = "_example"
+FEE_ACCOUNT_SLUG = "fee"
+ACCOUNT_ROLE_FEE = "fee"
 
 
 @dataclass(frozen=True)
@@ -47,8 +49,29 @@ class InvestorManifest:
     def enabled_accounts(self) -> tuple[InvestorAccountSpec, ...]:
         return tuple(account for account in self.accounts if account.enabled)
 
-    def account_env_files(self) -> tuple[Path, ...]:
-        return tuple(account.env_path for account in self.enabled_accounts())
+    def accounts_without_creds(self) -> tuple[InvestorAccountSpec, ...]:
+        """Enabled manifest rows missing ``DERIBIT_CLIENT_ID`` / ``SECRET``."""
+        from .config import has_private_creds_for_env
+
+        return tuple(
+            account
+            for account in self.enabled_accounts()
+            if not has_private_creds_for_env(account.env_path)
+        )
+
+    def operational_accounts(self) -> tuple[InvestorAccountSpec, ...]:
+        """Enabled rows that can call private Deribit APIs (have API credentials)."""
+        from .config import has_private_creds_for_env
+
+        return tuple(
+            account
+            for account in self.enabled_accounts()
+            if has_private_creds_for_env(account.env_path)
+        )
+
+    def account_env_files(self, *, require_creds: bool = False) -> tuple[Path, ...]:
+        accounts = self.operational_accounts() if require_creds else self.enabled_accounts()
+        return tuple(account.env_path for account in accounts)
 
     def env_for_slug(self, slug: str) -> Path:
         for account in self.accounts:
@@ -87,6 +110,16 @@ def investor_dir_for_account(account_env: Path) -> Path | None:
 def account_env_basename(slug: str) -> str:
     """Standard sub-account env filename (IDE / dotenv friendly)."""
     return f".env.{slug.strip()}"
+
+
+def fee_account_env_path(investor_dir: Path) -> Path:
+    """Operator fee-collection sub-account env (not in ``accounts.toml``)."""
+    return (investor_dir / "accounts" / account_env_basename(FEE_ACCOUNT_SLUG)).resolve()
+
+
+def is_fee_account_env_path(account_env: Path) -> bool:
+    """True when ``account_env`` is the standard fee wallet env file."""
+    return account_env.resolve().name == account_env_basename(FEE_ACCOUNT_SLUG)
 
 
 def resolve_account_env_path(investor_dir: Path, slug: str) -> Path:
@@ -212,9 +245,12 @@ def load_investor_manifest(
 
     data = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
     investor_meta = data.get("investor") or {}
-    investor_id = str(investor_meta.get("id") or investor_dir.name).strip()
-    if not investor_id:
+    from .investor_registry import validate_investor_id
+
+    raw_id = str(investor_meta.get("id") or investor_dir.name).strip()
+    if not raw_id:
         raise ConfigurationError(f"{manifest_path}: [investor].id is required")
+    investor_id = validate_investor_id(raw_id)
     display_name = str(investor_meta.get("display_name") or investor_id).strip()
 
     accounts: list[InvestorAccountSpec] = []
@@ -279,14 +315,60 @@ def strategy_profile_search_paths(
     return tuple(paths)
 
 
+def _read_account_role(account_env: Path) -> str:
+    if not account_env.is_file():
+        return ""
+    for line in account_env.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() == "ACCOUNT_ROLE":
+            return value.strip().lower()
+    return ""
+
+
+def _is_fee_account_env_file(account_env: Path) -> bool:
+    account_env = account_env.resolve()
+    if is_fee_account_env_path(account_env):
+        role = _read_account_role(account_env)
+        return role == "" or role == ACCOUNT_ROLE_FEE
+    return _read_account_role(account_env) == ACCOUNT_ROLE_FEE
+
+
+def _fee_account_layer_paths(account_env: Path) -> tuple[Path, ...]:
+    """Shared defaults + investor env + fee wallet env; no strategy profile."""
+    account_env = account_env.resolve()
+    root = find_repo_root(account_env)
+    layers: list[Path] = []
+    if root is not None:
+        for name in (".env.defaults", "defaults.env"):
+            defaults = root / CONFIG_SHARED / name
+            if defaults.is_file():
+                layers.append(defaults)
+                break
+    investor_dir = investor_dir_for_account(account_env)
+    if investor_dir is not None:
+        investor_env = resolve_investor_env_path(investor_dir)
+        if investor_env is not None:
+            layers.append(investor_env)
+    if account_env.is_file():
+        layers.append(account_env)
+    return tuple(layers)
+
+
 def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
     """Env files to merge in order; later paths override earlier keys.
 
     Investor sub-account envs (under ``config/investors/<id>/accounts/``) are applied **last** so they can
     override shared strategy profiles. All other entry env files keep the profile last (profile overlays
     the entry file), matching legacy single-``.env`` workflows.
+
+    Fee collection envs (``ACCOUNT_ROLE=fee``) skip strategy profiles entirely.
     """
     account_env = account_env.resolve()
+    if _is_fee_account_env_file(account_env):
+        return _fee_account_layer_paths(account_env)
     root = find_repo_root(account_env)
     layers: list[Path] = []
     if root is not None:

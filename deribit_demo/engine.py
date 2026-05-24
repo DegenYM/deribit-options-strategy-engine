@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from .client import DeribitClient
 from .config import BotConfig
-from .exceptions import AuthenticationError, ExchangeError
+from .exceptions import AuthenticationError, ExchangeError, TransientExchangeError
 from .fees import (
     annualized_return,
     option_trade_fee_native,
@@ -18,6 +18,7 @@ from .fees import (
     premium_value_native,
     premium_value_usdc,
 )
+from .trade_apr import realized_apr_from_close
 from .margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
     linear_usdc_short_put_initial_per_contract_usdc,
@@ -39,7 +40,9 @@ from .models import (
     TradeGroup,
     StrategyState,
     TransactionEntry,
+    is_phantom_reconcile_close,
     normalize_strategy_name,
+    open_short_instrument_names,
 )
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
 from .trade_journal import (
@@ -62,6 +65,8 @@ from .utils import (
 
 LOGGER = logging.getLogger(__name__)
 LOG_REASON_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+# Defer reconciled_external closes right after entry while Deribit positions API catches up.
+RECONCILE_EXTERNAL_CLOSE_GRACE_MS = 180_000
 # When logging scan blockers, avoid megabytes of text per cycle.
 _MAX_SCAN_BLOCKER_LOG_LINES = 36
 # Append at most this many `example_messages` from scan rejection detail per side.
@@ -258,6 +263,23 @@ class DeribitOptionTrialBot:
             elif index_at_close > 0:
                 group.backfill_realized_pnl_usdc(spot_index_usd=index_at_close)
 
+    def _option_contract_size(self, instrument_name: str) -> Decimal:
+        try:
+            payload = self.client.get_instrument(instrument_name)
+            return to_decimal(payload.get("contract_size") or "1")
+        except Exception:  # noqa: BLE001
+            return Decimal("1")
+
+    def _entry_net_apr_for_group(self, group: TradeGroup) -> Decimal:
+        contract_size = self._option_contract_size(group.short_instrument_name)
+        if group.entry_index_usd <= 0 and group.collateral_book().upper() != "USDC":
+            cache: dict[str, OrderBookSnapshot] = {}
+            group.entry_index_usd = self._currency_index_price(group.currency, cache)
+        apr = group.entry_net_apr_at_open(contract_size=contract_size)
+        if apr > 0:
+            return apr
+        return group.entry_net_apr
+
     def _attach_open_group_stats(self, group: TradeGroup) -> None:
         """Snapshot book equity at open; persist to state + trade journal DB."""
         book = self._group_collateral_currency(group)
@@ -267,19 +289,7 @@ class DeribitOptionTrialBot:
         if group.entry_index_usd <= 0 and book.upper() != "USDC":
             cache: dict[str, OrderBookSnapshot] = {}
             group.entry_index_usd = self._currency_index_price(group.currency, cache)
-        dte = group.dte_days
-        net_credit = group.entry_credit
-        if book.upper() != "USDC":
-            cache: dict[str, OrderBookSnapshot] = {}
-            idx = self._currency_index_price(group.currency, cache)
-            if idx > 0:
-                net_credit = group.entry_credit / idx
-        if equity > 0 and net_credit > 0 and dte > 0:
-            group.entry_net_apr = annualized_return(
-                net_credit=net_credit,
-                capital_base=equity,
-                dte_days=dte,
-            )
+        group.entry_net_apr = self._entry_net_apr_for_group(group)
         try:
             self._trade_journal().record_group_stats_open(
                 scope_key=self._journal_scope_key(),
@@ -304,11 +314,6 @@ class DeribitOptionTrialBot:
     ) -> tuple[Decimal, Decimal]:
         book = self._group_collateral_currency(group)
         close_equity = self._book_equity_native(book, summaries)
-        holding_days = Decimal(str(max(closed_timestamp_ms - group.entry_timestamp_ms, 0))) / Decimal(
-            "86400000"
-        )
-        if close_equity <= 0 or holding_days <= 0:
-            return close_equity, Decimal("0")
         idx = index_price_usd if index_price_usd is not None else Decimal("0")
         if idx <= 0 and book.upper() != "USDC":
             cache: dict[str, OrderBookSnapshot] = {}
@@ -321,10 +326,20 @@ class DeribitOptionTrialBot:
                 realized_pnl,
                 index_price_usd=idx,
             )
-        apr = annualized_return(
-            net_credit=pnl_native,
-            capital_base=close_equity,
-            dte_days=holding_days,
+        contract_size = self._option_contract_size(group.short_instrument_name)
+        apr = realized_apr_from_close(
+            strategy=group.strategy or self.config.option_strategy,
+            collateral_currency=book,
+            option_type=group.option_type,
+            quantity=group.quantity,
+            contract_size=contract_size,
+            strike=group.short_strike,
+            index_price_usd=idx,
+            estimated_im_collateral=group.estimated_im_collateral,
+            covered_underlying_quantity=group.covered_underlying_quantity,
+            pnl_collateral_native=pnl_native,
+            entry_timestamp_ms=group.entry_timestamp_ms,
+            closed_timestamp_ms=closed_timestamp_ms,
         )
         return close_equity, apr
 
@@ -518,9 +533,13 @@ class DeribitOptionTrialBot:
         state = self.state_store.load()
         open_groups = self._open_groups(state)
         excluded_group_ids = load_performance_exclusion_group_ids(self.state_store.path)
+        open_short_names = open_short_instrument_names(state.groups)
         all_closed_groups = [group for group in state.groups if group.status == "closed"]
         closed_groups = [
-            group for group in all_closed_groups if group.group_id not in excluded_group_ids
+            group
+            for group in all_closed_groups
+            if group.group_id not in excluded_group_ids
+            and not is_phantom_reconcile_close(group, open_short_names=open_short_names)
         ]
         realized_groups = [
             group
@@ -689,51 +708,64 @@ class DeribitOptionTrialBot:
         last_log_signature: tuple[Any, ...] | None = None
         while cycles <= 0 or iteration < cycles:
             cycle_no = iteration + 1
-            manage_result = self.manage(live=live)
-            cycle_result: dict[str, Any] = {"manage": manage_result}
+            sleep_seconds = self.config.poll_seconds_normal
+            try:
+                manage_result = self.manage(live=live)
+                cycle_result: dict[str, Any] = {"manage": manage_result}
 
-            context = self._load_runtime()
-            status_after_manage = self._status_payload(context)
-            cycle_result["status"] = status_after_manage
-            candidates = self._scan_candidates(context, currencies=currencies, top_n=self.config.top_n)
-            cycle_result["scan"] = self._scan_payload(context, candidates, scan_currencies=currencies)
-            portfolio = status_after_manage["portfolio"]
-            can_enter = not portfolio["halt_new_entries"]
-            if can_enter:
-                cycle_result["entry"] = self._enter_best_from_candidates(context, candidates=candidates[:1], live=live)
-                if cycle_result["entry"].get("group") is not None:
-                    context.state.groups.append(cycle_result["entry"]["group"])
-            else:
-                reason = (
-                    "hard_derisk" if portfolio["hard_derisk"]
-                    else "cooling_down" if portfolio["cooling_down"]
-                    else "halt_limit_reached"
+                context = self._load_runtime()
+                status_after_manage = self._status_payload(context)
+                cycle_result["status"] = status_after_manage
+                candidates = self._scan_candidates(context, currencies=currencies, top_n=self.config.top_n)
+                cycle_result["scan"] = self._scan_payload(context, candidates, scan_currencies=currencies)
+                portfolio = status_after_manage["portfolio"]
+                can_enter = not portfolio["halt_new_entries"]
+                if can_enter:
+                    cycle_result["entry"] = self._enter_best_from_candidates(context, candidates=candidates[:1], live=live)
+                    if cycle_result["entry"].get("group") is not None:
+                        context.state.groups.append(cycle_result["entry"]["group"])
+                else:
+                    reason = (
+                        "hard_derisk" if portfolio["hard_derisk"]
+                        else "cooling_down" if portfolio["cooling_down"]
+                        else "halt_limit_reached"
+                    )
+                    cycle_result["entry"] = {
+                        "action": "entry_skipped",
+                        "reason": reason,
+                    }
+
+                entry_action = cycle_result["entry"].get("action", "")
+                risk_blocked = portfolio["hard_derisk"] or portfolio["cooling_down"]
+                if not candidates and not risk_blocked and entry_action != "naked_put_entered":
+                    topup_actions = self._topup_existing_naked_groups(context, live=live)
+                    if topup_actions:
+                        cycle_result["topup"] = topup_actions
+                if live:
+                    self._persist_trade_journal_result(cycle_result.get("entry"))
+                    self._persist_trade_journal_actions(cycle_result.get("topup") or [])
+                self.state_store.save(context.state)
+                log_signature = self._cycle_log_signature(cycle_result)
+                if log_signature != last_log_signature:
+                    self._log_cycle_update(cycle_no, cycle_result, live=live)
+                    last_log_signature = log_signature
+                if retain_results:
+                    cycle_results.append(cycle_result)
+                iteration += 1
+                if cycles > 0 and iteration >= cycles:
+                    break
+                sleep_seconds = (
+                    self.config.poll_seconds_stress
+                    if portfolio["regime"] != RiskRegime.NORMAL.value
+                    else self.config.poll_seconds_normal
                 )
-                cycle_result["entry"] = {
-                    "action": "entry_skipped",
-                    "reason": reason,
-                }
-
-            entry_action = cycle_result["entry"].get("action", "")
-            risk_blocked = portfolio["hard_derisk"] or portfolio["cooling_down"]
-            if not candidates and not risk_blocked and entry_action != "naked_put_entered":
-                topup_actions = self._topup_existing_naked_groups(context, live=live)
-                if topup_actions:
-                    cycle_result["topup"] = topup_actions
-            if live:
-                self._persist_trade_journal_result(cycle_result.get("entry"))
-                self._persist_trade_journal_actions(cycle_result.get("topup") or [])
-            self.state_store.save(context.state)
-            log_signature = self._cycle_log_signature(cycle_result)
-            if log_signature != last_log_signature:
-                self._log_cycle_update(cycle_no, cycle_result, live=live)
-                last_log_signature = log_signature
-            if retain_results:
-                cycle_results.append(cycle_result)
-            iteration += 1
-            if cycles > 0 and iteration >= cycles:
-                break
-            sleep_seconds = self.config.poll_seconds_stress if portfolio["regime"] != RiskRegime.NORMAL.value else self.config.poll_seconds_normal
+            except TransientExchangeError as exc:
+                LOGGER.warning(
+                    "run cycle=%s transient exchange error: %s; backing off before retry",
+                    cycle_no,
+                    exc,
+                )
+                sleep_seconds = max(self.config.poll_seconds_stress * 6, 60)
             self.sleep_fn(sleep_seconds)
         return {"action": "run", "cycles": iteration, "results": cycle_results}
 
@@ -3550,9 +3582,9 @@ class DeribitOptionTrialBot:
         if not markets:
             return RiskRegime.CRISIS, ["no_option_markets_loaded_for_currency"]
         loader = lambda instrument_name: self._get_orderbook(instrument_name, orderbook_cache)
-        ok, liq_notes = self.strategy.core_naked_liquidity_detail(currency, markets, loader)
+        ok, liq_notes = self.strategy.core_regime_liquidity_detail(currency, markets, loader)
         if not ok:
-            return RiskRegime.CRISIS, ["naked_core_liquidity_check_failed", *liq_notes]
+            return RiskRegime.CRISIS, ["core_entry_liquidity_check_failed", *liq_notes]
 
         drawdown = self._index_drawdown_24h(currency)
         dvol_ratio = self._dvol_ratio(currency)
@@ -4299,6 +4331,44 @@ class DeribitOptionTrialBot:
         except (ValueError, TypeError):
             return 0
 
+    def _flow_query_start_ms(self, state: StrategyState, collateral: str) -> int:
+        """Earliest transaction-log timestamp for external cash-flow tallies."""
+        day_start_ms = self._day_start_ms_from_key(state.day_key)
+        if day_start_ms <= 0:
+            return 0
+        anchor_ms = state.day_equity_anchor_ms_by_book.get(collateral.upper(), 0)
+        if anchor_ms <= 0:
+            return day_start_ms
+        return max(day_start_ms, anchor_ms)
+
+    def _heal_legacy_flow_double_count(
+        self,
+        state: StrategyState,
+        *,
+        book: str,
+        equity_native: Decimal,
+        now_ms: int,
+    ) -> None:
+        """Re-anchor books whose day_net_flow duplicates day-start deposits."""
+        if book in state.day_equity_anchor_ms_by_book:
+            return
+        flow_native = state.day_net_flow_native_by_book.get(book, Decimal("0"))
+        start_native = state.day_start_equity_native_by_book.get(book, Decimal("0"))
+        if start_native > 0 and flow_native > 0:
+            ratio = safe_div(flow_native, start_native)
+            if (
+                Decimal("0.95") <= ratio <= Decimal("1.05")
+                and equity_native >= start_native * Decimal("0.95")
+            ):
+                state.day_equity_anchor_ms_by_book[book] = now_ms
+                state.day_net_flow_usdc_by_book[book] = Decimal("0")
+                state.day_net_flow_native_by_book[book] = Decimal("0")
+                state.last_flow_query_ms_by_book.pop(book, None)
+                return
+        day_start_ms = self._day_start_ms_from_key(state.day_key)
+        if day_start_ms > 0:
+            state.day_equity_anchor_ms_by_book[book] = day_start_ms
+
     def _refresh_cash_flows_by_book(
         self,
         state: StrategyState,
@@ -4312,20 +4382,25 @@ class DeribitOptionTrialBot:
         USDC-equivalent terms. Drawdown uses the native tally; the USDC tally is
         retained for reporting and backward-compatible state.
 
+        The query window starts at ``max(UTC midnight, day_equity_anchor_ms)`` so
+        deposits already baked into day-start equity are not counted twice.
+
         Calls are throttled per book by ``cash_flow_query_interval_seconds``.
         Failures are logged and swallowed so a single API flake does not
         block the rest of the cycle.
         """
         if not self.config.has_private_credentials:
             return
-        day_start_ms = self._day_start_ms_from_key(state.day_key)
-        if day_start_ms <= 0:
+        if self._day_start_ms_from_key(state.day_key) <= 0:
             return
         now_ms = utc_now_ms()
         interval_ms = max(self.config.cash_flow_query_interval_seconds, 1) * 1000
 
         for collateral_raw in self.config.traded_collaterals:
             collateral = collateral_raw.upper()
+            flow_start_ms = self._flow_query_start_ms(state, collateral)
+            if flow_start_ms <= 0:
+                continue
             last_query = state.last_flow_query_ms_by_book.get(collateral, 0)
             if last_query and (now_ms - last_query) < interval_ms:
                 continue
@@ -4333,7 +4408,7 @@ class DeribitOptionTrialBot:
             try:
                 payloads = self.client.get_transaction_log(
                     currency=collateral,
-                    start_timestamp=day_start_ms,
+                    start_timestamp=flow_start_ms,
                     end_timestamp=now_ms,
                     count=100,
                 )
@@ -4372,6 +4447,7 @@ class DeribitOptionTrialBot:
         total_equity = self._total_equity_usdc(summaries, {})
         per_book = self._book_equities_usdc(summaries, {})
         per_book_native = self._book_equities_native(summaries)
+        now_ms = utc_now_ms()
         if state.day_key != today_key:
             state.day_key = today_key
             state.day_start_equity_usdc = total_equity
@@ -4382,21 +4458,35 @@ class DeribitOptionTrialBot:
             state.day_net_flow_usdc_by_book = {book: Decimal("0") for book in per_book}
             state.day_net_flow_native_by_book = {book: Decimal("0") for book in per_book_native}
             state.last_flow_query_ms_by_book = {}
+            state.day_equity_anchor_ms_by_book = {book: now_ms for book in per_book}
         else:
             # First run after schema upgrade: backfill any missing per-book entry
             # from the current equity so we don't treat "unset" as "zero drop".
             for book, equity in per_book.items():
-                state.day_start_equity_by_book.setdefault(book, equity)
-                state.day_net_flow_usdc_by_book.setdefault(book, Decimal("0"))
+                if book not in state.day_start_equity_by_book:
+                    state.day_start_equity_by_book[book] = equity
+                    state.day_net_flow_usdc_by_book.setdefault(book, Decimal("0"))
+                    state.day_equity_anchor_ms_by_book[book] = now_ms
+                else:
+                    state.day_net_flow_usdc_by_book.setdefault(book, Decimal("0"))
+                    self._heal_legacy_flow_double_count(
+                        state,
+                        book=book,
+                        equity_native=per_book_native.get(book, Decimal("0")),
+                        now_ms=now_ms,
+                    )
             for book, equity in per_book_native.items():
                 native_start = state.day_start_equity_by_book.get(book, equity) if book == "USDC" else equity
-                state.day_start_equity_native_by_book.setdefault(book, native_start)
-                state.day_net_flow_native_by_book.setdefault(book, Decimal("0"))
+                if book not in state.day_start_equity_native_by_book:
+                    state.day_start_equity_native_by_book[book] = native_start
+                    state.day_net_flow_native_by_book.setdefault(book, Decimal("0"))
+                    state.day_equity_anchor_ms_by_book.setdefault(book, now_ms)
+                else:
+                    state.day_net_flow_native_by_book.setdefault(book, Decimal("0"))
         state.last_equity_usdc = total_equity
         state.last_equity_by_book = dict(per_book)
         state.last_equity_native_by_book = dict(per_book_native)
         # Drop expired per-book cooldowns so the dict doesn't grow unbounded.
-        now_ms = utc_now_ms()
         state.cooldown_until_ms_by_book = {
             book: ts for book, ts in state.cooldown_until_ms_by_book.items() if ts and ts > now_ms
         }
@@ -4966,6 +5056,15 @@ class DeribitOptionTrialBot:
                 continue
             still_open = group.short_instrument_name in open_short_option_names
             if still_open:
+                continue
+            age_ms = utc_now_ms() - int(group.entry_timestamp_ms or 0)
+            if age_ms < RECONCILE_EXTERNAL_CLOSE_GRACE_MS:
+                LOGGER.debug(
+                    "reconcile defer external close group=%s instrument=%s (age_ms=%s)",
+                    group.group_id,
+                    group.short_instrument_name,
+                    age_ms,
+                )
                 continue
             closed_timestamp_ms = utc_now_ms()
             estimated_close_debit = self._estimate_reconcile_close_debit(

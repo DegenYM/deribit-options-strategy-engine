@@ -1,0 +1,27 @@
+# Investor handoff — fill and deliver via a secure channel (not chat plaintext).
+# Manager: ./bot investor import-handoff path/to/handoff.toml
+
+[investor]
+id = "alice"
+display_name = "Alice"
+dashboard_email = "alice@example.com"
+deribit_env = "mainnet"  # must be quoted in TOML
+
+[[strategies]]
+slug = "naked"
+client_id = "YOUR_CLIENT_ID"
+client_secret = "YOUR_CLIENT_SECRET"
+reference_capital_usdc = 50000
+
+# Optional additional strategies (must exist in accounts.toml from investor init)
+# [[strategies]]
+# slug = "covered_call"
+# client_id = "..."
+# client_secret = "..."
+
+[fee]
+client_id = "FEE_CLIENT_ID"
+client_secret = "FEE_CLIENT_SECRET"
+
+[checklist]
+margin_segregated = true

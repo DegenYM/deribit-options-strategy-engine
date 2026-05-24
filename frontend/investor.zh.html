@@ -27,7 +27,7 @@
     <script src="/vendor/chart.umd.min.js"></script>
     <script src="/vendor/luxon.min.js"></script>
     <script src="/vendor/chartjs-adapter-luxon.umd.min.js"></script>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/styles.css?v=inv-layout-6" />
   </head>
   <body class="app-body investor-portal investor-blocking-load text-slate-100 min-h-screen font-sans">
     <script>
@@ -35,13 +35,14 @@
       window.__INVESTOR_LOCALE__ = "zh-Hant";
     </script>
     <header class="app-header sticky top-0 z-10">
-      <div class="dashboard-shell py-3 flex flex-wrap items-center gap-4">
-        <div class="min-w-[220px]">
+      <div class="dashboard-shell investor-header-shell py-3 flex flex-wrap items-center gap-4">
+        <div class="investor-header-title min-w-0 w-full sm:min-w-[220px] sm:w-auto">
           <h1 class="text-lg font-semibold tracking-tight text-slate-50">投資組合總覽</h1>
           <p class="text-xs text-slate-500">
             即時權益與策略摘要；非投資建議。詳細營運請使用內部儀表板。
           </p>
         </div>
+        <div class="investor-header-badges flex flex-wrap items-center gap-2">
         <span
           id="env-badge"
           class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
@@ -54,9 +55,13 @@
           id="strategy-badge"
           class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
         >策略：—</span>
-        <span id="header-spot-btc" class="text-xs font-mono text-emerald-200/90 tabular-nums">BTC —</span>
-        <span id="header-spot-eth" class="text-xs font-mono text-emerald-200/90 tabular-nums">ETH —</span>
-        <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
+        </div>
+        <div class="investor-header-spot flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-emerald-200/90 tabular-nums">
+        <span id="header-spot-btc">BTC —</span>
+        <span id="header-spot-eth">ETH —</span>
+        </div>
+        <div class="investor-header-actions ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-400">
+          <span id="data-freshness-slot"></span>
           <span id="last-refresh">上次更新：—</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
             <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
@@ -72,6 +77,15 @@
       </div>
     </header>
 
+    <div
+      id="investor-progress-bar"
+      class="investor-progress-bar hidden"
+      role="progressbar"
+      aria-hidden="true"
+    >
+      <div class="investor-progress-bar-fill"></div>
+    </div>
+
     <main class="dashboard-shell dashboard-main">
       <section class="section-card priority-section">
         <div class="section-heading">
@@ -83,7 +97,14 @@
             彙總權益、本日損益、已收權利金與歷史已實現表現；數字來自連線 Deribit 與本地狀態檔，延遲與估計誤差屬正常範圍。
           </p>
         </div>
-        <div id="aggregate-card" class="overview-panel"></div>
+        <div id="aggregate-card" class="overview-panel">
+          <div class="overview-metrics-grid">
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+          </div>
+        </div>
       </section>
 
       <details class="section-card collapsible-section" open>
@@ -108,23 +129,38 @@
         </div>
       </details>
 
-      <section class="section-card priority-section">
+      <section class="section-card priority-section" id="activity-section">
         <div class="section-heading">
           <div>
             <p class="section-eyebrow">進出場紀錄</p>
-            <h2 class="section-title">近期開倉與已平倉</h2>
+            <h2 class="section-title">持倉中與已平倉</h2>
             <p class="section-copy mt-1">
               每張卡片對應一筆策略群組：左側為進場脈絡，右側為出場或持倉狀態。
             </p>
           </div>
           <span class="open-meta-pill" id="activity-meta">—</span>
         </div>
-        <ul id="recent-activity-list" class="activity-list activity-list-unified">
-          <li class="activity-empty">載入中…</li>
-        </ul>
+        <div class="activity-zone">
+          <div class="activity-zone-head">
+            <h3 class="activity-zone-title">持倉中</h3>
+          </div>
+          <ul id="activity-open-list" class="activity-list activity-list-unified">
+            <li class="activity-empty">載入中…</li>
+          </ul>
+          <div id="activity-open-pagination" class="activity-pagination" hidden></div>
+        </div>
+        <div class="activity-zone">
+          <div class="activity-zone-head">
+            <h3 class="activity-zone-title">已平倉</h3>
+          </div>
+          <ul id="activity-closed-list" class="activity-list activity-list-unified">
+            <li class="activity-empty">載入中…</li>
+          </ul>
+          <div id="activity-closed-pagination" class="activity-pagination" hidden></div>
+        </div>
       </section>
 
-      <details class="section-card collapsible-section" open>
+      <details id="charts-section" class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">圖表分析</p>
@@ -145,15 +181,14 @@
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
               <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">未實現收斂 vs 帳本權益（USDC）</h3>
+                <h3 class="text-sm font-semibold text-slate-200">各帳本總權益（USDC 約當）</h3>
                 <span class="text-xs text-slate-500" id="risk-capital-meta">—</span>
               </div>
-              <div class="h-72 relative">
+              <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-risk-capital"></canvas>
               </div>
               <p class="text-xs text-slate-500 mt-2" id="risk-capital-hint">
-                各帳本<strong class="text-slate-400">未實現收斂</strong>為開倉群組進場權利金加總；<strong class="text-slate-400">權益</strong>為即時快照之
-                USDC 約當。此為曝險參考，非保證報酬。
+                各帳本權益以 USDC 約當顯示，來自即時或最近快照。
               </p>
             </div>
 
@@ -162,7 +197,7 @@
                 <h3 class="text-sm font-semibold text-slate-200">累計已實現損益（USDC）</h3>
                 <span class="text-xs text-slate-500" id="cum-pnl-meta">—</span>
               </div>
-              <div class="h-72 relative">
+              <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-cum-pnl"></canvas>
               </div>
             </div>
@@ -172,14 +207,14 @@
                 <h3 class="text-sm font-semibold text-slate-200">每日已實現損益（USDC）</h3>
                 <span class="text-xs text-slate-500" id="daily-pnl-meta">—</span>
               </div>
-              <div class="h-72 relative">
+              <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-daily-pnl"></canvas>
               </div>
             </div>
 
             <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
               <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">滾動年化報酬率（相對參考資本）</h3>
+                <h3 class="text-sm font-semibold text-slate-200">滾動年化報酬率（視窗／當日總權益）</h3>
                 <div class="text-xs text-slate-400 flex gap-2 items-center">
                   <label>
                     視窗
@@ -192,7 +227,7 @@
                   </label>
                 </div>
               </div>
-              <div class="h-72 relative">
+              <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-apr"></canvas>
               </div>
             </div>
@@ -228,7 +263,7 @@
         </div>
         <p class="investor-load-pct" data-investor-load-pct>0%</p>
         <p class="investor-load-hint" data-investor-load-hint>
-          正在從 Deribit 取得即時報價、持倉與損益資料，通常需要數秒鐘。
+          先載入最近快照，再於背景同步 Deribit 即時資料。
         </p>
       </div>
     </div>
@@ -238,6 +273,6 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script src="/app.js?v=20260519b" defer></script>
+    <script src="/app.js?v=position-size-inline-20260523" defer></script>
   </body>
 </html>

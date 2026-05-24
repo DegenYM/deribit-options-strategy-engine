@@ -44,6 +44,44 @@ def test_load_config_parses_strategy_fields(tmp_path: Path):
     assert config.bull_put_long_delta_min == Decimal("0.03")
     assert config.bull_put_long_delta_max == Decimal("0.06")
     assert config.halt_open_max_loss_pct == Decimal("0.45")
+    assert config.regime_entry_option_sides() == ("put",)
+
+
+def test_regime_entry_option_sides_by_strategy(tmp_path: Path):
+    covered = tmp_path / ".env.covered"
+    covered.write_text(
+        "\n".join(
+            [
+                "DERIBIT_ENV=testnet",
+                "OPTION_STRATEGY=covered_call",
+                "SHORT_OPTION_SIDE=call",
+            ]
+        )
+    )
+    naked_call = tmp_path / ".env.naked_call"
+    naked_call.write_text(
+        "\n".join(
+            [
+                "DERIBIT_ENV=testnet",
+                "OPTION_STRATEGY=naked_short",
+                "SHORT_OPTION_SIDE=call",
+            ]
+        )
+    )
+    naked_both = tmp_path / ".env.naked_both"
+    naked_both.write_text(
+        "\n".join(
+            [
+                "DERIBIT_ENV=testnet",
+                "OPTION_STRATEGY=naked_short",
+                "SHORT_OPTION_SIDE=both",
+            ]
+        )
+    )
+
+    assert load_config(covered, require_private=False).regime_entry_option_sides() == ("call",)
+    assert load_config(naked_call, require_private=False).regime_entry_option_sides() == ("call",)
+    assert load_config(naked_both, require_private=False).regime_entry_option_sides() == ("put", "call")
 
 
 def test_load_config_parses_currency_specific_min_open_interest(tmp_path: Path):
@@ -223,3 +261,33 @@ def test_strategy_profile_mismatch_raises(tmp_path: Path):
 
     with pytest.raises(ConfigurationError, match="does not match account OPTION_STRATEGY"):
         load_config(env_file, require_private=False)
+
+
+def test_fee_account_skips_strategy_profile(tmp_path: Path, monkeypatch):
+    repo = tmp_path
+    (repo / "deribit_demo").mkdir()
+    strategies = repo / "config/shared/strategies"
+    strategies.mkdir(parents=True)
+    (strategies / ".env.naked_short").write_text("MIN_NET_APR=0.99\n")
+    investor = repo / "config/investors/alice"
+    accounts = investor / "accounts"
+    accounts.mkdir(parents=True)
+    fee_env = accounts / ".env.fee"
+    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=testnet\n")
+    monkeypatch.chdir(repo)
+
+    config = load_config(fee_env, require_private=False)
+
+    assert config.is_fee_collection_account is True
+    assert config.min_net_apr == Decimal("0.12")
+
+
+def test_assert_trading_account_rejects_fee_wallet(tmp_path: Path):
+    env_file = tmp_path / ".env.fee"
+    env_file.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=testnet\n")
+    config = load_config(env_file, require_private=False)
+
+    with pytest.raises(ConfigurationError, match="Fee collection account"):
+        from deribit_demo.config import assert_trading_account
+
+        assert_trading_account(config)

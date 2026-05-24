@@ -90,12 +90,16 @@
   };
   const CORE_BOOKS = ["BTC", "ETH", "USDC"];
   /** Auto-refresh cadence; longer interval reduces backend / Deribit fan-out under load. */
-  const FRONTEND_REFRESH_INTERVAL_MS = 60_000;
+  const FRONTEND_REFRESH_INTERVAL_MS = 180_000;
   /** Max concurrent /api/* fetches per refresh wave (after spot + health). */
   const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 2;
+  const INVESTOR_STATUS_TIMEOUT_MS = 45_000;
+  /** Full-screen overlay dismissed after health + snapshot (or this cap). */
+  const INVESTOR_OVERLAY_MAX_MS = 3_000;
   const FETCH_JSON_RETRYABLE_STATUS = new Set([502, 503, 504]);
   const FETCH_JSON_MAX_RETRIES = 2;
   const FETCH_JSON_RETRY_BASE_MS = 450;
+  const ACTIVITY_PAGE_SIZE = 10;
 
   const STRATEGIES = [
     {
@@ -104,6 +108,8 @@
       titleZh: "備兌買權",
       short: "Covered Call",
       shortZh: "備兌",
+      chipShort: "CC",
+      chipShortZh: "備兌",
       accentClass: "strategy-card-call",
       description: "Short call backed by existing BTC/ETH spot collateral.",
       descriptionZh: "在持有現貨擔保下賣出買權，以權利金增強收益。",
@@ -114,6 +120,8 @@
       titleZh: "單賣選擇權（裸賣）",
       short: "Naked Short",
       shortZh: "裸賣",
+      chipShort: "Naked",
+      chipShortZh: "裸賣",
       accentClass: "strategy-card-put",
       description: "Single-leg short option (put / call / both) with uncapped tail risk on the chosen side.",
       descriptionZh: "單邊賣出買／賣權；在對應方向具尾部風險，需嚴格風控。",
@@ -124,6 +132,8 @@
       titleZh: "牛勢賣權價差",
       short: "Put Spread",
       shortZh: "賣權價差",
+      chipShort: "Spread",
+      chipShortZh: "價差",
       accentClass: "strategy-card-spread",
       description: "Short put paired with a lower-strike long put protection leg.",
       descriptionZh: "賣出較高履約價賣權，並買入較低履約價賣權作保護。",
@@ -140,6 +150,10 @@
     groups: null,
     cumulativePnl: null,
     aprSeries: null,
+    portfolioSnapshot: null,
+    dataFreshness: { source: null, snapshotMs: null, statusMs: null, live: false },
+    chartsDataLoaded: false,
+    chartsLoadInFlight: false,
     bookFilter: "ALL",
     aprWindow: 30,
     charts: {},
@@ -155,6 +169,8 @@
     lastUnderlyingIndexUsd: {},
     /** Latest ``/api/spot`` (BTC/ETH USD index) for header + PNL USD fallback. */
     lastSpotUsd: { BTC: null, ETH: null },
+    activityOpenPage: 1,
+    activityClosedPage: 1,
   };
 
   // ---------- helpers ----------
@@ -175,6 +191,279 @@
     const n = num(value);
     if (n === null) return "—";
     return decimals === 1 ? fmt.pct1.format(n) : fmt.pct2.format(n);
+  }
+
+  function resolvedPortfolio() {
+    if (STATE.status?.portfolio) {
+      return {
+        portfolio: STATE.status.portfolio,
+        source: "live",
+        freshnessMs: STATE.dataFreshness.statusMs ?? 0,
+      };
+    }
+    const snap = STATE.portfolioSnapshot?.portfolio;
+    if (snap && Object.keys(snap).length > 0) {
+      return {
+        portfolio: snap,
+        source: "snapshot",
+        freshnessMs: num(STATE.portfolioSnapshot?.freshness_ms),
+      };
+    }
+    return { portfolio: null, source: null, freshnessMs: null };
+  }
+
+  function fmtFreshnessMinutes(ms) {
+    const n = num(ms);
+    if (n === null || n < 0) return null;
+    const mins = Math.max(1, Math.round(n / 60_000));
+    return mins;
+  }
+
+  function dataFreshnessBadgeHtml() {
+    const resolved = resolvedPortfolio();
+    if (resolved.source === "live") {
+      const age = num(STATE.dataFreshness.statusMs);
+      if (age !== null && age < 30_000) {
+        return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-200">${i18n("Live", "即時")}</span>`;
+      }
+    }
+    if (resolved.source === "snapshot") {
+      const mins = fmtFreshnessMinutes(resolved.freshnessMs);
+      const label =
+        mins !== null
+          ? i18n(`Snapshot · ~${mins}m ago`, `快照 · 約 ${mins} 分鐘前`)
+          : i18n("Snapshot", "快照");
+      return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-200">${label}</span>`;
+    }
+    return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-800/60 text-slate-400">${i18n("Loading…", "載入中…")}</span>`;
+  }
+
+  function renderDataFreshnessBadge() {
+    if (!INVESTOR) return;
+    const host = document.getElementById("data-freshness-slot");
+    if (!host) return;
+    host.innerHTML = dataFreshnessBadgeHtml();
+  }
+
+  function setInvestorProgressBar(active, { indeterminate = false } = {}) {
+    const bar = document.getElementById("investor-progress-bar");
+    if (!bar) return;
+    bar.classList.toggle("hidden", !active);
+    bar.classList.toggle("investor-progress-bar--indeterminate", active && indeterminate);
+  }
+
+  function aggregateSkeletonHtml() {
+    const cell = `<div class="skeleton-block h-16 rounded-lg"></div>`;
+    const desktop = `<div class="overview-metrics-grid">${cell.repeat(8)}</div>`;
+    if (!INVESTOR) return desktop;
+    const mobile = `<div class="inv-dashboard">
+        <div class="inv-panel skeleton-block" style="height:5.5rem"></div>
+        <div class="inv-panel skeleton-block" style="height:4rem"></div>
+        <div class="inv-panel skeleton-block" style="height:7rem"></div>
+      </div>`;
+    return `<div class="investor-view-desktop">${desktop}</div><div class="investor-view-mobile">${mobile}</div>`;
+  }
+
+  function overviewMetricsGridHtml(ctx) {
+    const {
+      totalEquity,
+      dayStart,
+      dayPnl,
+      dayDrawdown,
+      openCredit,
+      creditByStrategy,
+      summary,
+      winRate,
+      avgHolding,
+      sinceLine,
+      lifetimePnl,
+      lifetimeNativeByBook,
+      closedCount,
+      windowLabelDays,
+      windowPnl,
+      windowNativeByBook,
+      lifetimeApr,
+      windowApr,
+      equityNativeByBook,
+    } = ctx;
+    return `
+      <div class="overview-metrics-grid">
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${i18n("Total equity", "總權益（USDC 約當）")}</div>
+          <div class="text-2xl font-mono">${fmtUsd(totalEquity)}</div>
+          <div class="overview-metric-meta">
+            <div class="overview-metric-line">${fmtBookEquityNativeBreakdown(equityNativeByBook)}</div>
+            <div class="overview-metric-line">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
+          </div>
+        </div>
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${i18n("Day P&L", "本日損益")}</div>
+          <div class="text-2xl font-mono ${pnlClass(dayPnl)}">${fmtUsd(dayPnl)}</div>
+          <div class="overview-metric-meta">
+            <div class="overview-metric-line">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</div>
+          </div>
+        </div>
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${i18n("Open credit", "未實現權利金（進場收斂）")}</div>
+          <div class="text-2xl font-mono">${fmtUsd(openCredit)}</div>
+          <div class="overview-metric-meta">
+            <div class="overview-metric-line">${fmtOpenCreditStrategyBreakdown(creditByStrategy)}</div>
+          </div>
+        </div>
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${i18n("Win rate · avg holding", "勝率 · 平均持有")}</div>
+          <div class="text-2xl font-mono">${summary ? `${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}${INVESTOR_ZH ? " 天" : "d"}` : "—"}</div>
+          <div class="overview-metric-meta">
+            <div class="overview-metric-line">${summary ? sinceLine : i18n("Loading performance…", "績效摘要載入中…")}</div>
+          </div>
+        </div>
+
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${i18n("Total profit (lifetime)", "累計已實現損益")}</div>
+          <div class="text-2xl font-mono ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</div>
+          <div class="overview-metric-meta">
+            ${summary ? `<div class="overview-metric-line">${fmtLifetimeRealizedNativeBreakdown(lifetimeNativeByBook)}</div>` : ""}
+            <div class="overview-metric-line">${summary ? `${closedCount ?? 0} ${i18n("closed groups", "筆已平倉部位")}` : ""}</div>
+          </div>
+        </div>
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${rollingWindowProfitLabel(windowLabelDays)}</div>
+          <div class="text-2xl font-mono ${pnlClass(windowPnl)}">${summary ? fmtUsd(windowPnl) : "—"}</div>
+          <div class="overview-metric-meta">
+            ${summary ? `<div class="overview-metric-line">${fmtLifetimeRealizedNativeBreakdown(windowNativeByBook)}</div>` : ""}
+            <div class="overview-metric-line">${summary ? rollingWindowPnlHint(windowLabelDays) : ""}</div>
+          </div>
+        </div>
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${i18n("Realized APR (lifetime)", "已實現年化（存續期）")}</div>
+          <div class="text-2xl font-mono">${summary ? fmtPct(lifetimeApr) : "—"}</div>
+          <div class="overview-metric-meta">
+            <div class="overview-metric-line">${summary ? i18n("annualized on actual span", "依實際區間年化") : ""}</div>
+          </div>
+        </div>
+        <div class="overview-metric-cell">
+          <div class="text-xs text-slate-400">${rollingWindowAprLabel(windowLabelDays)}</div>
+          <div class="text-2xl font-mono">${summary ? fmtPct(windowApr) : "—"}</div>
+          <div class="overview-metric-meta">
+            <div class="overview-metric-line overview-metric-line--hint">${summary ? rollingWindowAprHint(windowLabelDays) : ""}</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function investorNativeChipsHtml(byBook, { pnl = false, places = { BTC: 5, ETH: 4, USDC: 2 } } = {}) {
+    const symbols = { BTC: "₿", ETH: "◆", USDC: "$" };
+    return ["BTC", "ETH", "USDC"]
+      .map((book) => {
+        const n = num(byBook[book]);
+        const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
+        const tone = pnl ? pnlClass(byBook[book]) : "";
+        return `<span class="inv-chip ${tone}"><span class="inv-chip-sym">${symbols[book]}</span><span class="inv-chip-val font-mono tabular-nums">${text}</span></span>`;
+      })
+      .join("");
+  }
+
+  function investorOpenCreditMiniHtml(byStrategy) {
+    return strategyOrder(new Set(STRATEGIES.map((s) => s.id)))
+      .map((id) => {
+        const short = escapeHtml(strategyInfo(id).short);
+        const n = num(byStrategy[id]);
+        const text = n === null ? "—" : fmtUsd(n);
+        return `<div class="inv-mini-row"><span class="inv-mini-label">${short}</span><span class="inv-mini-value font-mono tabular-nums">${text}</span></div>`;
+      })
+      .join("");
+  }
+
+  function investorOverviewHtml(ctx) {
+    const {
+      totalEquity,
+      dayStart,
+      dayPnl,
+      dayDrawdown,
+      openCredit,
+      creditByStrategy,
+      summary,
+      winRate,
+      avgHolding,
+      sinceLine,
+      lifetimePnl,
+      lifetimeNativeByBook,
+      closedCount,
+      windowLabelDays,
+      windowPnl,
+      windowNativeByBook,
+      lifetimeApr,
+      windowApr,
+      equityNativeByBook,
+    } = ctx;
+    const winHold =
+      summary !== null && summary !== undefined
+        ? `${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}${INVESTOR_ZH ? " 天" : "d"}`
+        : "—";
+    const winSub = summary
+      ? sinceLine
+      : i18n("Loading performance…", "績效摘要載入中…");
+    return `<div class="inv-dashboard">
+      <section class="inv-panel inv-panel--hero" aria-label="${i18n("Account snapshot", "帳戶快照")}">
+        <div class="inv-split">
+          <div class="inv-kpi">
+            <span class="inv-kpi-label">${i18n("Total equity", "總權益")}</span>
+            <span class="inv-kpi-value font-mono tabular-nums">${fmtUsd(totalEquity)}</span>
+            <span class="inv-kpi-foot">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</span>
+          </div>
+          <div class="inv-kpi">
+            <span class="inv-kpi-label">${i18n("Day P&L", "本日損益")}</span>
+            <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(dayPnl)}">${fmtUsd(dayPnl)}</span>
+            <span class="inv-kpi-foot">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</span>
+          </div>
+        </div>
+        <div class="inv-chips-row">${investorNativeChipsHtml(equityNativeByBook)}</div>
+      </section>
+
+      <section class="inv-panel" aria-label="${i18n("Open risk", "未平倉風險")}">
+        <div class="inv-split">
+          <div class="inv-kpi">
+            <span class="inv-kpi-label">${i18n("Open credit", "未實現權利金")}</span>
+            <span class="inv-kpi-value font-mono tabular-nums">${fmtUsd(openCredit)}</span>
+            <div class="inv-mini-list">${investorOpenCreditMiniHtml(creditByStrategy)}</div>
+          </div>
+          <div class="inv-kpi">
+            <span class="inv-kpi-label">${i18n("Win rate · hold", "勝率 · 持有")}</span>
+            <span class="inv-kpi-value font-mono tabular-nums">${winHold}</span>
+            <span class="inv-kpi-foot">${winSub}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="inv-panel" aria-label="${i18n("Realized performance", "已實現績效")}">
+        <h3 class="inv-panel-title">${i18n("Realized P&L", "已實現損益")}</h3>
+        <div class="inv-compare">
+          <div class="inv-compare-col">
+            <span class="inv-compare-tag">${i18n("Lifetime", "存續")}</span>
+            <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</span>
+            <div class="inv-chips-row inv-chips-row--compact">${summary ? investorNativeChipsHtml(lifetimeNativeByBook, { pnl: true }) : ""}</div>
+            <span class="inv-kpi-foot">${summary ? `${closedCount ?? 0} ${i18n("closed", "筆平倉")}` : ""}</span>
+          </div>
+          <div class="inv-compare-col">
+            <span class="inv-compare-tag">${i18n("Last", "近")} ${windowLabelDays}${INVESTOR_ZH ? " 日" : "d"}</span>
+            <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(windowPnl)}">${summary ? fmtUsd(windowPnl) : "—"}</span>
+            <div class="inv-chips-row inv-chips-row--compact">${summary ? investorNativeChipsHtml(windowNativeByBook, { pnl: true }) : ""}</div>
+            <span class="inv-kpi-foot">${summary ? rollingWindowPnlHint(windowLabelDays) : ""}</span>
+          </div>
+        </div>
+        <div class="inv-split inv-split--apr">
+          <div class="inv-kpi inv-kpi--compact">
+            <span class="inv-kpi-label">${i18n("APR lifetime", "年化·存續")}</span>
+            <span class="inv-kpi-value font-mono tabular-nums">${summary ? fmtPct(lifetimeApr) : "—"}</span>
+          </div>
+          <div class="inv-kpi inv-kpi--compact">
+            <span class="inv-kpi-label">${i18n("APR", "年化")} ${windowLabelDays}${INVESTOR_ZH ? " 日" : "d"}</span>
+            <span class="inv-kpi-value font-mono tabular-nums">${summary ? fmtPct(windowApr) : "—"}</span>
+            <span class="inv-kpi-foot">${summary ? rollingWindowAprHint(windowLabelDays) : ""}</span>
+          </div>
+        </div>
+      </section>
+    </div>`;
   }
 
   /** Deribit-style: ($) for USDC, ₿ / ♦ for coin (option premium / mark). */
@@ -665,11 +954,45 @@
     return dt.toLocal().toFormat("yyyy-LL-dd");
   }
 
+  /** Report window: rolling close filter + fixed N-day APR denominator (see realized_summary). */
+  function rollingWindowProfitLabel(days) {
+    const n = Math.round(days ?? 30);
+    return i18n(`Total profit (rolling ${n}d)`, `已實現損益（滾動 ${n} 日視窗）`);
+  }
+
+  function rollingWindowAprLabel(days) {
+    const n = Math.round(days ?? 30);
+    return i18n(`Realized APR (rolling ${n}d)`, `已實現年化（滾動 ${n} 日視窗）`);
+  }
+
+  function rollingWindowPnlHint(days) {
+    const n = Math.round(days ?? 30);
+    return i18n(`Closes in last ${n}d only`, `僅計最近 ${n} 日內平倉`);
+  }
+
+  function rollingWindowAprHint(days) {
+    const n = Math.round(days ?? 30);
+    return i18n(
+      `Last ${n}d closes ÷ ledger total equity`,
+      `近 ${n} 日平倉 ÷ 當日總權益`
+    );
+  }
+
+  function realizedSummaryUrl(days = 30) {
+    let url = `/api/realized_summary?days=${days}`;
+    const cap = aprEffectiveCapitalUsdc();
+    if (cap !== null) {
+      url += `&effective_capital_usdc=${encodeURIComponent(String(cap))}`;
+    }
+    return url;
+  }
+
   /** Earliest entry among realized closed groups (lifetime APR sample start). */
   function lifetimePerformanceStartMs(report, groups) {
     let min = null;
     const consider = (g) => {
       if (!g || num(g.realized_pnl) === null) return;
+      if (!isDisplayableClosedTradeGroup(g, STATE.status, groups)) return;
       const entry = entryTimestampMs(g);
       if (entry === null || entry <= 0) return;
       if (min === null || entry < min) min = entry;
@@ -732,6 +1055,7 @@
         ...base,
         title: base.titleZh || base.title,
         short: base.shortZh || base.short,
+        chipShort: base.chipShortZh || base.chipShort || base.shortZh || base.short,
         description: base.descriptionZh || base.description,
       };
     }
@@ -740,6 +1064,7 @@
       id: key || "",
       title: label,
       short: label,
+      chipShort: label,
       accentClass: "border-slate-700",
       description: "",
     };
@@ -757,10 +1082,12 @@
     return "chip-strategy-unknown";
   }
 
-  function strategyChipHtml(id) {
+  function strategyChipHtml(id, { compact = false } = {}) {
     const info = strategyInfo(id);
     const cls = strategyChipClass(info.id || id);
-    return `<span class="chip ${cls}">${escapeHtml(info.short)}</span>`;
+    const label = compact ? info.chipShort || info.short : info.short;
+    const compactClass = compact ? " chip--compact" : "";
+    return `<span class="chip ${cls}${compactClass}">${escapeHtml(label)}</span>`;
   }
 
   function tradeGroupKey(g) {
@@ -789,6 +1116,8 @@
     "close_book_equity",
     "quantity",
     "realized_pnl",
+    "contract_size",
+    "short_strike",
   ];
 
   function hasTradeGroupValue(v) {
@@ -828,6 +1157,34 @@
     return closedTimestampMs(g) !== null;
   }
 
+  /** ``reconciled_external`` glitch: same short leg still open within 5 minutes of entry. */
+  const PHANTOM_RECONCILE_MAX_HOLDING_MS = 300_000;
+
+  function openShortInstrumentNames(status, groups) {
+    const names = new Set();
+    for (const g of currentOpenRows(status, groups)) {
+      const name = String(g?.short_instrument_name || "").trim();
+      if (name) names.add(name);
+    }
+    return names;
+  }
+
+  function isPhantomReconcileClose(g, status, groups) {
+    if (!isClosedTradeGroup(g)) return false;
+    if (String(g?.close_reason || "").toLowerCase() !== "reconciled_external") return false;
+    const entry = entryTimestampMs(g);
+    const closed = closedTimestampMs(g);
+    if (entry === null || closed === null || closed <= entry) return false;
+    if (closed - entry > PHANTOM_RECONCILE_MAX_HOLDING_MS) return false;
+    const short = String(g?.short_instrument_name || "").trim();
+    if (!short) return false;
+    return openShortInstrumentNames(status, groups).has(short);
+  }
+
+  function isDisplayableClosedTradeGroup(g, status, groups) {
+    return isClosedTradeGroup(g) && !isPhantomReconcileClose(g, status, groups);
+  }
+
   function currentOpenRows(status, groups) {
     const out = [];
     const seen = new Set();
@@ -848,11 +1205,12 @@
     return out.map((g) => enrichOpenGroupRow(status, g));
   }
 
-  function mergedClosedRows(report, groups, limit = 20) {
+  function mergedClosedRows(report, groups, limit = 20, status = null) {
+    const st = status ?? STATE.status;
     const rows = dedupeTradeGroups([
       ...(groups?.closed || []),
       ...(report?.recent_closed_trades || []),
-    ]).filter(isClosedTradeGroup);
+    ]).filter((g) => isDisplayableClosedTradeGroup(g, st, groups));
     rows.sort((a, b) => (closedTimestampMs(b) || 0) - (closedTimestampMs(a) || 0));
     return rows.slice(0, limit);
   }
@@ -1078,13 +1436,68 @@
     return pnlUsd / idx;
   }
 
-  function annualizedAprOnBookEquity(g, status, equityNative) {
-    const pnlN = realizedPnlInAprBookNative(g, status);
-    const holding = groupHoldingDays(g);
-    if (pnlN === null || equityNative === null || equityNative <= 0 || holding === null || holding <= 0) {
+  /** APR 分母：每張合約名目（與 trade_apr.opened_contract_amount_per_contract 一致）。 */
+  function tradeGroupContractSize(g) {
+    const cs = num(g?.contract_size);
+    return cs !== null && cs > 0 ? cs : 1;
+  }
+
+  function tradeGroupOpenedAmountPerContract(g, status) {
+    const qty = num(g?.quantity);
+    if (qty === null || qty <= 0) return null;
+    const cs = tradeGroupContractSize(g);
+    const strat = strategyId(g);
+    const imColl = num(g?.estimated_im_collateral);
+    if (strat === "bull_put_spread" && imColl !== null && imColl > 0) return imColl / qty;
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC") {
+      const opt = optionPutCallLabel(g).toLowerCase();
+      if (opt === "call") {
+        const idx =
+          usdcLinearUnderlyingIndexUsd(g, status) ??
+          entryIndexUsdForGroup(g, status) ??
+          collateralBookSpotUsd(g, status) ??
+          closeIndexUsdForGroup(g, status);
+        if (idx !== null && idx > 0) return idx;
+      } else {
+        const strike = openRowLegStrike(g, "short");
+        if (strike !== null && strike > 0) return strike;
+      }
       return null;
     }
-    return (pnlN / equityNative) * (365 / holding);
+    return cs;
+  }
+
+  function tradeGroupOpenedNotional(g, status) {
+    const per = tradeGroupOpenedAmountPerContract(g, status);
+    const qty = num(g?.quantity);
+    if (per === null || qty === null || qty <= 0) return null;
+    const strat = strategyId(g);
+    if (strat === "covered_call") {
+      const cover = num(g?.covered_underlying_quantity);
+      return cover !== null && cover > 0 ? cover : qty;
+    }
+    const book = tradeGroupAprBook(g);
+    if (book === "USDC" || strat === "bull_put_spread") return per * qty;
+    return per * qty;
+  }
+
+  function tradeGroupAprCapitalBase(g, status) {
+    return tradeGroupOpenedNotional(g, status);
+  }
+
+  function annualizedAprOnPositionCapital(g, status) {
+    const pnlN = realizedPnlInAprBookNative(g, status);
+    const holding = groupHoldingDays(g);
+    const capital = tradeGroupAprCapitalBase(g, status);
+    if (pnlN === null || capital === null || capital <= 0 || holding === null || holding <= 0) {
+      return null;
+    }
+    return (pnlN / capital) * (365 / holding);
+  }
+
+  function annualizedAprOnBookEquity(g, status, equityNative) {
+    return annualizedAprOnPositionCapital(g, status);
   }
 
   /** 逆線：USDC 標記 = 幣本位 × 現價；USDC 帳本直接用 stored USDC。 */
@@ -1121,6 +1534,14 @@
     return INVESTOR_ZH ? `${usdStr}（${nativeStr}）` : `${usdStr} (${nativeStr})`;
   }
 
+  /** Open-position KPI tiles: USDC on first row, native book amount on second. */
+  function fmtUsdNativeBookStackHtml(usd, native, book) {
+    const usdStr = fmtUsd(usd);
+    if (native === null || !book || book === "USDC") return usdStr;
+    const nativeStr = escapeHtml(fmtNativeBookAmount(native, book));
+    return `<span class="open-position-value-stack"><span class="open-position-value-line">${usdStr}</span><span class="open-position-value-sub">${nativeStr}</span></span>`;
+  }
+
   function nativeFromUsdAtIndex(usd, indexUsd) {
     const v = num(usd);
     const idx = num(indexUsd);
@@ -1151,36 +1572,35 @@
     );
   }
 
-  /** Entry net APR: persisted at open, else estimate from entry credit / book equity / entry DTE. */
+  /** USDC 線性期權：標的現价（BTC/ETH index），call APR 分母用。 */
+  function usdcLinearUnderlyingIndexUsd(g, status) {
+    const key = underlyingIndexKeyForGroup(g);
+    if (key !== "BTC" && key !== "ETH") return null;
+    const candidates = [
+      num(g?.entry_index_usd),
+      num(g?.close_index_usd),
+      num(status?.underlying_index_usd?.[key]),
+      num(STATE.groups?.underlying_index_usd?.[key]),
+      num(STATE.lastSpotUsd?.[key]),
+      openRowLegStrike(g, "short"),
+    ];
+    for (const value of candidates) {
+      if (value !== null && value > 100) return value;
+    }
+    return null;
+  }
+
+  /** Entry net APR: persisted at open (per-contract round-trip), else estimate from fill premium. */
   /**
-   * Closed-trade APR: frozen ``realized_apr_on_equity`` when present; otherwise
-   * ``realized_pnl / close_book_equity``; legacy rows use current book equity from status.
+   * Closed-trade APR: prefer backend-enriched ``realized_apr_on_equity`` (recomputed on
+   * each /api/groups load); fall back to client recompute when missing.
    */
   function groupRealizedApr(g, status) {
-    const pnl = num(g?.realized_pnl);
     const holding = groupHoldingDays(g);
-    if (pnl === null || holding === null || holding <= 0) return null;
-
-    const book = tradeGroupAprBook(g);
-    let storedApr = num(g?.realized_apr_on_equity) ?? num(g?.realized_annualized_return);
-    const closeEq = num(g?.close_book_equity);
-    if (storedApr !== null && Math.abs(storedApr) <= 1e-10 && Math.abs(pnl) > 0.01) {
-      storedApr = null;
-    }
-    const closeEqNativePlausible =
-      closeEq !== null &&
-      closeEq > 0 &&
-      (book === "USDC" || closeEq < 5000);
-    const hasFrozenApr =
-      storedApr !== null && Math.abs(storedApr) > 1e-10 && closeEqNativePlausible;
-    if (hasFrozenApr) return storedApr;
-
-    if (closeEqNativePlausible) {
-      const fromClose = annualizedAprOnBookEquity(g, status, closeEq);
-      if (fromClose !== null && Math.abs(fromClose) > 1e-10) return fromClose;
-    }
-
-    return annualizedAprOnBookEquity(g, status, strategyBookEquityNative(g, status));
+    if (holding === null || holding <= 0) return null;
+    const stored = num(g?.realized_apr_on_equity) ?? num(g?.realized_annualized_return);
+    if (stored !== null) return stored;
+    return annualizedAprOnPositionCapital(g, status);
   }
 
   function activityAmountDisplay(g, status) {
@@ -1207,28 +1627,41 @@
     return fmtNum(-Math.abs(q), 4);
   }
 
-  function groupEntryNetApr(g, status) {
-    const stored = num(g?.entry_net_apr);
-    if (stored !== null && stored > 0) return stored;
-    const entryEq = num(g?.entry_book_equity);
+  function groupEntryNetCreditAtOpen(g, status) {
     const credit = num(g?.entry_credit);
-    const dte = groupEntryDteDaysAtOpen(g);
-    if (entryEq !== null && entryEq > 0 && credit !== null && credit > 0 && dte !== null && dte > 0) {
-      return (credit / entryEq) * (365 / dte);
-    }
+    if (credit === null) return null;
+    const fee = num(g?.entry_fee) ?? 0;
     const book = tradeGroupAprBook(g);
-    const equity = strategyBookEquityNative(g, status);
-    if (credit === null || dte === null || dte <= 0 || equity === null || equity <= 0) return null;
-    let netCredit = credit;
-    if (book !== "USDC") {
-      const idx =
-        num(status?.underlying_index_usd?.[book]) ??
-        num(STATE.groups?.underlying_index_usd?.[book]) ??
-        num(STATE.lastSpotUsd?.[book]);
-      if (idx === null || idx <= 0) return null;
-      netCredit = credit / idx;
+    const prem = num(g?.short_entry_average_price);
+    const qty = num(g?.quantity);
+    const idx = entryIndexUsdForGroup(g, status);
+    let netUsdc = credit;
+    if (fee > 0 && prem !== null && prem > 0 && qty !== null && qty > 0 && idx !== null && idx > 0) {
+      const gross = prem * qty * idx;
+      const tol = Math.max(0.01, Math.abs(gross) * 0.001);
+      if (Math.abs(gross - credit) <= tol) netUsdc = credit - fee;
+      else if (Math.abs(gross - (credit + fee)) <= tol) netUsdc = credit;
     }
-    return (netCredit / equity) * (365 / dte);
+    if (book === "USDC") return netUsdc;
+    if (idx === null || idx <= 0) return null;
+    return netUsdc / idx;
+  }
+
+  function groupEntryNetApr(g, status) {
+    const dte = groupEntryDteDaysAtOpen(g);
+    const opened = tradeGroupOpenedNotional(g, status);
+    const net = groupEntryNetCreditAtOpen(g, status);
+    if (
+      net === null ||
+      net <= 0 ||
+      dte === null ||
+      dte <= 0 ||
+      opened === null ||
+      opened <= 0
+    ) {
+      return num(g?.entry_net_apr);
+    }
+    return (net / opened) * (365 / dte);
   }
 
   function groupEntryFeeUsd(g) {
@@ -1275,15 +1708,49 @@
     return rows;
   }
 
-  function recentOpenedRows(status, groups, limit = 10) {
+  function activityOpenRows(status, groups) {
     return dedupeTradeGroups(allTradeGroupsForActivity(status, groups))
-      .slice()
-      .sort((a, b) => (entryTimestampMs(b) || 0) - (entryTimestampMs(a) || 0))
-      .slice(0, limit);
+      .filter((g) => isOpenTradeGroup(g))
+      .sort((a, b) => (entryTimestampMs(b) || 0) - (entryTimestampMs(a) || 0));
   }
 
-  function recentClosedRows(report, groups, limit = 10) {
-    return mergedClosedRows(report, groups, limit);
+  function activityClosedRows(status, report, groups) {
+    return mergedClosedRows(report, groups, 500, status);
+  }
+
+  function paginateRows(rows, page, pageSize) {
+    const total = rows.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(Math.max(1, page), totalPages);
+    const startIdx = (safePage - 1) * pageSize;
+    return {
+      rows: rows.slice(startIdx, startIdx + pageSize),
+      page: safePage,
+      totalPages,
+      total,
+      start: total ? startIdx + 1 : 0,
+      end: Math.min(startIdx + pageSize, total),
+    };
+  }
+
+  function activityPaginationHtml(section, pageInfo) {
+    const { page, totalPages, total, start, end } = pageInfo;
+    if (total <= ACTIVITY_PAGE_SIZE) return "";
+    const prevDisabled = page <= 1;
+    const nextDisabled = page >= totalPages;
+    const label = i18n(
+      `${start}–${end} of ${total} · page ${page} of ${totalPages}`,
+      `${start}–${end} / 共 ${total} 筆 · 第 ${page} / ${totalPages} 頁`
+    );
+    return `<div class="activity-pagination" data-activity-section="${escapeHtml(section)}">
+        <button type="button" class="filter-chip activity-page-btn" data-activity-section="${escapeHtml(
+          section
+        )}" data-direction="prev"${prevDisabled ? " disabled" : ""}>${i18n("Prev", "上一頁")}</button>
+        <span class="activity-pagination-label">${escapeHtml(label)}</span>
+        <button type="button" class="filter-chip activity-page-btn" data-activity-section="${escapeHtml(
+          section
+        )}" data-direction="next"${nextDisabled ? " disabled" : ""}>${i18n("Next", "下一頁")}</button>
+      </div>`;
   }
 
   function tradeGroupActivityTitle(g) {
@@ -1308,25 +1775,6 @@
         return `<span>${escapeHtml(p[0])} <strong>${escapeHtml(String(p[1]))}</strong></span>`;
       })
       .join("");
-  }
-
-  /** One row per trade group: closed list merged first so realized / close fields win over open snapshots. */
-  function recentActivityUnifiedRows(status, report, groups, limit = 20) {
-    const opened = recentOpenedRows(status, groups, limit);
-    const closed = recentClosedRows(report, groups, limit);
-    const merged = dedupeTradeGroups([...closed, ...opened]);
-    merged.sort((a, b) => {
-      const ra = activityRecencyMs(a);
-      const rb = activityRecencyMs(b);
-      return rb - ra;
-    });
-    return merged.slice(0, limit);
-  }
-
-  function activityRecencyMs(g) {
-    const c = closedTimestampMs(g);
-    if (c !== null && c > 0) return c;
-    return entryTimestampMs(g) || 0;
   }
 
   function activityLifecycleCardHtml(g, status, groups) {
@@ -1502,8 +1950,45 @@
 
   // ---------- top bar ----------
 
+  function renderInvestorHeaderIdentity(health) {
+    if (!INVESTOR || !health) return;
+    const name = String(health.investor_display_name || health.investor_id || "").trim();
+    const h1 = document.querySelector(".app-header h1");
+    if (h1 && name) {
+      h1.textContent = `${name} · ${INVESTOR_ZH ? "投資組合總覽" : "Investor summary"}`;
+    }
+    const sub = document.querySelector(".app-header h1 + p");
+    if (!sub) return;
+    if (!sub.dataset.investorBaseCopy) {
+      sub.dataset.investorBaseCopy = sub.textContent || "";
+    }
+    const base = sub.dataset.investorBaseCopy;
+    const investorId = String(health.investor_id || "").trim();
+    sub.textContent =
+      investorId && investorId !== name
+        ? `${i18n("Investor id", "投資人 ID")}: ${investorId} · ${base}`
+        : base;
+  }
+
+  /** Ops dashboard: rose on mainnet = live-funds warning. Investor portal: neutral tones (not an error). */
+  function envBadgeToneClass(env) {
+    if (INVESTOR) {
+      if (env === "mainnet") {
+        return "border-sky-500/50 bg-sky-500/10 text-sky-200";
+      }
+      if (env === "test") {
+        return "border-amber-500/50 bg-amber-500/10 text-amber-200";
+      }
+      return "border-slate-500/50 bg-slate-500/10 text-slate-200";
+    }
+    return env === "mainnet"
+      ? "border-rose-500/50 bg-rose-500/10 text-rose-200"
+      : "border-emerald-500/50 bg-emerald-500/10 text-emerald-200";
+  }
+
   function renderTopBar(health) {
     if (!health) return;
+    renderInvestorHeaderIdentity(health);
     const env = (health.env || "").toLowerCase();
     const envBadge = document.getElementById("env-badge");
     if (envBadge) {
@@ -1517,10 +2002,7 @@
           : `${i18n("Network:", "網路：")} ${env || "—"}`
         : `env: ${env || "?"}`;
       envBadge.className =
-        "text-xs px-2 py-0.5 rounded-full border " +
-        (env === "mainnet"
-          ? "border-rose-500/50 bg-rose-500/10 text-rose-200"
-          : "border-emerald-500/50 bg-emerald-500/10 text-emerald-200");
+        "text-xs px-2 py-0.5 rounded-full border " + envBadgeToneClass(env);
     }
 
     const strategyBadge = document.getElementById("strategy-badge");
@@ -1562,6 +2044,7 @@
           "text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-700/30 text-slate-300";
       }
     }
+    renderDataFreshnessBadge();
   }
 
   function renderRegime(status) {
@@ -1797,14 +2280,18 @@
   function renderAggregate(status, report) {
     const root = document.getElementById("aggregate-card");
     if (!root) return;
-    const portfolio = status?.portfolio;
+    const { portfolio, source } = resolvedPortfolio();
     const summary = report?.summary;
 
     if (!portfolio && !summary) {
-      root.innerHTML = `<p class="text-sm text-slate-400">${i18n(
-        "No status / report data yet.",
-        "尚無即時帳戶或績效摘要資料。"
-      )}</p>`;
+      if (INVESTOR && !STATE.investorReady) {
+        root.innerHTML = aggregateSkeletonHtml();
+      } else {
+        root.innerHTML = `<p class="text-sm text-slate-400">${i18n(
+          "No status / report data yet.",
+          "尚無即時帳戶或績效摘要資料。"
+        )}</p>`;
+      }
       return;
     }
 
@@ -1812,19 +2299,13 @@
     const dayStart = num(portfolio?.day_start_equity_usdc);
     const dayPnl = portfolioDayPnlUsdForDisplay(portfolio, totalEquity, dayStart);
     const dayDrawdown = num(portfolio?.day_drawdown_pct);
-    const projected = num(portfolio?.projected_max_profit_apr);
-    const targetProgress = num(portfolio?.target_progress_ratio);
     const openRows = currentOpenRows(status, STATE.groups);
     const openCredit = openRows.reduce(
       (sum, g) => sum + (openRowEntryCreditUsd(g, status, STATE.groups) || 0),
       0
     );
-    const openUnrealized = openRows.reduce((sum, g) => {
-      const v = openRowDisplayUnrealizedUsd(g, status, STATE.groups);
-      return sum + (v ?? 0);
-    }, 0);
+    const creditByStrategy = sumOpenCreditByStrategy(openRows, status, STATE.groups);
 
-    const effectiveCap = num(summary?.effective_capital_usdc);
     const lifetimePnl = num(summary?.realized_pnl_usdc);
     const lifetimeApr = num(summary?.lifetime_realized_apr);
     const winRate = num(summary?.realized_win_rate);
@@ -1835,57 +2316,60 @@
     const windowApr = num(summary?.window_realized_apr);
     const lifetimeStartMs = lifetimePerformanceStartMs(report, STATE.groups);
     const lifetimeNativeByBook = sumLifetimeRealizedPnlNativeByBook(report, STATE.groups, status);
+    const windowLabelDays = windowDays ?? 30;
+    const windowNativeByBook = sumWindowRealizedPnlNativeByBook(
+      report,
+      STATE.groups,
+      status,
+      windowLabelDays
+    );
+    const equityNativeByBook = bookEquityNativeByBook(status);
+    const sinceLine =
+      lifetimeStartMs !== null
+        ? `${i18n("since", "自")} ${fmtDate(lifetimeStartMs)}`
+        : i18n("no realized history yet", "尚無已實現紀錄");
+    const freshnessNote =
+      source === "snapshot" && INVESTOR
+        ? `<p class="text-xs text-amber-200/80 mt-3">${i18n(
+            "Equity from last snapshot; live sync continues in background.",
+            "權益來自最近快照；即時同步於背景進行中。"
+          )}</p>`
+        : source === "live" && INVESTOR
+        ? `<p class="text-xs text-emerald-200/70 mt-3">${i18n("Live Deribit sync", "已同步 Deribit 即時資料")}</p>`
+        : "";
 
-    root.innerHTML = `
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-y-5 gap-x-6">
-        <div>
-          <div class="text-xs text-slate-400">${i18n("Total equity", "總權益（USDC 約當）")}</div>
-          <div class="text-2xl font-mono">${fmtUsd(totalEquity)}</div>
-          <div class="text-xs text-slate-500">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
-        </div>
-        <div>
-          <div class="text-xs text-slate-400">${i18n("Day P&L", "本日損益")}</div>
-          <div class="text-2xl font-mono ${pnlClass(dayPnl)}">${fmtUsd(dayPnl)}</div>
-          <div class="text-xs text-slate-500">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</div>
-        </div>
-        <div>
-          <div class="text-xs text-slate-400">${i18n("Open credit", "未實現權利金（進場收斂）")}</div>
-          <div class="text-2xl font-mono">${fmtUsd(openCredit)}</div>
-          <div class="text-xs text-slate-500">${i18n("unrealized MTM", "未實現損益約當")} ${fmtUsd(openUnrealized)}</div>
-        </div>
-        <div>
-          <div class="text-xs text-slate-400">${i18n("Projected APR (open)", "持倉隱含年化（參考）")}</div>
-          <div class="text-2xl font-mono">${fmtPct(projected)}</div>
-          <div class="text-xs text-slate-500">${i18n("target progress", "目標達成度")} ${fmtPct(targetProgress)}</div>
-        </div>
+    const overviewCtx = {
+      totalEquity,
+      dayStart,
+      dayPnl,
+      dayDrawdown,
+      openCredit,
+      creditByStrategy,
+      summary,
+      winRate,
+      avgHolding,
+      sinceLine,
+      lifetimePnl,
+      lifetimeNativeByBook,
+      closedCount,
+      windowLabelDays,
+      windowPnl,
+      windowNativeByBook,
+      lifetimeApr,
+      windowApr,
+      equityNativeByBook,
+    };
+    const desktopOverview = overviewMetricsGridHtml(overviewCtx);
 
-        <div>
-          <div class="text-xs text-slate-400">${i18n("Total profit (lifetime)", "累計已實現損益")}</div>
-          <div class="text-2xl font-mono ${pnlClass(lifetimePnl)}">${fmtUsd(lifetimePnl)}</div>
-          <div class="text-xs text-slate-500 mt-0.5">${fmtLifetimeRealizedNativeBreakdown(lifetimeNativeByBook)}</div>
-          <div class="text-xs text-slate-500">${closedCount ?? 0} ${i18n("closed groups", "筆已平倉部位")}</div>
-        </div>
-        <div>
-          <div class="text-xs text-slate-400">${i18n("Lifetime APR", "存續期年化（已實現）")}</div>
-          <div class="text-2xl font-mono">${fmtPct(lifetimeApr)}</div>
-          <div class="text-xs text-slate-500">${
-            lifetimeStartMs !== null
-              ? `${i18n("since", "自")} ${fmtDate(lifetimeStartMs)}`
-              : i18n("no realized history yet", "尚無已實現紀錄")
-          }</div>
-        </div>
-        <div>
-          <div class="text-xs text-slate-400">${windowDays ?? 30}${i18n("d realized", " 日已實現")}</div>
-          <div class="text-2xl font-mono ${pnlClass(windowPnl)}">${fmtUsd(windowPnl)}</div>
-          <div class="text-xs text-slate-500">${i18n("window APR", "區間年化")} ${fmtPct(windowApr)}</div>
-        </div>
-        <div>
-          <div class="text-xs text-slate-400">${i18n("Win rate · avg holding", "勝率 · 平均持有")}</div>
-          <div class="text-2xl font-mono">${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}${INVESTOR_ZH ? " 天" : "d"}</div>
-          <div class="text-xs text-slate-500">${i18n("effective capital", "參考資本")} ${fmtUsd(effectiveCap)}</div>
-        </div>
-      </div>
-    `;
+    if (INVESTOR) {
+      root.innerHTML = `
+        <div class="investor-view-desktop">${desktopOverview}</div>
+        <div class="investor-view-mobile">${investorOverviewHtml(overviewCtx)}</div>
+        ${freshnessNote}`;
+    } else {
+      root.innerHTML = `${desktopOverview}${freshnessNote}`;
+    }
+    renderDataFreshnessBadge();
   }
 
   // ---------- strategy groups ----------
@@ -1903,6 +2387,8 @@
       annualizedCount: 0,
       annualizedWeightedSum: 0,
       annualizedWeight: 0,
+      aprPnlUsdSum: 0,
+      aprCapitalDays: 0,
       holdingSum: 0,
       holdingCount: 0,
       books: new Set(),
@@ -1928,15 +2414,23 @@
     return native * spot;
   }
 
-  function closedAnnualizedEquityDaysWeight(g, status, holding) {
+  function closedAnnualizedCapitalDaysWeight(g, status, holding) {
     if (holding === null || holding <= 0) return null;
+    const capital = tradeGroupAprCapitalBase(g, status);
+    if (capital === null || capital <= 0) return null;
     const book = tradeGroupAprBook(g);
-    const native = strategyBookEquityNative(g, status);
-    if (native === null || native <= 0) return null;
-    if (book === "USDC") return native * holding;
+    if (book === "USDC") return capital * holding;
     const spot = num(status?.underlying_index_usd?.[book]) ?? num(STATE.lastSpotUsd?.[book]);
     if (spot === null || spot <= 0) return null;
-    return native * spot * holding;
+    return capital * spot * holding;
+  }
+
+  /** Strategy-level realized APR: total P&L / sum(position capital × holding days) × 365. */
+  function strategyAggregateRealizedApr(summary) {
+    if (summary.aprCapitalDays > 0) {
+      return (summary.aprPnlUsdSum / summary.aprCapitalDays) * 365;
+    }
+    return null;
   }
 
   function buildStrategySummaries(status, report, groups) {
@@ -1974,11 +2468,25 @@
         s.holdingSum += holding;
         s.holdingCount += 1;
       }
+      const capital = tradeGroupAprCapitalBase(g, status);
+      if (pnl !== null && capital !== null && capital > 0 && holding !== null && holding > 0) {
+        const book = tradeGroupAprBook(g);
+        let capitalUsd = capital;
+        if (book === "BTC" || book === "ETH") {
+          const spot = collateralBookSpotUsd(g, status);
+          if (spot === null || spot <= 0) capitalUsd = null;
+          else capitalUsd = capital * spot;
+        }
+        if (capitalUsd !== null) {
+          s.aprPnlUsdSum += pnl;
+          s.aprCapitalDays += capitalUsd * holding;
+        }
+      }
       const ann = groupRealizedApr(g, status);
       if (ann !== null) {
         s.annualizedSum += ann;
         s.annualizedCount += 1;
-        const weight = closedAnnualizedEquityDaysWeight(g, status, holding);
+        const weight = closedAnnualizedCapitalDaysWeight(g, status, holding);
         if (weight !== null) {
           s.annualizedWeightedSum += ann * weight;
           s.annualizedWeight += weight;
@@ -1995,10 +2503,7 @@
   function strategySummaryCardHtml(summary) {
     const info = strategyInfo(summary.id);
     const winRate = summary.closedCount > 0 ? summary.wins / summary.closedCount : null;
-    const avgAnn =
-      summary.annualizedCount > 0 ? summary.annualizedSum / summary.annualizedCount : null;
-    const weightedAnn =
-      summary.annualizedWeight > 0 ? summary.annualizedWeightedSum / summary.annualizedWeight : avgAnn;
+    const weightedAnn = strategyAggregateRealizedApr(summary);
     const avgHolding =
       summary.holdingCount > 0 ? summary.holdingSum / summary.holdingCount : null;
     const books = Array.from(summary.books).sort().join(" / ") || "—";
@@ -2072,9 +2577,10 @@
     return `<span class="credit-capture-bar"><span class="${tone}" style="width:${width}%"></span></span>`;
   }
 
-  function openPositionMetricHtml(label, valueHtml, extraClass = "") {
+  function openPositionMetricHtml(label, valueHtml, extraClass = "", { secondary = false } = {}) {
+    const secondaryClass = secondary ? " open-position-kpi-secondary" : "";
     return `
-      <div class="open-position-metric ${extraClass}">
+      <div class="open-position-metric${secondaryClass} ${extraClass}">
         <span class="open-position-label">${label}</span>
         <span class="open-position-value">${valueHtml}</span>
       </div>`;
@@ -2147,7 +2653,89 @@
       <span>${escapeHtml(strategyLegDetail(g))}</span>`;
   }
 
-  function openPositionCardHtml(g, status, groups) {
+  function openPositionCardInvestorHtml(g, status, groups) {
+    const id = strategyId(g);
+    const isBullPutSpread = id === "bull_put_spread";
+    const dteVal = openRowDteDays(g);
+    const pnlUsd = openRowDisplayUnrealizedUsd(g, status, groups);
+    const nativeUnr = openRowDisplayNativeUnrealizedValue(g, status, groups);
+    const coll = openRowBookCollateralUpper(g) || g.collateral_currency || "";
+    const creditKept = num(g.profit_capture);
+    const entryCredit = openRowEntryCreditUsd(g, status, groups);
+    const entryCreditNative = groupEntryCreditNative(g, status);
+    const longLeg = openRowLegInstrumentName(g, "long");
+    const shortAmt = openRowLegSignedSizeForDisplay(g, status, "short");
+    const longAmt = openRowLegSignedSizeForDisplay(g, status, "long");
+    const fmtLegAmount = (amt) => (amt === null ? "" : ` · ${fmtNum(amt, 4)}`);
+    const strategyClass = openPositionStrategyClass(id);
+    const toneClass = openPositionToneClass(pnlUsd);
+    const statusLabel = openPositionStatusLabel(pnlUsd);
+    const entryUsd =
+      entryCredit === null ? "—" : fmtUsd(entryCredit);
+    const entryNative =
+      entryCreditNative === null
+        ? ""
+        : `<span class="inv-pos-metric-sub font-mono">${fmtNativeUnrealizedDisplay(entryCreditNative, coll)}</span>`;
+    const entryApr = groupEntryNetApr(g, status);
+    const entryAprText = entryApr === null ? "—" : fmtPct(entryApr, 1);
+    let detailTags = "";
+    if (isBullPutSpread) {
+      const strikeWidth = bullPutSpreadWidth(g);
+      const entryGap = openRowLegPriceGap(g, status, "average_price");
+      detailTags = `
+        <span class="inv-pos-tag">${i18n("Width", "價差")} ${fmtStrike(strikeWidth)}</span>
+        <span class="inv-pos-tag">${i18n("Entry gap", "進場")} ${fmtDeribitPriceCell(entryGap, coll)}</span>`;
+    } else {
+      detailTags = `
+        <span class="inv-pos-tag">${i18n("Strike", "履約")} ${fmtStrike(openRowLegStrike(g, "short"))}</span>
+        <span class="inv-pos-tag">${escapeHtml(strategyLegDetail(g))}</span>`;
+    }
+    return `
+      <article class="inv-position ${strategyClass} ${toneClass}">
+        <header class="inv-position-head">
+          <div class="inv-position-main">
+            <div class="inv-position-titleline">
+              ${strategyChipHtml(id, { compact: true })}
+              <h3 class="inv-position-name">${escapeHtml(openPositionTitle(g))}</h3>
+            </div>
+            <p class="inv-position-contract font-mono">${escapeHtml(g.short_instrument_name || "—")}<span class="inv-position-size tabular-nums">${fmtLegAmount(shortAmt)}</span></p>
+            ${isBullPutSpread && longLeg ? `<p class="inv-position-contract font-mono inv-position-contract--long">${i18n("Long", "買腿")} ${escapeHtml(longLeg)}<span class="inv-position-size tabular-nums">${fmtLegAmount(longAmt)}</span></p>` : ""}
+            <div class="inv-position-tags">
+              <span class="inv-pos-tag">${escapeHtml(coll)}</span>
+              <span class="inv-pos-tag inv-pos-tag--status">${escapeHtml(statusLabel)}</span>
+              ${detailTags}
+            </div>
+          </div>
+          <div class="inv-position-pnl">
+            <span class="inv-position-pnl-label">${i18n("Unrealized", "未實現")}</span>
+            <span class="inv-position-pnl-value font-mono tabular-nums ${pnlClass(pnlUsd)}">${pnlUsd === null ? "—" : fmtUsd(pnlUsd)}</span>
+            <span class="inv-position-pnl-native font-mono tabular-nums ${pnlClass(nativeUnr)}">${fmtNativeUnrealizedDisplay(nativeUnr, coll)}</span>
+          </div>
+        </header>
+        <div class="inv-position-strip" role="list">
+          <div class="inv-pos-metric" role="listitem">
+            <span class="inv-pos-metric-k">${i18n("DTE", "到期")}</span>
+            <span class="inv-pos-metric-v font-mono tabular-nums">${dteVal !== null ? `${fmtNum(dteVal, 1)}${INVESTOR_ZH ? "天" : "d"}` : "—"}</span>
+          </div>
+          <div class="inv-pos-metric" role="listitem">
+            <span class="inv-pos-metric-k">${i18n("Credit kept", "權利金")}</span>
+            <span class="inv-pos-metric-v font-mono tabular-nums">${fmtPct(creditKept, 1)}</span>
+            ${creditCaptureBarHtml(creditKept)}
+          </div>
+          <div class="inv-pos-metric" role="listitem">
+            <span class="inv-pos-metric-k">${i18n("Entry", "進場")}</span>
+            <span class="inv-pos-metric-v font-mono tabular-nums">${entryUsd}</span>
+            ${entryNative}
+          </div>
+          <div class="inv-pos-metric" role="listitem">
+            <span class="inv-pos-metric-k">${i18n("Entry APR", "進場年化")}</span>
+            <span class="inv-pos-metric-v font-mono tabular-nums ${entryApr !== null && entryApr >= 0.15 ? "pnl-pos" : ""}">${entryAprText}</span>
+          </div>
+        </div>
+      </article>`;
+  }
+
+  function openPositionCardDesktopHtml(g, status, groups) {
     const id = strategyId(g);
     const isBullPutSpread = id === "bull_put_spread";
     const dteVal = openRowDteDays(g);
@@ -2210,7 +2798,7 @@
           )}
           ${openPositionMetricHtml(
             i18n("Entry credit", "進場收斂"),
-            entryCredit === null ? "—" : fmtUsdWithNativeBookAmount(entryCredit, entryCreditNative, coll)
+            entryCredit === null ? "—" : fmtUsdNativeBookStackHtml(entryCredit, entryCreditNative, coll)
           )}
           ${(() => {
             const entryApr = groupEntryNetApr(g, status);
@@ -2224,11 +2812,11 @@
           })()}
           ${openPositionMetricHtml(
             i18n("Entry fee", "進場手續費"),
-            entryFee === null ? "—" : fmtUsdWithNativeBookAmount(entryFee, entryFeeNative, coll)
+            entryFee === null ? "—" : fmtUsdNativeBookStackHtml(entryFee, entryFeeNative, coll)
           )}
           ${openPositionMetricHtml(
             i18n("Est. close fee", "預估平倉費"),
-            closeFee === null ? "—" : fmtUsdWithNativeBookAmount(closeFee, closeFeeNative, coll)
+            closeFee === null ? "—" : fmtUsdNativeBookStackHtml(closeFee, closeFeeNative, coll)
           )}
         </div>
         <div class="open-position-legs ${isBullPutSpread ? "has-two-legs" : "has-one-leg"}">
@@ -2236,6 +2824,12 @@
           ${isBullPutSpread ? openPositionLegCardHtml(g, status, groups, "long") : ""}
         </div>
       </article>`;
+  }
+
+  function openPositionCardHtml(g, status, groups) {
+    const desktop = openPositionCardDesktopHtml(g, status, groups);
+    if (!INVESTOR) return desktop;
+    return `<div class="investor-view-desktop">${desktop}</div><div class="investor-view-mobile">${openPositionCardInvestorHtml(g, status, groups)}</div>`;
   }
 
   /** One strategy playbook: header + stacked open-position cards (avoids repeating the same trades as tables + flat list). */
@@ -2343,10 +2937,190 @@
   }
 
   function destroyChart(key) {
-    if (STATE.charts[key]) {
-      STATE.charts[key].destroy();
-      STATE.charts[key] = null;
+    const chart = STATE.charts[key];
+    if (!chart) return;
+    const canvas = chart.canvas;
+    chart.destroy();
+    STATE.charts[key] = null;
+    if (canvas) {
+      canvas.removeAttribute("width");
+      canvas.removeAttribute("height");
+      canvas.style.width = "";
+      canvas.style.height = "";
     }
+  }
+
+  function chartCanvasContext(canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return null;
+    return canvas.getContext("2d");
+  }
+
+  function resizeAllCharts() {
+    Object.values(STATE.charts).forEach((chart) => {
+      try {
+        chart?.resize?.();
+      } catch (_) {
+        /* ignore */
+      }
+    });
+  }
+
+  function scheduleChartResizeAll() {
+    requestAnimationFrame(() => {
+      resizeAllCharts();
+      window.setTimeout(resizeAllCharts, 80);
+      window.setTimeout(resizeAllCharts, 320);
+    });
+  }
+
+  let chartResizeObserversAttached = false;
+
+  function attachChartResizeObservers() {
+    if (chartResizeObserversAttached || typeof ResizeObserver === "undefined") return;
+    chartResizeObserversAttached = true;
+    document.querySelectorAll(".chart-panel-canvas").forEach((shell) => {
+      const canvas = shell.querySelector("canvas");
+      if (!canvas?.id) return;
+      new ResizeObserver(() => resizeAllCharts()).observe(shell);
+    });
+  }
+
+  /** Live portfolio equity for rolling APR denominator (matches engine effective capital). */
+  function aprEffectiveCapitalUsdc() {
+    const eq = num(STATE.status?.portfolio?.total_equity_usdc);
+    return eq !== null && eq > 0 ? eq : null;
+  }
+
+  function aprSeriesUrl() {
+    let url = `/api/apr_series?window_days=${STATE.aprWindow}`;
+    const cap = aprEffectiveCapitalUsdc();
+    if (cap !== null) {
+      url += `&effective_capital_usdc=${encodeURIComponent(String(cap))}`;
+    }
+    return url;
+  }
+
+  function defaultEmptyChartTimeBounds() {
+    const end = luxon.DateTime.now().toUTC().startOf("day");
+    const start = end.minus({ days: Math.max(STATE.aprWindow, 30) });
+    return { min: start.toMillis(), max: end.toMillis() };
+  }
+
+  function chartPanelShell(canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return null;
+    // Prefer explicit panel wrapper; fall back to canvas parent for older cached HTML.
+    return canvas.closest(".chart-panel-canvas") || canvas.parentElement;
+  }
+
+  function setChartPanelEmpty(canvasId, { empty, message = "" } = {}) {
+    const shell = chartPanelShell(canvasId);
+    if (!shell) return;
+    let overlay = shell.querySelector(".chart-empty-overlay");
+    if (!empty) {
+      overlay?.remove();
+      shell.classList.remove("chart-panel-canvas--empty");
+      return;
+    }
+    shell.classList.add("chart-panel-canvas--empty");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.className = "chart-empty-overlay";
+      shell.appendChild(overlay);
+    }
+    overlay.textContent = message;
+  }
+
+  const EMPTY_CHART_COPY = {
+    realized: {
+      en: "No closed positions yet — this chart fills in after the first close.",
+      zh: "尚無平倉紀錄 — 首次平倉後此圖表才會開始累積。",
+    },
+    apr: {
+      en: "Rolling APR needs closed trades and daily equity snapshots.",
+      zh: "滾動年化需有平倉紀錄與每日權益快照。",
+    },
+  };
+
+  function emptyChartMessage(kind) {
+    const copy = EMPTY_CHART_COPY[kind] || EMPTY_CHART_COPY.realized;
+    return i18n(copy.en, copy.zh);
+  }
+
+  function emptyChartScaleOptions({ yPercent = false, chartType = "line" } = {}) {
+    const xBounds = defaultEmptyChartTimeBounds();
+    const base = chartCommonOptions();
+    const yMin = yPercent ? -0.1 : -50;
+    const yMax = yPercent ? 0.1 : 50;
+    return {
+      ...base,
+      plugins: {
+        ...base.plugins,
+        legend: { display: false },
+        tooltip: { enabled: false },
+      },
+      scales: {
+        x: {
+          ...base.scales.x,
+          ...xBounds,
+          display: true,
+          offset: chartType === "bar",
+          time: {
+            unit: "day",
+            round: "day",
+            tooltipFormat: "yyyy-LL-dd",
+          },
+        },
+        y: {
+          ...base.scales.y,
+          display: true,
+          min: yMin,
+          max: yMax,
+          ticks: {
+            ...base.scales.y.ticks,
+            maxTicksLimit: 6,
+            ...(yPercent ? { callback: (v) => fmtPct(v, 1) } : {}),
+          },
+        },
+      },
+    };
+  }
+
+  function mountEmptyTimeSeriesChart(
+    canvasId,
+    key,
+    { yPercent = false, chartType = "line", messageKind = "realized" } = {}
+  ) {
+    const ctx = chartCanvasContext(canvasId);
+    if (!ctx) return;
+    destroyChart(key);
+    setChartPanelEmpty(canvasId, {
+      empty: true,
+      message: emptyChartMessage(messageKind),
+    });
+    const xBounds = defaultEmptyChartTimeBounds();
+    const placeholder = [
+      { x: xBounds.min, y: 0 },
+      { x: xBounds.max, y: 0 },
+    ];
+    // Skeleton uses a line at y=0 so axes/grid render reliably (bar placeholders are invisible).
+    STATE.charts[key] = new Chart(ctx, {
+      type: "line",
+      data: {
+        datasets: [
+          {
+            label: i18n("No realized history yet", "尚無已實現紀錄"),
+            data: placeholder,
+            borderWidth: 1,
+            pointRadius: 0,
+            borderColor: "rgba(148, 163, 184, 0.35)",
+            backgroundColor: "transparent",
+          },
+        ],
+      },
+      options: emptyChartScaleOptions({ yPercent, chartType }),
+    });
   }
 
   function visibleBooks() {
@@ -2374,13 +3148,36 @@
     return out;
   }
 
+  function sumOpenCreditByStrategy(openRows, status, groups) {
+    const out = Object.fromEntries(STRATEGIES.map((s) => [s.id, 0]));
+    for (const g of openRows || []) {
+      const id = strategyId(g);
+      if (!STRATEGY_BY_ID[id]) continue;
+      const credit = openRowEntryCreditUsd(g, status, groups);
+      if (credit === null) continue;
+      out[id] += credit;
+    }
+    return out;
+  }
+
+  function fmtOpenCreditStrategyBreakdown(byStrategy) {
+    const rows = strategyOrder(new Set(STRATEGIES.map((s) => s.id))).map((id) => {
+      const short = escapeHtml(strategyInfo(id).short);
+      const n = num(byStrategy[id]);
+      const text = n === null ? "—" : fmtUsd(n);
+      return `<div class="open-credit-row"><span class="open-credit-label text-slate-500">${short}</span><span class="open-credit-value font-mono tabular-nums text-slate-300">${text}</span></div>`;
+    });
+    return `<div class="open-credit-breakdown">${rows.join("")}</div>`;
+  }
+
   /** Closed groups with realized PnL (full ``groups.closed`` + report enrich). */
-  function lifetimeRealizedClosedRows(report, groups) {
+  function lifetimeRealizedClosedRows(report, groups, status = null) {
+    const st = status ?? STATE.status;
     return dedupeTradeGroups([
       ...(groups?.closed || []),
       ...(report?.recent_closed_trades || []),
     ])
-      .filter(isClosedTradeGroup)
+      .filter((g) => isDisplayableClosedTradeGroup(g, st, groups))
       .filter((g) => num(g?.realized_pnl) !== null);
   }
 
@@ -2396,16 +3193,56 @@
     return out;
   }
 
+  function sumWindowRealizedPnlNativeByBook(report, groups, status, windowDays) {
+    const out = { BTC: 0, ETH: 0, USDC: 0 };
+    const days = windowDays ?? 30;
+    const cutoffMs = Date.now() - days * 24 * 3600 * 1000;
+    for (const g of lifetimeRealizedClosedRows(report, groups)) {
+      const closedMs = closedTimestampMs(g);
+      if (closedMs === null || closedMs < cutoffMs) continue;
+      const book = tradeGroupAprBook(g);
+      if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
+      const native = realizedPnlInAprBookNative(g, status);
+      if (native === null) continue;
+      out[book] += native;
+    }
+    return out;
+  }
+
+  function bookEquityNativeByBook(status) {
+    const accounts = status?.accounts || {};
+    const out = {};
+    let any = false;
+    for (const book of CORE_BOOKS) {
+      out[book] = num(accounts[book]?.equity);
+      if (out[book] !== null) any = true;
+    }
+    if (!any) {
+      const { portfolio } = resolvedPortfolio();
+      for (const book of CORE_BOOKS) {
+        out[book] = num(portfolio?.equity_by_book?.[book]);
+      }
+    }
+    return out;
+  }
+
+  function fmtNativeBookBreakdown(byBook, { places = { BTC: 5, ETH: 4, USDC: 2 }, pnl = false } = {}) {
+    const symbols = { BTC: "₿", ETH: "♦", USDC: "($)" };
+    const items = ["BTC", "ETH", "USDC"].map((book) => {
+      const n = num(byBook[book]);
+      const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
+      const cls = pnl ? ` ${pnlClass(byBook[book])}` : "";
+      return `<span class="native-book-item"><span class="native-book-symbol text-slate-500">${symbols[book]}</span> <span class="font-mono tabular-nums${cls}">${text}</span></span>`;
+    });
+    return `<span class="native-book-breakdown">${items.join("")}</span>`;
+  }
+
   function fmtLifetimeRealizedNativeBreakdown(byBook) {
-    const sp = '<span class="text-slate-500">';
-    const ep = "</span>";
-    const sep = '<span class="text-slate-600">·</span>';
-    const parts = [
-      `${sp}₿${ep}\u00A0<span class="font-mono ${pnlClass(byBook.BTC)}">${fmtNum(byBook.BTC, 5)}</span>`,
-      `${sp}♦${ep}\u00A0<span class="font-mono ${pnlClass(byBook.ETH)}">${fmtNum(byBook.ETH, 4)}</span>`,
-      `${sp}($)${ep}\u00A0<span class="font-mono ${pnlClass(byBook.USDC)}">${fmtNum(byBook.USDC, 2)}</span>`,
-    ];
-    return parts.join(`\u00A0${sep}\u00A0`);
+    return fmtNativeBookBreakdown(byBook, { pnl: true });
+  }
+
+  function fmtBookEquityNativeBreakdown(byBook) {
+    return fmtNativeBookBreakdown(byBook);
   }
 
   function openTradeGroupsForRisk() {
@@ -2449,38 +3286,40 @@
     };
   }
 
-  function renderRiskVsCapitalChart() {
-    const ctx = document.getElementById("chart-risk-capital")?.getContext("2d");
+  function renderBookEquityChart() {
+    const ctx = chartCanvasContext("chart-risk-capital");
     if (!ctx) return;
     destroyChart("riskCapital");
 
     const books = visibleBooks();
     const portfolio = STATE.status?.portfolio;
-    const openGroups = openTradeGroupsForRisk();
-    const creditByBook = sumOpenCreditByBook(openGroups);
 
     const equityBars = books.map((b) => {
       const v = bookEquityUsdForDisplay(b, STATE.status);
       return v !== null ? v : 0;
     });
-    const creditBars = books.map((b) => creditByBook[b] || 0);
 
     const totEq = num(portfolio?.total_equity_usdc);
-    const totalCredit = books.reduce((sum, b) => sum + (creditByBook[b] || 0), 0);
-
-    const nOpen = openGroups.length;
-    let meta = `${nOpen} open group${nOpen === 1 ? "" : "s"}`;
-    if (portfolio && totEq !== null) {
-      const creditPct = totEq > 0 ? totalCredit / totEq : null;
-      meta += ` · open credit ${fmtUsd(totalCredit)} (${fmtPct(creditPct, 2)} of equity)`;
-    } else if (!STATE.status && nOpen > 0) {
-      meta += " · book equity needs live /api/status";
+    const sumBars = equityBars.reduce((a, b) => a + b, 0);
+    let meta = i18n(`Total ${fmtUsd(totEq)}`, `合計 ${fmtUsd(totEq)}`);
+    if (totEq !== null && sumBars > 0 && Math.abs(sumBars - totEq) > 1) {
+      meta += i18n(" · bars sum may differ from headline", " · 各帳加總可能與總覽略有差異");
+    } else if (!STATE.status) {
+      meta = i18n("Awaiting live snapshot", "等待即時快照");
     }
 
     setText("risk-capital-meta", meta);
+    setText(
+      "risk-capital-hint",
+      i18n(
+        "Per-book equity in USDC equivalent from the live snapshot (or last saved snapshot).",
+        "各帳本權益以 USDC 約當顯示，來自即時或最近快照。"
+      )
+    );
 
     const barColors = books.map((b) => BOOK_COLORS[b] || "#94a3b8");
     const baseOpts = riskBarChartBaseOptions();
+    setChartPanelEmpty("chart-risk-capital", { empty: false });
 
     STATE.charts.riskCapital = new Chart(ctx, {
       type: "bar",
@@ -2490,15 +3329,8 @@
           {
             label: i18n("Book equity (USDC eq.)", "帳本權益（USDC 約當）"),
             data: equityBars,
-            backgroundColor: barColors.map((c) => c + "55"),
+            backgroundColor: barColors.map((c) => c + "cc"),
             borderColor: barColors,
-            borderWidth: 1,
-          },
-          {
-            label: i18n("Open credit", "未實現收斂"),
-            data: creditBars,
-            backgroundColor: "rgba(16, 185, 129, 0.36)",
-            borderColor: "#34d399",
             borderWidth: 1,
           },
         ],
@@ -2515,10 +3347,9 @@
                 const i = items[0].dataIndex;
                 if (i === undefined) return "";
                 const eq = equityBars[i] ?? 0;
-                const credit = creditBars[i] ?? 0;
-                const r = eq > 0 ? credit / eq : null;
+                const share = totEq > 0 ? eq / totEq : null;
                 const lines = [
-                  `${i18n("Open credit / equity: ", "收斂／權益比：")}${fmtPct(r, 2)}`,
+                  `${i18n("Share of total: ", "佔總權益：")}${fmtPct(share, 2)}`,
                 ];
                 return lines;
               },
@@ -2590,15 +3421,18 @@
   }
 
   function renderCumulativePnlChart() {
-    const ctx = document.getElementById("chart-cum-pnl")?.getContext("2d");
+    const ctx = chartCanvasContext("chart-cum-pnl");
     if (!ctx) return;
     destroyChart("cumPnl");
     const series = STATE.cumulativePnl;
-    setText(
-      "cum-pnl-meta",
-      series?.realized_count ? `${series.realized_count} closed groups` : "no closed groups"
-    );
-    if (!series) return;
+    const closedMeta = series?.realized_count
+      ? `${series.realized_count} closed groups`
+      : i18n("no closed groups", "尚無已平倉組");
+    setText("cum-pnl-meta", closedMeta);
+    if (!series) {
+      mountEmptyTimeSeriesChart("chart-cum-pnl", "cumPnl");
+      return;
+    }
     const datasets = [];
     const books = visibleBooks();
     for (const book of books) {
@@ -2640,6 +3474,11 @@
         });
       }
     }
+    if (!datasets.length) {
+      mountEmptyTimeSeriesChart("chart-cum-pnl", "cumPnl");
+      return;
+    }
+    setChartPanelEmpty("chart-cum-pnl", { empty: false });
     STATE.charts.cumPnl = new Chart(ctx, {
       type: "line",
       data: { datasets },
@@ -2652,16 +3491,45 @@
     return points.filter((p) => Math.abs(p.y) > 1e-12);
   }
 
+  const DAILY_PNL_PROFIT_FILL = "rgba(52, 211, 153, 0.67)";
+  const DAILY_PNL_PROFIT_BORDER = "#34d399";
+  const DAILY_PNL_LOSS_FILL = "rgba(251, 113, 133, 0.67)";
+  const DAILY_PNL_LOSS_BORDER = "#fb7185";
+
+  function dailyPnlBarFillColors(points) {
+    return points.map((p) => {
+      const y = num(p.y) ?? 0;
+      if (y > 0) return DAILY_PNL_PROFIT_FILL;
+      if (y < 0) return DAILY_PNL_LOSS_FILL;
+      return "rgba(148, 163, 184, 0.4)";
+    });
+  }
+
+  function dailyPnlBarBorderColors(points) {
+    return points.map((p) => {
+      const y = num(p.y) ?? 0;
+      if (y > 0) return DAILY_PNL_PROFIT_BORDER;
+      if (y < 0) return DAILY_PNL_LOSS_BORDER;
+      return "#94a3b8";
+    });
+  }
+
   function renderDailyPnlChart() {
-    const ctx = document.getElementById("chart-daily-pnl")?.getContext("2d");
+    const ctx = chartCanvasContext("chart-daily-pnl");
     if (!ctx) return;
     destroyChart("dailyPnl");
     const MA_WINDOW = 30;
     const series = STATE.cumulativePnl;
-    if (!series) return;
+    if (!series) {
+      setText("daily-pnl-meta", i18n("no closed groups", "尚無已平倉組"));
+      mountEmptyTimeSeriesChart("chart-daily-pnl", "dailyPnl", { chartType: "bar" });
+      return;
+    }
     const books = visibleBooks();
     const validDaily = (series.daily_total || []).filter((r) => Number.isFinite(dateToMs(r.date)));
-    let meta = series?.daily_total?.length ? `${series.daily_total.length} active days` : "—";
+    let meta = series?.daily_total?.length
+      ? `${series.daily_total.length} ${i18n("active days", "個有效交易日")}`
+      : i18n("no closed groups", "尚無已平倉組");
     if (STATE.bookFilter === "ALL" && validDaily.length >= MA_WINDOW) {
       meta += " · 30d SMA";
     }
@@ -2673,11 +3541,11 @@
       if (barData.length) {
         datasets.push({
           type: "bar",
-          label: "Daily total",
+          label: i18n("Daily total", "每日合計"),
           data: barData,
           order: 1,
-          backgroundColor: BOOK_COLORS.TOTAL + "aa",
-          borderColor: BOOK_COLORS.TOTAL,
+          backgroundColor: dailyPnlBarFillColors(barData),
+          borderColor: dailyPnlBarBorderColors(barData),
           borderWidth: 1,
         });
       }
@@ -2689,11 +3557,11 @@
         if (barData.length) {
           datasets.push({
             type: "bar",
-            label: `${book} daily`,
+            label: `${book} ${i18n("daily", "每日")}`,
             data: barData,
             order: 1,
-            backgroundColor: BOOK_COLORS[book] + "aa",
-            borderColor: BOOK_COLORS[book],
+            backgroundColor: dailyPnlBarFillColors(barData),
+            borderColor: dailyPnlBarBorderColors(barData),
             borderWidth: 1,
           });
         }
@@ -2726,11 +3594,16 @@
         });
       }
     }
-    if (!datasets.length) return;
+    if (!datasets.length) {
+      mountEmptyTimeSeriesChart("chart-daily-pnl", "dailyPnl", { chartType: "bar" });
+      return;
+    }
+    setChartPanelEmpty("chart-daily-pnl", { empty: false });
     const flatPoints = datasets.flatMap((d) => d.data || []);
     const xBounds = suggestTimeScaleMinMax(flatPoints);
     const base = chartCommonOptions();
     STATE.charts.dailyPnl = new Chart(ctx, {
+      type: "bar",
       data: { datasets },
       options: {
         ...base,
@@ -2754,14 +3627,18 @@
   }
 
   function renderAprChart() {
-    const ctx = document.getElementById("chart-apr")?.getContext("2d");
+    const ctx = chartCanvasContext("chart-apr");
     if (!ctx) return;
     destroyChart("apr");
     const rows = STATE.aprSeries?.rows || [];
     const data = finalizeSimpleLineData(
       filterValidTimePoints(rows.map((r) => ({ x: dateToMs(r.date), y: num(r.apr) })))
     );
-    if (!data.length) return;
+    if (!data.length) {
+      mountEmptyTimeSeriesChart("chart-apr", "apr", { yPercent: true, messageKind: "apr" });
+      return;
+    }
+    setChartPanelEmpty("chart-apr", { empty: false });
     const xBounds = suggestTimeScaleMinMax(data);
     const base = chartCommonOptions();
     STATE.charts.apr = new Chart(ctx, {
@@ -2822,21 +3699,50 @@
   }
 
   function renderRecentActivity(status, report, groups) {
-    const root = document.getElementById("recent-activity-list");
-    if (!root) return;
-    const rows = recentActivityUnifiedRows(status, report, groups, 20);
-    const nOpen = rows.filter((g) => !isClosedTradeGroup(g)).length;
-    const nClosed = rows.filter((g) => isClosedTradeGroup(g)).length;
+    const openRoot = document.getElementById("activity-open-list");
+    const closedRoot = document.getElementById("activity-closed-list");
+    if (!openRoot && !closedRoot) return;
+
+    const openAll = activityOpenRows(status, groups);
+    const closedAll = activityClosedRows(status, report, groups);
+    const openPage = paginateRows(openAll, STATE.activityOpenPage, ACTIVITY_PAGE_SIZE);
+    const closedPage = paginateRows(closedAll, STATE.activityClosedPage, ACTIVITY_PAGE_SIZE);
+    STATE.activityOpenPage = openPage.page;
+    STATE.activityClosedPage = closedPage.page;
+
     setText(
       "activity-meta",
-      INVESTOR
-        ? i18n(
-            `${rows.length} positions · ${nOpen} open · ${nClosed} closed`,
-            `${rows.length} 筆紀錄 · ${nOpen} 持倉中 · ${nClosed} 已平倉`
-          )
-        : `${rows.length} positions · ${nOpen} open · ${nClosed} closed`
+      i18n(
+        `${openAll.length} open · ${closedAll.length} closed`,
+        `${openAll.length} 持倉中 · ${closedAll.length} 已平倉`
+      )
     );
-    renderRecentActivityList(root, rows, status, groups, i18n("No recent activity", "尚無近期紀錄"));
+
+    renderRecentActivityList(
+      openRoot,
+      openPage.rows,
+      status,
+      groups,
+      i18n("No open positions", "尚無持倉")
+    );
+    renderRecentActivityList(
+      closedRoot,
+      closedPage.rows,
+      status,
+      groups,
+      i18n("No closed trades", "尚無已平倉紀錄")
+    );
+
+    const openPagRoot = document.getElementById("activity-open-pagination");
+    const closedPagRoot = document.getElementById("activity-closed-pagination");
+    if (openPagRoot) {
+      openPagRoot.innerHTML = activityPaginationHtml("open", openPage);
+      openPagRoot.hidden = !openPagRoot.innerHTML;
+    }
+    if (closedPagRoot) {
+      closedPagRoot.innerHTML = activityPaginationHtml("closed", closedPage);
+      closedPagRoot.hidden = !closedPagRoot.innerHTML;
+    }
   }
 
   function closedTimestampMs(g) {
@@ -2854,10 +3760,9 @@
     return realizedPnlInAprBookNative(g, status);
   }
 
-  /** ``365 × realized_pnl / (strategy book equity × holding_days)`` in native book units. */
+  /** Realized PnL annualized on position collateral (not whole-book equity). */
   function closedAnnualizedReturnOnEquity(g, status) {
-    const equity = strategyBookEquityNative(g, status);
-    return annualizedAprOnBookEquity(g, status, equity);
+    return annualizedAprOnPositionCapital(g, status);
   }
 
   // ---------- stress card ----------
@@ -3004,6 +3909,23 @@
     if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
   }
 
+  function renderPerformanceCharts() {
+    const chartFns = [
+      ["risk-capital", renderBookEquityChart],
+      ["cum-pnl", renderCumulativePnlChart],
+      ["daily-pnl", renderDailyPnlChart],
+      ["apr", renderAprChart],
+    ];
+    for (const [name, fn] of chartFns) {
+      try {
+        fn();
+      } catch (err) {
+        console.error(`${name} chart render failed`, err);
+      }
+    }
+    scheduleChartResizeAll();
+  }
+
   function renderDashboard() {
     updateUnderlyingIndexCache(STATE.status, STATE.groups);
     renderRegime(STATE.status);
@@ -3013,10 +3935,7 @@
     renderBookCards(STATE.status);
     renderAggregate(STATE.status, STATE.report);
     renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
-    renderRiskVsCapitalChart();
-    renderCumulativePnlChart();
-    renderDailyPnlChart();
-    renderAprChart();
+    renderPerformanceCharts();
     renderRecentActivity(STATE.status, STATE.report, STATE.groups);
     renderStress(STATE.stress);
   }
@@ -3025,6 +3944,10 @@
     spot: {
       en: "Fetching BTC / ETH market prices…",
       zh: "正在取得 BTC / ETH 即時報價…",
+    },
+    snapshot: {
+      en: "Loading last equity snapshot…",
+      zh: "正在讀取最近權益快照…",
     },
     health: {
       en: "Checking account connection…",
@@ -3091,8 +4014,8 @@
     set("title", "Loading your portfolio", "正在載入您的投資組合");
     set(
       "hint",
-      "Fetching live prices, positions, and P&L from Deribit. This usually takes a few seconds.",
-      "正在從 Deribit 取得即時報價、持倉與損益資料，通常需要數秒鐘。"
+      "Showing snapshot first; live positions and P&L sync in the background.",
+      "先顯示最近快照；持倉與損益於背景同步中。"
     );
   }
 
@@ -3141,7 +4064,7 @@
     }
     const refreshBtn = document.getElementById("refresh-now");
     if (refreshBtn) refreshBtn.disabled = false;
-    Object.values(STATE.charts).forEach((chart) => chart?.resize?.());
+    scheduleChartResizeAll();
   }
 
   async function tickHeaderSpot({ renderDependentViews = true, updateDom = true } = {}) {
@@ -3158,6 +4081,97 @@
       }
     } catch (_) {
       /* ignore */
+    }
+  }
+
+  function chartsSectionOpen() {
+    const el = document.getElementById("charts-section");
+    return Boolean(el?.open);
+  }
+
+  async function fetchPortfolioSnapshot() {
+    try {
+      const d = await fetchJson("/api/portfolio/snapshot");
+      STATE.portfolioSnapshot = d;
+      if (d?.source === "ledger") {
+        STATE.dataFreshness.source = "snapshot";
+        STATE.dataFreshness.snapshotMs = num(d.freshness_ms);
+        STATE.dataFreshness.live = false;
+      }
+    } catch (_) {
+      /* snapshot is optional for first paint */
+    }
+  }
+
+  async function fetchStatusWithTimeout() {
+    const timeoutMs = INVESTOR_STATUS_TIMEOUT_MS;
+    let timedOut = false;
+    const timeoutPromise = delay(timeoutMs).then(() => {
+      timedOut = true;
+      throw new Error("status timeout");
+    });
+    try {
+      const d = await Promise.race([fetchJson("/api/status"), timeoutPromise]);
+      STATE.status = d;
+      STATE.statusErrorOnce = false;
+      STATE.dataFreshness.source = "live";
+      STATE.dataFreshness.live = true;
+      STATE.dataFreshness.statusMs = 0;
+      return d;
+    } catch (err) {
+      if (timedOut && STATE.portfolioSnapshot?.portfolio) {
+        if (!STATE.statusErrorOnce) {
+          showToast(
+            i18n(
+              "Live sync is slow; showing last snapshot.",
+              "即時同步較慢，先顯示最近快照。"
+            )
+          );
+          STATE.statusErrorOnce = true;
+        }
+        fetchJson("/api/status")
+          .then((d) => {
+            STATE.status = d;
+            STATE.dataFreshness.source = "live";
+            STATE.dataFreshness.live = true;
+            renderDashboard();
+          })
+          .catch(() => {});
+        return null;
+      }
+      STATE.status = null;
+      if (!STATE.statusErrorOnce) {
+        showToast(`status: ${err.message}`);
+        STATE.statusErrorOnce = true;
+      }
+      return null;
+    }
+  }
+
+  async function loadChartDataIfNeeded({ force = false } = {}) {
+    if (!force && STATE.chartsDataLoaded) {
+      renderPerformanceCharts();
+      return;
+    }
+    if (STATE.chartsLoadInFlight) return;
+    STATE.chartsLoadInFlight = true;
+    try {
+      await Promise.all([
+        fetchJson("/api/cumulative_pnl_series")
+          .then((d) => {
+            STATE.cumulativePnl = d;
+          })
+          .catch((err) => showToast(`cumulative pnl: ${err.message}`)),
+        fetchJson(aprSeriesUrl())
+          .then((d) => {
+            STATE.aprSeries = d;
+          })
+          .catch((err) => showToast(`apr series: ${err.message}`)),
+      ]);
+      STATE.chartsDataLoaded = true;
+      renderPerformanceCharts();
+    } finally {
+      STATE.chartsLoadInFlight = false;
     }
   }
 
@@ -3188,13 +4202,12 @@
     const investorFirstLoad = INVESTOR && !STATE.investorReady;
     if (investorFirstLoad) {
       beginInvestorLoad({ blocking: true });
+    } else if (INVESTOR) {
+      setInvestorProgressBar(true, { indeterminate: true });
     }
     try {
-      // Ops dashboard: progressive render as each endpoint resolves.
-      // Investor portal: batch render once all endpoints finish to avoid partial snapshots.
       let renderScheduled = false;
       function scheduleRender() {
-        if (INVESTOR) return;
         if (renderScheduled) return;
         renderScheduled = true;
         requestAnimationFrame(() => {
@@ -3211,8 +4224,8 @@
       try {
         const spotPromise = investorFetch("spot", () =>
           tickHeaderSpot({
-            renderDependentViews: false,
-            updateDom: !INVESTOR,
+            renderDependentViews: !INVESTOR,
+            updateDom: true,
           })
         );
         const healthPromise = investorFetch("health", () =>
@@ -3221,18 +4234,29 @@
           })
         );
         await Promise.all([spotPromise, healthPromise]);
-        if (INVESTOR) {
-          STATE.investorLoadTotal = investorLoadStepCount(
-            Boolean(STATE.health?.has_private_creds),
-            { includeCharts: !investorFirstLoad }
-          );
-        }
-        if (!INVESTOR) renderTopBar(STATE.health);
+        renderTopBar(STATE.health);
       } catch (err) {
         showToast(`health failed: ${err.message}`);
       }
 
       const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
+
+      if (INVESTOR && investorFirstLoad) {
+        try {
+          await Promise.race([
+            investorFetch("snapshot", fetchPortfolioSnapshot),
+            delay(INVESTOR_OVERLAY_MAX_MS),
+          ]);
+        } catch (_) {
+          /* snapshot optional; always dismiss blocking overlay */
+        }
+        setInvestorPageReady(true);
+        setInvestorProgressBar(true, { indeterminate: true });
+        scheduleRender();
+      } else if (INVESTOR) {
+        await fetchPortfolioSnapshot();
+        scheduleRender();
+      }
 
       function fetchGroups() {
         return fetchJson("/api/groups")
@@ -3245,26 +4269,8 @@
           });
       }
 
-      function fetchCumulative() {
-        return fetchJson("/api/cumulative_pnl_series")
-          .then((d) => {
-            STATE.cumulativePnl = d;
-            scheduleRender();
-          })
-          .catch((err) => showToast(`cumulative pnl: ${err.message}`));
-      }
-
-      function fetchApr() {
-        return fetchJson(`/api/apr_series?window_days=${STATE.aprWindow}`)
-          .then((d) => {
-            STATE.aprSeries = d;
-            scheduleRender();
-          })
-          .catch((err) => showToast(`apr series: ${err.message}`));
-      }
-
       function fetchSummary() {
-        return fetchJson("/api/realized_summary?days=30")
+        return fetchJson(realizedSummaryUrl(30))
           .then((d) => {
             STATE.report = d;
             scheduleRender();
@@ -3272,7 +4278,7 @@
           .catch((err) => showToast(`realized summary: ${err.message}`));
       }
 
-      function fetchStatus() {
+      function fetchStatusOp() {
         return fetchJson("/api/status")
           .then((d) => {
             STATE.status = d;
@@ -3288,28 +4294,16 @@
           });
       }
 
-      const criticalFactories = [() => investorFetch("groups", fetchGroups)];
-      const chartFactories = [
-        () => investorFetch("cumulative", fetchCumulative),
-        () => investorFetch("apr", fetchApr),
-      ];
-
+      const tier2 = [() => investorFetch("groups", fetchGroups)];
       if (hasPrivateCreds) {
-        criticalFactories.push(
-          () => investorFetch("summary", fetchSummary),
-          () => investorFetch("status", fetchStatus)
-        );
-        if (!INVESTOR) {
-          criticalFactories.push(() =>
-            fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
-              .then((d) => {
-                STATE.stress = d;
-                scheduleRender();
-              })
-              .catch((err) => showToast(`stress: ${err.message}`))
+        if (INVESTOR) {
+          tier2.push(() =>
+            investorFetch("status", () => fetchStatusWithTimeout().then(() => scheduleRender()))
           );
+          tier2.push(() => investorFetch("summary", fetchSummary));
         } else {
-          STATE.stress = null;
+          tier2.push(() => fetchStatusOp());
+          tier2.push(() => fetchSummary());
         }
       } else {
         STATE.status = null;
@@ -3317,25 +4311,37 @@
         STATE.stress = null;
       }
 
-      await promisePool(criticalFactories, FRONTEND_API_CONCURRENCY);
+      await promisePool(tier2, FRONTEND_API_CONCURRENCY);
 
-      if (investorFirstLoad) {
-        advanceInvestorLoad("render");
-        renderDashboard();
-        setInvestorPageReady(true);
-        await promisePool(chartFactories, FRONTEND_API_CONCURRENCY);
-        renderDashboard();
+      if (hasPrivateCreds && !INVESTOR) {
+        await fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
+          .then((d) => {
+            STATE.stress = d;
+            scheduleRender();
+          })
+          .catch((err) => showToast(`stress: ${err.message}`));
+      } else if (INVESTOR) {
+        STATE.stress = null;
+      }
+
+      if (!INVESTOR || chartsSectionOpen()) {
+        await loadChartDataIfNeeded({ force: !INVESTOR });
       } else {
-        await promisePool(chartFactories, FRONTEND_API_CONCURRENCY);
+        renderBookEquityChart();
+      }
+
+      if (!INVESTOR || STATE.investorReady) {
         renderDashboard();
       }
 
+      setInvestorProgressBar(false);
       setText(
         "last-refresh",
         `${i18n("last refresh:", "上次更新：")} ${luxon.DateTime.now().toFormat("HH:mm:ss")}`
       );
     } finally {
       STATE.refreshInFlight = false;
+      setInvestorProgressBar(false);
     }
   }
 
@@ -3347,7 +4353,7 @@
         btn.classList.toggle("filter-active", btn.dataset.book === book);
       });
     }
-    renderRiskVsCapitalChart();
+    renderBookEquityChart();
     renderCumulativePnlChart();
     renderDailyPnlChart();
   }
@@ -3377,12 +4383,19 @@
       const btn = e.target.closest("button[data-book]");
       if (btn) setBookFilter(btn.dataset.book);
     });
+    document.getElementById("activity-section")?.addEventListener("click", (e) => {
+      const btn = e.target.closest("button.activity-page-btn");
+      if (!btn || btn.disabled) return;
+      const section = btn.dataset.activitySection;
+      const dir = btn.dataset.direction === "next" ? 1 : -1;
+      if (section === "open") STATE.activityOpenPage += dir;
+      else if (section === "closed") STATE.activityClosedPage += dir;
+      renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+    });
     document.getElementById("apr-window")?.addEventListener("change", async (e) => {
       STATE.aprWindow = parseInt(e.target.value, 10) || 30;
       try {
-        STATE.aprSeries = await fetchJson(
-          `/api/apr_series?window_days=${STATE.aprWindow}`
-        );
+        STATE.aprSeries = await fetchJson(aprSeriesUrl());
       } catch (err) {
         showToast(`apr series: ${err.message}`);
       }
@@ -3394,15 +4407,17 @@
     document.querySelectorAll("details.collapsible-section").forEach((details) => {
       details.addEventListener("toggle", () => {
         if (!details.open) return;
-        requestAnimationFrame(() => {
-          Object.values(STATE.charts).forEach((chart) => chart?.resize?.());
-        });
+        scheduleChartResizeAll();
+        if (INVESTOR && details.id === "charts-section") {
+          loadChartDataIfNeeded();
+        }
       });
     });
   }
 
   document.addEventListener("DOMContentLoaded", () => {
     applyInvestorLoadCopy();
+    attachChartResizeObservers();
     attachControls();
     attachExpandableSections();
     attachAutoRefresh();

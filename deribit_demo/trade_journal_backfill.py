@@ -153,6 +153,287 @@ def _state_synthetic_premium_price(
     return safe_div(gross_usdc, qty * idx)
 
 
+@dataclass(frozen=True)
+class StateGroupStatsBackfillSummary:
+    state_file: str
+    closed_groups: int
+    pnl_updated: int
+    apr_updated: int
+    entry_apr_updated: int
+    saved: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state_file": self.state_file,
+            "closed_groups": self.closed_groups,
+            "pnl_updated": self.pnl_updated,
+            "apr_updated": self.apr_updated,
+            "entry_apr_updated": self.entry_apr_updated,
+            "saved": self.saved,
+        }
+
+
+_DEFAULT_OPTION_FEE_RATE = Decimal("0.0003")
+_DEFAULT_OPTION_FEE_CAP_RATE = Decimal("0.125")
+
+
+def _is_covered_call_group(group: TradeGroup) -> bool:
+    if (group.strategy or "") == "covered_call":
+        return True
+    label = str(group.short_label or "")
+    if label.startswith("covered_call-"):
+        return True
+    return group.option_type == "call" and group.covered_underlying_quantity > 0
+
+
+def _fee_rates_for_state(state_path: Path) -> tuple[Decimal, Decimal]:
+    """Best-effort fee rates from a sibling account env; else Deribit defaults."""
+    try:
+        from .config import load_config
+        from .env_layout import find_repo_root
+
+        repo = find_repo_root(state_path)
+        stem = state_path.stem
+        candidates: list[Path] = []
+        if repo is not None:
+            parent = state_path.resolve().parent
+            if parent.parent.name == "investors":
+                investor_id = parent.name
+                candidates.append(repo / "config" / "investors" / investor_id / "accounts" / f".env.{stem}")
+            candidates.append(repo / "config" / "shared" / "strategies" / f".env.{stem}")
+            candidates.append(repo / f".env.{stem}")
+        for env_path in candidates:
+            if env_path.is_file():
+                cfg = load_config(env_path, require_private=False)
+                return cfg.option_fee_rate, cfg.option_fee_cap_rate
+    except Exception:  # noqa: BLE001
+        pass
+    return _DEFAULT_OPTION_FEE_RATE, _DEFAULT_OPTION_FEE_CAP_RATE
+
+
+def _prepare_group_for_apr_backfill(
+    group: TradeGroup,
+    *,
+    journal: TradeJournalStore | None,
+    scope: str,
+) -> None:
+    if _is_covered_call_group(group) and group.covered_underlying_quantity <= 0 and group.quantity > 0:
+        group.covered_underlying_quantity = group.quantity
+    if not group.strategy and _is_covered_call_group(group):
+        group.strategy = "covered_call"
+
+    executions: list[dict[str, Any]] = []
+    if journal is not None:
+        executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
+    if executions:
+        group.enrich_fill_prices_from_journal(executions)
+    group.infer_indices_from_fill_prices()
+    if group.short_entry_average_price <= 0:
+        idx = group.entry_index_usd
+        if idx <= 0 and group.close_index_usd is not None and group.close_index_usd > 0:
+            idx = group.close_index_usd
+        if idx > 0:
+            group.enrich_fill_prices_from_ledger_spot(idx)
+
+
+def _backfill_entry_net_apr_for_group(
+    group: TradeGroup,
+    *,
+    fee_rate: Decimal,
+    fee_cap_rate: Decimal,
+) -> bool:
+    """Recompute entry_net_apr from actual open credit, fee, and position size."""
+    _ = fee_rate, fee_cap_rate  # screening-only; ledger APR ignores estimated fees
+
+    if group.entry_timestamp_ms <= 0 or group.expiration_timestamp_ms <= group.entry_timestamp_ms:
+        return False
+
+    new_apr = group.entry_net_apr_at_open(contract_size=_contract_size_for_group(group))
+    if new_apr <= 0:
+        return False
+
+    if group.short_entry_average_price <= 0:
+        premium = group.resolved_short_entry_price()
+        if premium > 0:
+            group.short_entry_average_price = premium
+
+    if new_apr == group.entry_net_apr:
+        return False
+    group.entry_net_apr = new_apr
+    return True
+
+
+def _contract_size_for_group(group: TradeGroup) -> Decimal:
+    name = (group.short_instrument_name or "").upper()
+    if "_USDC-" in name:
+        return Decimal("0.1")
+    return Decimal("1")
+
+
+def _backfill_apr_for_group(group: TradeGroup) -> bool:
+    """Recompute position-size realized APR for one closed group."""
+    from .trade_apr import realized_apr_from_close
+
+    if group.closed_timestamp_ms is None or group.entry_timestamp_ms <= 0:
+        return False
+
+    book = group.collateral_book()
+    idx = group.close_index_usd if group.close_index_usd is not None and group.close_index_usd > 0 else group.entry_index_usd
+    if group.collateral_book() == "USDC":
+        idx = group.underlying_index_usd_for_apr()
+
+    pnl_native = group.realized_pnl_collateral_native
+    if pnl_native is None and book == "USDC":
+        pnl_native = group.realized_pnl
+    elif (pnl_native is None or pnl_native == 0) and idx is not None and idx > 0 and group.realized_pnl is not None:
+        pnl_native = group.realized_pnl / idx
+    if pnl_native is None:
+        return False
+
+    qty = group.quantity if group.quantity > 0 else Decimal("1")
+    if group.strategy == "covered_call" and group.covered_underlying_quantity <= 0:
+        group.covered_underlying_quantity = qty
+
+    apr = realized_apr_from_close(
+        strategy=group.strategy or "naked_short",
+        collateral_currency=book,
+        option_type=group.option_type or "put",
+        quantity=qty,
+        contract_size=_contract_size_for_group(group),
+        strike=group.short_strike,
+        index_price_usd=idx if idx is not None else Decimal("0"),
+        estimated_im_collateral=group.estimated_im_collateral,
+        covered_underlying_quantity=group.covered_underlying_quantity,
+        pnl_collateral_native=pnl_native,
+        entry_timestamp_ms=group.entry_timestamp_ms,
+        closed_timestamp_ms=group.closed_timestamp_ms,
+    )
+    group.realized_apr_on_equity = apr
+    group.realized_annualized_return = apr
+    return True
+
+
+def backfill_closed_group_stats_in_state(
+    state_path: Path,
+    *,
+    spot_index_usd: Decimal | None = None,
+    spot_by_book: dict[str, Decimal] | None = None,
+    dry_run: bool = False,
+    fee_rate: Decimal | None = None,
+    fee_cap_rate: Decimal | None = None,
+) -> StateGroupStatsBackfillSummary:
+    """Recompute entry_net_apr (all groups) + coin PnL / close APR (closed groups)."""
+    store = StrategyStateStore(state_path)
+    state = store.load()
+    journal_path = journal_db_path_for_state(state_path)
+    journal = TradeJournalStore(journal_path) if journal_path.is_file() else None
+    scope = scope_key_for_state(state_path)
+
+    if fee_rate is None or fee_cap_rate is None:
+        resolved_fee_rate, resolved_fee_cap = _fee_rates_for_state(state_path)
+        fee_rate = fee_rate if fee_rate is not None else resolved_fee_rate
+        fee_cap_rate = fee_cap_rate if fee_cap_rate is not None else resolved_fee_cap
+
+    closed_groups = 0
+    pnl_updated = 0
+    apr_updated = 0
+    entry_apr_updated = 0
+    changed = False
+
+    for group in state.groups:
+        if group.group_id and group.entry_timestamp_ms > 0:
+            _prepare_group_for_apr_backfill(group, journal=journal, scope=scope)
+            before_entry_apr = group.entry_net_apr
+            if _backfill_entry_net_apr_for_group(
+                group,
+                fee_rate=fee_rate,
+                fee_cap_rate=fee_cap_rate,
+            ):
+                if group.entry_net_apr != before_entry_apr:
+                    entry_apr_updated += 1
+                    changed = True
+                    if journal is not None:
+                        stats = journal.get_group_stats(scope, group.group_id)
+                        if stats is not None:
+                            journal.record_group_stats_open(
+                                scope_key=scope,
+                                group_id=group.group_id,
+                                collateral_book=stats.get("collateral_book") or group.collateral_book(),
+                                opened_ts_ms=int(stats.get("opened_ts_ms") or group.entry_timestamp_ms),
+                                entry_book_equity=to_decimal(stats.get("entry_book_equity")),
+                                entry_net_apr=group.entry_net_apr,
+                                entry_credit_usdc=to_decimal(stats.get("entry_credit_usdc") or group.entry_credit),
+                            )
+
+        if group.status != "closed" or group.closed_timestamp_ms is None:
+            continue
+        if group.entry_timestamp_ms <= 0:
+            continue
+        closed_groups += 1
+
+        if group.is_coin_collateral():
+            executions: list[dict[str, Any]] = []
+            if journal is not None:
+                executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
+            book = group.collateral_book()
+            spot = None
+            if spot_by_book:
+                spot = spot_by_book.get(book)
+            if spot is None and spot_index_usd is not None:
+                spot = spot_index_usd
+            before_native = group.realized_pnl_collateral_native
+            before_entry_idx = group.entry_index_usd
+            before_close_idx = group.close_index_usd
+            group.backfill_realized_pnl_collateral_native(
+                spot_index_usd=spot,
+                journal_executions=executions,
+            )
+            group.infer_indices_from_fill_prices()
+            if (
+                group.realized_pnl_collateral_native is not None
+                and (
+                    group.realized_pnl_collateral_native != before_native
+                    or group.entry_index_usd != before_entry_idx
+                    or group.close_index_usd != before_close_idx
+                )
+            ):
+                pnl_updated += 1
+                changed = True
+
+        before_apr = group.realized_apr_on_equity
+        if _backfill_apr_for_group(group):
+            if group.realized_apr_on_equity != before_apr:
+                apr_updated += 1
+                changed = True
+
+    saved = False
+    if changed and not dry_run:
+        store.save(state)
+        saved = True
+        LOGGER.info(
+            "%s backfilled closed stats: pnl=%s apr=%s (closed=%s)",
+            state_path.name,
+            pnl_updated,
+            apr_updated,
+            closed_groups,
+        )
+        try:
+            from .frontend_server import invalidate_closed_groups_payload_cache
+
+            invalidate_closed_groups_payload_cache()
+        except Exception:
+            pass
+
+    return StateGroupStatsBackfillSummary(
+        state_file=str(state_path),
+        closed_groups=closed_groups,
+        pnl_updated=pnl_updated,
+        apr_updated=apr_updated,
+        entry_apr_updated=entry_apr_updated,
+        saved=saved,
+    )
+
+
 def recalculate_closed_coin_pnl_in_state(
     state_path: Path,
     *,
@@ -160,41 +441,13 @@ def recalculate_closed_coin_pnl_in_state(
     spot_by_book: dict[str, Decimal] | None = None,
 ) -> int:
     """Recompute coin realized PnL for all closed groups and persist to state."""
-    store = StrategyStateStore(state_path)
-    state = store.load()
-    journal_path = journal_db_path_for_state(state_path)
-    journal = TradeJournalStore(journal_path) if journal_path.is_file() else None
-    scope = scope_key_for_state(state_path)
-    updated = 0
-    for group in state.groups:
-        if group.status != "closed" or not group.is_coin_collateral():
-            continue
-        executions: list[dict[str, Any]] = []
-        if journal is not None:
-            executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
-        book = group.collateral_book()
-        spot = None
-        if spot_by_book:
-            spot = spot_by_book.get(book)
-        if spot is None and spot_index_usd is not None:
-            spot = spot_index_usd
-        group.backfill_realized_pnl_collateral_native(
-            spot_index_usd=spot,
-            journal_executions=executions,
-        )
-        if group.realized_pnl_collateral_native is None:
-            continue
-        updated += 1
-    if updated:
-        store.save(state)
-        LOGGER.info("%s recalculated coin realized PnL for %s closed group(s)", state_path.name, updated)
-        try:
-            from .frontend_server import invalidate_closed_groups_payload_cache
-
-            invalidate_closed_groups_payload_cache()
-        except Exception:
-            pass
-    return updated
+    summary = backfill_closed_group_stats_in_state(
+        state_path,
+        spot_index_usd=spot_index_usd,
+        spot_by_book=spot_by_book,
+        dry_run=False,
+    )
+    return summary.pnl_updated
 
 
 def _backfill_group_from_state(
@@ -551,7 +804,7 @@ def sync_incremental_investor(
 
     root = find_repo_root(repo_root or Path.cwd())
     manifest = load_investor_manifest(investor, repo_root=root)
-    return [sync_incremental_journal(account.env_path, **kwargs) for account in manifest.enabled_accounts()]
+    return [sync_incremental_journal(account.env_path, **kwargs) for account in manifest.operational_accounts()]
 
 
 def backfill_investor(
