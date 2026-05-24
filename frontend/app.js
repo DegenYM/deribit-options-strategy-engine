@@ -92,7 +92,7 @@
   /** Auto-refresh cadence; longer interval reduces backend / Deribit fan-out under load. */
   const FRONTEND_REFRESH_INTERVAL_MS = 180_000;
   /** Max concurrent /api/* fetches per refresh wave (after spot + health). */
-  const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 2;
+  const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 3;
   const INVESTOR_STATUS_TIMEOUT_MS = 45_000;
   /** Full-screen overlay dismissed after health + snapshot (or this cap). */
   const INVESTOR_OVERLAY_MAX_MS = 3_000;
@@ -4148,7 +4148,7 @@
     }
   }
 
-  async function loadChartDataIfNeeded({ force = false } = {}) {
+  async function loadChartDataIfNeeded({ force = false, investorFetchWrap = null } = {}) {
     if (!force && STATE.chartsDataLoaded) {
       renderPerformanceCharts();
       return;
@@ -4156,18 +4156,28 @@
     if (STATE.chartsLoadInFlight) return;
     STATE.chartsLoadInFlight = true;
     try {
-      await Promise.all([
+      const fetchCumulative = () =>
         fetchJson("/api/cumulative_pnl_series")
           .then((d) => {
             STATE.cumulativePnl = d;
           })
-          .catch((err) => showToast(`cumulative pnl: ${err.message}`)),
+          .catch((err) => showToast(`cumulative pnl: ${err.message}`));
+
+      const fetchApr = () =>
         fetchJson(aprSeriesUrl())
           .then((d) => {
             STATE.aprSeries = d;
           })
-          .catch((err) => showToast(`apr series: ${err.message}`)),
-      ]);
+          .catch((err) => showToast(`apr series: ${err.message}`));
+
+      if (investorFetchWrap) {
+        await Promise.all([
+          investorFetchWrap("cumulative", fetchCumulative),
+          investorFetchWrap("apr", fetchApr),
+        ]);
+      } else {
+        await Promise.all([fetchCumulative(), fetchApr()]);
+      }
       STATE.chartsDataLoaded = true;
       renderPerformanceCharts();
     } finally {
@@ -4240,7 +4250,9 @@
       }
 
       const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
+      let snapshotFetchedThisRefresh = false;
 
+      // Investor first paint: race snapshot vs overlay cap, then unlock the page.
       if (INVESTOR && investorFirstLoad) {
         try {
           await Promise.race([
@@ -4250,11 +4262,9 @@
         } catch (_) {
           /* snapshot optional; always dismiss blocking overlay */
         }
+        snapshotFetchedThisRefresh = true;
         setInvestorPageReady(true);
         setInvestorProgressBar(true, { indeterminate: true });
-        scheduleRender();
-      } else if (INVESTOR) {
-        await fetchPortfolioSnapshot();
         scheduleRender();
       }
 
@@ -4294,16 +4304,33 @@
           });
       }
 
-      const tier2 = [() => investorFetch("groups", fetchGroups)];
+      function fetchStress() {
+        return fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
+          .then((d) => {
+            STATE.stress = d;
+            scheduleRender();
+          })
+          .catch((err) => showToast(`stress: ${err.message}`));
+      }
+
+      const investorFetchWrap = investorFirstLoad
+        ? (stepKey, run) => investorFetch(stepKey, run)
+        : null;
+      const wrapStep = (stepKey, run) =>
+        investorFetchWrap ? investorFetchWrap(stepKey, run) : run();
+
+      const wave = [() => wrapStep("groups", fetchGroups)];
+
       if (hasPrivateCreds) {
         if (INVESTOR) {
-          tier2.push(() =>
-            investorFetch("status", () => fetchStatusWithTimeout().then(() => scheduleRender()))
+          wave.push(() =>
+            wrapStep("status", () => fetchStatusWithTimeout().then(() => scheduleRender()))
           );
-          tier2.push(() => investorFetch("summary", fetchSummary));
+          wave.push(() => wrapStep("summary", fetchSummary));
         } else {
-          tier2.push(() => fetchStatusOp());
-          tier2.push(() => fetchSummary());
+          wave.push(() => fetchStatusOp());
+          wave.push(() => fetchSummary());
+          wave.push(() => fetchStress());
         }
       } else {
         STATE.status = null;
@@ -4311,22 +4338,27 @@
         STATE.stress = null;
       }
 
-      await promisePool(tier2, FRONTEND_API_CONCURRENCY);
+      if (INVESTOR && !snapshotFetchedThisRefresh) {
+        wave.push(() => wrapStep("snapshot", fetchPortfolioSnapshot));
+      }
 
-      if (hasPrivateCreds && !INVESTOR) {
-        await fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
-          .then((d) => {
-            STATE.stress = d;
-            scheduleRender();
+      const chartsNeeded = !INVESTOR || chartsSectionOpen();
+      if (chartsNeeded) {
+        wave.push(() =>
+          loadChartDataIfNeeded({
+            force: !INVESTOR,
+            investorFetchWrap,
           })
-          .catch((err) => showToast(`stress: ${err.message}`));
-      } else if (INVESTOR) {
+        );
+      }
+
+      await promisePool(wave, FRONTEND_API_CONCURRENCY);
+
+      if (INVESTOR) {
         STATE.stress = null;
       }
 
-      if (!INVESTOR || chartsSectionOpen()) {
-        await loadChartDataIfNeeded({ force: !INVESTOR });
-      } else {
+      if (!chartsNeeded) {
         renderBookEquityChart();
       }
 
