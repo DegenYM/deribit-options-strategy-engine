@@ -36,7 +36,7 @@ from .env_layout import (
     load_investor_manifest,
     resolve_investor_scope,
 )
-from .current_stress import compute_current_stress
+from .current_stress import CurrentStressResult, compute_current_stress, compute_stress_from_prefetch
 from .engine import DeribitOptionTrialBot, ExchangePrefetch
 from .exceptions import ConfigurationError
 from .models import OrderBookSnapshot, TradeGroup, normalize_strategy_name
@@ -2057,7 +2057,55 @@ def _finalize_stress_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _aggregate_stress(accounts: list[DashboardAccount], *, shocks: list[Decimal]) -> dict[str, Any]:
+def _stress_result_payload(result: CurrentStressResult) -> dict[str, Any]:
+    return {
+        "generated_at": result.generated_at,
+        "option_strategy": result.option_strategy,
+        "strategy_analysis": _decimalize(result.strategy_analysis),
+        "index_by_ccy": {k: str(v) for k, v in result.index_by_ccy.items()},
+        "equity_usdc_by_book": {k: str(v) for k, v in result.equity_usdc_by_book.items()},
+        "positions": _decimalize(result.positions),
+        "scenarios": _decimalize(result.scenarios),
+        "notes": list(result.notes),
+    }
+
+
+def _stress_cache_key(account: DashboardAccount) -> str:
+    return f"{_live_api_identity(account)}\0{normalize_strategy_name(account.config.option_strategy)}"
+
+
+def _stress_result_for_account(
+    account: DashboardAccount,
+    *,
+    shocks: list[Decimal],
+    prefetches: dict[str, ExchangePrefetch | None],
+    results_by_identity: dict[str, CurrentStressResult],
+) -> CurrentStressResult:
+    cache_key = _stress_cache_key(account)
+    cached = results_by_identity.get(cache_key)
+    if cached is not None:
+        return cached
+    cfg = account.config
+    prefetch = prefetches.get(_live_api_identity(account))
+    if prefetch is not None:
+        result = compute_stress_from_prefetch(
+            cfg,
+            prefetch,
+            shocks=shocks,
+            client=DeribitClient(cfg),
+        )
+    else:
+        result = compute_current_stress(cfg, DeribitClient(cfg), shocks=shocks)
+    results_by_identity[cache_key] = result
+    return result
+
+
+def _aggregate_stress(
+    accounts: list[DashboardAccount],
+    *,
+    shocks: list[Decimal],
+    exchange_prefetch_cache: _TtlCache | None = None,
+) -> dict[str, Any]:
     aggregate = _new_stress_bucket(
         "multi_account",
         analysis={
@@ -2068,10 +2116,23 @@ def _aggregate_stress(accounts: list[DashboardAccount], *, shocks: list[Decimal]
     )
     strategy_buckets: dict[str, dict[str, Any]] = {}
     aggregate_identity: set[str] = set()
+    prefetches = (
+        _prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
+        if exchange_prefetch_cache is not None
+        else {}
+    )
+    results_by_identity: dict[str, CurrentStressResult] = {}
 
     for account in accounts:
-        cfg = load_config(account.env_file, require_private=True)
-        result = compute_current_stress(cfg, DeribitClient(cfg), shocks=shocks)
+        if not _has_private_creds(account.config):
+            continue
+        result = _stress_result_for_account(
+            account,
+            shocks=shocks,
+            prefetches=prefetches,
+            results_by_identity=results_by_identity,
+        )
+        cfg = account.config
         strategy = normalize_strategy_name(result.option_strategy or cfg.option_strategy)
         strategy_bucket = strategy_buckets.setdefault(strategy, _new_stress_bucket(strategy, analysis=result.strategy_analysis))
         ident = _live_api_identity_config(cfg, account.name)
@@ -2382,6 +2443,14 @@ def create_app(
             LOGGER.debug("dashboard bundle spot native backfill skipped: %s", exc)
         return out
 
+    def _locked_aggregate_stress(shock_decimals: list[Decimal]) -> dict[str, Any]:
+        with _heavy_portfolio_lock:
+            return _aggregate_stress(
+                accounts,
+                shocks=shock_decimals,
+                exchange_prefetch_cache=exchange_prefetch_cache,
+            )
+
     @app.get("/api/dashboard_bundle")
     def api_dashboard_bundle(
         days: int = Query(default=30, ge=0, le=3650),
@@ -2469,20 +2538,20 @@ def create_app(
 
         def _compute() -> dict[str, Any]:
             if multi_account:
-                return _aggregate_stress(accounts, shocks=shock_decimals)
-            cfg = load_config(accounts[0].env_file, require_private=True)
-            client = DeribitClient(cfg)
-            result = compute_current_stress(cfg, client, shocks=shock_decimals)
-            return {
-                "generated_at": result.generated_at,
-                "option_strategy": result.option_strategy,
-                "strategy_analysis": _decimalize(result.strategy_analysis),
-                "index_by_ccy": {k: str(v) for k, v in result.index_by_ccy.items()},
-                "equity_usdc_by_book": {k: str(v) for k, v in result.equity_usdc_by_book.items()},
-                "positions": _decimalize(result.positions),
-                "scenarios": _decimalize(result.scenarios),
-                "notes": list(result.notes),
-            }
+                return _locked_aggregate_stress(shock_decimals)
+            account = accounts[0]
+            cfg = load_config(account.env_file, require_private=True)
+            prefetch = _exchange_prefetch_for_account(account, cache=exchange_prefetch_cache)
+            if prefetch is not None:
+                result = compute_stress_from_prefetch(
+                    cfg,
+                    prefetch,
+                    shocks=shock_decimals,
+                    client=DeribitClient(cfg),
+                )
+            else:
+                result = compute_current_stress(cfg, DeribitClient(cfg), shocks=shock_decimals)
+            return _stress_result_payload(result)
 
         try:
             payload = stress_cache.get_or_set(("stress", shocks), _compute)

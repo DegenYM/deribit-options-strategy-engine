@@ -6,7 +6,7 @@ from typing import Any
 
 from .client import DeribitClient
 from .config import BotConfig
-from .exceptions import ExchangeError
+from .engine import ExchangePrefetch
 from .models import AccountSummary, OptionInstrument, Position
 from .stress import StressScenario, black_swan_strategy_analysis, stress_option_position_pnl_breakdown_usdc
 from .utils import ONE, ZERO, parse_option_name, safe_div, to_decimal
@@ -47,6 +47,15 @@ def _load_active_option_instruments(client: DeribitClient) -> dict[str, OptionIn
     return by_name
 
 
+def _instruments_by_name_from_prefetch(prefetch: ExchangePrefetch) -> dict[str, OptionInstrument]:
+    by_name: dict[str, OptionInstrument] = {}
+    for items in prefetch.markets_by_currency.values():
+        for inst in items:
+            if inst.instrument_name:
+                by_name[inst.instrument_name] = inst
+    return by_name
+
+
 def _equity_by_book_usdc(
     config: BotConfig,
     *,
@@ -68,19 +77,7 @@ def _equity_by_book_usdc(
     return out
 
 
-def compute_current_stress(
-    config: BotConfig,
-    client: DeribitClient,
-    *,
-    shocks: list[Decimal],
-) -> CurrentStressResult:
-    notes: list[str] = []
-
-    # 1) Load account summaries + positions.
-    summaries = {s.currency: s for s in (AccountSummary.from_api(x) for x in (client.get_account_summaries() or [])) if s.currency}
-    positions = [Position.from_api(x) for x in (client.get_positions(currency="any", kind="any") or []) if isinstance(x, dict)]
-    opt_positions = [p for p in positions if p.kind == "option" and p.instrument_name and p.size != 0]
-
+def _option_base_ccys(opt_positions: list[Position]) -> set[str]:
     option_base_ccys: set[str] = set()
     for p in opt_positions:
         parsed = parse_option_name(p.instrument_name) or {}
@@ -88,29 +85,43 @@ def compute_current_stress(
         base = base.split("_", 1)[0].upper()
         if base:
             option_base_ccys.add(base)
+    return option_base_ccys
 
-    # 2) Load index prices for collateral books and option underlyings.
+
+def _index_by_ccy_for_stress(
+    config: BotConfig,
+    *,
+    opt_positions: list[Position],
+    client: DeribitClient | None = None,
+    preset: dict[str, Decimal] | None = None,
+) -> dict[str, Decimal]:
+    if preset is not None:
+        index_by_ccy = {str(k).upper(): to_decimal(v) for k, v in preset.items()}
+        index_by_ccy.setdefault("USDC", ONE)
+        return index_by_ccy
+
     index_by_ccy: dict[str, Decimal] = {}
-    for c in sorted({*(str(x).upper() for x in config.traded_collaterals), *option_base_ccys}):
+    for c in sorted({*(str(x).upper() for x in config.traded_collaterals), *_option_base_ccys(opt_positions)}):
         ccy = (c or "").upper()
         if ccy == "USDC":
             index_by_ccy[ccy] = ONE
             continue
-        try:
-            payload = client.get_index_price(_index_name_for_currency(ccy))
-            idx = to_decimal(payload.get("index_price") if isinstance(payload, dict) else 0)
-        except Exception:
-            idx = ZERO
+        idx = ZERO
+        if client is not None:
+            try:
+                payload = client.get_index_price(_index_name_for_currency(ccy))
+                idx = to_decimal(payload.get("index_price") if isinstance(payload, dict) else 0)
+            except Exception:
+                idx = ZERO
         if idx > 0:
             index_by_ccy[ccy] = idx
+    return index_by_ccy
 
-    # 3) Equity caps per book (USDC-equivalent).
-    equity_usdc_by_book = _equity_by_book_usdc(config, summaries=summaries, index_by_ccy=index_by_ccy)
-    total_equity = sum(equity_usdc_by_book.values(), ZERO) or config.reference_capital_usdc
 
-    # 4) Load active instruments to get strike/settlement info.
-    inst_by_name = _load_active_option_instruments(client)
-
+def _normalize_stress_positions(
+    opt_positions: list[Position],
+    inst_by_name: dict[str, OptionInstrument],
+) -> list[dict[str, Any]]:
     normalized_positions: list[dict[str, Any]] = []
     for p in opt_positions:
         parsed = parse_option_name(p.instrument_name) or {}
@@ -118,8 +129,6 @@ def compute_current_stress(
         base = base.split("_", 1)[0].upper()
         inst = inst_by_name.get(p.instrument_name)
         if inst is None:
-            # Fall back to parsed strike/type; infer linear USDC from names like
-            # BTC_USDC-... when instrument metadata is unavailable.
             strike = to_decimal(parsed.get("strike"))
             opt_type = str(parsed.get("option_type") or "put")
             quote = str(parsed.get("quote_currency") or "").upper()
@@ -133,8 +142,6 @@ def compute_current_stress(
             instrument_type = inst.instrument_type or ("linear" if settlement.upper() == "USDC" else "reversed")
             contract_size = inst.contract_size if inst.contract_size > 0 else ONE
 
-        # Deribit option positions use ``size`` as the option amount. ``size_currency``
-        # is a futures-oriented field and can have a different scale for options.
         qty = abs(p.size)
         normalized_positions.append(
             {
@@ -152,8 +159,18 @@ def compute_current_stress(
                 "floating_pnl": p.floating_profit_loss,
             }
         )
+    return normalized_positions
 
-    # 5) Scenarios: staged slippage by shock magnitude (same ladder as backtest).
+
+def _stress_scenarios(
+    config: BotConfig,
+    *,
+    shocks: list[Decimal],
+    normalized_positions: list[dict[str, Any]],
+    index_by_ccy: dict[str, Decimal],
+    equity_usdc_by_book: dict[str, Decimal],
+    total_equity: Decimal,
+) -> list[dict[str, Any]]:
     def slippage_for(shock: Decimal) -> Decimal:
         a = abs(shock)
         if a <= Decimal("0.10"):
@@ -189,7 +206,6 @@ def compute_current_stress(
             spot = index_by_ccy.get(base_ccy, ZERO)
             if spot <= 0:
                 continue
-            # Use *current* mark_price as baseline premium (P&L impact from now).
             bd = stress_option_position_pnl_breakdown_usdc(
                 OptionInstrument(
                     instrument_name=pos["instrument_name"],
@@ -228,7 +244,6 @@ def compute_current_stress(
                 loss_by_book[book] = loss_by_book.get(book, ZERO) + spot_pnl
                 spot_cover_by_book[book] = spot_cover_by_book.get(book, ZERO) + spot_pnl
 
-        # Cap each book by its equity (cannot lose more than 100% of that book in liquidation).
         capped_total = ZERO
         capped_by_book: dict[str, Decimal] = {}
         capped_base_total = ZERO
@@ -239,7 +254,6 @@ def compute_current_stress(
             capped = max(loss, -cap) if cap > 0 else loss
             capped_by_book[book] = capped
             capped_total += capped
-            # Proportional cap of components
             raw = base_by_book.get(book, ZERO) + slip_by_book.get(book, ZERO) + spot_cover_by_book.get(book, ZERO)
             ratio = safe_div(capped, raw, ONE) if raw != 0 else ONE
             capped_base_total += base_by_book.get(book, ZERO) * ratio
@@ -262,7 +276,30 @@ def compute_current_stress(
                 "worst_legs": [item for _loss, item in worst_legs_sorted],
             }
         )
+    return scenario_rows
 
+
+def _compute_stress_result(
+    config: BotConfig,
+    *,
+    shocks: list[Decimal],
+    summaries: dict[str, AccountSummary],
+    opt_positions: list[Position],
+    inst_by_name: dict[str, OptionInstrument],
+    index_by_ccy: dict[str, Decimal],
+    notes: list[str] | None = None,
+) -> CurrentStressResult:
+    equity_usdc_by_book = _equity_by_book_usdc(config, summaries=summaries, index_by_ccy=index_by_ccy)
+    total_equity = sum(equity_usdc_by_book.values(), ZERO) or config.reference_capital_usdc
+    normalized_positions = _normalize_stress_positions(opt_positions, inst_by_name)
+    scenario_rows = _stress_scenarios(
+        config,
+        shocks=shocks,
+        normalized_positions=normalized_positions,
+        index_by_ccy=index_by_ccy,
+        equity_usdc_by_book=equity_usdc_by_book,
+        total_equity=total_equity,
+    )
     return CurrentStressResult(
         generated_at="now",
         option_strategy=config.option_strategy,
@@ -271,7 +308,62 @@ def compute_current_stress(
         equity_usdc_by_book=equity_usdc_by_book,
         positions=normalized_positions,
         scenarios=scenario_rows,
-        notes=notes,
+        notes=list(notes or []),
+    )
+
+
+def compute_stress_from_prefetch(
+    config: BotConfig,
+    prefetch: ExchangePrefetch,
+    *,
+    shocks: list[Decimal],
+    index_by_ccy: dict[str, Decimal] | None = None,
+    client: DeribitClient | None = None,
+) -> CurrentStressResult:
+    """Stress from a dashboard exchange prefetch (no account summary / position refetch)."""
+    opt_positions = [
+        p for p in prefetch.positions if p.kind == "option" and p.instrument_name and p.size != 0
+    ]
+    resolved_index = _index_by_ccy_for_stress(
+        config,
+        opt_positions=opt_positions,
+        client=client,
+        preset=index_by_ccy,
+    )
+    return _compute_stress_result(
+        config,
+        shocks=shocks,
+        summaries=prefetch.summaries,
+        opt_positions=opt_positions,
+        inst_by_name=_instruments_by_name_from_prefetch(prefetch),
+        index_by_ccy=resolved_index,
+    )
+
+
+def compute_current_stress(
+    config: BotConfig,
+    client: DeribitClient,
+    *,
+    shocks: list[Decimal],
+) -> CurrentStressResult:
+    summaries = {
+        s.currency: s
+        for s in (AccountSummary.from_api(x) for x in (client.get_account_summaries() or []))
+        if s.currency
+    }
+    positions = [
+        Position.from_api(x) for x in (client.get_positions(currency="any", kind="any") or []) if isinstance(x, dict)
+    ]
+    opt_positions = [p for p in positions if p.kind == "option" and p.instrument_name and p.size != 0]
+    index_by_ccy = _index_by_ccy_for_stress(config, opt_positions=opt_positions, client=client)
+    inst_by_name = _load_active_option_instruments(client)
+    return _compute_stress_result(
+        config,
+        shocks=shocks,
+        summaries=summaries,
+        opt_positions=opt_positions,
+        inst_by_name=inst_by_name,
+        index_by_ccy=index_by_ccy,
     )
 
 
@@ -313,4 +405,3 @@ def render_current_stress_md(result: CurrentStressResult) -> str:
     lines.append("- 每本帳損失做了 equity 上限（最慘歸零），用來近似強制平倉/爆倉上限。")
     lines.append("")
     return "\n".join(lines)
-

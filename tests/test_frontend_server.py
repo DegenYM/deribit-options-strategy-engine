@@ -929,3 +929,64 @@ def test_aggregate_groups_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
 
     assert max_in_flight >= 2
     assert elapsed < 0.30
+
+
+def test_aggregate_stress_reuses_prefetch_without_account_refetch(tmp_path, monkeypatch) -> None:
+    from deribit_demo.current_stress import CurrentStressResult
+    from deribit_demo.engine import ExchangePrefetch
+
+    cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="a", client_secret="1")
+    cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="b", client_secret="2")
+    accounts = [
+        DashboardAccount("a", tmp_path / "a.env", cfg_a, cfg_a.state_file, tmp_path / "la"),
+        DashboardAccount("b", tmp_path / "b.env", cfg_b, cfg_b.state_file, tmp_path / "lb"),
+    ]
+    prefetch = ExchangePrefetch(
+        summaries={},
+        open_orders=[],
+        positions=[],
+        option_positions=[],
+        future_positions=[],
+        future_markets_by_name={},
+        markets_by_currency={"BTC": [], "ETH": []},
+    )
+    stress_calls = {"prefetch": 0, "live": 0}
+
+    def _fake_prefetch(config, *_args, **_kwargs):
+        result = CurrentStressResult(
+            generated_at="now",
+            option_strategy=config.option_strategy,
+            strategy_analysis={"label": config.option_strategy},
+            index_by_ccy={"USDC": Decimal("1")},
+            equity_usdc_by_book={"USDC": Decimal("1000")},
+            positions=[],
+            scenarios=[],
+            notes=[],
+        )
+        stress_calls["prefetch"] += 1
+        return result
+
+    def _blocked_live(*_args, **_kwargs):
+        stress_calls["live"] += 1
+        raise AssertionError("compute_current_stress should not run when prefetch cache is warm")
+
+    monkeypatch.setattr(frontend_server, "compute_stress_from_prefetch", _fake_prefetch)
+    monkeypatch.setattr(frontend_server, "compute_current_stress", _blocked_live)
+    monkeypatch.setattr(
+        frontend_server,
+        "_prefetch_all_accounts",
+        lambda _accounts, cache: {
+            frontend_server._live_api_identity(account): prefetch for account in accounts
+        },
+    )
+    cache = frontend_server._TtlCache(15.0)
+
+    payload = frontend_server._aggregate_stress(
+        accounts,
+        shocks=[Decimal("-0.10")],
+        exchange_prefetch_cache=cache,
+    )
+
+    assert stress_calls == {"prefetch": 2, "live": 0}
+    assert payload["option_strategy"] == "multi_account"
+    assert len(payload["strategy_stresses"]) == 2
