@@ -4,9 +4,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from deribit_demo.fee_snapshot_store import FeeSnapshotStore, FlowBaselineRow, fee_ledger_db_path
-from deribit_demo.investor_cash_flow import SubscriptionFlowLine
-from deribit_demo.investor_fee_report import (
+from deribit_engine.fee_snapshot_store import FeeSnapshotStore, FlowBaselineRow, fee_ledger_db_path
+from deribit_engine.investor_cash_flow import SubscriptionFlowLine
+from deribit_engine.investor_fee_report import (
     InitialFeeReportContext,
     SettlementFeeReportContext,
     _equity_native_for_book,
@@ -16,8 +16,8 @@ from deribit_demo.investor_fee_report import (
     settlement_report_path,
     write_initial_fee_report,
 )
-from deribit_demo.investor_fee_report_csv import write_initial_fee_report_csv
-from deribit_demo.investor_fee_report_pdf import write_initial_fee_report_pdf
+from deribit_engine.investor_fee_report_csv import write_initial_fee_report_csv
+from deribit_engine.investor_fee_report_pdf import write_initial_fee_report_pdf
 
 
 def test_report_paths_use_initial_and_date_folders(tmp_path: Path) -> None:
@@ -140,7 +140,7 @@ def test_render_initial_fee_report_md_english() -> None:
 
 
 def test_render_settlement_fee_report_md_english(tmp_path: Path) -> None:
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
     ctx = SettlementFeeReportContext(
         investor_id="demo",
@@ -246,7 +246,7 @@ enabled = true
 """.strip(),
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     store = FeeSnapshotStore(fee_ledger_db_path(tmp_path, "demo"))
@@ -264,8 +264,8 @@ enabled = true
     )
 
     def _fake_capture(*args, **kwargs):
-        from deribit_demo.investor_fee_config import InvestorFeeConfig
-        from deribit_demo.investor_nav_snapshot import InvestorNavCapture
+        from deribit_engine.investor_fee_config import InvestorFeeConfig
+        from deribit_engine.investor_nav_snapshot import InvestorNavCapture
 
         return InvestorNavCapture(
             ts_ms=ts,
@@ -291,8 +291,8 @@ enabled = true
     def _fake_lines(*args, **kwargs):
         return [_flow_line(book="USDC", amount_native=Decimal("1000"), usdc_equiv=Decimal("1000"))]
 
-    monkeypatch.setattr("deribit_demo.investor_fee_report.capture_investor_nav", _fake_capture)
-    monkeypatch.setattr("deribit_demo.investor_fee_report.fetch_subscription_flow_lines", _fake_lines)
+    monkeypatch.setattr("deribit_engine.investor_fee_report.capture_investor_nav", _fake_capture)
+    monkeypatch.setattr("deribit_engine.investor_fee_report.fetch_subscription_flow_lines", _fake_lines)
 
     out = write_initial_fee_report(
         investor_dir,

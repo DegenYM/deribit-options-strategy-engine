@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from deribit_demo.config import load_config
-from deribit_demo.env_layout import (
+from deribit_engine.config import load_config
+from deribit_engine.env_layout import (
     env_layer_paths,
     investor_frontend_ledger_dir,
     investor_live_log_dir,
@@ -12,11 +12,11 @@ from deribit_demo.env_layout import (
     load_investor_manifest,
     resolve_investor_scope,
 )
-from deribit_demo.exceptions import ConfigurationError
+from deribit_engine.exceptions import ConfigurationError
 
 
 def _write_layout(repo: Path) -> Path:
-    (repo / "deribit_demo").mkdir()
+    (repo / "deribit_engine").mkdir()
     (repo / "config" / "shared" / "strategies").mkdir(parents=True)
     (repo / "config" / "shared" / "strategies" / ".env.bull_put_spread").write_text(
         "OPTION_STRATEGY=bull_put_spread\nSHORT_PUT_DELTA_MAX=0.17\n",
@@ -190,7 +190,7 @@ def test_load_investor_manifest_normalizes_investor_id_casing(tmp_path: Path):
 
 def test_fee_env_layers_skip_strategy_profile(tmp_path: Path):
     repo = tmp_path
-    (repo / "deribit_demo").mkdir()
+    (repo / "deribit_engine").mkdir()
     (repo / "config" / "shared" / "strategies").mkdir(parents=True)
     (repo / "config" / "shared" / "strategies" / ".env.naked_short").write_text(
         "MIN_NET_APR=0.99\n",

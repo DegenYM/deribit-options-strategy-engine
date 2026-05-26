@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from conftest import make_config
 
-import deribit_demo.frontend_server as frontend_server
+import deribit_engine.frontend_server as frontend_server
 
 
 @pytest.fixture()

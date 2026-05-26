@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from deribit_demo.exceptions import ConfigurationError
-from deribit_demo.fee_snapshot_store import FeeSnapshotStore, fee_ledger_db_path
-from deribit_demo.investor_ops import (
+from deribit_engine.exceptions import ConfigurationError
+from deribit_engine.fee_snapshot_store import FeeSnapshotStore, fee_ledger_db_path
+from deribit_engine.investor_ops import (
     bootstrap_initial_hwm,
     import_handoff,
     investor_init,
@@ -13,11 +13,11 @@ from deribit_demo.investor_ops import (
     parse_strategy_slugs,
     validate_investor,
 )
-from deribit_demo.investor_registry import load_platform_registry
+from deribit_engine.investor_registry import load_platform_registry
 
 
 def _bootstrap_repo(tmp_path: Path) -> Path:
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     example = Path(__file__).resolve().parents[1] / "config" / "investors" / "_example"
     (tmp_path / "config" / "investors" / "_example").mkdir(parents=True)
     for rel in (
@@ -159,7 +159,7 @@ def test_validate_skips_hwm_bootstrap_with_no_api(tmp_path: Path, monkeypatch):
         raise AssertionError("bootstrap should not run")
 
     monkeypatch.setattr(
-        "deribit_demo.investor_ops.bootstrap_initial_hwm",
+        "deribit_engine.investor_ops.bootstrap_initial_hwm",
         _fail_if_called,
     )
     result = validate_investor("dana", check_api=False, repo_root=repo)
@@ -169,7 +169,7 @@ def test_validate_skips_hwm_bootstrap_with_no_api(tmp_path: Path, monkeypatch):
 
 
 def test_validate_bootstraps_hwm_when_api_ok(tmp_path: Path, monkeypatch):
-    from deribit_demo.client import DeribitClient
+    from deribit_engine.client import DeribitClient
 
     repo = _bootstrap_repo(tmp_path)
     investor_init("erin", strategies=("naked",), repo_root=repo)
@@ -205,7 +205,7 @@ def test_validate_bootstraps_hwm_when_api_ok(tmp_path: Path, monkeypatch):
         }
 
     monkeypatch.setattr(
-        "deribit_demo.investor_ops.bootstrap_initial_hwm",
+        "deribit_engine.investor_ops.bootstrap_initial_hwm",
         _fake_bootstrap,
     )
     monkeypatch.setattr(
@@ -230,7 +230,7 @@ def test_validate_no_bootstrap_hwm_flag(tmp_path: Path, monkeypatch):
     def _fail(*_a, **_k):
         called["n"] += 1
 
-    monkeypatch.setattr("deribit_demo.investor_ops.bootstrap_initial_hwm", _fail)
+    monkeypatch.setattr("deribit_engine.investor_ops.bootstrap_initial_hwm", _fail)
     result = validate_investor(
         "gina",
         check_api=False,

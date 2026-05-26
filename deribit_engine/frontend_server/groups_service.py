@@ -366,7 +366,7 @@ def _groups_payload_for_account(
     payload = copy.deepcopy(_closed_groups_payload(account.state_path, spot_index=spot_index))
     if _has_private_creds(account.config):
         try:
-            import deribit_demo.frontend_server as pkg
+            import deribit_engine.frontend_server as pkg
 
             bot = pkg._bot_for_account(account, require_private=True)
             prefetch = prefetches.get(_live_api_identity(account))
@@ -392,7 +392,7 @@ def _aggregate_groups(
     next_group_id: dict[str, Any] = {}
     excluded_closed_count = 0
 
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     try:
         prefetches = pkg._prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)

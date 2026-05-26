@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from deribit_demo.metrics_store import MetricsStore, performance_scope_key
+from deribit_engine.metrics_store import MetricsStore, performance_scope_key
 
 
 class _Account:

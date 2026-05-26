@@ -2,12 +2,12 @@ from decimal import Decimal
 
 from conftest import FakeClient, make_config
 
-from deribit_demo.fees import (
+from deribit_engine.fees import (
     linear_usdc_short_put_apr_premium_over_strike,
     net_apr_inverse_short_per_contract,
 )
-from deribit_demo.models import NakedPutCandidate, OptionInstrument, OrderBookSnapshot, RiskRegime
-from deribit_demo.strategy import StrategySelector
+from deribit_engine.models import NakedPutCandidate, OptionInstrument, OrderBookSnapshot, RiskRegime
+from deribit_engine.strategy import StrategySelector
 
 
 def test_buy_limit_price_uses_tick_size_steps_for_reversed_options(tmp_path):

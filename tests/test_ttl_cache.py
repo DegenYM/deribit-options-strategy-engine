@@ -1,4 +1,4 @@
-from deribit_demo.frontend_server.types import _TtlCache
+from deribit_engine.frontend_server.types import _TtlCache
 
 
 def test_ttl_cache_get_stale_returns_expired_value():

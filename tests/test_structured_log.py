@@ -1,7 +1,7 @@
 import json
 import logging
 
-from deribit_demo.structured_log import LiveContextFilter, LiveJsonFormatter, configure_live_structured_logging
+from deribit_engine.structured_log import LiveContextFilter, LiveJsonFormatter, configure_live_structured_logging
 
 
 def test_live_json_formatter_includes_scope_fields():

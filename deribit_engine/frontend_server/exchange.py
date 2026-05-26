@@ -8,7 +8,7 @@ from .types import DashboardAccount, _TtlCache
 
 
 def _bot_for_account(account: DashboardAccount, *, require_private: bool) -> DeribitOptionTrialBot:
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     cfg = pkg.load_config(account.env_file, require_private=require_private)
     client = pkg.DeribitClient(cfg)
@@ -25,7 +25,7 @@ def _exchange_prefetch_for_account(
     key = _live_api_identity(account)
 
     def _fetch() -> ExchangePrefetch:
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         return pkg._bot_for_account(account, require_private=True).fetch_exchange_prefetch()
 
@@ -54,7 +54,7 @@ def _status_payload_for_account(
     exchange_prefetch_cache: _TtlCache,
     prefetches: dict[str, ExchangePrefetch | None] | None = None,
 ) -> dict[str, Any]:
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     bot = pkg._bot_for_account(account, require_private=True)
     if prefetches is not None:

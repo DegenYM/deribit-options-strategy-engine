@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 import pytest
 
-from deribit_demo.exceptions import ConfigurationError
-from deribit_demo.investor_frontend_launchd import (
+from deribit_engine.exceptions import ConfigurationError
+from deribit_engine.investor_frontend_launchd import (
     frontend_launchd_label,
     frontend_plist_filename,
     frontend_targets,
@@ -14,7 +14,7 @@ from deribit_demo.investor_frontend_launchd import (
     read_frontend_port_from_plist,
     wait_for_frontend_health,
 )
-from deribit_demo.investor_registry import (
+from deribit_engine.investor_registry import (
     InvestorRegistryEntry,
     PlatformRegistry,
     PlatformSettings,
@@ -81,7 +81,7 @@ def test_install_frontend_plist_copies_generated(tmp_path: Path):
 
     registry = _registry(tmp_path, investors=[_entry("alice", port=8800)])
     with patch(
-        "deribit_demo.investor_frontend_launchd.launch_agents_dir",
+        "deribit_engine.investor_frontend_launchd.launch_agents_dir",
         return_value=tmp_path / "LaunchAgents",
     ):
         dest, changed = install_frontend_plist("alice", repo_root=tmp_path, registry=registry)
@@ -136,9 +136,9 @@ def test_manage_start_bootstraps_each_investor(tmp_path: Path):
         return Result()
 
     with (
-        patch("deribit_demo.investor_frontend_launchd.launch_agents_dir", return_value=agents),
-        patch("deribit_demo.investor_launchd_common.subprocess.run", side_effect=fake_run),
-        patch("deribit_demo.investor_frontend_launchd.wait_for_frontend_health", return_value=True),
+        patch("deribit_engine.investor_frontend_launchd.launch_agents_dir", return_value=agents),
+        patch("deribit_engine.investor_launchd_common.subprocess.run", side_effect=fake_run),
+        patch("deribit_engine.investor_frontend_launchd.wait_for_frontend_health", return_value=True),
     ):
         results = manage_frontend_launchd(
             "start",
@@ -160,7 +160,7 @@ def test_wait_for_frontend_health_retries(tmp_path: Path):
         return calls["n"] >= 2
 
     with patch(
-        "deribit_demo.investor_frontend_launchd.probe_frontend_health",
+        "deribit_engine.investor_frontend_launchd.probe_frontend_health",
         side_effect=fake_probe,
     ):
         assert wait_for_frontend_health(8765, max_wait_sec=2.0, poll_interval_sec=0.01) is True
@@ -177,5 +177,5 @@ def test_probe_frontend_health_uses_local_url():
         def __exit__(self, *args):
             return False
 
-    with patch("deribit_demo.investor_frontend_launchd.urllib.request.urlopen", return_value=FakeResponse()):
+    with patch("deribit_engine.investor_frontend_launchd.urllib.request.urlopen", return_value=FakeResponse()):
         assert probe_frontend_health(8765) is True

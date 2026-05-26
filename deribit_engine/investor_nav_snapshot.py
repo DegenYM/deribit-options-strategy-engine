@@ -272,7 +272,7 @@ def capture_investor_nav(
     """Fetch live consolidated equity for all enabled sub-accounts."""
     root = find_repo_root(repo_root or Path.cwd())
     if root is None:
-        raise RuntimeError("Cannot locate repository root (missing deribit_demo/)")
+        raise RuntimeError("Cannot locate repository root (missing deribit_engine/)")
     manifest = load_investor_manifest(investor, repo_root=root)
     fee_config = load_investor_fee_config(manifest.root)
     store = FeeSnapshotStore(fee_ledger_db_path(root, manifest.investor_id))
@@ -561,7 +561,7 @@ def settle_period(
     """Settle fees for [start_ms, end_ms]. If start_ms is None, use latest stored snapshot."""
     root = find_repo_root(repo_root or Path.cwd())
     if root is None:
-        raise RuntimeError("Cannot locate repository root (missing deribit_demo/)")
+        raise RuntimeError("Cannot locate repository root (missing deribit_engine/)")
     manifest = load_investor_manifest(investor, repo_root=root)
     fee_config = load_investor_fee_config(manifest.root)
     store = FeeSnapshotStore(fee_ledger_db_path(root, manifest.investor_id))
@@ -792,7 +792,7 @@ def fee_status(
 ) -> dict[str, Any]:
     root = find_repo_root(repo_root or Path.cwd())
     if root is None:
-        raise RuntimeError("Cannot locate repository root (missing deribit_demo/)")
+        raise RuntimeError("Cannot locate repository root (missing deribit_engine/)")
     manifest = load_investor_manifest(investor, repo_root=root)
     fee_config = load_investor_fee_config(manifest.root)
     store = FeeSnapshotStore(fee_ledger_db_path(root, manifest.investor_id))

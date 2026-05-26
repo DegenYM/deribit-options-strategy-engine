@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from deribit_demo.config import load_config
-from deribit_demo.exceptions import ConfigurationError
+from deribit_engine.config import load_config
+from deribit_engine.exceptions import ConfigurationError
 
 
 def test_load_config_parses_strategy_fields(tmp_path: Path):
@@ -265,7 +265,7 @@ def test_strategy_profile_mismatch_raises(tmp_path: Path):
 
 def test_fee_account_skips_strategy_profile(tmp_path: Path, monkeypatch):
     repo = tmp_path
-    (repo / "deribit_demo").mkdir()
+    (repo / "deribit_engine").mkdir()
     strategies = repo / "config/shared/strategies"
     strategies.mkdir(parents=True)
     (strategies / ".env.naked_short").write_text("MIN_NET_APR=0.99\n")
@@ -288,6 +288,6 @@ def test_assert_trading_account_rejects_fee_wallet(tmp_path: Path):
     config = load_config(env_file, require_private=False)
 
     with pytest.raises(ConfigurationError, match="Fee collection account"):
-        from deribit_demo.config import assert_trading_account
+        from deribit_engine.config import assert_trading_account
 
         assert_trading_account(config)

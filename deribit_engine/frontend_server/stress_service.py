@@ -148,7 +148,7 @@ def _stress_result_for_account(
         return cached
     cfg = account.config
     prefetch = prefetches.get(_live_api_identity(account))
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     if prefetch is not None:
         result = pkg.compute_stress_from_prefetch(
@@ -179,7 +179,7 @@ def _aggregate_stress(
     )
     strategy_buckets: dict[str, dict[str, Any]] = {}
     aggregate_identity: set[str] = set()
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     prefetches = (
         pkg._prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)

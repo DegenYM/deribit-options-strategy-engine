@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from deribit_demo.utils import align_option_order_amount, dumps_json
+from deribit_engine.utils import align_option_order_amount, dumps_json
 
 
 def test_align_option_order_amount_uses_smaller_step_than_contract_size():

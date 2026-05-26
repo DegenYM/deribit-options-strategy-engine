@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from deribit_demo.fee_snapshot_store import FeeSnapshotStore, FlowBaselineRow
-from deribit_demo.investor_cash_flow import (
+from deribit_engine.fee_snapshot_store import FeeSnapshotStore, FlowBaselineRow
+from deribit_engine.investor_cash_flow import (
     CumulativeNetFlow,
     initial_hwm_from_net_flow,
     initial_spot_deduction_usdc,
 )
-from deribit_demo.investor_fee_config import InvestorFeeConfig
-from deribit_demo.investor_nav_snapshot import (
+from deribit_engine.investor_fee_config import InvestorFeeConfig
+from deribit_engine.investor_nav_snapshot import (
     InvestorNavCapture,
     average_aum_mgmt,
     capture_investor_nav,
@@ -72,7 +72,7 @@ def test_resolve_hwm_uses_flow_baseline(tmp_path: Path) -> None:
 def test_capture_investor_nav_aligns_usdc_native_with_portfolio(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
     investor_dir = tmp_path / "config" / "investors" / "demo"
     investor_dir.mkdir(parents=True)
@@ -96,11 +96,11 @@ def test_capture_investor_nav_aligns_usdc_native_with_portfolio(
         }
 
     monkeypatch.setattr(
-        "deribit_demo.frontend_server._aggregate_status",
+        "deribit_engine.frontend_server._aggregate_status",
         _fake_aggregate,
     )
     monkeypatch.setattr(
-        "deribit_demo.frontend_server._make_dashboard_accounts",
+        "deribit_engine.frontend_server._make_dashboard_accounts",
         lambda **kwargs: [],
     )
 
@@ -112,7 +112,7 @@ def test_capture_investor_nav_aligns_usdc_native_with_portfolio(
             return [investor_dir / "accounts/.env.naked"]
 
     monkeypatch.setattr(
-        "deribit_demo.investor_nav_snapshot.load_investor_manifest",
+        "deribit_engine.investor_nav_snapshot.load_investor_manifest",
         lambda investor, repo_root=None: _Manifest(),
     )
 
@@ -122,7 +122,7 @@ def test_capture_investor_nav_aligns_usdc_native_with_portfolio(
 
 
 def test_store_nav_capture_writes_capture_nav_on_bootstrap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
     ledger = tmp_path / "data" / "fee_ledger" / "demo" / "snapshots.db"
     capture = InvestorNavCapture(
@@ -160,11 +160,11 @@ def test_store_nav_capture_writes_capture_nav_on_bootstrap(tmp_path: Path, monke
         )
 
     monkeypatch.setattr(
-        "deribit_demo.investor_nav_snapshot.fetch_cumulative_net_flow_usdc",
+        "deribit_engine.investor_nav_snapshot.fetch_cumulative_net_flow_usdc",
         _fake_fetch,
     )
     monkeypatch.setattr(
-        "deribit_demo.investor_fee_report.write_initial_fee_report",
+        "deribit_engine.investor_fee_report.write_initial_fee_report",
         lambda *_a, **_k: None,
     )
     row_id, bootstrap = store_nav_capture(capture, repo_root=tmp_path, snapshot_kind="manual")
@@ -210,7 +210,7 @@ def test_bootstrap_hwm_from_transaction_log(tmp_path: Path, monkeypatch: pytest.
         )
 
     monkeypatch.setattr(
-        "deribit_demo.investor_nav_snapshot.fetch_cumulative_net_flow_usdc",
+        "deribit_engine.investor_nav_snapshot.fetch_cumulative_net_flow_usdc",
         _fake_fetch,
     )
     result = maybe_bootstrap_hwm_from_deposits(capture, repo_root=tmp_path, store=store)
@@ -381,7 +381,7 @@ enabled = true
         "INITIAL_HWM_NAV_PERF=100000\nPERFORMANCE_FEE_RATE=0.10\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     store = FeeSnapshotStore(tmp_path / "data" / "fee_ledger" / "demo" / "snapshots.db")
@@ -404,7 +404,7 @@ enabled = true
     def _fake_capture(*_args, **_kwargs):
         raise AssertionError("live capture should not run when end snapshot exists")
 
-    monkeypatch.setattr("deribit_demo.investor_nav_snapshot.capture_investor_nav", _fake_capture)
+    monkeypatch.setattr("deribit_engine.investor_nav_snapshot.capture_investor_nav", _fake_capture)
 
     result = settle_quarter("demo", "2026-Q1", repo_root=tmp_path)
     assert Decimal(result["distributable_profit"]) == Decimal("16000")
@@ -449,7 +449,7 @@ enabled = true
         "INITIAL_HWM_NAV_PERF=100000\nPERFORMANCE_FEE_RATE=0.10\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     store = FeeSnapshotStore(tmp_path / "data" / "fee_ledger" / "demo" / "snapshots.db")
@@ -480,7 +480,7 @@ enabled = true
         )
 
     def _fake_flow_lines(*_args, **_kwargs):
-        from deribit_demo.investor_cash_flow import SubscriptionFlowLine
+        from deribit_engine.investor_cash_flow import SubscriptionFlowLine
 
         return [
             SubscriptionFlowLine(
@@ -496,14 +496,14 @@ enabled = true
         ]
 
     monkeypatch.setattr(
-        "deribit_demo.investor_cash_flow.fetch_subscription_flow_lines",
+        "deribit_engine.investor_cash_flow.fetch_subscription_flow_lines",
         _fake_flow_lines,
     )
 
     def _no_capture(*_args, **_kwargs):
         raise AssertionError("no live capture")
 
-    monkeypatch.setattr("deribit_demo.investor_nav_snapshot.capture_investor_nav", _no_capture)
+    monkeypatch.setattr("deribit_engine.investor_nav_snapshot.capture_investor_nav", _no_capture)
 
     result = settle_period(
         "demo",

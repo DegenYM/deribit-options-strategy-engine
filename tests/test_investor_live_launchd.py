@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 import pytest
 
-from deribit_demo.exceptions import ConfigurationError
-from deribit_demo.investor_live_launchd import (
+from deribit_engine.exceptions import ConfigurationError
+from deribit_engine.investor_live_launchd import (
     install_live_plist,
     live_launchd_label,
     live_targets,
@@ -12,7 +12,7 @@ from deribit_demo.investor_live_launchd import (
     probe_live_supervisor,
     wait_for_live_supervisor,
 )
-from deribit_demo.investor_registry import (
+from deribit_engine.investor_registry import (
     InvestorRegistryEntry,
     PlatformRegistry,
     PlatformSettings,
@@ -77,7 +77,7 @@ def test_install_live_plist_copies_generated(tmp_path: Path):
 
     registry = _registry(tmp_path, investors=[_entry("alice")])
     with patch(
-        "deribit_demo.investor_live_launchd.launch_agents_dir",
+        "deribit_engine.investor_live_launchd.launch_agents_dir",
         return_value=tmp_path / "LaunchAgents",
     ):
         dest, changed = install_live_plist("alice", repo_root=tmp_path, registry=registry)
@@ -129,10 +129,10 @@ def test_manage_start_bootstraps_each_investor(tmp_path: Path):
         return Result()
 
     with (
-        patch("deribit_demo.investor_live_launchd.launch_agents_dir", return_value=agents),
-        patch("deribit_demo.investor_launchd_common.subprocess.run", side_effect=fake_run),
+        patch("deribit_engine.investor_live_launchd.launch_agents_dir", return_value=agents),
+        patch("deribit_engine.investor_launchd_common.subprocess.run", side_effect=fake_run),
         patch(
-            "deribit_demo.investor_live_launchd.wait_for_live_supervisor",
+            "deribit_engine.investor_live_launchd.wait_for_live_supervisor",
             return_value=True,
         ),
     ):
@@ -164,5 +164,5 @@ def test_wait_for_live_supervisor_retries(tmp_path: Path):
             return True
         return False
 
-    with patch("deribit_demo.investor_live_launchd.probe_live_supervisor", side_effect=fake_probe):
+    with patch("deribit_engine.investor_live_launchd.probe_live_supervisor", side_effect=fake_probe):
         assert wait_for_live_supervisor(tmp_path, "alice", max_wait_sec=2.0, poll_interval_sec=0.01) is True

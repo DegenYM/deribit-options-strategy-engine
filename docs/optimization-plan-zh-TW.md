@@ -39,10 +39,10 @@
 | **API 穩定性** | `exchange_throttle.py` 全进程 pacing |
 | **測試** | 25+ 測試檔、**280** test cases |
 | **目錄規範** | `docs/repo-layout-zh-TW.md`（canonical vs legacy） |
-| **程式模組** | `deribit_demo/cli/`、`engine/`、`frontend_server/`（Phase 2 拆分後） |
+| **程式模組** | `deribit_engine/cli/`、`engine/`、`frontend_server/`（Phase 2 拆分後） |
 | **CI coverage** | GitHub Actions `--cov-fail-under=60`（本機 ~66%） |
 | **Heartbeat / watchdog** | `.state/.../heartbeat.json` + `scripts/check_live_heartbeat.py` |
-| **結構化 log** | `deribit_demo/structured_log.py`（live JSON） |
+| **結構化 log** | `deribit_engine/structured_log.py`（live JSON） |
 | **Incident runbooks** | `docs/runbooks/*.md` |
 | **pre-commit** | `.pre-commit-config.yaml`（ruff + pytest） |
 
@@ -107,7 +107,7 @@ TELEGRAM_ALERT_COOLDOWN_SECONDS=300
 |---|------|------|-------------|------|
 | 1.1 | **Heartbeat 檔** | 每 live cycle 寫入 timestamp、regime、last_error | `engine/base.py` → `.state/investors/<id>/<slug>.heartbeat.json` | ✅ |
 | 1.2 | **外部 watchdog** | cron / launchd 檢查 heartbeat 過期 → Telegram | `scripts/check_live_heartbeat.py` | ✅ |
-| 1.3 | **結構化 log** | JSON 欄位：`investor_id`、`slug`、`cycle`、`regime` | `deribit_demo/structured_log.py` | ✅ |
+| 1.3 | **結構化 log** | JSON 欄位：`investor_id`、`slug`、`cycle`、`regime` | `deribit_engine/structured_log.py` | ✅ |
 | 1.4 | **Incident runbooks** | state 不一致、panic、429、Tunnel 失效、憑證輪替 | `docs/runbooks/*.md` | ✅ |
 | 1.5 | **pre-commit** | commit 前 ruff + pytest | `.pre-commit-config.yaml` | ✅ |
 
@@ -141,9 +141,9 @@ TELEGRAM_ALERT_COOLDOWN_SECONDS=300
 **產出結構**（對外 import 不變）：
 
 ```text
-deribit_demo/cli/           # common, investor, fee, strategy, frontend
-deribit_demo/engine/        # context, base, scanner, entry, management, execution, bot
-deribit_demo/frontend_server/
+deribit_engine/cli/           # common, investor, fee, strategy, frontend
+deribit_engine/engine/        # context, base, scanner, entry, management, execution, bot
+deribit_engine/frontend_server/
   ├── app.py                # create_app, serve
   ├── aggregation.py, exchange.py, groups_service.py, ...
   └── routes/
@@ -198,7 +198,7 @@ scripts/run_e2e_dashboard.py
 | 5.1 | PostgreSQL 取代部分 SQLite ledger | 多機寫入、長期報表 |
 | 5.2 | Metabase 投資人報表 | 非工程師查 PnL |
 | 5.3 | Sentry + Loki | 需 stack trace / 集中 log |
-| 5.4 | 套件 rename（`deribit_demo` → 正式名）+ git tag | 對外版本化 |
+| 5.4 | 套件 rename（`deribit_engine`）+ git tag | `deribit_engine` ✅；git tag 待需要時 |
 
 ---
 

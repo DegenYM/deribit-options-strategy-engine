@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from deribit_demo.models import OptionInstrument
-from deribit_demo.stress import (
+from deribit_engine.models import OptionInstrument
+from deribit_engine.stress import (
     StressScenario,
     black_swan_strategy_analysis,
     stress_option_position_pnl_breakdown_usdc,

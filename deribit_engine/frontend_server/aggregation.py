@@ -305,7 +305,7 @@ def _aggregate_status(
     *,
     exchange_prefetch_cache: _TtlCache,
 ) -> dict[str, Any]:
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     try:
         prefetches = pkg._prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)

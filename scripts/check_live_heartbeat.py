@@ -26,8 +26,8 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = _repo_root()
     sys.path.insert(0, str(repo_root))
-    from deribit_demo.live_heartbeat import find_stale_heartbeats, stale_seconds_from_environ
-    from deribit_demo.telegram_alerts import bootstrap_telegram_env, format_alert_message, send_telegram_alert
+    from deribit_engine.live_heartbeat import find_stale_heartbeats, stale_seconds_from_environ
+    from deribit_engine.telegram_alerts import bootstrap_telegram_env, format_alert_message, send_telegram_alert
 
     stale_seconds = args.stale_seconds if args.stale_seconds is not None else stale_seconds_from_environ()
     stale_rows = find_stale_heartbeats(repo_root, stale_seconds=stale_seconds, investor_id=args.investor)

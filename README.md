@@ -68,8 +68,8 @@ cp .env.example .env
 
 ```bash
 pytest tests/ -q
-ruff check deribit_demo tests scripts
-ruff format --check deribit_demo tests scripts
+ruff check deribit_engine tests scripts
+ruff format --check deribit_engine tests scripts
 ```
 
 僅部署 bot / frontend 時可只裝 `pip install -r requirements.txt`。

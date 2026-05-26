@@ -28,8 +28,8 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["deribit_demo"]
-omit = ["deribit_demo/__main__.py"]
+source = ["deribit_engine"]
+omit = ["deribit_engine/__main__.py"]
 
 [tool.coverage.report]
 fail_under = 60

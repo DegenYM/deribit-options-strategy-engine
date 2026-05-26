@@ -1,4 +1,4 @@
-from deribit_demo.backtest import bs_delta
+from deribit_engine.backtest import bs_delta
 
 
 def test_bs_delta_call_between_0_and_1():

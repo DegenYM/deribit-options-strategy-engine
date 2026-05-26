@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 
 def _build_app(env_file: Path):
-    import deribit_demo.frontend_server as frontend_server
+    import deribit_engine.frontend_server as frontend_server
     from tests.conftest import make_config
 
     cfg = make_config(env_file.parent, state_file=env_file.parent / "e2e.state.json")

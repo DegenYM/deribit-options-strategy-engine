@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from deribit_demo import exchange_throttle
+from deribit_engine import exchange_throttle
 
 
 def test_pace_exchange_request_spaces_calls(monkeypatch):
@@ -11,11 +11,11 @@ def test_pace_exchange_request_spaces_calls(monkeypatch):
     sleeps: list[float] = []
     monotonic = iter([0.05, 0.06, 0.07, 0.08])
     monkeypatch.setattr(
-        "deribit_demo.exchange_throttle.time.sleep",
+        "deribit_engine.exchange_throttle.time.sleep",
         lambda s: sleeps.append(s),
     )
     monkeypatch.setattr(
-        "deribit_demo.exchange_throttle.time.monotonic",
+        "deribit_engine.exchange_throttle.time.monotonic",
         lambda: next(monotonic),
     )
 

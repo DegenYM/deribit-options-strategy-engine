@@ -4,8 +4,8 @@ from unittest.mock import patch
 
 from conftest import FakeClient, future_expiry, make_config
 
-from deribit_demo.engine import DeribitOptionTrialBot
-from deribit_demo.models import (
+from deribit_engine.engine import DeribitOptionTrialBot
+from deribit_engine.models import (
     AccountSummary,
     OrderBookSnapshot,
     Position,
@@ -14,8 +14,8 @@ from deribit_demo.models import (
     TradeGroup,
     is_phantom_reconcile_close,
 )
-from deribit_demo.state import performance_exclusions_path
-from deribit_demo.utils import utc_now, utc_now_ms
+from deribit_engine.state import performance_exclusions_path
+from deribit_engine.utils import utc_now, utc_now_ms
 
 
 def _build_group(
@@ -562,7 +562,7 @@ def test_covered_call_otm_time_exit_near_expiry(tmp_path):
 def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake_client):
     from datetime import UTC, datetime
 
-    from deribit_demo.utils import utc_now_ms
+    from deribit_engine.utils import utc_now_ms
 
     config = make_config(
         tmp_path,
@@ -845,7 +845,7 @@ def test_panic_close_dry_run_lists_positions(tmp_path, fake_client):
 
 
 def test_run_survives_transient_exchange_error(tmp_path, fake_client):
-    from deribit_demo.exceptions import TransientExchangeError
+    from deribit_engine.exceptions import TransientExchangeError
 
     config = make_config(tmp_path)
     engine = DeribitOptionTrialBot(config, fake_client)
@@ -1077,7 +1077,7 @@ def test_regime_falls_back_to_elevated_when_drawdown_unavailable(tmp_path):
 
     engine = DeribitOptionTrialBot(config, PartialFakeClient())
     instruments = [
-        __import__("deribit_demo.models", fromlist=["OptionInstrument"]).OptionInstrument.from_api(item)
+        __import__("deribit_engine.models", fromlist=["OptionInstrument"]).OptionInstrument.from_api(item)
         for item in engine.client.get_instruments("BTC", kind="option", expired=False)
     ]
 
@@ -1116,7 +1116,7 @@ def test_regime_uses_cached_value_when_feeds_fail_after_success(tmp_path):
 
     engine = DeribitOptionTrialBot(config, FlakyFakeClient())
     instruments = [
-        __import__("deribit_demo.models", fromlist=["OptionInstrument"]).OptionInstrument.from_api(item)
+        __import__("deribit_engine.models", fromlist=["OptionInstrument"]).OptionInstrument.from_api(item)
         for item in engine.client.get_instruments("BTC", kind="option", expired=False)
     ]
 
@@ -1903,7 +1903,7 @@ def test_book_router_honors_traded_collaterals(tmp_path, fake_client):
     construct BTC or ETH inverse books, so dust in those sub-accounts can't
     leak into drawdown calculations.
     """
-    from deribit_demo.book import BookRouter
+    from deribit_engine.book import BookRouter
 
     config = make_config(
         tmp_path,
@@ -1930,7 +1930,7 @@ def test_book_router_skips_usdc_when_not_traded(tmp_path, fake_client):
     inverse-only setup (``traded_collaterals=(BTC, ETH)``), the BookRouter
     must *not* automatically invent a USDC book.
     """
-    from deribit_demo.book import BookRouter
+    from deribit_engine.book import BookRouter
 
     config = make_config(
         tmp_path,

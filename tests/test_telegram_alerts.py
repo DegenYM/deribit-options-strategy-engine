@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deribit_demo.telegram_alerts import (
+from deribit_engine.telegram_alerts import (
     TelegramAlertConfig,
     bootstrap_telegram_env,
     format_alert_message,
@@ -17,7 +17,7 @@ from deribit_demo.telegram_alerts import (
 
 @pytest.fixture(autouse=True)
 def _clear_telegram_cooldown():
-    import deribit_demo.telegram_alerts as mod
+    import deribit_engine.telegram_alerts as mod
 
     mod._last_sent_monotonic.clear()
     mod._shared_env_loaded = False
@@ -45,7 +45,7 @@ def test_send_alert_respects_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
     response = MagicMock()
     response.json.return_value = {"ok": True}
     response.raise_for_status.return_value = None
-    with patch("deribit_demo.telegram_alerts.requests.post", return_value=response) as post:
+    with patch("deribit_engine.telegram_alerts.requests.post", return_value=response) as post:
         assert send_telegram_alert("one", event_key="evt", config=cfg) is True
         assert send_telegram_alert("two", event_key="evt", config=cfg) is False
         assert post.call_count == 1
@@ -60,7 +60,7 @@ def test_bootstrap_loads_shared_defaults(tmp_path: Path, monkeypatch: pytest.Mon
         "TELEGRAM_ALERTS_ENABLED=true\nTELEGRAM_BOT_TOKEN=from_defaults\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     bootstrap_telegram_env(tmp_path)
     assert os.environ.get("TELEGRAM_BOT_TOKEN") == "from_defaults"
@@ -97,10 +97,10 @@ def test_send_test_alert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         ),
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     response = MagicMock()
     response.json.return_value = {"ok": True}
     response.raise_for_status.return_value = None
-    with patch("deribit_demo.telegram_alerts.requests.post", return_value=response) as post:
+    with patch("deribit_engine.telegram_alerts.requests.post", return_value=response) as post:
         assert send_test_alert(repo_root=tmp_path) is True
         assert post.call_count == 1

@@ -179,7 +179,7 @@ def create_app(
     # ------------------------------------------------------------------
 
     def _fetch_spot() -> dict[str, Any]:
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         client = pkg.DeribitClient(config_public)
         btc_raw = client.get_index_price("btc_usd")
@@ -267,7 +267,7 @@ def create_app(
     @app.get("/api/portfolio/snapshot")
     def api_portfolio_snapshot() -> Any:
         """Last on-disk equity snapshot (no Deribit); for fast investor first paint."""
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         payload = pkg._latest_ledger_snapshot(
             accounts,
@@ -279,13 +279,13 @@ def create_app(
         return JSONResponse(_decimalize(payload))
 
     def _locked_aggregate_status() -> dict[str, Any]:
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         with _heavy_portfolio_lock:
             return pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
 
     def _locked_aggregate_report(d: int) -> dict[str, Any]:
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         with _heavy_portfolio_lock:
             return pkg._aggregate_report(accounts, days=d)
@@ -295,7 +295,7 @@ def create_app(
         days: int,
         override: Decimal | None,
     ) -> dict[str, Any]:
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         with _heavy_portfolio_lock:
             status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
@@ -351,7 +351,7 @@ def create_app(
         return out
 
     def _locked_aggregate_stress(shock_decimals: list[Decimal]) -> dict[str, Any]:
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         with _heavy_portfolio_lock:
             return pkg._aggregate_stress(
@@ -434,7 +434,7 @@ def create_app(
         )
 
         def _compute() -> dict[str, Any]:
-            import deribit_demo.frontend_server as pkg
+            import deribit_engine.frontend_server as pkg
 
             return pkg._aggregate_realized_summary(
                 accounts,

@@ -41,7 +41,7 @@ config/platform/generated/systemd/com.deribit.frontend.<id>.service
 
 ```bash
 __PYTHON_BIN__ --version
-__PYTHON_BIN__ -c "import deribit_demo; print('ok')"
+__PYTHON_BIN__ -c "import deribit_engine; print('ok')"
 ```
 
 ## 安裝（以 jack 為例）

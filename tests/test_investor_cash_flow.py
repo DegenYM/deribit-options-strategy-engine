@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from deribit_demo.client import DeribitClient
-from deribit_demo.investor_cash_flow import (
+from deribit_engine.client import DeribitClient
+from deribit_engine.investor_cash_flow import (
     default_fee_flow_start_ms,
     effective_fee_flow_start_ms,
     fetch_cumulative_net_flow_usdc,
@@ -45,7 +45,7 @@ enabled = true
         "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\nTRADED_COLLATERALS=USDC\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     logs = [
@@ -94,7 +94,7 @@ enabled = true
         "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\nTRADED_COLLATERALS=USDC\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     logs = [
@@ -140,7 +140,7 @@ enabled = true
         "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     logs = [
@@ -194,7 +194,7 @@ enabled = true
         "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=bbb\nDERIBIT_CLIENT_SECRET=sec_b\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     logs_by_client = {
@@ -255,7 +255,7 @@ enabled = true
         "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=bbb\nDERIBIT_CLIENT_SECRET=sec_b\nTRADED_COLLATERALS=USDC\n",
         encoding="utf-8",
     )
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
     logs_by_client = {

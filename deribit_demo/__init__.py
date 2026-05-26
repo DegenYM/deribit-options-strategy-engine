@@ -1,1 +1,0 @@
-"""Deribit option trial bot."""

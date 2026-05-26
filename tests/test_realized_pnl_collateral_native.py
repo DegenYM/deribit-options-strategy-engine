@@ -5,8 +5,8 @@ from decimal import Decimal
 import pytest
 from conftest import FakeClient, make_config
 
-from deribit_demo.engine import DeribitOptionTrialBot
-from deribit_demo.models import OptionInstrument, TradeGroup
+from deribit_engine.engine import DeribitOptionTrialBot
+from deribit_engine.models import OptionInstrument, TradeGroup
 
 
 @pytest.fixture

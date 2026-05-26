@@ -2,7 +2,7 @@ import signal
 from pathlib import Path
 from unittest.mock import patch
 
-from deribit_demo.investor_launchd_common import (
+from deribit_engine.investor_launchd_common import (
     force_reload_plist,
     list_pids_listening_on_tcp_port,
     terminate_tcp_listeners,
@@ -15,7 +15,7 @@ def test_list_pids_listening_on_tcp_port_parses_lsof_output():
         stdout = "12345\n67890\n"
         stderr = ""
 
-    with patch("deribit_demo.investor_launchd_common.subprocess.run", return_value=Result()):
+    with patch("deribit_engine.investor_launchd_common.subprocess.run", return_value=Result()):
         assert list_pids_listening_on_tcp_port(8765) == [12345, 67890]
 
 
@@ -32,11 +32,11 @@ def test_terminate_tcp_listeners_sends_sigterm_when_process_exits():
 
     with (
         patch(
-            "deribit_demo.investor_launchd_common.list_pids_listening_on_tcp_port",
+            "deribit_engine.investor_launchd_common.list_pids_listening_on_tcp_port",
             side_effect=fake_list,
         ),
-        patch("deribit_demo.investor_launchd_common.os.kill", side_effect=fake_kill),
-        patch("deribit_demo.investor_launchd_common.time.sleep", return_value=None),
+        patch("deribit_engine.investor_launchd_common.os.kill", side_effect=fake_kill),
+        patch("deribit_engine.investor_launchd_common.time.sleep", return_value=None),
     ):
         killed, msg = terminate_tcp_listeners(8765, grace_sec=0.0)
 
@@ -66,10 +66,10 @@ def test_force_reload_plist_bootouts_kills_and_bootstraps(tmp_path: Path):
         return True, "bootstrapped"
 
     with (
-        patch("deribit_demo.investor_launchd_common.is_launchd_loaded", side_effect=fake_loaded),
-        patch("deribit_demo.investor_launchd_common.bootout_plist", side_effect=fake_bootout),
-        patch("deribit_demo.investor_launchd_common.terminate_tcp_listeners", side_effect=fake_terminate),
-        patch("deribit_demo.investor_launchd_common.bootstrap_plist", side_effect=fake_bootstrap),
+        patch("deribit_engine.investor_launchd_common.is_launchd_loaded", side_effect=fake_loaded),
+        patch("deribit_engine.investor_launchd_common.bootout_plist", side_effect=fake_bootout),
+        patch("deribit_engine.investor_launchd_common.terminate_tcp_listeners", side_effect=fake_terminate),
+        patch("deribit_engine.investor_launchd_common.bootstrap_plist", side_effect=fake_bootstrap),
     ):
         ok, msg = force_reload_plist(
             plist,
@@ -83,8 +83,8 @@ def test_force_reload_plist_bootouts_kills_and_bootstraps(tmp_path: Path):
 
 
 def test_manage_frontend_restart_uses_force_reload(tmp_path: Path):
-    from deribit_demo.investor_frontend_launchd import manage_frontend_launchd
-    from deribit_demo.investor_registry import InvestorRegistryEntry
+    from deribit_engine.investor_frontend_launchd import manage_frontend_launchd
+    from deribit_engine.investor_registry import InvestorRegistryEntry
 
     def _entry(investor_id: str, *, port: int) -> InvestorRegistryEntry:
         return InvestorRegistryEntry(
@@ -126,13 +126,13 @@ def test_manage_frontend_restart_uses_force_reload(tmp_path: Path):
     agents.mkdir()
 
     with (
-        patch("deribit_demo.investor_frontend_launchd.launch_agents_dir", return_value=agents),
+        patch("deribit_engine.investor_frontend_launchd.launch_agents_dir", return_value=agents),
         patch(
-            "deribit_demo.investor_frontend_launchd._force_reload_frontend_plist",
+            "deribit_engine.investor_frontend_launchd._force_reload_frontend_plist",
             return_value=(True, "force reloaded (bootout: stopped; kill: terminated [1]; bootstrap: bootstrapped)"),
         ) as force_reload,
-        patch("deribit_demo.investor_frontend_launchd.is_frontend_loaded", return_value=True),
-        patch("deribit_demo.investor_frontend_launchd.wait_for_frontend_health", return_value=True),
+        patch("deribit_engine.investor_frontend_launchd.is_frontend_loaded", return_value=True),
+        patch("deribit_engine.investor_frontend_launchd.wait_for_frontend_health", return_value=True),
     ):
         results = manage_frontend_launchd(
             "restart",

@@ -306,7 +306,7 @@ def _make_dashboard_accounts(
     multi = len(env_files) > 1
     seen: dict[str, int] = {}
     accounts: list[DashboardAccount] = []
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     for item in env_files:
         cfg = pkg.load_config(item, require_private=False)

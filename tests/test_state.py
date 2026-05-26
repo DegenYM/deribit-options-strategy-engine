@@ -8,8 +8,8 @@ from unittest import mock
 
 from conftest import future_expiry
 
-from deribit_demo.models import StrategyState, TradeGroup
-from deribit_demo.state import StrategyStateStore
+from deribit_engine.models import StrategyState, TradeGroup
+from deribit_engine.state import StrategyStateStore
 
 
 def _sample_state() -> StrategyState:
@@ -98,7 +98,7 @@ def test_save_failure_cleans_tmp(tmp_path: Path) -> None:
     store.save(_sample_state())
     first_content = store.path.read_text()
 
-    with mock.patch("deribit_demo.state.os.replace", side_effect=OSError("boom")):
+    with mock.patch("deribit_engine.state.os.replace", side_effect=OSError("boom")):
         try:
             store.save(_sample_state())
         except OSError:

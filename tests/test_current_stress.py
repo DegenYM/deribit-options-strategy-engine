@@ -4,9 +4,9 @@ from decimal import Decimal
 
 from conftest import make_config
 
-from deribit_demo.current_stress import compute_current_stress, compute_stress_from_prefetch
-from deribit_demo.engine import ExchangePrefetch
-from deribit_demo.models import AccountSummary, OptionInstrument, Position
+from deribit_engine.current_stress import compute_current_stress, compute_stress_from_prefetch
+from deribit_engine.engine import ExchangePrefetch
+from deribit_engine.models import AccountSummary, OptionInstrument, Position
 
 
 def _prefetch_from_fake_client(fake_client, cfg) -> ExchangePrefetch:

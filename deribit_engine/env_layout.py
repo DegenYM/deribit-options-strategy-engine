@@ -89,12 +89,12 @@ class InvestorManifest:
 
 
 def find_repo_root(start: Path | str | None = None) -> Path | None:
-    """Return repository root when ``deribit_demo`` and config layout are present."""
+    """Return repository root when ``deribit_engine`` and config layout are present."""
     cur = Path(start or Path.cwd()).resolve()
     if cur.is_file():
         cur = cur.parent
     for parent in (cur, *cur.parents):
-        if not (parent / "deribit_demo").is_dir():
+        if not (parent / "deribit_engine").is_dir():
             continue
         if (parent / CONFIG_STRATEGIES).is_dir() or (parent / ".env.example").is_file():
             return parent
@@ -243,7 +243,7 @@ def load_investor_manifest(
 ) -> InvestorManifest:
     root = find_repo_root(repo_root or Path.cwd())
     if root is None:
-        raise ConfigurationError("Cannot locate repository root (missing deribit_demo/)")
+        raise ConfigurationError("Cannot locate repository root (missing deribit_engine/)")
     investor_dir = resolve_investor_dir(root, investor)
     manifest_path = investor_dir / ACCOUNTS_MANIFEST
     if not manifest_path.is_file():

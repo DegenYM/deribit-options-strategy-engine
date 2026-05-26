@@ -10,7 +10,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def register_groups_routes(app: Any, ctx: RouteContext) -> None:
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     @app.get("/api/groups")
     def api_groups() -> Any:

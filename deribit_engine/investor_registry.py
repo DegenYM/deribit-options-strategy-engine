@@ -85,7 +85,7 @@ def load_platform_registry(
 ) -> PlatformRegistry:
     root = Path(repo_root) if repo_root is not None else find_repo_root(Path.cwd())
     if root is None:
-        raise ConfigurationError("Cannot locate repository root (missing deribit_demo/)")
+        raise ConfigurationError("Cannot locate repository root (missing deribit_engine/)")
     path = registry_path(root)
     if not path.is_file():
         example = registry_example_path(root)

@@ -1,7 +1,7 @@
 from decimal import Decimal
 
-from deribit_demo.models import TradeGroup
-from deribit_demo.trade_apr import (
+from deribit_engine.models import TradeGroup
+from deribit_engine.trade_apr import (
     entry_net_apr_from_actual_open,
     entry_net_apr_from_fill,
     opened_contract_amount_per_contract,

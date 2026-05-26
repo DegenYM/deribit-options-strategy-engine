@@ -6,12 +6,12 @@ from pathlib import Path
 
 from conftest import future_expiry, make_config
 
-import deribit_demo.frontend_server as frontend_server
-from deribit_demo.current_stress import CurrentStressResult
-from deribit_demo.frontend_server import DashboardAccount
-from deribit_demo.models import StrategyState, TradeGroup
-from deribit_demo.state import StrategyStateStore, performance_exclusions_path
-from deribit_demo.stress import black_swan_strategy_analysis
+import deribit_engine.frontend_server as frontend_server
+from deribit_engine.current_stress import CurrentStressResult
+from deribit_engine.frontend_server import DashboardAccount
+from deribit_engine.models import StrategyState, TradeGroup
+from deribit_engine.state import StrategyStateStore, performance_exclusions_path
+from deribit_engine.stress import black_swan_strategy_analysis
 
 
 def _stress_result(strategy: str, book: str, loss: Decimal) -> CurrentStressResult:
@@ -390,7 +390,7 @@ def test_aggregate_stress_normalizes_put_spread_alias(tmp_path, monkeypatch):
 
 def test_aggregate_status_prefetch_once_per_api_identity(tmp_path, monkeypatch):
     """Three strategy rows on one Deribit login should not triple Deribit fan-out."""
-    from deribit_demo.engine import ExchangePrefetch
+    from deribit_engine.engine import ExchangePrefetch
 
     cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="dup", client_secret="same")
     cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="dup", client_secret="same")
@@ -814,7 +814,7 @@ def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
     import threading
     import time
 
-    from deribit_demo.engine import ExchangePrefetch
+    from deribit_engine.engine import ExchangePrefetch
 
     cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="a", client_secret="1")
     cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="b", client_secret="2")
@@ -878,7 +878,7 @@ def test_aggregate_groups_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
     import threading
     import time
 
-    from deribit_demo.engine import ExchangePrefetch
+    from deribit_engine.engine import ExchangePrefetch
 
     cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="a", client_secret="1")
     cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="b", client_secret="2")
@@ -931,8 +931,8 @@ def test_aggregate_groups_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
 
 
 def test_aggregate_stress_reuses_prefetch_without_account_refetch(tmp_path, monkeypatch) -> None:
-    from deribit_demo.current_stress import CurrentStressResult
-    from deribit_demo.engine import ExchangePrefetch
+    from deribit_engine.current_stress import CurrentStressResult
+    from deribit_engine.engine import ExchangePrefetch
 
     cfg_a = make_config(tmp_path, option_strategy="naked_short", client_id="a", client_secret="1")
     cfg_b = make_config(tmp_path, option_strategy="covered_call", client_id="b", client_secret="2")

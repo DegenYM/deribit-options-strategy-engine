@@ -152,7 +152,7 @@ class TradeJournalSyncScheduler:
         self.state = TradeJournalSyncState()
 
     def start(self) -> None:
-        import deribit_demo.frontend_server as pkg
+        import deribit_engine.frontend_server as pkg
 
         if not any(pkg._has_private_creds(account.config) for account in self._accounts):
             LOGGER.info("trade journal sync scheduler disabled: no private creds")
@@ -178,7 +178,7 @@ class TradeJournalSyncScheduler:
         total_inserted = 0
         errors: list[str] = []
         for account in self._accounts:
-            import deribit_demo.frontend_server as pkg
+            import deribit_engine.frontend_server as pkg
 
             if not pkg._has_private_creds(account.config):
                 results.append({"account": account.name, "skipped": True, "reason": "no_credentials"})

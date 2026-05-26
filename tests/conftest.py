@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from deribit_demo.book import Book
-from deribit_demo.config import BotConfig
+from deribit_engine.book import Book
+from deribit_engine.config import BotConfig
 
 
 def future_expiry(days: int) -> int:

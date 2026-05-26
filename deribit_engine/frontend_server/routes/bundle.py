@@ -14,7 +14,7 @@ def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
     from fastapi import HTTPException, Query
     from fastapi.responses import JSONResponse
 
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     @app.get("/api/dashboard_bundle")
     def api_dashboard_bundle(

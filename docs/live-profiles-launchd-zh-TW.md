@@ -49,7 +49,7 @@ cp "$REPO_ROOT/config/platform/generated/launchd/com.deribit.live.${INVESTOR}.pl
 
 ```bash
 __PYTHON_BIN__ --version
-__PYTHON_BIN__ -c "import deribit_demo; print('ok')"
+__PYTHON_BIN__ -c "import deribit_engine; print('ok')"
 ```
 
 ## 安裝（以 jack 為例）

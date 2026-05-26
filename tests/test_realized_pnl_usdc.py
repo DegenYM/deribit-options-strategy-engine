@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from deribit_demo.models import TradeGroup
+from deribit_engine.models import TradeGroup
 
 
 def test_backfill_realized_pnl_usdc_prefers_native_times_index() -> None:

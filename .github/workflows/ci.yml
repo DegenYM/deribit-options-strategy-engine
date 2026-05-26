@@ -29,13 +29,13 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Ruff lint
-        run: ruff check deribit_demo tests scripts
+        run: ruff check deribit_engine tests scripts
 
       - name: Ruff format
-        run: ruff format --check deribit_demo tests scripts
+        run: ruff format --check deribit_engine tests scripts
 
       - name: Pytest
-        run: pytest tests/ -q --cov=deribit_demo --cov-report=term-missing:skip-covered --cov-fail-under=60
+        run: pytest tests/ -q --cov=deribit_engine --cov-report=term-missing:skip-covered --cov-fail-under=60
 
   frontend:
     runs-on: ubuntu-latest

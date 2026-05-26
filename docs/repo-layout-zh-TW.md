@@ -6,8 +6,8 @@
 
 ```text
 deribit-options-strategy-engine/
-├── bot                          # CLI 入口（→ deribit_demo.cli）
-├── deribit_demo/                # 策略引擎、frontend、投資人 ops
+├── bot                          # CLI 入口（→ deribit_engine.cli）
+├── deribit_engine/                # 策略引擎、frontend、投資人 ops
 ├── config/
 │   ├── shared/                  # 全投資人共用（無 API 金鑰）
 │   │   ├── defaults.env.example
@@ -109,7 +109,7 @@ deribit-options-strategy-engine/
 | `config/shared/strategies/.env.*` | `config/shared/defaults.env` |
 | `config/platform/registry.toml.example` | `config/platform/registry.toml` |
 | `config/handoff/handoff.template.toml` | `config/handoff/<id>.toml` |
-| `docs/`、`tests/`、`deribit_demo/` | `.state/`、`data/`、`logs/` |
+| `docs/`、`tests/`、`deribit_engine/` | `.state/`、`data/`、`logs/` |
 
 ## 相關文件
 

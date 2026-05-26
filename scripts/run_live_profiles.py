@@ -20,7 +20,7 @@ def _repo_root() -> Path:
 def _env_files_for_investor(repo_root: Path, investor_id: str) -> list[Path]:
     sys.path.insert(0, str(repo_root))
     try:
-        from deribit_demo.env_layout import load_investor_manifest
+        from deribit_engine.env_layout import load_investor_manifest
 
         return list(
             load_investor_manifest(investor_id, repo_root=repo_root).account_env_files(
@@ -55,7 +55,7 @@ def _resolve_existing_env_files(repo_root: Path, raw_env_files: list[str]) -> li
 def _safe_log_name(env_file: Path, repo_root: Path) -> str:
     sys.path.insert(0, str(repo_root))
     try:
-        from deribit_demo.env_layout import account_slug_from_env_path
+        from deribit_engine.env_layout import account_slug_from_env_path
 
         slug = account_slug_from_env_path(env_file)
         if slug:
@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = _repo_root()
     sys.path.insert(0, str(repo_root))
     try:
-        from deribit_demo.telegram_alerts import bootstrap_telegram_env
+        from deribit_engine.telegram_alerts import bootstrap_telegram_env
 
         bootstrap_telegram_env(repo_root)
     finally:
@@ -198,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def _notify_live_supervisor(title: str, *, body: str, event_key: str, level: str = "warning") -> None:
         try:
-            from deribit_demo.telegram_alerts import format_alert_message, send_telegram_alert
+            from deribit_engine.telegram_alerts import format_alert_message, send_telegram_alert
 
             investor_id = args.investor or DEFAULT_INVESTOR_ID
             message = format_alert_message(
@@ -239,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         sys.path.insert(0, str(repo_root))
         try:
-            from deribit_demo.env_layout import (
+            from deribit_engine.env_layout import (
                 investor_live_log_dir,
                 load_investor_manifest,
                 resolve_investor_scope,

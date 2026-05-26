@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from deribit_demo.trade_journal import (
+from deribit_engine.trade_journal import (
     TradeJournalStore,
     ingest_engine_action,
     journal_db_path_for_state,

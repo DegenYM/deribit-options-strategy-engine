@@ -15,8 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from deribit_demo.env_layout import find_repo_root  # noqa: E402
-from deribit_demo.investor_nav_snapshot import (  # noqa: E402
+from deribit_engine.env_layout import find_repo_root  # noqa: E402
+from deribit_engine.investor_nav_snapshot import (  # noqa: E402
     capture_investor_nav,
     store_nav_capture,
 )

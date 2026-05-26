@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from deribit_demo.live_heartbeat import (
+from deribit_engine.live_heartbeat import (
     LiveHeartbeatRecord,
     find_stale_heartbeats,
     heartbeat_path_for_state,
@@ -11,7 +11,7 @@ from deribit_demo.live_heartbeat import (
     read_live_heartbeat,
     write_live_heartbeat,
 )
-from deribit_demo.utils import utc_now_ms
+from deribit_engine.utils import utc_now_ms
 
 
 def test_heartbeat_path_for_state():
@@ -41,7 +41,7 @@ def test_write_and_read_live_heartbeat(tmp_path: Path):
 
 
 def test_find_stale_heartbeats_missing_and_expired(tmp_path: Path):
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
     investor_dir = tmp_path / "config" / "investors" / "alice"
     accounts_dir = investor_dir / "accounts"
@@ -115,8 +115,8 @@ def test_find_stale_heartbeats_missing_and_expired(tmp_path: Path):
 def test_engine_writes_live_heartbeat_on_run(tmp_path, fake_client):
     from conftest import make_config
 
-    from deribit_demo.engine import DeribitOptionTrialBot
-    from deribit_demo.live_heartbeat import heartbeat_path_for_state, read_live_heartbeat
+    from deribit_engine.engine import DeribitOptionTrialBot
+    from deribit_engine.live_heartbeat import heartbeat_path_for_state, read_live_heartbeat
 
     config = make_config(
         tmp_path,

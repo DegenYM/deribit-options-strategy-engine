@@ -4,17 +4,17 @@ import pytest
 import requests
 from conftest import make_config
 
-from deribit_demo.client import DeribitClient
-from deribit_demo.exceptions import ExchangeError, TransientExchangeError
+from deribit_engine.client import DeribitClient
+from deribit_engine.exceptions import ExchangeError, TransientExchangeError
 
 
 @pytest.fixture(autouse=True)
 def _disable_exchange_throttle(monkeypatch):
-    from deribit_demo.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
+    from deribit_engine.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
 
     with _AUTH_CACHE_LOCK:
         _AUTH_TOKEN_CACHE.clear()
-    monkeypatch.setattr("deribit_demo.client.pace_exchange_request", lambda: None)
+    monkeypatch.setattr("deribit_engine.client.pace_exchange_request", lambda: None)
     monkeypatch.setenv("DERIBIT_MIN_REQUEST_INTERVAL_SEC", "0")
     yield
     with _AUTH_CACHE_LOCK:
@@ -125,7 +125,7 @@ def test_get_instrument_uses_exact_public_endpoint(tmp_path):
 
 
 def test_idempotent_request_retries_on_retryable_http(tmp_path, monkeypatch):
-    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda _s: None)
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
     session = FakeSession(
         [
             FakeResponse({}, status_code=522, text="timeout"),
@@ -141,7 +141,7 @@ def test_idempotent_request_retries_on_retryable_http(tmp_path, monkeypatch):
 
 
 def test_idempotent_request_raises_after_retry_exhaustion(tmp_path, monkeypatch):
-    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda _s: None)
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
     session = FakeSession([FakeResponse({}, status_code=522, text="timeout")] * 4)
     client = _make_client(tmp_path, session)
 
@@ -151,7 +151,7 @@ def test_idempotent_request_raises_after_retry_exhaustion(tmp_path, monkeypatch)
 
 def test_idempotent_request_respects_retry_after_header(tmp_path, monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda s: sleeps.append(s))
     session = FakeSession(
         [
             FakeResponse({}, status_code=429, text="slow down", headers={"Retry-After": "2.5"}),
@@ -168,7 +168,7 @@ def test_idempotent_request_respects_retry_after_header(tmp_path, monkeypatch):
 
 def test_call_auth_retries_on_429(tmp_path, monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda s: sleeps.append(s))
     session = FakeSession(
         [
             FakeResponse({}, status_code=429, text="slow down", headers={"Retry-After": "1.0"}),
@@ -191,11 +191,11 @@ def test_call_auth_retries_on_429(tmp_path, monkeypatch):
 
 
 def test_auth_token_cache_shared_across_clients(tmp_path, monkeypatch):
-    from deribit_demo.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
+    from deribit_engine.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
 
     with _AUTH_CACHE_LOCK:
         _AUTH_TOKEN_CACHE.clear()
-    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda _s: None)
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
     auth = FakeResponse(_auth_result())
     summaries = FakeResponse(_ok_body({"summaries": []}))
     session_a = FakeSession([auth, summaries])
@@ -253,7 +253,7 @@ def test_oauth_refreshes_when_token_expires(tmp_path):
 
 
 def test_place_order_retries_once_on_connection_error(tmp_path, monkeypatch):
-    monkeypatch.setattr("deribit_demo.client.time.sleep", lambda _s: None)
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
     session = FakeSession(
         [
             FakeResponse(_auth_result()),
@@ -548,7 +548,7 @@ def test_get_user_trades_by_instrument_jsonrpc_params(tmp_path):
 
 
 def test_get_instruments_uses_process_cache(tmp_path, monkeypatch):
-    from deribit_demo.client import _INSTRUMENTS_CACHE, _INSTRUMENTS_CACHE_LOCK
+    from deribit_engine.client import _INSTRUMENTS_CACHE, _INSTRUMENTS_CACHE_LOCK
 
     with _INSTRUMENTS_CACHE_LOCK:
         _INSTRUMENTS_CACHE.clear()

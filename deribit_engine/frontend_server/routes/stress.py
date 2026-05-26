@@ -11,7 +11,7 @@ def register_stress_routes(app: Any, ctx: RouteContext) -> None:
     from fastapi import HTTPException, Query
     from fastapi.responses import JSONResponse
 
-    import deribit_demo.frontend_server as pkg
+    import deribit_engine.frontend_server as pkg
 
     @app.get("/api/stress")
     def api_stress(shocks: str = Query(default="0.10,0.20,0.30,0.40,0.50")) -> Any:

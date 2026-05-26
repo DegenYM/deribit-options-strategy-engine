@@ -2,13 +2,13 @@ from pathlib import Path
 
 import pytest
 
-from deribit_demo.exceptions import ConfigurationError
-from deribit_demo.investor_ops import investor_init, render_systemd_units
-from deribit_demo.investor_registry import load_platform_registry
+from deribit_engine.exceptions import ConfigurationError
+from deribit_engine.investor_ops import investor_init, render_systemd_units
+from deribit_engine.investor_registry import load_platform_registry
 
 
 def _bootstrap_repo(tmp_path: Path) -> Path:
-    (tmp_path / "deribit_demo").mkdir()
+    (tmp_path / "deribit_engine").mkdir()
     example = Path(__file__).resolve().parents[1] / "config" / "investors" / "_example"
     (tmp_path / "config" / "investors" / "_example").mkdir(parents=True)
     for rel in (
