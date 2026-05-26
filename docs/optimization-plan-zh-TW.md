@@ -14,7 +14,7 @@
 | **P0** 收斂本機改動 | ✅ 已完成 | CI、Telegram、Phase 2 拆分已 commit + push（`17b01d9`） |
 | **P1** 營運可靠性 | ✅ 已完成 | heartbeat、watchdog、結構化 log、runbooks（commit `0e75d8b`） |
 | **P2** 程式架構 | ✅ 已完成 | `cli/`、`engine/`、`frontend_server/` + CI coverage ≥60% |
-| **P3** 部署與跨平台 | ⬜ 未開始 | systemd 範本、Docker、Uptime 監控 |
+| **P3** 部署與跨平台 | 🟡 進行中 | systemd 範本 ✅；Docker、Uptime 監控待做 |
 | **P4** 前端與對外交付 | ⬜ 未開始 | `app.js` 模組化、Playwright |
 | **P5** 規模化 | ⬜ 未開始 | 觸發條件未到 |
 
@@ -34,7 +34,7 @@
 | **投資人 onboarding** | `docs/investor-onboarding-zh-TW.md`、handoff、`import-handoff` |
 | **管理方 runbook** | `docs/operator-onboarding-zh-TW.md` |
 | **費用與合規** | HWM/NAV 快照、季結算、PDF/MD/CSV、fee 專戶、披露文件 |
-| **常駐（macOS）** | launchd + `./bot investor live\|frontend start` |
+| **常駐** | macOS launchd + Linux systemd 範本；`./bot investor live\|frontend start`（macOS） |
 | **Dashboard** | bundle API、多帳並行聚合、stress prefetch 重用 |
 | **API 穩定性** | `exchange_throttle.py` 全进程 pacing |
 | **測試** | 25+ 測試檔、**280** test cases |
@@ -57,7 +57,6 @@ _（目前無待收斂項；Phase 0 / 2 已 push 至 main。）_
 | `engine/management.py` ~2,000 行 | 仍偏大；後續可再拆 |
 | `frontend/app.js` ~4,600 行、零 build | 難 modularize（Phase 4） |
 | coverage 門檻 60% → 70% | 長期品質目標 |
-| 無 systemd 範本 | Linux VPS 需從頭摸索 |
 
 ---
 
@@ -158,15 +157,15 @@ deribit_demo/frontend_server/
 
 ---
 
-### Phase 3 — 部署與跨平台（1–2 週）
+### Phase 3 — 部署與跨平台（1–2 週） 🟡
 
 **目標**：macOS launchd 已有；補 Linux / 備援。
 
-| # | 任務 | 產出 |
-|---|------|------|
-| 3.1 | **systemd unit 範本** | 對標 `config/launchd/com.deribit.live.plist.template` |
-| 3.2 | **Docker Compose（可選）** | 固定 Python、bot + frontend 一鍵起 |
-| 3.3 | **Uptime 監控** | 各 investor frontend port + Cloudflare Tunnel | Uptime Kuma 或 curl cron |
+| # | 任務 | 產出 | 狀態 |
+|---|------|------|------|
+| 3.1 | **systemd unit 範本** | 對標 `config/launchd/`；[`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md) | ✅ |
+| 3.2 | **Docker Compose（可選）** | 固定 Python、bot + frontend 一鍵起 | ⬜ |
+| 3.3 | **Uptime 監控** | 各 investor frontend port + Cloudflare Tunnel | Uptime Kuma 或 curl cron | ⬜ |
 
 **完成標準**：macOS 用 launchd、Linux 有對等 systemd 文件可照做。
 
@@ -212,7 +211,7 @@ gantt
     拆 frontend_server     :done, p2d, 2026-05-26, 7d
     coverage CI            :done, p2c, 2026-05-26, 3d
     section P3 部署
-    systemd 範本          :p3, after p1b, 7d
+    systemd 範本          :done, p3, 2026-05-26, 7d
     section P4 前端
     Playwright+模組化      :p4, after p2a, 21d
 ```
@@ -226,7 +225,7 @@ gantt
 | **P0** | Commit Phase 2 拆分 + push | ✅ 已完成 |
 | **P1** | Heartbeat + watchdog + runbooks + pre-commit | ✅ 已完成 |
 | **P2** | 拆 `engine.py` / `cli.py` / `frontend_server` + coverage | ✅ 已完成 |
-| **P3** | systemd / Docker | 上 VPS 才急 |
+| **P3** | systemd 範本 | ✅ 3.1 完成；Docker / Uptime 待做 |
 | **P4** | 前端 Vite / Playwright | 對外 dashboard 穩定後 |
 | **P5** | PG / Metabase / Sentry | 投資人與機器數再上一級 |
 
@@ -253,7 +252,7 @@ gantt
 | 例外追蹤 | Sentry | 5 |
 | 日誌 | 結構化 JSON → Loki | 1 ✅（live JSON）、5 |
 | 報表 | Metabase | 5 |
-| 部署 | launchd（已有）、systemd、Docker Compose | 3 |
+| 部署 | launchd（已有）、systemd（已有）、Docker Compose | 3 |
 
 ---
 
@@ -264,7 +263,8 @@ gantt
 | [`README.md`](../README.md) | Quick start、常用指令 |
 | [`repo-layout-zh-TW.md`](repo-layout-zh-TW.md) | 目錄與 legacy 遷移 |
 | [`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md) | 新增投資人 |
-| [`live-profiles-launchd-zh-TW.md`](live-profiles-launchd-zh-TW.md) | Live bot 常駐、heartbeat |
+| [`live-profiles-launchd-zh-TW.md`](live-profiles-launchd-zh-TW.md) | Live bot 常駐（macOS）、heartbeat |
+| [`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md) | Live bot / frontend 常駐（Linux） |
 | [`runbooks/README-zh-TW.md`](runbooks/README-zh-TW.md) | Incident 照表操課 |
 | [`telegram-alerts-zh-TW.md`](telegram-alerts-zh-TW.md) | Telegram 設定 |
 | [`CHANGELOG.md`](../CHANGELOG.md) | 版本變更 |
@@ -273,7 +273,7 @@ gantt
 
 ## 9. 下一步（擇一開工）
 
-1. **Phase 3.1**：systemd unit 範本（對標 launchd template）  
+1. **Phase 3.2–3.3**：Docker Compose（可選）、Uptime 監控  
 2. **Phase 4.2**：Playwright 煙霧測試（dashboard bundle → 200）  
 3. **可選**：再拆 `engine/management.py`；將 coverage 門檻提升至 70%
 

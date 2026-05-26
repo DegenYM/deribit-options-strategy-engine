@@ -18,10 +18,15 @@ deribit-options-strategy-engine/
 │   ├── platform/
 │   │   ├── registry.toml.example
 │   │   ├── registry.toml        # 本機 ops 中繼資料（gitignore）
-│   │   └── generated/launchd/   # investor init 產物（gitignore）
+│   │   └── generated/           # investor init 產物（gitignore）
+│   │       ├── launchd/
+│   │       └── systemd/
 │   ├── launchd/
 │   │   ├── com.deribit.live.plist.template
 │   │   └── com.deribit.frontend.plist.template
+│   ├── systemd/
+│   │   ├── com.deribit.live.service.template
+│   │   └── com.deribit.frontend.service.template
 │   └── handoff/
 │       └── handoff.template.toml
 ├── frontend/                    # Dashboard 靜態頁
@@ -61,11 +66,12 @@ deribit-options-strategy-engine/
 | 績效費快照 | `data/fee_ledger/<id>/snapshots.db` |
 | 費用報表 | `data/fee_ledger/<id>/reports/` |
 
-## launchd
+## launchd / systemd
 
-- **範本**：`config/launchd/*.plist.template`（佔位符 `__REPO_ROOT__` 等）
-- **已填入路徑的 plist**：`./bot investor init` → `config/platform/generated/launchd/`
-- **安裝**：複製 generated plist 到 `~/Library/LaunchAgents/`，或 `./bot investor live|frontend start`
+- **範本**：`config/launchd/*.plist.template`、`config/systemd/*.service.template`（佔位符 `__REPO_ROOT__` 等）
+- **已填入路徑的產物**：`./bot investor init` → `config/platform/generated/launchd/`、`generated/systemd/`
+- **macOS 安裝**：複製 generated plist 到 `~/Library/LaunchAgents/`，或 `./bot investor live|frontend start`
+- **Linux 安裝**：複製 generated unit 到 `/etc/systemd/system/`，見 [`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md)
 
 不再維護 per-investor 的 `com.deribit.*.jack.plist.example` 等重複檔案。
 
@@ -110,3 +116,4 @@ deribit-options-strategy-engine/
 - 投資人設定：[`README.md`](../README.md) → Investor / Sub-account Layout
 - 管理方 onboarding：[`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md)
 - Live launchd：[`live-profiles-launchd-zh-TW.md`](live-profiles-launchd-zh-TW.md)
+- Live systemd（Linux）：[`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md)

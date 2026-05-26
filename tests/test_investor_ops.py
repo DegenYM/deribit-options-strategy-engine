@@ -39,6 +39,11 @@ def _bootstrap_repo(tmp_path: Path) -> Path:
         src = Path(__file__).resolve().parents[1] / "config" / "launchd" / name
         (tmp_path / "config" / "launchd" / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
+    (tmp_path / "config" / "systemd").mkdir(parents=True)
+    for name in ("com.deribit.live.service.template", "com.deribit.frontend.service.template"):
+        src = Path(__file__).resolve().parents[1] / "config" / "systemd" / name
+        (tmp_path / "config" / "systemd" / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
     (tmp_path / "config" / "platform" / "registry.toml").write_text(
         "\n".join(
             [

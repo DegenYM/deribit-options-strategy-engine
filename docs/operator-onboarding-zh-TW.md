@@ -78,9 +78,11 @@ cp config/platform/registry.toml.example config/platform/registry.toml
 
 等同於 `./bot fee-snapshot --investor alice` 的首次 HWM bootstrap；日常排程仍用 `scripts/snapshot_investor_fee_nav.py`。
 
-## 4. 常駐（launchd）
+## 4. 常駐（macOS launchd / Linux systemd）
 
-已產生的 plist 在 `config/platform/generated/launchd/`。安裝範例：
+已產生的 plist 在 `config/platform/generated/launchd/`（macOS）；systemd unit 在 `generated/systemd/`（Linux）。
+
+**macOS** 安裝範例：
 
 ```bash
 INVESTOR=alice
@@ -93,6 +95,8 @@ cp "$REPO_ROOT/config/platform/generated/launchd/com.deribit.frontend.${INVESTOR
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.deribit.live.${INVESTOR}.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.deribit.frontend.${INVESTOR}.plist
 ```
+
+**Linux** 請見 [`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md)（`./bot investor render-systemd <id>` 產生 unit 後 `systemctl enable --now`）。
 
 Cloudflare Tunnel / Access 仍依 [`cloudflare-tunnel-investor.md`](cloudflare-tunnel-investor.md)（Phase 2 再自動化 `provision`）。
 
@@ -131,6 +135,7 @@ Cloudflare Tunnel / Access 仍依 [`cloudflare-tunnel-investor.md`](cloudflare-t
 | `./bot investor frontend start` | 一次啟動所有 `frontend_enabled` 的 dashboard |
 | `./bot investor live start` | 一次啟動所有 `live_enabled` 的 live 監督 |
 | `./bot investor render-launchd alice` | 重產 launchd plist（改埠時加 `--port`） |
+| `./bot investor render-systemd alice` | 重產 systemd unit（Linux；改埠時加 `--port`） |
 | `./bot investor bootstrap-hwm alice` | 僅建立 initial HWM（`validate` 成功時已自動執行） |
 | `./bot investor init ... --no-register` | 只建目錄、不寫 registry |
 

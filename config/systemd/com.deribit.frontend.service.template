@@ -1,0 +1,16 @@
+[Unit]
+Description=Deribit dashboard frontend (__INVESTOR_ID__)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_ROOT__
+ExecStart=__PYTHON_BIN__ __REPO_ROOT__/bot --investor __INVESTOR_ID__ frontend --port __FRONTEND_PORT__
+Restart=always
+RestartSec=10
+StandardOutput=append:__REPO_ROOT__/logs/frontend/__INVESTOR_ID__/frontend.log
+StandardError=append:__REPO_ROOT__/logs/frontend/__INVESTOR_ID__/frontend.err.log
+
+[Install]
+WantedBy=multi-user.target

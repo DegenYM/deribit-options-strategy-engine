@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Linux systemd unit templates for live bot and dashboard frontend (`config/systemd/`).
+- `./bot investor render-systemd` and generated units under `config/platform/generated/systemd/`.
+- [`docs/live-profiles-systemd-zh-TW.md`](docs/live-profiles-systemd-zh-TW.md) runbook for Linux VPS deployment.
 - Telegram alerts for live ops (`TELEGRAM_*` env vars, `./bot telegram-test`).
 - GitHub Actions CI: pytest on Python 3.11/3.12, Ruff lint and format check.
 - `pyproject.toml` with project metadata and tool configuration.

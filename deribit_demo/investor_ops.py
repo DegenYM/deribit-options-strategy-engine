@@ -1,4 +1,4 @@
-"""Investor onboarding helpers: init, handoff import, validate, list, launchd render."""
+"""Investor onboarding helpers: init, handoff import, validate, list, launchd/systemd render."""
 
 from __future__ import annotations
 
@@ -56,6 +56,7 @@ class InitResult:
     strategies: tuple[str, ...]
     frontend_port: int | None
     launchd_paths: tuple[Path, ...]
+    systemd_paths: tuple[Path, ...]
 
 
 @dataclass(frozen=True)
@@ -158,6 +159,12 @@ def investor_init(
         registry=registry,
         frontend_port=frontend_port,
     )
+    systemd_paths = render_systemd_units(
+        investor_id,
+        repo_root=repo,
+        registry=registry,
+        frontend_port=frontend_port,
+    )
 
     for sub in ("logs/live", "logs/frontend", "data/fee_ledger"):
         (repo / sub / investor_id).mkdir(parents=True, exist_ok=True)
@@ -168,6 +175,7 @@ def investor_init(
         strategies=strategies,
         frontend_port=frontend_port,
         launchd_paths=launchd_paths,
+        systemd_paths=systemd_paths,
     )
 
 
@@ -555,6 +563,31 @@ def list_investors(*, repo_root: Path | None = None) -> list[dict[str, Any]]:
     return rows
 
 
+def _render_template_file(template_path: Path, replacements: dict[str, str]) -> str:
+    if not template_path.is_file():
+        raise ConfigurationError(f"Missing template: {template_path}")
+    text = template_path.read_text(encoding="utf-8")
+    for key, value in replacements.items():
+        text = text.replace(key, value)
+    return text
+
+
+def _investor_service_replacements(
+    investor_id: str,
+    *,
+    repo_root: Path,
+    python_bin: str,
+    frontend_port: int,
+) -> dict[str, str]:
+    return {
+        "__LABEL__": f"com.deribit.live.{investor_id}",
+        "__REPO_ROOT__": str(repo_root),
+        "__PYTHON_BIN__": python_bin,
+        "__INVESTOR_ID__": investor_id,
+        "__FRONTEND_PORT__": str(frontend_port),
+    }
+
+
 def render_launchd_plists(
     investor_id: str,
     *,
@@ -568,6 +601,12 @@ def render_launchd_plists(
     entry = registry.entry_for(investor_id)
     port = frontend_port or (entry.frontend_port if entry else None) or 8765
     python_bin = registry.platform.python_bin or "python3"
+    replacements = _investor_service_replacements(
+        investor_id,
+        repo_root=repo_root,
+        python_bin=python_bin,
+        frontend_port=port,
+    )
 
     out_dir = repo_root / "config/platform/generated/launchd"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -575,32 +614,60 @@ def render_launchd_plists(
     templates = {
         f"com.deribit.live.{investor_id}.plist": (
             repo_root / "config/launchd/com.deribit.live.plist.template",
-            {
-                "__LABEL__": f"com.deribit.live.{investor_id}",
-                "__REPO_ROOT__": str(repo_root),
-                "__PYTHON_BIN__": python_bin,
-                "__INVESTOR_ID__": investor_id,
-            },
+            replacements,
         ),
         f"com.deribit.frontend.{investor_id}.plist": (
             repo_root / "config/launchd/com.deribit.frontend.plist.template",
-            {
-                "__LABEL__": f"com.deribit.frontend.{investor_id}",
-                "__REPO_ROOT__": str(repo_root),
-                "__PYTHON_BIN__": python_bin,
-                "__INVESTOR_ID__": investor_id,
-                "__FRONTEND_PORT__": str(port),
-            },
+            replacements,
         ),
     }
 
     written: list[Path] = []
-    for filename, (template_path, replacements) in templates.items():
-        if not template_path.is_file():
-            raise ConfigurationError(f"Missing launchd template: {template_path}")
-        text = template_path.read_text(encoding="utf-8")
-        for key, value in replacements.items():
-            text = text.replace(key, value)
+    for filename, (template_path, file_replacements) in templates.items():
+        text = _render_template_file(template_path, file_replacements)
+        out_path = out_dir / filename
+        out_path.write_text(text, encoding="utf-8")
+        written.append(out_path)
+    return tuple(written)
+
+
+def render_systemd_units(
+    investor_id: str,
+    *,
+    repo_root: Path,
+    registry: PlatformRegistry | None = None,
+    frontend_port: int | None = None,
+) -> tuple[Path, ...]:
+    investor_id = validate_investor_id(investor_id)
+    if registry is None:
+        registry = load_platform_registry(repo_root=repo_root)
+    entry = registry.entry_for(investor_id)
+    port = frontend_port or (entry.frontend_port if entry else None) or 8765
+    python_bin = registry.platform.python_bin or "python3"
+    replacements = _investor_service_replacements(
+        investor_id,
+        repo_root=repo_root,
+        python_bin=python_bin,
+        frontend_port=port,
+    )
+
+    out_dir = repo_root / "config/platform/generated/systemd"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    templates = {
+        f"com.deribit.live.{investor_id}.service": (
+            repo_root / "config/systemd/com.deribit.live.service.template",
+            replacements,
+        ),
+        f"com.deribit.frontend.{investor_id}.service": (
+            repo_root / "config/systemd/com.deribit.frontend.service.template",
+            replacements,
+        ),
+    }
+
+    written: list[Path] = []
+    for filename, (template_path, file_replacements) in templates.items():
+        text = _render_template_file(template_path, file_replacements)
         out_path = out_dir / filename
         out_path.write_text(text, encoding="utf-8")
         written.append(out_path)

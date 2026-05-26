@@ -77,6 +77,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     inv_launchd.add_argument("--port", type=int, default=None, help="Override frontend port in plist")
     inv_launchd.add_argument("--json", action="store_true", help="Emit JSON")
 
+    inv_systemd = investor_sub.add_parser(
+        "render-systemd",
+        help="Write systemd units to config/platform/generated/systemd/",
+    )
+    inv_systemd.add_argument("investor_id", metavar="ID")
+    inv_systemd.add_argument("--port", type=int, default=None, help="Override frontend port in unit")
+    inv_systemd.add_argument("--json", action="store_true", help="Emit JSON")
+
     inv_frontend = investor_sub.add_parser(
         "frontend",
         help="Start/stop/restart/status all investor frontends via launchd (macOS)",
@@ -139,6 +147,7 @@ def dispatch(args: argparse.Namespace) -> int | None:
         list_investors,
         parse_strategy_slugs,
         render_launchd_plists,
+        render_systemd_units,
         validate_investor,
     )
 
@@ -164,10 +173,11 @@ def dispatch(args: argparse.Namespace) -> int | None:
             "strategies": list(result.strategies),
             "frontend_port": result.frontend_port,
             "launchd_paths": [str(path) for path in result.launchd_paths],
+            "systemd_paths": [str(path) for path in result.systemd_paths],
             "next_steps": [
                 "Fill secrets: ./bot investor import-handoff config/handoff/<id>.toml",
                 f"Validate + initial HWM: ./bot investor validate {result.investor_id}",
-                "Install launchd: see docs/operator-onboarding-zh-TW.md",
+                "Install launchd (macOS) or systemd (Linux): see docs/operator-onboarding-zh-TW.md",
             ],
         }
         render(payload, args.json)
@@ -227,6 +237,26 @@ def dispatch(args: argparse.Namespace) -> int | None:
         render(
             {
                 "action": "investor-render-launchd",
+                "investor_id": args.investor_id,
+                "paths": [str(path) for path in paths],
+            },
+            args.json,
+        )
+        return 0
+
+    if args.investor_command == "render-systemd":
+        from ..investor_registry import load_platform_registry
+
+        registry = load_platform_registry(repo_root=repo_root)
+        paths = render_systemd_units(
+            args.investor_id,
+            repo_root=repo_root,
+            registry=registry,
+            frontend_port=args.port,
+        )
+        render(
+            {
+                "action": "investor-render-systemd",
                 "investor_id": args.investor_id,
                 "paths": [str(path) for path in paths],
             },
