@@ -77,3 +77,10 @@ def test_dashboard_bundle_returns_sections(dashboard_client: TestClient) -> None
     assert "status" in payload
     assert "groups" in payload
     assert "realized_summary" in payload
+
+
+def test_portfolio_snapshot_handles_missing_ledger(dashboard_client: TestClient) -> None:
+    response = dashboard_client.get("/api/portfolio/snapshot")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload.get("source") == "none"

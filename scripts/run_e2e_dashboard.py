@@ -17,7 +17,7 @@ for path in (ROOT, TESTS):
 
 
 def _build_app(env_file: Path):
-    from conftest import make_config  # tests/ on sys.path (same as pytest)
+    from conftest import make_config  # tests/ on sys.path (avoids site-packages `tests`)
 
     import deribit_engine.frontend_server as frontend_server
 
@@ -30,7 +30,7 @@ def _build_app(env_file: Path):
     frontend_server._aggregate_status = lambda *_a, **_k: fake_status  # type: ignore[method-assign]
     frontend_server._aggregate_groups = lambda *_a, **_k: fake_groups  # type: ignore[method-assign]
     frontend_server._aggregate_realized_summary = lambda *_a, **_k: fake_summary  # type: ignore[method-assign]
-    frontend_server._latest_ledger_snapshot = lambda *_a, **_k: None  # type: ignore[method-assign]
+    frontend_server._latest_ledger_snapshot = lambda *_a, **_k: {"source": "none"}  # type: ignore[method-assign]
 
     return frontend_server.create_app(
         env_file=env_file,

@@ -274,6 +274,8 @@ def create_app(
             scheduler_states=[s.state for s in equity_schedulers],
             snapshot_interval_sec=interval,
         )
+        if payload is None:
+            payload = {"source": "none"}
         if payload.get("source") == "none":
             return JSONResponse(_decimalize(payload), status_code=200)
         return JSONResponse(_decimalize(payload))
