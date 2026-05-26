@@ -1,0 +1,16 @@
+{
+  "name": "deribit-strategy-dashboard",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "esbuild": "^0.21.5"
+  }
+}

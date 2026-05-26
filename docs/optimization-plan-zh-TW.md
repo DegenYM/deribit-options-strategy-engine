@@ -3,7 +3,7 @@
 本文件整理 Deribit Options Strategy Engine 的現況、已完成項、以及建議的分階段優化路線。  
 適用對象：管理方 / 維護者；與 [`repo-layout-zh-TW.md`](repo-layout-zh-TW.md)、[`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md) 互補。
 
-最後更新：2026-05-26（Phase 2 架構拆分完成）
+最後更新：2026-05-26（Phase 4 前端模組化 + Playwright 完成）
 
 ---
 
@@ -15,7 +15,7 @@
 | **P1** 營運可靠性 | ✅ 已完成 | heartbeat、watchdog、結構化 log、runbooks（commit `0e75d8b`） |
 | **P2** 程式架構 | ✅ 已完成 | `cli/`、`engine/`、`frontend_server/` + CI coverage ≥60% |
 | **P3** 部署與跨平台 | 🟡 進行中 | systemd 範本 ✅；Docker、Uptime 監控待做 |
-| **P4** 前端與對外交付 | ⬜ 未開始 | `app.js` 模組化、Playwright |
+| **P4** 前端與對外交付 | ✅ 已完成 | ES modules + Playwright + Access checklist |
 | **P5** 規模化 | ⬜ 未開始 | 觸發條件未到 |
 
 **品質指標（本機）**：280 tests 全綠 · coverage **~66%**（門檻 60%） · Ruff 全綠
@@ -35,7 +35,7 @@
 | **管理方 runbook** | `docs/operator-onboarding-zh-TW.md` |
 | **費用與合規** | HWM/NAV 快照、季結算、PDF/MD/CSV、fee 專戶、披露文件 |
 | **常駐** | macOS launchd + Linux systemd 範本；`./bot investor live\|frontend start`（macOS） |
-| **Dashboard** | bundle API、多帳並行聚合、stress prefetch 重用 |
+| **Dashboard 前端** | ES modules（`frontend/src/`）+ esbuild bundle；Playwright 煙霧測試 |
 | **API 穩定性** | `exchange_throttle.py` 全进程 pacing |
 | **測試** | 25+ 測試檔、**280** test cases |
 | **目錄規範** | `docs/repo-layout-zh-TW.md`（canonical vs legacy） |
@@ -55,7 +55,6 @@ _（目前無待收斂項；Phase 0 / 2 已 push 至 main。）_
 | 項目 | 風險 |
 |------|------|
 | `engine/management.py` ~2,000 行 | 仍偏大；後續可再拆 |
-| `frontend/app.js` ~4,600 行、零 build | 難 modularize（Phase 4） |
 | coverage 門檻 60% → 70% | 長期品質目標 |
 
 ---
@@ -171,13 +170,24 @@ deribit_demo/frontend_server/
 
 ---
 
-### Phase 4 — 前端與對外交付（2–4 週，可延後）
+### Phase 4 — 前端與對外交付（2–4 週，可延後） ✅
 
-| # | 任務 | 說明 |
-|---|------|------|
-| 4.1 | **`app.js` 模組化** | Vite + ES modules（不必一次上 React） |
-| 4.2 | **Playwright 煙霧測試** | dashboard 載入、`GET /api/dashboard_bundle` → 200 |
-| 4.3 | **Cloudflare Access checklist** | registry 已有 `dashboard_email`；補 policy 文件 |
+| # | 任務 | 說明 | 狀態 |
+|---|------|------|------|
+| 4.1 | **`app.js` 模組化** | ES modules + esbuild（`frontend/src/`） | ✅ |
+| 4.2 | **Playwright 煙霧測試** | dashboard 載入、`GET /api/dashboard_bundle` → 200 | ✅ |
+| 4.3 | **Cloudflare Access checklist** | [`cloudflare-access-checklist-zh-TW.md`](cloudflare-access-checklist-zh-TW.md) | ✅ |
+
+**產出**：
+
+```text
+frontend/src/shared/     # config, context, state
+frontend/src/dashboard.js
+frontend/e2e/            # Playwright specs
+frontend/README.md       # build + e2e 說明
+tests/e2e/               # HTTP smoke（pytest）
+scripts/run_e2e_dashboard.py
+```
 
 ---
 
@@ -213,7 +223,7 @@ gantt
     section P3 部署
     systemd 範本          :done, p3, 2026-05-26, 7d
     section P4 前端
-    Playwright+模組化      :p4, after p2a, 21d
+    Playwright+模組化      :done, p4, 2026-05-26, 21d
 ```
 
 ---
@@ -226,7 +236,7 @@ gantt
 | **P1** | Heartbeat + watchdog + runbooks + pre-commit | ✅ 已完成 |
 | **P2** | 拆 `engine.py` / `cli.py` / `frontend_server` + coverage | ✅ 已完成 |
 | **P3** | systemd 範本 | ✅ 3.1 完成；Docker / Uptime 待做 |
-| **P4** | 前端 Vite / Playwright | 對外 dashboard 穩定後 |
+| **P4** | 前端 ES modules / Playwright / Access checklist | ✅ 已完成 |
 | **P5** | PG / Metabase / Sentry | 投資人與機器數再上一級 |
 
 ---
@@ -267,6 +277,8 @@ gantt
 | [`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md) | Live bot / frontend 常駐（Linux） |
 | [`runbooks/README-zh-TW.md`](runbooks/README-zh-TW.md) | Incident 照表操課 |
 | [`telegram-alerts-zh-TW.md`](telegram-alerts-zh-TW.md) | Telegram 設定 |
+| [`cloudflare-access-checklist-zh-TW.md`](cloudflare-access-checklist-zh-TW.md) | Access policy 檢查清單 |
+| [`frontend/README.md`](../frontend/README.md) | Dashboard 前端 build / e2e |
 | [`CHANGELOG.md`](../CHANGELOG.md) | 版本變更 |
 
 ---
@@ -274,7 +286,6 @@ gantt
 ## 9. 下一步（擇一開工）
 
 1. **Phase 3.2–3.3**：Docker Compose（可選）、Uptime 監控  
-2. **Phase 4.2**：Playwright 煙霧測試（dashboard bundle → 200）  
-3. **可選**：再拆 `engine/management.py`；將 coverage 門檻提升至 70%
+2. **可選**：再拆 `engine/management.py`；將 coverage 門檻提升至 70%
 
 README「文件」一節已連結本計畫。

@@ -544,7 +544,7 @@ def create_app(
     # Static frontend
     # ------------------------------------------------------------------
 
-    frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+    frontend_dir = Path(__file__).resolve().parents[2] / "frontend"
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon_ico() -> Any:

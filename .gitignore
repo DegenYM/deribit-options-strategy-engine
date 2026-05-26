@@ -24,6 +24,10 @@ data/backtest_cache/
 data/frontend_ledger/
 data/fee_ledger/
 logs/
+node_modules/
+frontend/node_modules/
+frontend/playwright-report/
+frontend/test-results/
 .mplconfig/
 # 本機產生的 PDF（已納版交付物除外）
 output/pdf/*

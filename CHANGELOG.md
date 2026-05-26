@@ -6,8 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Dashboard static file path after `frontend_server/` package split (`parents[2]/frontend`).
+
 ### Added
 
+- Dashboard frontend ES module sources (`frontend/src/`) with esbuild bundle to `app.js`.
+- Playwright smoke tests and pytest HTTP smoke tests for dashboard pages and `/api/dashboard_bundle`.
+- [`docs/cloudflare-access-checklist-zh-TW.md`](docs/cloudflare-access-checklist-zh-TW.md) for Zero Trust policy rollout.
 - Linux systemd unit templates for live bot and dashboard frontend (`config/systemd/`).
 - `./bot investor render-systemd` and generated units under `config/platform/generated/systemd/`.
 - [`docs/live-profiles-systemd-zh-TW.md`](docs/live-profiles-systemd-zh-TW.md) runbook for Linux VPS deployment.
