@@ -9,8 +9,10 @@ Requires Node.js **18+**.
 ```bash
 cd frontend
 npm ci
-npm run build    # writes app.js from src/
+npm run build    # bundles src/ → app.js (verify in browser before commit)
 ```
+
+**注意**：`app.js` 為 runtime 交付檔；`npm run build` 會覆寫它。若 index 頁異常，可先還原 `app.js` 或確認 build 產物完整（>4000 行、含 `bootDashboard`）。
 
 ## Source layout
 

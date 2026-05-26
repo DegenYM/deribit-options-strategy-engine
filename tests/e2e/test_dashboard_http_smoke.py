@@ -63,6 +63,13 @@ def test_investor_page_loads(dashboard_client: TestClient) -> None:
     assert "aggregate-card" in response.text
 
 
+def test_dashboard_app_js_is_monolithic_bundle(dashboard_client: TestClient) -> None:
+    js = dashboard_client.get("/app.js").text
+    assert js.lstrip().startswith("// Local dashboard logic.")
+    assert "bootDashboard" in js
+    assert len(js.splitlines()) > 4000
+
+
 def test_dashboard_bundle_returns_sections(dashboard_client: TestClient) -> None:
     response = dashboard_client.get("/api/dashboard_bundle?days=7")
     assert response.status_code == 200

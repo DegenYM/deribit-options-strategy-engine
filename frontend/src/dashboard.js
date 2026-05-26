@@ -4448,12 +4448,17 @@ function attachExpandableSections() {
 }
 
 export function initDashboard() {
-  document.addEventListener("DOMContentLoaded", () => {
+  const boot = () => {
     applyInvestorLoadCopy();
     attachChartResizeObservers();
     attachControls();
     attachExpandableSections();
     attachAutoRefresh();
     refreshAll({ force: true });
-  });
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
 }
