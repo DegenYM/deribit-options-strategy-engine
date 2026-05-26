@@ -1168,6 +1168,10 @@ def main(argv: list[str] | None = None) -> int:
         render(payload, args.json)
         return 0 if sent else 1
     bot = build_bot(args)
+    if args.command == "run" and getattr(args, "live", False):
+        from .structured_log import configure_live_structured_logging
+
+        configure_live_structured_logging(bot._telegram_scope(), verbose=args.verbose)
 
     try:
         if args.command == "ping":

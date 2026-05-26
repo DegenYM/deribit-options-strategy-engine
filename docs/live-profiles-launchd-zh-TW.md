@@ -164,6 +164,21 @@ done
 | `logs/live/<id>/supervisor.log` | 監督腳本 stdout（started / exited / restarted） |
 | `logs/live/<id>/supervisor.err.log` | 監督腳本 stderr / traceback |
 | `logs/live/<id>/<slug>.log` | 各子帳 bot 的 cycle log |
+| `.state/investors/<id>/<slug>.heartbeat.json` | live cycle 心跳（`ts_ms`、`regime`、`last_error`） |
+
+## Heartbeat watchdog
+
+Live bot 每完成一個 cycle（或 API 退避重試時）會更新 heartbeat。外部腳本可偵測 bot 卡住：
+
+```bash
+# 預設 10 分鐘無更新 → Telegram 告警（需 defaults.env 內 Telegram 設定）
+python scripts/check_live_heartbeat.py
+
+# 乾跑（只印 STALE、不發 TG）
+python scripts/check_live_heartbeat.py --dry-run
+```
+
+建議用 **cron** 或 **launchd StartInterval** 每 5 分鐘跑一次。環境變數 `LIVE_HEARTBEAT_STALE_SECONDS=600` 可調門檻。故障處理見 [`docs/runbooks/README-zh-TW.md`](runbooks/README-zh-TW.md)。
 
 ## 注意事項
 

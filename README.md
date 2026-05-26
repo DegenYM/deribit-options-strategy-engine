@@ -89,6 +89,8 @@ ruff format --check deribit_demo tests scripts
 - **管理方新增投資人**（CLI：`investor init` / `import-handoff` / `validate`；registry 與 `accounts.toml` 分離）：[`docs/operator-onboarding-zh-TW.md`](docs/operator-onboarding-zh-TW.md)。
 - **目錄架構與 legacy 遷移**：[`docs/repo-layout-zh-TW.md`](docs/repo-layout-zh-TW.md)。
 - **維護與優化路線圖**（CI、營運、架構拆分）：[`docs/optimization-plan-zh-TW.md`](docs/optimization-plan-zh-TW.md)。
+- **Live 故障 runbooks**（state 不一致、429、panic、Tunnel）：[`docs/runbooks/README-zh-TW.md`](docs/runbooks/README-zh-TW.md)。
+- **Telegram 告警**：[`docs/telegram-alerts-zh-TW.md`](docs/telegram-alerts-zh-TW.md)。
 - 策略 tuning 在 [`config/shared/strategies/`](config/shared/strategies/)；子帳至少放憑證與資金規模，有需要時也可在同一檔覆寫少數策略鍵（見下方載入順序）。
 
 ### Investor / Sub-account Layout（建議）
@@ -103,6 +105,7 @@ config/investors/<investor_id>/
 
 # 同 repo 多投資人時，執行期資料依 investor_id 分目錄（互不干擾）：
 .state/investors/<investor_id>/<slug>.json
+.state/investors/<investor_id>/<slug>.heartbeat.json   # live cycle 心跳（watchdog 用）
 .state/investors/<investor_id>/<slug>.trade_journal.db
 data/frontend_ledger/<investor_id>/[<slug>/]equity_*.jsonl
 data/frontend_ledger/<investor_id>/metrics.db

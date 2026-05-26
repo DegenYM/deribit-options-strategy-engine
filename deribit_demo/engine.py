@@ -18,6 +18,7 @@ from .fees import (
     option_trade_fee_usdc,
     premium_value_usdc,
 )
+from .live_heartbeat import LiveHeartbeatRecord, heartbeat_path_for_state, write_live_heartbeat
 from .margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
     linear_usdc_short_put_initial_per_contract_usdc,
@@ -165,6 +166,25 @@ class DeribitOptionTrialBot:
             **scope,
         )
         send_telegram_alert(message, event_key=event_key, level=level)
+
+    def _write_live_heartbeat(
+        self,
+        *,
+        cycle: int,
+        regime: str | None = None,
+        last_error: str | None = None,
+    ) -> None:
+        scope = self._telegram_scope()
+        record = LiveHeartbeatRecord(
+            ts_ms=utc_now_ms(),
+            cycle=cycle,
+            regime=regime,
+            last_error=last_error,
+            investor_id=scope["investor_id"],
+            slug=scope["slug"],
+            live=True,
+        )
+        write_live_heartbeat(heartbeat_path_for_state(self.config.state_file), record)
 
     def _trade_journal(self) -> TradeJournalStore:
         if self._trade_journal_store is None:
@@ -748,6 +768,7 @@ class DeribitOptionTrialBot:
         retain_results = cycles > 0
         last_log_signature: tuple[Any, ...] | None = None
         transient_failures = 0
+        last_regime: str | None = None
         while cycles <= 0 or iteration < cycles:
             cycle_no = iteration + 1
             sleep_seconds = self.config.poll_seconds_normal
@@ -795,6 +816,9 @@ class DeribitOptionTrialBot:
                 if log_signature != last_log_signature:
                     self._log_cycle_update(cycle_no, cycle_result, live=live)
                     last_log_signature = log_signature
+                last_regime = portfolio["regime"]
+                if live:
+                    self._write_live_heartbeat(cycle=cycle_no, regime=last_regime, last_error=None)
                 if retain_results:
                     cycle_results.append(cycle_result)
                 iteration += 1
@@ -813,6 +837,8 @@ class DeribitOptionTrialBot:
                     cycle_no,
                     exc,
                 )
+                if live:
+                    self._write_live_heartbeat(cycle=cycle_no, regime=last_regime, last_error=str(exc))
                 sleep_seconds = max(self.config.poll_seconds_stress * 6, 60)
                 if live and transient_failures >= 5:
                     self._telegram_alert(
@@ -1749,6 +1775,7 @@ class DeribitOptionTrialBot:
         portfolio = status["portfolio"]
         manage_actions = cycle_result["manage"].get("actions", [])
         entry = cycle_result["entry"]
+        log_extra = {"cycle": cycle_no, "regime": portfolio["regime"]}
         LOGGER.info(
             "run cycle=%s live=%s regime=%s open_groups=%s manage_actions=%s entry_action=%s",
             cycle_no,
@@ -1757,6 +1784,7 @@ class DeribitOptionTrialBot:
             len(status.get("trade_groups", [])),
             len(manage_actions),
             entry["action"],
+            extra=log_extra,
         )
         if manage_actions:
             LOGGER.info(
