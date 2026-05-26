@@ -24,3 +24,5 @@ python scripts/check_live_heartbeat.py
 ```
 
 可設 `LIVE_HEARTBEAT_STALE_SECONDS=600`（預設 10 分鐘）調整門檻。
+
+**重啟後仍顯示 `reason=missing`**：舊行程必須重啟才會載入 heartbeat 寫入邏輯；重啟後 bot 會在 `run --live` 啟動時立刻寫入 `cycle=0`，並在每個 cycle 開始時更新 timestamp。若 watchdog 在重啟後立刻跑，請等至少一個完整 cycle（帳戶較重時首 cycle 可能需 2–5 分鐘，遇 429 更久）再判定 STALE。

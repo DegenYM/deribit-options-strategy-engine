@@ -769,9 +769,13 @@ class DeribitOptionTrialBot:
         last_log_signature: tuple[Any, ...] | None = None
         transient_failures = 0
         last_regime: str | None = None
+        if live:
+            self._write_live_heartbeat(cycle=0, regime=None, last_error=None)
         while cycles <= 0 or iteration < cycles:
             cycle_no = iteration + 1
             sleep_seconds = self.config.poll_seconds_normal
+            if live:
+                self._write_live_heartbeat(cycle=cycle_no, regime=last_regime, last_error=None)
             try:
                 manage_result = self.manage(live=live)
                 cycle_result: dict[str, Any] = {"manage": manage_result}
