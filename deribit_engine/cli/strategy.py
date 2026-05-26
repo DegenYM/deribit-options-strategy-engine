@@ -92,6 +92,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Override OPTION_STRATEGY for this scan: naked_short, bull_put_spread, covered_call",
     )
     scan_parser.add_argument("--top-n", type=int, help="Number of candidates to return")
+    scan_parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="Include scan_rejections detail (extra Deribit orderbook calls)",
+    )
     scan_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     enter_parser = subparsers.add_parser("enter-best", help="Preview or enter the best spread candidate")
@@ -498,6 +503,7 @@ def _dispatch_bot_commands(args: argparse.Namespace) -> int:
                 bot.scan(
                     currencies=parse_csv(args.currencies, upper=True) or None,
                     top_n=args.top_n,
+                    include_scan_diagnostics=args.diagnostics or None,
                 ),
                 args.json,
             )

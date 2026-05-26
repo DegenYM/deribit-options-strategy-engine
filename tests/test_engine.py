@@ -45,6 +45,21 @@ def _build_group(
     )
 
 
+def test_scan_skips_rejection_diagnostics_when_candidates_found(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        min_net_apr=Decimal("0.05"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    result = engine.scan(include_scan_diagnostics=False)
+
+    if result["candidates"]:
+        assert result["scan_rejections"] == {}
+        assert result["scan_rejections_short_call"] is None
+        assert result["entry_blockers"] == []
+
+
 def test_scan_returns_naked_put_candidates(tmp_path, fake_client):
     config = make_config(
         tmp_path,

@@ -359,6 +359,42 @@ def test_short_call_rejected_when_otm_out_of_range(tmp_path):
     assert reason == "otm_out_of_range"
 
 
+def test_strike_otm_prefilter_skips_deep_itm_call_without_orderbook(tmp_path):
+    config = make_config(
+        tmp_path,
+        enable_short_call=True,
+        btc_call_otm_min=Decimal("0.025"),
+        btc_call_otm_max=Decimal("0.18"),
+    )
+    selector = StrategySelector(config)
+    inst_payload, _book_payload = _make_btc_call_payload(14, 77000, delta="0.11")
+    instrument = OptionInstrument.from_api(inst_payload)
+    assert not selector._passes_strike_otm_prefilter(
+        instrument,
+        currency="BTC",
+        index_price=Decimal("80000"),
+        option_type="call",
+    )
+
+
+def test_strike_otm_prefilter_keeps_in_band_call(tmp_path):
+    config = make_config(
+        tmp_path,
+        enable_short_call=True,
+        btc_call_otm_min=Decimal("0.025"),
+        btc_call_otm_max=Decimal("0.18"),
+    )
+    selector = StrategySelector(config)
+    inst_payload, _book_payload = _make_btc_call_payload(14, 77000, delta="0.11")
+    instrument = OptionInstrument.from_api(inst_payload)
+    assert selector._passes_strike_otm_prefilter(
+        instrument,
+        currency="BTC",
+        index_price=Decimal("70000"),
+        option_type="call",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Three-book redesign regressions
 # ---------------------------------------------------------------------------

@@ -193,12 +193,53 @@ class StrategySelector:
         return book.index_price > 0 and instrument.strike > book.index_price
 
     @staticmethod
+    def _otm_ratio_from_strike(
+        instrument: OptionInstrument,
+        *,
+        index_price: Decimal,
+        option_type: str,
+    ) -> Decimal:
+        if index_price <= 0 or instrument.strike <= 0:
+            return Decimal("0")
+        if option_type == "call":
+            return (instrument.strike / index_price) - Decimal("1")
+        return Decimal("1") - (instrument.strike / index_price)
+
+    def _passes_strike_otm_prefilter(
+        self,
+        instrument: OptionInstrument,
+        *,
+        currency: str,
+        index_price: Decimal,
+        option_type: str,
+    ) -> bool:
+        """Cheap strike/index screen before ``get_order_book`` during scan."""
+        if index_price <= 0 or instrument.strike <= 0:
+            return True
+        otm = self._otm_ratio_from_strike(instrument, index_price=index_price, option_type=option_type)
+        if option_type == "call":
+            omin, omax = self.config.call_otm_bounds(currency)
+        else:
+            omin, omax = self.config.put_otm_bounds(currency)
+        slack = Decimal("0.005")
+        return (omin - slack) <= otm <= (omax + slack)
+
+    @staticmethod
     def _covered_call_scan_pairs(
         calls: list[OptionInstrument],
         orderbook_loader: Callable[[str], OrderBookSnapshot],
+        *,
+        index_price: Decimal | None = None,
+        currency: str = "",
+        prefilter: Callable[[OptionInstrument], bool] | None = None,
     ) -> list[tuple[OptionInstrument, OrderBookSnapshot]]:
         """OTM calls first (ascending strike) so scan examples show relevant strikes above spot."""
-        pairs = [(inst, orderbook_loader(inst.instrument_name)) for inst in calls]
+        scoped = calls
+        if prefilter is not None:
+            scoped = [inst for inst in scoped if prefilter(inst)]
+        elif index_price is not None and index_price > 0 and currency:
+            scoped = [inst for inst in scoped if inst.strike > index_price]
+        pairs = [(inst, orderbook_loader(inst.instrument_name)) for inst in scoped]
         otm = sorted(
             (pair for pair in pairs if StrategySelector._is_otm_call(*pair)),
             key=lambda pair: pair[0].strike,
@@ -874,6 +915,7 @@ class StrategySelector:
         summary_maintenance_margin: Decimal,
         collateral_currency: str,
         existing_im_by_expiry: dict[int, Decimal],
+        index_price: Decimal | None = None,
     ) -> dict[str, Any]:
         """Aggregate why naked puts are rejected (liquidity screen + sizing + build gates); for scan JSON."""
         puts = [
@@ -892,7 +934,13 @@ class StrategySelector:
         buildable_names: list[str] = []
         usdc_collateral = collateral_currency.upper() == "USDC"
 
+        ref_index = index_price if index_price is not None else Decimal("0")
         for inst in puts:
+            if ref_index > 0 and not self._passes_strike_otm_prefilter(
+                inst, currency=currency, index_price=ref_index, option_type="put"
+            ):
+                liquidity_counts["otm_out_of_range"] += 1
+                continue
             book = orderbook_loader(inst.instrument_name)
             liq = self._naked_short_put_rejection_reason(currency, inst, book)
             if liq is not None:
@@ -1016,6 +1064,7 @@ class StrategySelector:
         summary_maintenance_margin: Decimal,
         collateral_currency: str,
         existing_im_by_expiry: dict[int, Decimal],
+        index_price: Decimal | None = None,
     ) -> dict[str, Any]:
         """Aggregate why naked calls are rejected; mirrors naked_put_scan_rejection_detail."""
         calls = [
@@ -1034,7 +1083,13 @@ class StrategySelector:
         buildable_names: list[str] = []
         usdc_collateral = collateral_currency.upper() == "USDC"
 
+        ref_index = index_price if index_price is not None else Decimal("0")
         for inst in calls:
+            if ref_index > 0 and not self._passes_strike_otm_prefilter(
+                inst, currency=currency, index_price=ref_index, option_type="call"
+            ):
+                liquidity_counts["otm_out_of_range"] += 1
+                continue
             book = orderbook_loader(inst.instrument_name)
             liq = self._naked_short_call_rejection_reason(currency, inst, book)
             if liq is not None:
@@ -1145,6 +1200,7 @@ class StrategySelector:
         collateral_currency: str,
         currency: str,
         existing_im_by_expiry: dict[int, Decimal],
+        index_price: Decimal | None = None,
     ) -> list[NakedPutCandidate]:
         """Build short-call candidates (same NakedPutCandidate class with option_type=call)."""
         if regime is RiskRegime.CRISIS:
@@ -1160,7 +1216,12 @@ class StrategySelector:
             and self.config.entry_dte_min <= item.dte_days() <= self.config.entry_dte_max
         ]
         candidates: list[NakedPutCandidate] = []
+        ref_index = index_price if index_price is not None else Decimal("0")
         for inst in calls:
+            if ref_index > 0 and not self._passes_strike_otm_prefilter(
+                inst, currency=currency, index_price=ref_index, option_type="call"
+            ):
+                continue
             book = orderbook_loader(inst.instrument_name)
             if self._naked_short_call_rejection_reason(currency, inst, book) is not None:
                 continue
@@ -1697,6 +1758,7 @@ class StrategySelector:
         collateral_currency: str,
         available_cover_quantity: Decimal,
         summary_equity: Decimal,
+        index_price: Decimal | None = None,
     ) -> dict[str, Any]:
         """Aggregate why covered-call candidates are rejected; for scan JSON diagnostics."""
         calls = [
@@ -1720,7 +1782,23 @@ class StrategySelector:
                 return
             examples.append(message)
 
-        for inst, book in self._covered_call_scan_pairs(calls, orderbook_loader):
+        ref_index = index_price if index_price is not None else Decimal("0")
+        prefilter = (
+            (
+                lambda inst: self._passes_strike_otm_prefilter(
+                    inst, currency=currency, index_price=ref_index, option_type="call"
+                )
+            )
+            if ref_index > 0
+            else None
+        )
+        for inst, book in self._covered_call_scan_pairs(
+            calls,
+            orderbook_loader,
+            index_price=ref_index if ref_index > 0 else None,
+            currency=currency,
+            prefilter=prefilter,
+        ):
             liq = self._naked_short_call_rejection_reason(currency, inst, book)
             if liq is not None:
                 liquidity_counts[liq] += 1
@@ -1807,6 +1885,7 @@ class StrategySelector:
         currency: str,
         available_cover_quantity: Decimal,
         summary_equity: Decimal,
+        index_price: Decimal | None = None,
     ) -> list[NakedPutCandidate]:
         if regime is RiskRegime.CRISIS:
             return []
@@ -1824,7 +1903,12 @@ class StrategySelector:
             and self.config.entry_dte_min <= item.dte_days() <= self.config.entry_dte_max
         ]
         candidates: list[NakedPutCandidate] = []
+        ref_index = index_price if index_price is not None else Decimal("0")
         for inst in calls:
+            if ref_index > 0 and not self._passes_strike_otm_prefilter(
+                inst, currency=currency, index_price=ref_index, option_type="call"
+            ):
+                continue
             book = orderbook_loader(inst.instrument_name)
             if self._naked_short_call_rejection_reason(currency, inst, book) is not None:
                 continue
@@ -1936,6 +2020,7 @@ class StrategySelector:
         collateral_currency: str,
         currency: str,
         existing_im_by_expiry: dict[int, Decimal],
+        index_price: Decimal | None = None,
     ) -> list[NakedPutCandidate]:
         if regime is RiskRegime.CRISIS:
             return []
@@ -1950,7 +2035,12 @@ class StrategySelector:
             and self.config.entry_dte_min <= item.dte_days() <= self.config.entry_dte_max
         ]
         candidates: list[NakedPutCandidate] = []
+        ref_index = index_price if index_price is not None else Decimal("0")
         for inst in puts:
+            if ref_index > 0 and not self._passes_strike_otm_prefilter(
+                inst, currency=currency, index_price=ref_index, option_type="put"
+            ):
+                continue
             book = orderbook_loader(inst.instrument_name)
             reason = self._naked_short_put_rejection_reason(currency, inst, book)
             if reason is not None:

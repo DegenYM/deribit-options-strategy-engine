@@ -42,8 +42,9 @@ from .context import (
 
 
 class ManagementMixin:
-    def manage(self, *, live: bool = False) -> dict[str, Any]:
-        context = self._load_runtime()
+    def manage(self, *, live: bool = False, context: RuntimeContext | None = None) -> dict[str, Any]:
+        if context is None:
+            context = self._load_runtime()
         actions: list[dict[str, Any]] = []
 
         actions.extend(self._pending_covered_call_spot_exit_actions(context, live=live))
@@ -124,14 +125,19 @@ class ManagementMixin:
             if live:
                 self._write_live_heartbeat(cycle=cycle_no, regime=last_regime, last_error=None)
             try:
-                manage_result = self.manage(live=live)
+                context = self._load_runtime()
+                manage_result = self.manage(live=live, context=context)
                 cycle_result: dict[str, Any] = {"manage": manage_result}
 
-                context = self._load_runtime()
                 status_after_manage = self._status_payload(context)
                 cycle_result["status"] = status_after_manage
                 candidates = self._scan_candidates(context, currencies=currencies, top_n=self.config.top_n)
-                cycle_result["scan"] = self._scan_payload(context, candidates, scan_currencies=currencies)
+                cycle_result["scan"] = self._scan_payload(
+                    context,
+                    candidates,
+                    scan_currencies=currencies,
+                    include_scan_diagnostics=False,
+                )
                 portfolio = status_after_manage["portfolio"]
                 can_enter = not portfolio["halt_new_entries"]
                 if can_enter:

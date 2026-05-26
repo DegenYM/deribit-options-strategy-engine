@@ -27,11 +27,19 @@ class ScannerMixin:
         *,
         currencies: tuple[str, ...] | None = None,
         top_n: int | None = None,
+        include_scan_diagnostics: bool | None = None,
     ) -> dict[str, Any]:
         context = self._load_runtime()
         candidates = self._scan_candidates(context, currencies=currencies, top_n=top_n)
         self.state_store.save(context.state)
-        return self._scan_payload(context, candidates, scan_currencies=currencies)
+        if include_scan_diagnostics is None:
+            include_scan_diagnostics = not candidates
+        return self._scan_payload(
+            context,
+            candidates,
+            scan_currencies=currencies,
+            include_scan_diagnostics=include_scan_diagnostics,
+        )
 
     def _scan_payload(
         self,
@@ -39,6 +47,7 @@ class ScannerMixin:
         candidates: list[NakedPutCandidate],
         *,
         scan_currencies: tuple[str, ...] | None = None,
+        include_scan_diagnostics: bool = True,
     ) -> dict[str, Any]:
         selected = scan_currencies or self.config.managed_currencies
         option_counts = Counter((c.option_type or "put") for c in candidates)
@@ -64,13 +73,24 @@ class ScannerMixin:
                 "put_and_call_compete_in_scan": self.config.naked_scan_put_and_call_compete,
                 "note_zh": note_zh,
             },
-            "entry_blockers": self._scan_entry_blockers(context, candidates, selected_currencies=selected),
-            "scan_rejections": self._covered_call_scan_rejections_payload(context, tuple(selected))
-            if is_covered_call
-            else self._naked_scan_rejections_payload(context, tuple(selected)),
-            "scan_rejections_short_call": None
-            if is_covered_call
-            else self._naked_scan_rejections_short_call_payload(context, tuple(selected)),
+            "entry_blockers": self._scan_entry_blockers(
+                context,
+                candidates,
+                selected_currencies=selected,
+                include_scan_diagnostics=include_scan_diagnostics,
+            ),
+            "scan_rejections": (
+                self._covered_call_scan_rejections_payload(context, tuple(selected))
+                if is_covered_call
+                else self._naked_scan_rejections_payload(context, tuple(selected))
+            )
+            if include_scan_diagnostics
+            else {},
+            "scan_rejections_short_call": (
+                None if is_covered_call else self._naked_scan_rejections_short_call_payload(context, tuple(selected))
+            )
+            if include_scan_diagnostics
+            else None,
         }
 
     def _naked_scan_rejections_payload(
@@ -94,6 +114,7 @@ class ScannerMixin:
                 )
                 regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
                 key = f"{currency}/{collateral_ccy}" if collateral_ccy != currency else currency
+                index_price = self._currency_index_price(currency, context.orderbook_cache)
                 out[key] = self.strategy.naked_put_scan_rejection_detail(
                     currency,
                     collateral_markets,
@@ -103,6 +124,7 @@ class ScannerMixin:
                     summary_maintenance_margin=mm,
                     collateral_currency=collateral_ccy,
                     existing_im_by_expiry=im_by_exp,
+                    index_price=index_price,
                 )
         return out
 
@@ -130,6 +152,7 @@ class ScannerMixin:
                 )
                 regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
                 key = f"{currency}/{collateral_ccy}" if collateral_ccy != currency else currency
+                index_price = self._currency_index_price(currency, context.orderbook_cache)
                 out[key] = self.strategy.naked_call_scan_rejection_detail(
                     currency,
                     collateral_markets,
@@ -139,6 +162,7 @@ class ScannerMixin:
                     summary_maintenance_margin=mm,
                     collateral_currency=collateral_ccy,
                     existing_im_by_expiry=im_by_exp,
+                    index_price=index_price,
                 )
         return out
 
@@ -170,6 +194,7 @@ class ScannerMixin:
                 collateral_currency=ccy,
                 available_cover_quantity=available_cover,
                 summary_equity=equity,
+                index_price=self._currency_index_price(ccy, context.orderbook_cache),
             )
         return out
 
@@ -179,6 +204,7 @@ class ScannerMixin:
         candidates: list[NakedPutCandidate],
         *,
         selected_currencies: tuple[str, ...],
+        include_scan_diagnostics: bool = True,
     ) -> list[str]:
         blockers: list[str] = []
         snap = context.snapshot
@@ -205,6 +231,19 @@ class ScannerMixin:
             return blockers
         if candidates:
             return []
+        if not include_scan_diagnostics:
+            blockers: list[str] = []
+            snap = context.snapshot
+            if snap.halt_new_entries:
+                return list(snap.halt_entry_reasons)
+            for currency in selected_currencies:
+                regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
+                if regime is RiskRegime.CRISIS:
+                    detail = snap.regime_detail_by_currency.get(currency, ())
+                    blockers.append(f"{currency}: regime=crisis — {'; '.join(detail)}")
+            if not blockers:
+                blockers.append("no_candidates: run `./bot scan --diagnostics` for rejection detail")
+            return blockers
         if self.config.option_strategy == "covered_call":
             return self._covered_call_scan_entry_blockers(
                 context,
@@ -605,6 +644,7 @@ class ScannerMixin:
             regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
             if regime is RiskRegime.CRISIS:
                 continue
+            index_price = self._currency_index_price(currency, orderbook_cache)
             markets_by_collateral: dict[str, list[OptionInstrument]] = {}
             for market in context.markets_by_currency.get(currency, []):
                 coll = "USDC" if self._linear_usdc_mode() else (market.settlement_currency or currency)
@@ -666,6 +706,7 @@ class ScannerMixin:
                         currency=currency,
                         available_cover_quantity=available_cover,
                         summary_equity=collateral_summary.equity,
+                        index_price=index_price,
                     ):
                         if self._naked_candidate_matches_open_group(context.state, candidate):
                             continue
@@ -688,6 +729,7 @@ class ScannerMixin:
                         collateral_currency=collateral_ccy,
                         currency=currency,
                         existing_im_by_expiry=im_by_exp,
+                        index_price=index_price,
                     ):
                         if self._naked_candidate_matches_open_group(context.state, candidate):
                             continue
@@ -713,6 +755,7 @@ class ScannerMixin:
                         collateral_currency=collateral_ccy,
                         currency=currency,
                         existing_im_by_expiry=im_by_exp,
+                        index_price=index_price,
                     ):
                         if self._naked_candidate_matches_open_group(context.state, candidate):
                             continue

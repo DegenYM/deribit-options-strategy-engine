@@ -17,8 +17,9 @@ for path in (ROOT, TESTS):
 
 
 def _build_app(env_file: Path):
-    import deribit_engine.frontend_server as frontend_server
     from conftest import make_config  # tests/ on sys.path (same as pytest)
+
+    import deribit_engine.frontend_server as frontend_server
 
     cfg = make_config(env_file.parent, state_file=env_file.parent / "e2e.state.json")
     fake_status = {"portfolio": {"total_equity_usdc": "1000"}, "trade_groups": []}
