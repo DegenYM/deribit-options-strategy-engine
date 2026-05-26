@@ -11,9 +11,9 @@
 
 | Phase | 狀態 | 備註 |
 |-------|------|------|
-| **P0** 收斂本機改動 | 🟡 部分完成 | CI、Telegram、`live_enabled`、pre-commit 已進 main；**Phase 2 拆分尚未 commit** |
+| **P0** 收斂本機改動 | ✅ 已完成 | CI、Telegram、Phase 2 拆分已 commit + push（`17b01d9`） |
 | **P1** 營運可靠性 | ✅ 已完成 | heartbeat、watchdog、結構化 log、runbooks（commit `0e75d8b`） |
-| **P2** 程式架構 | ✅ 本機完成 | `cli/`、`engine/`、`frontend_server/` + CI coverage ≥60%；**待 commit / push** |
+| **P2** 程式架構 | ✅ 已完成 | `cli/`、`engine/`、`frontend_server/` + CI coverage ≥60% |
 | **P3** 部署與跨平台 | ⬜ 未開始 | systemd 範本、Docker、Uptime 監控 |
 | **P4** 前端與對外交付 | ⬜ 未開始 | `app.js` 模組化、Playwright |
 | **P5** 規模化 | ⬜ 未開始 | 觸發條件未到 |
@@ -48,17 +48,12 @@
 
 ### 1.2 本機已做、待 commit / push
 
-| 項目 | 說明 |
-|------|------|
-| **Phase 2 架構拆分** | 刪除 `cli.py`、`engine.py`、`frontend_server.py`；改為三個套件（見 §3 Phase 2 產出） |
-| **CI coverage 門檻** | `pytest-cov`、`pyproject.toml` `fail_under=60`、Actions 加 `--cov` |
-| **Ruff format** | 全 repo 格式統一（若 Phase 2 commit 時一併納入） |
+_（目前無待收斂項；Phase 0 / 2 已 push 至 main。）_
 
 ### 1.3 仍缺 / 技術債
 
 | 項目 | 風險 |
 |------|------|
-| Phase 2 改動未 commit / push | main 與本機漂移 |
 | `engine/management.py` ~2,000 行 | 仍偏大；後續可再拆 |
 | `frontend/app.js` ~4,600 行、零 build | 難 modularize（Phase 4） |
 | coverage 門檻 60% → 70% | 長期品質目標 |
@@ -92,7 +87,7 @@ TELEGRAM_ALERT_COOLDOWN_SECONDS=300
 
 ## 3. 分階段計畫
 
-### Phase 0 — 收斂本機改動（1–2 天） 🟡
+### Phase 0 — 收斂本機改動（1–2 天） ✅
 
 **目標**：工程基礎落地，main 與本機一致。
 
@@ -102,7 +97,7 @@ TELEGRAM_ALERT_COOLDOWN_SECONDS=300
 | 0.2 | 確認 `defaults.env` 內 Telegram 已啟用且 `./bot telegram-test` 成功 | 告警通道可用 | ✅（營運確認） |
 | 0.3 | 刪除 `telegram.env.example`，更新 README / docs 指向單一 `defaults.env` | 設定路徑單一 | ✅ |
 | 0.4 | Commit `live_enabled` 及對應 tests（若已驗證） | 子帳可「只追蹤不下單」 | ✅ |
-| 0.5 | Commit Phase 2 架構拆分 + coverage CI | main 與本機一致 | ⬜ 待做 |
+| 0.5 | Commit Phase 2 架構拆分 + coverage CI | main 與本機一致 | ✅ `17b01d9` |
 
 ---
 
@@ -206,7 +201,7 @@ gantt
     dateFormat YYYY-MM-DD
     section P0 收斂
     Commit CI+TG           :done, p0, 2026-05-26, 3d
-    Commit Phase2 拆分     :active, p0b, 2026-05-26, 2d
+    Commit Phase2 拆分     :done, p0b, 2026-05-26, 2d
     section P1 營運
     Heartbeat+watchdog     :done, p1a, 2026-05-26, 7d
     結構化log+runbooks     :done, p1b, 2026-05-26, 10d
@@ -228,9 +223,9 @@ gantt
 
 | 優先 | 做什麼 | 為什麼 |
 |------|--------|--------|
-| **P0** | Commit Phase 2 拆分 + push | main 與本機一致 |
+| **P0** | Commit Phase 2 拆分 + push | ✅ 已完成 |
 | **P1** | Heartbeat + watchdog + runbooks + pre-commit | ✅ 已完成 |
-| **P2** | 拆 `engine.py` / `cli.py` / `frontend_server` + coverage | ✅ 本機完成，待 commit |
+| **P2** | 拆 `engine.py` / `cli.py` / `frontend_server` + coverage | ✅ 已完成 |
 | **P3** | systemd / Docker | 上 VPS 才急 |
 | **P4** | 前端 Vite / Playwright | 對外 dashboard 穩定後 |
 | **P5** | PG / Metabase / Sentry | 投資人與機器數再上一級 |
@@ -278,9 +273,8 @@ gantt
 
 ## 9. 下一步（擇一開工）
 
-1. **Phase 0.5**：commit + push Phase 2 架構拆分（`cli/`、`engine/`、`frontend_server/`）與 coverage CI 設定  
-2. **Phase 3.1**：systemd unit 範本（對標 launchd template）  
-3. **Phase 4.2**：Playwright 煙霧測試（dashboard bundle → 200）  
-4. **可選**：再拆 `engine/management.py`；將 coverage 門檻提升至 70%
+1. **Phase 3.1**：systemd unit 範本（對標 launchd template）  
+2. **Phase 4.2**：Playwright 煙霧測試（dashboard bundle → 200）  
+3. **可選**：再拆 `engine/management.py`；將 coverage 門檻提升至 70%
 
 README「文件」一節已連結本計畫。
