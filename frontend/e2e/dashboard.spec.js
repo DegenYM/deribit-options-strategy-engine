@@ -19,7 +19,9 @@ test.describe("dashboard smoke", () => {
     const response = await request.get("/api/health");
     expect(response.status()).toBe(200);
     const payload = await response.json();
-    expect(payload).toHaveProperty("ok", true);
+    expect(payload).toHaveProperty("env");
+    expect(payload).toHaveProperty("server_time_ms");
+    expect(payload).toHaveProperty("has_private_creds");
   });
 
   test("dashboard bundle endpoint responds", async ({ request }) => {

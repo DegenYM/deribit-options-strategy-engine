@@ -9,13 +9,16 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+TESTS = ROOT / "tests"
+for path in (ROOT, TESTS):
+    s = str(path)
+    if s not in sys.path:
+        sys.path.insert(0, s)
 
 
 def _build_app(env_file: Path):
     import deribit_engine.frontend_server as frontend_server
-    from tests.conftest import make_config
+    from conftest import make_config  # tests/ on sys.path (same as pytest)
 
     cfg = make_config(env_file.parent, state_file=env_file.parent / "e2e.state.json")
     fake_status = {"portfolio": {"total_equity_usdc": "1000"}, "trade_groups": []}
