@@ -1,0 +1,35 @@
+from __future__ import annotations
+
+import copy
+import logging
+from typing import Any
+
+from .context import RouteContext
+
+LOGGER = logging.getLogger(__name__)
+
+
+def register_groups_routes(app: Any, ctx: RouteContext) -> None:
+    import deribit_demo.frontend_server as pkg
+
+    @app.get("/api/groups")
+    def api_groups() -> Any:
+        from fastapi.responses import JSONResponse
+
+        cache_key = ("groups", pkg._closed_groups_cache_key(ctx.accounts))
+
+        def _compute() -> dict[str, Any]:
+            return pkg._aggregate_groups(ctx.accounts, exchange_prefetch_cache=ctx.exchange_prefetch_cache)
+
+        try:
+            payload = copy.deepcopy(ctx.groups_cache.get_or_set(cache_key, _compute))
+        except Exception as exc:  # noqa: BLE001
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=500, detail=f"groups failed: {exc}") from exc
+        try:
+            spot_idx = pkg._spot_index_decimals(ctx.spot_cache.get_or_set("spot", ctx.fetch_spot))
+            pkg._apply_spot_native_backfill(payload, spot_idx)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("groups spot native backfill skipped: %s", exc)
+        return JSONResponse(pkg._decimalize(payload))

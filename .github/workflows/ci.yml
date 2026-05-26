@@ -35,4 +35,4 @@ jobs:
         run: ruff format --check deribit_demo tests scripts
 
       - name: Pytest
-        run: pytest tests/ -q
+        run: pytest tests/ -q --cov=deribit_demo --cov-report=term-missing:skip-covered --cov-fail-under=60
