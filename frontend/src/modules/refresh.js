@@ -19,6 +19,14 @@ import { STATE } from "../shared/state.js";
 import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num, promisePool, realizedSummaryUrl, setInvestorProgressBar, setText, showToast, updateUnderlyingIndexCache } from "./domain.js";
 import { aprSeriesUrl, renderAprChart, renderBookEquityChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
 import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress, renderTopBar } from "./render.js";
+
+/** Set for the duration of refreshAll; used by background status/bundle retries. */
+let activeRenderDashboard = null;
+
+function invokeRenderDashboard() {
+  activeRenderDashboard?.();
+}
+
 export function updateHeaderSpotDom() {
   const elBtc = document.getElementById("header-spot-btc");
   const elEth = document.getElementById("header-spot-eth");
@@ -239,7 +247,7 @@ export async function fetchStatusWithTimeout() {
           STATE.status = d;
           STATE.dataFreshness.source = "live";
           STATE.dataFreshness.live = true;
-          renderDashboardFn?.();
+          invokeRenderDashboard();
         })
         .catch(() => {});
       return null;
@@ -284,7 +292,7 @@ export async function fetchDashboardBundle({ backgroundOnTimeout = false } = {})
         fetchJson(dashboardBundleUrl(30))
           .then((d) => {
             applyDashboardBundlePayload(d);
-            renderDashboardFn?.();
+            invokeRenderDashboard();
           })
           .catch(() => {});
       }
@@ -340,6 +348,7 @@ export function refreshWaitMs() {
 }
 
 export async function refreshAll({ force = false, silentIfLimited = false, renderDashboard: renderDashboardFn } = {}) {
+  activeRenderDashboard = renderDashboardFn ?? null;
   if (STATE.refreshInFlight) {
     if (!silentIfLimited) showToast(i18n("refresh already running", "已有更新正在進行"));
     return;
@@ -371,7 +380,12 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       renderScheduled = true;
       requestAnimationFrame(() => {
         renderScheduled = false;
-        renderDashboardFn?.();
+        try {
+          renderDashboardFn?.();
+        } catch (err) {
+          console.error("renderDashboard failed", err);
+          showToast(`render failed: ${err.message}`);
+        }
       });
     }
 
@@ -533,7 +547,12 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     }
 
     if (!INVESTOR || STATE.investorReady) {
-      renderDashboardFn?.();
+      try {
+        renderDashboardFn?.();
+      } catch (err) {
+        console.error("renderDashboard failed", err);
+        showToast(`render failed: ${err.message}`);
+      }
     }
 
     setInvestorProgressBar(false);
@@ -544,75 +563,6 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
   } finally {
     STATE.refreshInFlight = false;
     setInvestorProgressBar(false);
+    activeRenderDashboard = null;
   }
-}
-
-export function setBookFilter(book) {
-  STATE.bookFilter = book;
-  const filterRoot = document.querySelector("#book-filter");
-  if (filterRoot) {
-    filterRoot.querySelectorAll("button[data-book]").forEach((btn) => {
-      btn.classList.toggle("filter-active", btn.dataset.book === book);
-    });
-  }
-  renderBookEquityChart();
-  renderCumulativePnlChart();
-  renderDailyPnlChart();
-}
-
-export function attachAutoRefresh() {
-  const checkbox = document.getElementById("auto-refresh");
-  if (!checkbox) return;
-  function reset() {
-    if (STATE.autoRefreshHandle) {
-      clearInterval(STATE.autoRefreshHandle);
-      STATE.autoRefreshHandle = null;
-    }
-    if (checkbox.checked) {
-      STATE.autoRefreshHandle = setInterval(
-        () => refreshAll({ silentIfLimited: true }),
-        FRONTEND_REFRESH_INTERVAL_MS
-      );
-    }
-  }
-  checkbox.addEventListener("change", reset);
-  reset();
-}
-
-export function attachControls() {
-  document.getElementById("refresh-now")?.addEventListener("click", () => refreshAll());
-  document.getElementById("book-filter")?.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-book]");
-    if (btn) setBookFilter(btn.dataset.book);
-  });
-  document.getElementById("activity-section")?.addEventListener("click", (e) => {
-    const btn = e.target.closest("button.activity-page-btn");
-    if (!btn || btn.disabled) return;
-    const section = btn.dataset.activitySection;
-    const dir = btn.dataset.direction === "next" ? 1 : -1;
-    if (section === "open") STATE.activityOpenPage += dir;
-    else if (section === "closed") STATE.activityClosedPage += dir;
-    renderRecentActivity(STATE.status, STATE.report, STATE.groups);
-  });
-  document.getElementById("apr-window")?.addEventListener("change", async (e) => {
-    STATE.aprWindow = parseInt(e.target.value, 10) || 30;
-    try {
-      STATE.aprSeries = await fetchJson(aprSeriesUrl());
-    } catch (err) {
-      showToast(`apr series: ${err.message}`);
-    }
-    renderAprChart();
-  });
-}
-
-export function attachExpandableSections() {
-  document.querySelectorAll("details.collapsible-section").forEach((details) => {
-    details.addEventListener("toggle", () => {
-      if (!details.open) return;
-      scheduleChartResizeAll();
-      if (INVESTOR && details.id === "charts-section") {
-        loadChartDataIfNeeded();
-      }
-    });
-  });
 }

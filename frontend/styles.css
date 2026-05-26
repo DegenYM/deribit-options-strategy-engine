@@ -1536,12 +1536,36 @@ table tbody tr:hover {
   line-height: 1.4;
 }
 
-.native-book-breakdown {
+.native-book-breakdown,
+.book-equity-dual-breakdown {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
   align-items: flex-start;
   max-width: 100%;
+}
+
+.book-equity-dual-row {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.35rem;
+  max-width: 100%;
+}
+
+.book-equity-dual-sep {
+  font-size: 0.7rem;
+  user-select: none;
+}
+
+.inv-equity-dual {
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid rgb(51 65 85 / 0.45);
+}
+
+.inv-equity-dual .book-equity-dual-row {
+  font-size: 0.8rem;
 }
 
 .native-book-item {

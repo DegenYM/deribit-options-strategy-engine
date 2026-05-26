@@ -16,7 +16,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { bookEquityUsdForDisplay, dedupeTradeGroups, fmtNum, fmtPct, fmtUsd, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook } from "./domain.js";
+import { bookEquityNative, bookEquityUsdForDisplay, dedupeTradeGroups, fmtNum, fmtPct, fmtUsd, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -101,11 +101,6 @@ export function attachChartResizeObservers() {
 }
 
 /** Live portfolio equity for rolling APR denominator (matches engine effective capital). */
-export function aprEffectiveCapitalUsdc() {
-  const eq = num(STATE.status?.portfolio?.total_equity_usdc);
-  return eq !== null && eq > 0 ? eq : null;
-}
-
 export function aprSeriesUrl() {
   let url = `/api/apr_series?window_days=${STATE.aprWindow}`;
   const cap = aprEffectiveCapitalUsdc();
@@ -274,16 +269,6 @@ export function sumOpenCreditByStrategy(openRows, status, groups) {
   return out;
 }
 
-export function fmtOpenCreditStrategyBreakdown(byStrategy) {
-  const rows = strategyOrder(new Set(STRATEGIES.map((s) => s.id))).map((id) => {
-    const short = escapeHtml(strategyInfo(id).short);
-    const n = num(byStrategy[id]);
-    const text = n === null ? "—" : fmtUsd(n);
-    return `<div class="open-credit-row"><span class="open-credit-label text-slate-500">${short}</span><span class="open-credit-value font-mono tabular-nums text-slate-300">${text}</span></div>`;
-  });
-  return `<div class="open-credit-breakdown">${rows.join("")}</div>`;
-}
-
 /** Closed groups with realized PnL (full ``groups.closed`` + report enrich). */
 export function lifetimeRealizedClosedRows(report, groups, status = null) {
   const st = status ?? STATE.status;
@@ -324,39 +309,28 @@ export function sumWindowRealizedPnlNativeByBook(report, groups, status, windowD
 }
 
 export function bookEquityNativeByBook(status) {
-  const accounts = status?.accounts || {};
   const out = {};
   let any = false;
   for (const book of CORE_BOOKS) {
-    out[book] = num(accounts[book]?.equity);
-    if (out[book] !== null) any = true;
+    const n = bookEquityNative(status, book);
+    out[book] = n;
+    if (n !== null) any = true;
   }
   if (!any) {
     const { portfolio } = resolvedPortfolio();
     for (const book of CORE_BOOKS) {
-      out[book] = num(portfolio?.equity_by_book?.[book]);
+      if (book === "USDC") {
+        out[book] = num(portfolio?.equity_by_book?.[book]);
+        continue;
+      }
+      const usd = num(portfolio?.equity_by_book?.[book]);
+      const spot =
+        num(status?.underlying_index_usd?.[book]) ?? num(STATE.lastSpotUsd?.[book]);
+      out[book] =
+        usd !== null && spot !== null && spot > 0 ? usd / spot : null;
     }
   }
   return out;
-}
-
-export function fmtNativeBookBreakdown(byBook, { places = { BTC: 5, ETH: 4, USDC: 2 }, pnl = false } = {}) {
-  const symbols = { BTC: "₿", ETH: "♦", USDC: "($)" };
-  const items = ["BTC", "ETH", "USDC"].map((book) => {
-    const n = num(byBook[book]);
-    const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
-    const cls = pnl ? ` ${pnlClass(byBook[book])}` : "";
-    return `<span class="native-book-item"><span class="native-book-symbol text-slate-500">${symbols[book]}</span> <span class="font-mono tabular-nums${cls}">${text}</span></span>`;
-  });
-  return `<span class="native-book-breakdown">${items.join("")}</span>`;
-}
-
-export function fmtLifetimeRealizedNativeBreakdown(byBook) {
-  return fmtNativeBookBreakdown(byBook, { pnl: true });
-}
-
-export function fmtBookEquityNativeBreakdown(byBook) {
-  return fmtNativeBookBreakdown(byBook);
 }
 
 export function openTradeGroupsForRisk() {

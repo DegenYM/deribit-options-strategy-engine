@@ -16,7 +16,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, collateralBookSpotUsd, currentOpenRows, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, lifetimePerformanceStartMs, normalizeStrategyId, num, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { bookEquityNativeByBook, sumLifetimeRealizedPnlNativeByBook, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook } from "./charts.js";
 export function renderInvestorHeaderIdentity(health) {
   if (!INVESTOR || !health) return;
@@ -246,16 +246,6 @@ export function bookCardHtml(book, status) {
   `;
 }
 
-export function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  }[c]));
-}
-
 export function renderBookCards(status) {
   const root = document.getElementById("book-cards");
   if (!root) return;
@@ -392,6 +382,7 @@ export function renderAggregate(status, report) {
     windowLabelDays
   );
   const equityNativeByBook = bookEquityNativeByBook(status);
+  const equityUsdByBook = bookEquityUsdByBook(status);
   const sinceLine =
     lifetimeStartMs !== null
       ? `${i18n("since", "自")} ${fmtDate(lifetimeStartMs)}`
@@ -426,6 +417,7 @@ export function renderAggregate(status, report) {
     lifetimeApr,
     windowApr,
     equityNativeByBook,
+    equityUsdByBook,
   };
   const desktopOverview = overviewMetricsGridHtml(overviewCtx);
 
@@ -474,7 +466,7 @@ export function closedBookEquityUsd(status, book) {
   const b = String(book || "USDC").toUpperCase();
   const fromPortfolio = num(status?.portfolio?.equity_by_book?.[b]);
   if (fromPortfolio !== null && fromPortfolio > 0) return fromPortfolio;
-  const native = closedBookTotalEquityNative(status, b);
+  const native = bookEquityNative(status, b);
   if (native === null) return null;
   if (b === "USDC") return native;
   const spot = num(status?.underlying_index_usd?.[b]) ?? num(STATE.lastSpotUsd?.[b]);
@@ -652,20 +644,6 @@ export function openPositionMetricHtml(label, valueHtml, extraClass = "", { seco
       <span class="open-position-label">${label}</span>
       <span class="open-position-value">${valueHtml}</span>
     </div>`;
-}
-
-export function openPositionTitle(g) {
-  const ccy = String(g.currency || "").toUpperCase() || "Option";
-  const id = strategyId(g);
-  if (id === "bull_put_spread") {
-    return INVESTOR_ZH ? `${ccy} 賣權價差` : `${ccy} put spread`;
-  }
-  const side = optionPutCallLabel(g);
-  if (INVESTOR_ZH) {
-    const sideZh = side.toLowerCase() === "call" ? "買權" : "賣權";
-    return `${ccy} 賣出${sideZh}`;
-  }
-  return `${ccy} short ${side.toLowerCase()}`;
 }
 
 export function openPositionLegCardHtml(g, status, groups, role) {
@@ -1032,16 +1010,6 @@ export function renderRecentActivity(status, report, groups) {
     closedPagRoot.innerHTML = activityPaginationHtml("closed", closedPage);
     closedPagRoot.hidden = !closedPagRoot.innerHTML;
   }
-}
-
-export function closedTimestampMs(g) {
-  const ms = num(g.closed_timestamp_ms);
-  if (ms !== null) return ms;
-  if (g.closed_timestamp) {
-    const dt = luxon.DateTime.fromISO(String(g.closed_timestamp), { zone: "utc" });
-    if (dt.isValid) return dt.toMillis();
-  }
-  return null;
 }
 
 /** Realized PnL in the book collateral native unit (USDC pnl ÷ index for inverse books). */

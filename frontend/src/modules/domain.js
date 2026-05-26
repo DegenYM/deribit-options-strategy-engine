@@ -126,14 +126,16 @@ export function overviewMetricsGridHtml(ctx) {
     lifetimeApr,
     windowApr,
     equityNativeByBook,
+    equityUsdByBook,
   } = ctx;
   return `
     <div class="overview-metrics-grid">
       <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${i18n("Total equity", "總權益（USDC 約當）")}</div>
+        <div class="text-xs text-slate-400">${i18n("Total equity", "總權益")}</div>
         <div class="text-2xl font-mono">${fmtUsd(totalEquity)}</div>
+        <div class="text-[11px] text-slate-500">${i18n("USDC equivalent (all books)", "USDC 約當（全帳本合計）")}</div>
         <div class="overview-metric-meta">
-          <div class="overview-metric-line">${fmtBookEquityNativeBreakdown(equityNativeByBook)}</div>
+          <div class="overview-metric-line">${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}</div>
           <div class="overview-metric-line">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
         </div>
       </div>
@@ -236,6 +238,7 @@ export function investorOverviewHtml(ctx) {
     lifetimeApr,
     windowApr,
     equityNativeByBook,
+    equityUsdByBook,
   } = ctx;
   const winHold =
     summary !== null && summary !== undefined
@@ -250,7 +253,7 @@ export function investorOverviewHtml(ctx) {
         <div class="inv-kpi">
           <span class="inv-kpi-label">${i18n("Total equity", "總權益")}</span>
           <span class="inv-kpi-value font-mono tabular-nums">${fmtUsd(totalEquity)}</span>
-          <span class="inv-kpi-foot">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</span>
+          <span class="inv-kpi-foot">${i18n("USDC equivalent", "USDC 約當")} · ${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</span>
         </div>
         <div class="inv-kpi">
           <span class="inv-kpi-label">${i18n("Day P&L", "本日損益")}</span>
@@ -258,7 +261,7 @@ export function investorOverviewHtml(ctx) {
           <span class="inv-kpi-foot">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</span>
         </div>
       </div>
-      <div class="inv-chips-row">${investorNativeChipsHtml(equityNativeByBook)}</div>
+      <div class="inv-equity-dual">${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}</div>
     </section>
 
     <section class="inv-panel" aria-label="${i18n("Open risk", "未平倉風險")}">
@@ -797,6 +800,16 @@ export function fmtNum(value, places = 4) {
   return (places >= 8 ? fmt.num8 : fmt.num4).format(n);
 }
 
+export function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[c]));
+}
+
 export function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj || {}, key);
 }
@@ -812,6 +825,15 @@ export function bookEquityUsdForDisplay(book, status) {
   const spot = num(status?.underlying_index_usd?.[b]) ?? num(STATE.lastSpotUsd?.[b]);
   if (spot === null || spot <= 0) return null;
   return native * spot;
+}
+
+/** Per-book equity in USDC equivalent (from ``equity_by_book`` or native × index). */
+export function bookEquityUsdByBook(status) {
+  const out = {};
+  for (const book of CORE_BOOKS) {
+    out[book] = bookEquityUsdForDisplay(book, status);
+  }
+  return out;
 }
 
 // Match USDC equity / day-start: include spot MTM (and exclude external flows).
@@ -886,6 +908,96 @@ export function rollingWindowAprHint(days) {
     `Last ${n}d closes ÷ ledger total equity`,
     `近 ${n} 日平倉 ÷ 當日總權益`
   );
+}
+
+/** Live portfolio equity for rolling APR denominator (matches engine effective capital). */
+export function aprEffectiveCapitalUsdc() {
+  const eq = num(STATE.status?.portfolio?.total_equity_usdc);
+  return eq !== null && eq > 0 ? eq : null;
+}
+
+export function closedTimestampMs(g) {
+  const ms = num(g.closed_timestamp_ms);
+  if (ms !== null) return ms;
+  if (g.closed_timestamp) {
+    const dt = luxon.DateTime.fromISO(String(g.closed_timestamp), { zone: "utc" });
+    if (dt.isValid) return dt.toMillis();
+  }
+  return null;
+}
+
+export function openPositionTitle(g) {
+  const ccy = String(g.currency || "").toUpperCase() || "Option";
+  const id = strategyId(g);
+  if (id === "bull_put_spread") {
+    return INVESTOR_ZH ? `${ccy} 賣權價差` : `${ccy} put spread`;
+  }
+  const side = optionPutCallLabel(g);
+  if (INVESTOR_ZH) {
+    const sideZh = side.toLowerCase() === "call" ? "買權" : "賣權";
+    return `${ccy} 賣出${sideZh}`;
+  }
+  return `${ccy} short ${side.toLowerCase()}`;
+}
+
+export function fmtNativeBookBreakdown(byBook, { places = { BTC: 5, ETH: 4, USDC: 2 }, pnl = false } = {}) {
+  const symbols = { BTC: "₿", ETH: "♦", USDC: "($)" };
+  const items = ["BTC", "ETH", "USDC"].map((book) => {
+    const n = num(byBook[book]);
+    const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
+    const cls = pnl ? ` ${pnlClass(byBook[book])}` : "";
+    return `<span class="native-book-item"><span class="native-book-symbol text-slate-500">${symbols[book]}</span> <span class="font-mono tabular-nums${cls}">${text}</span></span>`;
+  });
+  return `<span class="native-book-breakdown">${items.join("")}</span>`;
+}
+
+export function fmtLifetimeRealizedNativeBreakdown(byBook) {
+  return fmtNativeBookBreakdown(byBook, { pnl: true });
+}
+
+export function fmtBookEquityNativeBreakdown(byBook) {
+  return fmtNativeBookBreakdown(byBook);
+}
+
+/** Total-equity KPI: per-book native amount and USDC equivalent (matches book cards). */
+export function fmtBookEquityDualBreakdown(nativeByBook, usdByBook) {
+  const symbols = { BTC: "₿", ETH: "♦", USDC: "($)" };
+  const places = { BTC: 5, ETH: 4, USDC: 2 };
+  const items = ["BTC", "ETH", "USDC"]
+    .map((book) => {
+      const native = num(nativeByBook?.[book]);
+      const usd = num(usdByBook?.[book]);
+      if (native === null && usd === null) return null;
+      if (book === "USDC") {
+        const v = usd ?? native;
+        if (v === null) return null;
+        return `<div class="book-equity-dual-row">
+          <span class="native-book-symbol text-slate-500">${symbols[book]}</span>
+          <span class="font-mono tabular-nums">${fmtUsd(v)}</span>
+        </div>`;
+      }
+      const nativeStr = native === null ? "—" : fmtNum(native, places[book]);
+      const usdStr = usd === null ? "—" : fmtUsd(usd);
+      return `<div class="book-equity-dual-row">
+        <span class="native-book-symbol text-slate-500">${symbols[book]}</span>
+        <span class="font-mono tabular-nums">${nativeStr}</span>
+        <span class="book-equity-dual-sep text-slate-600" aria-hidden="true">·</span>
+        <span class="font-mono tabular-nums text-slate-400">${usdStr}</span>
+      </div>`;
+    })
+    .filter(Boolean);
+  if (!items.length) return `<span class="text-slate-500">—</span>`;
+  return `<div class="book-equity-dual-breakdown">${items.join("")}</div>`;
+}
+
+export function fmtOpenCreditStrategyBreakdown(byStrategy) {
+  const rows = strategyOrder(new Set(STRATEGIES.map((s) => s.id))).map((id) => {
+    const short = escapeHtml(strategyInfo(id).short);
+    const n = num(byStrategy[id]);
+    const text = n === null ? "—" : fmtUsd(n);
+    return `<div class="open-credit-row"><span class="open-credit-label text-slate-500">${short}</span><span class="open-credit-value font-mono tabular-nums text-slate-300">${text}</span></div>`;
+  });
+  return `<div class="open-credit-breakdown">${rows.join("")}</div>`;
 }
 
 export function realizedSummaryUrl(days = 30) {
