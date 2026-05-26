@@ -17,6 +17,7 @@ def _fmt(x: Any, places: int = 6) -> str:
     except Exception:
         return str(x)
 
+
 def _pct(x: Any, *, base: Any, places: int = 2) -> str:
     b = to_decimal(base)
     if b <= 0:
@@ -47,7 +48,9 @@ def render_backtest_report_md(
     lines.append("")
     lines.append(f"- 產出時間：`{generated_at.isoformat()}`")
     lines.append(f"- 策略：`{strategy_analysis.get('label')}`")
-    lines.append(f"- 回測區間：`{params.get('start')}` → `{params.get('end')}`（resolution={params.get('resolution')}）")
+    lines.append(
+        f"- 回測區間：`{params.get('start')}` → `{params.get('end')}`（resolution={params.get('resolution')}）"
+    )
     lines.append(f"- 參考資金（USDC）：`{params.get('reference_capital_usdc')}`")
     lines.append("")
 
@@ -59,9 +62,7 @@ def render_backtest_report_md(
     lines.append(
         f"- **回測總損益**：`{_money(params.get('total_pnl_usdc'))}` USDC（約 `{_pct(params.get('total_pnl_usdc'), base=capital)}`）"
     )
-    lines.append(
-        f"- **最大回撤（歷史回放）**：`{_pct(params.get('max_drawdown_pct'), base=Decimal('1'))}`"
-    )
+    lines.append(f"- **最大回撤（歷史回放）**：`{_pct(params.get('max_drawdown_pct'), base=Decimal('1'))}`")
     if isinstance(stress, dict) and stress.get("spot_-40_slip_20%"):
         s40 = stress.get("spot_-40_slip_20%") or {}
         if isinstance(s40, dict) and s40.get("count"):
@@ -69,9 +70,7 @@ def render_backtest_report_md(
                 f"- **黑天鵝（-40% + 滑價）最差單次估算損失**：`{_money(s40.get('worst'))}` USDC（約 `{_pct(s40.get('worst'), base=capital)}`）"
             )
             if s40.get("worst_date") or s40.get("worst_by_book"):
-                lines.append(
-                    f"  - 最差發生日：`{s40.get('worst_date')}`；book 拆解：`{s40.get('worst_by_book')}`"
-                )
+                lines.append(f"  - 最差發生日：`{s40.get('worst_date')}`；book 拆解：`{s40.get('worst_by_book')}`")
             comps = s40.get("worst_components") if isinstance(s40, dict) else None
             if isinstance(comps, dict) and isinstance(comps.get("total"), dict):
                 tot = comps["total"]
@@ -90,20 +89,30 @@ def render_backtest_report_md(
 
     lines.append("## 怎麼解讀（超短版）")
     lines.append("- **historical replay**：用公開資料回放策略「會不會進場/出場」與粗略 PnL（近似）。")
-    lines.append("- **stress overlay**：假設你剛好有持倉時立刻遇到暴跌，估算當下可能虧多少（偏保守，且**每本帳損失上限 = 該本帳 equity**，代表最慘被打到歸零）。")
+    lines.append(
+        "- **stress overlay**：假設你剛好有持倉時立刻遇到暴跌，估算當下可能虧多少（偏保守，且**每本帳損失上限 = 該本帳 equity**，代表最慘被打到歸零）。"
+    )
     lines.append(f"- **策略黑天鵝重點**：{strategy_analysis.get('summary')}")
-    lines.append("- 你要的「黑天鵝會損失多少」主要看 **stress overlay 的 worst / p95**；你要的「收益/風險平衡」看 conservative vs baseline 的 tail loss 是否下降。")
+    lines.append(
+        "- 你要的「黑天鵝會損失多少」主要看 **stress overlay 的 worst / p95**；你要的「收益/風險平衡」看 conservative vs baseline 的 tail loss 是否下降。"
+    )
     lines.append("")
 
     lines.append("## 重要假設（請務必閱讀）")
-    lines.append("- **資料來源限制**：Deribit 公開 API 不一定提供「歷史期權價格/greeks/完整 order book」。本回測使用 index 與 DVOL 公開資料。")
-    lines.append("- **期權價格近似**：使用 **DVOL 當作波動率 proxy**，以 Black‑Scholes（\\(r=0\\)）估算權利金與 delta；因此結果是「策略邏輯+風控門檻」的近似回放，不是交易所撮合級回放。")
+    lines.append(
+        "- **資料來源限制**：Deribit 公開 API 不一定提供「歷史期權價格/greeks/完整 order book」。本回測使用 index 與 DVOL 公開資料。"
+    )
+    lines.append(
+        "- **期權價格近似**：使用 **DVOL 當作波動率 proxy**，以 Black‑Scholes（\\(r=0\\)）估算權利金與 delta；因此結果是「策略邏輯+風控門檻」的近似回放，不是交易所撮合級回放。"
+    )
     lines.append("- **流動性近似**：黑天鵝情境額外加上滑價（slippage）做保守估算。")
     lines.append("")
 
     lines.append("## 基準回測結果（historical replay）")
     lines.append(f"- **開倉筆數**：`{params.get('open_trade_count', 0)}`")
-    lines.append(f"- **總損益（USDC）**：`{_money(params.get('total_pnl_usdc'))}`（約 `{_pct(params.get('total_pnl_usdc'), base=capital)}`）")
+    lines.append(
+        f"- **總損益（USDC）**：`{_money(params.get('total_pnl_usdc'))}`（約 `{_pct(params.get('total_pnl_usdc'), base=capital)}`）"
+    )
     lines.append(f"- **期末資金（USDC）**：`{_money(params.get('final_equity_usdc'))}`")
     lines.append(f"- **最大回撤（peak-to-trough）**：`{_pct(params.get('max_drawdown_pct'), base=Decimal('1'))}`")
     lines.append("")
@@ -131,7 +140,9 @@ def render_backtest_report_md(
     if not scan:
         lines.append("- 本次未執行參數掃描。")
     else:
-        lines.append("- 下列比較以同一套回測 + stress overlay 產出；挑選方向是「**降低尾端損失**，在可接受的收益犧牲下」：")
+        lines.append(
+            "- 下列比較以同一套回測 + stress overlay 產出；挑選方向是「**降低尾端損失**，在可接受的收益犧牲下」："
+        )
         for row in scan:
             variant = row.get("variant")
             p = row.get("params") or {}
@@ -165,4 +176,3 @@ def render_backtest_report_md(
         lines.append("")
 
     return "\n".join(lines)
-

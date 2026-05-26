@@ -23,7 +23,10 @@ _IMG_DIR = Path(__file__).resolve().parents[1] / "docs" / "img" / "onboarding"
 _IMAGES: dict[str, tuple[str, str]] = {
     "s1_register": ("01-register.png", "Deribit 註冊頁"),
     "s2_deposit": ("03-wallet-deposit-menu.png", "Wallet → Deposit"),
-    "s5_api_perm": ("10-api-strategy-permissions.png", "策略子帳 API 權限（Account=read、Trade=read_write、Wallet=none）"),
+    "s5_api_perm": (
+        "10-api-strategy-permissions.png",
+        "策略子帳 API 權限（Account=read、Trade=read_write、Wallet=none）",
+    ),
     "s5_api_done": ("11-api-key-created.png", "API Key 建立成功（請妥善保存 Secret）"),
     "s6_fee_api": ("13-api-fee-permissions.png", "Fee 專戶 API（Account=read、Wallet=read_write、Trade=none）"),
     "s7_dashboard": ("14-cloudflare-access-login.png", "Cloudflare Access 登入"),
@@ -470,7 +473,9 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
     story.append(PageBreak())
     story.append(_h2("二、入金（把資金轉進 Deribit）"))
     story.append(_body("資金會先進你的<b>主帳戶</b>。之後第三、四節才會把錢分到各子帳戶。"))
-    story.append(_steps_block("2.1 找到入金頁面", ["登入 Deribit（確認是主帳戶）", "點 Wallet", "選 Deposit（入金／充值）"]))
+    story.append(
+        _steps_block("2.1 找到入金頁面", ["登入 Deribit（確認是主帳戶）", "點 Wallet", "選 Deposit（入金／充值）"])
+    )
     story.append(_image_block("s2_deposit", usable_w=usable_w, frame_h=frame_h))
 
     story.append(
@@ -511,7 +516,16 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
         )
     )
 
-    story.append(_steps_block("2.3 複製地址並從外部轉帳", ["在 Deposit 頁複製 Deribit 入金地址（或掃 QR Code）", "在交易所或錢包發起提現，選同一條鏈", "回到 Deribit → Wallet 確認餘額增加"]))
+    story.append(
+        _steps_block(
+            "2.3 複製地址並從外部轉帳",
+            [
+                "在 Deposit 頁複製 Deribit 入金地址（或掃 QR Code）",
+                "在交易所或錢包發起提現，選同一條鏈",
+                "回到 Deribit → Wallet 確認餘額增加",
+            ],
+        )
+    )
     story.append(_h3("2.4 各策略需要什麼幣？"))
     story.append(
         _kt_table(
@@ -678,7 +692,10 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
             ),
             _h3("5.2 建立 API Key"),
             Paragraph(
-                _p("路徑：Account → API → Add new key。先選 <b>Deribit-generated key</b>，再設定權限。", allow_markup=True),
+                _p(
+                    "路徑：Account → API → Add new key。先選 <b>Deribit-generated key</b>，再設定權限。",
+                    allow_markup=True,
+                ),
                 styles["Body"],
             ),
             Spacer(1, 2),
@@ -715,13 +732,16 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
             [
                 _h3("5.3 交付給管理方（策略用）"),
                 Spacer(1, 2),
-                *[Paragraph(_p(line), styles["Mono"]) for line in [
-                    "類型：策略子帳",
-                    "子帳名稱：naked",
-                    "環境：mainnet",
-                    "API Key：________________",
-                    "API Secret：________________",
-                ]],
+                *[
+                    Paragraph(_p(line), styles["Mono"])
+                    for line in [
+                        "類型：策略子帳",
+                        "子帳名稱：naked",
+                        "環境：mainnet",
+                        "API Key：________________",
+                        "API Secret：________________",
+                    ]
+                ],
                 Paragraph(_p("每個策略子帳重複 5.1～5.3。"), styles["Body"]),
                 Spacer(1, 4),
             ]

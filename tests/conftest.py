@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -761,11 +760,18 @@ class FakeClient:
                     "timestamp": 1,
                 }
             ]
-        if not trades and instrument_name not in self.combos and order_state == "filled" and Decimal(str(filled_amount or "0")) > 0:
+        if (
+            not trades
+            and instrument_name not in self.combos
+            and order_state == "filled"
+            and Decimal(str(filled_amount or "0")) > 0
+        ):
             amount_dec = Decimal(str(filled_amount))
             price_dec = Decimal(str(average_price or price or "0"))
             index_price = Decimal("70000") if instrument_name.startswith("BTC") else Decimal("3500")
-            fee_currency = "USDC" if "_USDC-" in instrument_name else ("BTC" if instrument_name.startswith("BTC") else "ETH")
+            fee_currency = (
+                "USDC" if "_USDC-" in instrument_name else ("BTC" if instrument_name.startswith("BTC") else "ETH")
+            )
             fee = min(index_price * amount_dec * Decimal("0.0003"), price_dec * amount_dec * Decimal("0.125"))
             fee_value = fee if fee_currency == "USDC" else (fee / index_price if index_price > 0 else Decimal("0"))
             trades = [

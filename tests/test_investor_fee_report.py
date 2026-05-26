@@ -32,8 +32,7 @@ def test_report_paths_use_initial_and_date_folders(tmp_path: Path) -> None:
     )
     assert initial == tmp_path / "data/fee_ledger/youming/reports/initial/initial-20260521.md"
     assert settlement == (
-        tmp_path
-        / "data/fee_ledger/youming/reports/2026-05-21/settlement-20260521T000000Z_20260521T161420Z.md"
+        tmp_path / "data/fee_ledger/youming/reports/2026-05-21/settlement-20260521T000000Z_20260521T161420Z.md"
     )
 
 

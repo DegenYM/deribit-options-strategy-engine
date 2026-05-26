@@ -2,17 +2,16 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from conftest import make_config
+
 from deribit_demo.current_stress import compute_current_stress, compute_stress_from_prefetch
 from deribit_demo.engine import ExchangePrefetch
 from deribit_demo.models import AccountSummary, OptionInstrument, Position
-from conftest import make_config
 
 
 def _prefetch_from_fake_client(fake_client, cfg) -> ExchangePrefetch:
     summaries = {
-        s.currency: s
-        for s in (AccountSummary.from_api(x) for x in fake_client.get_account_summaries())
-        if s.currency
+        s.currency: s for s in (AccountSummary.from_api(x) for x in fake_client.get_account_summaries()) if s.currency
     }
     positions = [Position.from_api(x) for x in fake_client.positions if isinstance(x, dict)]
     option_positions = [p for p in positions if p.kind == "option"]

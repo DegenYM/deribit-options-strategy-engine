@@ -10,7 +10,6 @@ from deribit_demo.trade_journal_backfill import (
     _backfill_group_from_state,
     _parse_bot_label,
     backfill_closed_group_stats_in_state,
-    load_trade_groups,
 )
 
 
@@ -121,8 +120,8 @@ def test_backfill_closed_group_stats_covered_call_fractional_apr(tmp_path: Path)
         ts_ms=closed_ms,
     )
 
-    from deribit_demo.state import StrategyStateStore
     from deribit_demo.models import StrategyState
+    from deribit_demo.state import StrategyStateStore
 
     StrategyStateStore(state_file).save(StrategyState(groups=[group]))
 
@@ -167,8 +166,8 @@ def test_backfill_entry_net_apr_fractional_covered_call(tmp_path: Path):
         closed_timestamp_ms=entry_ms + 3 * 86_400_000,
         realized_pnl=Decimal("45"),
     )
-    from deribit_demo.state import StrategyStateStore
     from deribit_demo.models import StrategyState
+    from deribit_demo.state import StrategyStateStore
 
     StrategyStateStore(state_file).save(StrategyState(groups=[group]))
 

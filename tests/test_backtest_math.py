@@ -15,4 +15,3 @@ def test_bs_delta_put_more_negative_when_spot_drops():
     d1 = bs_delta(spot=100.0, strike=100.0, t_years=0.5, sigma=0.5, option_type="put")
     d2 = bs_delta(spot=80.0, strike=100.0, t_years=0.5, sigma=0.5, option_type="put")
     assert d2 < d1
-

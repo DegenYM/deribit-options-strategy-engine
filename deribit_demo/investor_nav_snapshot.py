@@ -17,14 +17,14 @@ from .fee_snapshot_store import (
     NavSnapshotRow,
     fee_ledger_db_path,
 )
-from .investor_cash_flow import native_book_amount_to_usdc
 from .investor_cash_flow import (
     fetch_cumulative_net_flow_usdc,
     flow_report_dict,
     initial_spot_deduction_usdc,
+    native_book_amount_to_usdc,
 )
 from .investor_fee_config import InvestorFeeConfig, load_investor_fee_config
-from .utils import to_decimal, utc_now_ms
+from .utils import utc_now_ms
 
 # Reuse exchange prefetch per API login across fee CLI bursts (fee-settle-period, etc.).
 _FEE_EXCHANGE_PREFETCH_CACHE: Any = None
@@ -37,6 +37,7 @@ def _fee_exchange_prefetch_cache() -> Any:
 
         _FEE_EXCHANGE_PREFETCH_CACHE = _TtlCache(10.0)
     return _FEE_EXCHANGE_PREFETCH_CACHE
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -68,10 +69,7 @@ def collateral_spot_usdc(
     index_btc_usd: Decimal,
     index_eth_usd: Decimal,
 ) -> Decimal:
-    return (
-        fee_config.collateral_spot_btc * index_btc_usd
-        + fee_config.collateral_spot_eth * index_eth_usd
-    )
+    return fee_config.collateral_spot_btc * index_btc_usd + fee_config.collateral_spot_eth * index_eth_usd
 
 
 def resolve_agreed_spot_native(
@@ -102,9 +100,9 @@ def agreed_spot_usdc(
     index_btc_usd: Decimal,
     index_eth_usd: Decimal,
 ) -> Decimal:
-    return native_book_amount_to_usdc(btc_native, "BTC", {"BTC": index_btc_usd, "ETH": index_eth_usd}) + native_book_amount_to_usdc(
-        eth_native, "ETH", {"BTC": index_btc_usd, "ETH": index_eth_usd}
-    )
+    return native_book_amount_to_usdc(
+        btc_native, "BTC", {"BTC": index_btc_usd, "ETH": index_eth_usd}
+    ) + native_book_amount_to_usdc(eth_native, "ETH", {"BTC": index_btc_usd, "ETH": index_eth_usd})
 
 
 def snapshot_equity_native_by_book(row: NavSnapshotRow) -> dict[str, Decimal]:
@@ -245,9 +243,7 @@ def parse_fee_timestamp(
     try:
         dt = datetime.fromisoformat(normalized)
     except ValueError as exc:
-        raise ValueError(
-            f"Invalid timestamp {value!r}; use YYYY-MM-DD, ISO-8601, unix ms, or now"
-        ) from exc
+        raise ValueError(f"Invalid timestamp {value!r}; use YYYY-MM-DD, ISO-8601, unix ms, or now") from exc
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     else:
@@ -302,9 +298,7 @@ def capture_investor_nav(
     index_btc = _dec(index_map.get("BTC") or index_map.get("btc") or "0")
     index_eth = _dec(index_map.get("ETH") or index_map.get("eth") or "0")
     total_equity = _dec(portfolio.get("total_equity_usdc"))
-    equity_by_book = {
-        str(k).upper(): _dec(v) for k, v in (portfolio.get("equity_by_book") or {}).items()
-    }
+    equity_by_book = {str(k).upper(): _dec(v) for k, v in (portfolio.get("equity_by_book") or {}).items()}
     equity_native_by_book = {
         str(book).upper(): _dec((row or {}).get("equity") or "0")
         for book, row in (status.get("accounts") or {}).items()
@@ -349,9 +343,7 @@ def store_nav_capture(
 ) -> tuple[int, dict[str, Any] | None]:
     store = FeeSnapshotStore(fee_ledger_db_path(Path(repo_root), capture.investor_id))
     flow_baseline = store.load_flow_baseline(capture.investor_id)
-    btc_spot, eth_spot, _spot_source = resolve_agreed_spot_native(
-        capture.fee_config, flow_baseline
-    )
+    btc_spot, eth_spot, _spot_source = resolve_agreed_spot_native(capture.fee_config, flow_baseline)
     bootstrap = (
         maybe_bootstrap_hwm_from_deposits(
             capture,
@@ -504,9 +496,7 @@ def average_aum_mgmt(
         return Decimal("0")
     total = sum(
         (
-            financial_breakdown_from_snapshot(
-                row, fee_config=fee_config, flow_baseline=flow_baseline
-            )["aum_mgmt"]
+            financial_breakdown_from_snapshot(row, fee_config=fee_config, flow_baseline=flow_baseline)["aum_mgmt"]
             for row in rows
         ),
         Decimal("0"),
@@ -582,18 +572,12 @@ def settle_period(
         if start_snap is None:
             only = store.latest_snapshot(manifest.investor_id)
             if only is not None and only.ts_ms >= end_ms:
-                raise RuntimeError(
-                    "No NAV snapshot before period end; pass --from or use an earlier --to"
-                )
-            raise RuntimeError(
-                "No NAV snapshots on file; run fee-snapshot first or pass --from"
-            )
+                raise RuntimeError("No NAV snapshot before period end; pass --from or use an earlier --to")
+            raise RuntimeError("No NAV snapshots on file; run fee-snapshot first or pass --from")
         start_ms = start_snap.ts_ms
     else:
         if start_ms >= end_ms:
-            raise ValueError(
-                f"period start ({_ts_fmt(start_ms)}) must be before end ({_ts_fmt(end_ms)})"
-            )
+            raise ValueError(f"period start ({_ts_fmt(start_ms)}) must be before end ({_ts_fmt(end_ms)})")
         latest = store.latest_snapshot(manifest.investor_id)
         start_snap = (
             latest
@@ -611,9 +595,7 @@ def settle_period(
             )
 
     if start_snap is not None and start_snap.ts_ms > end_ms:
-        raise ValueError(
-            f"period start snapshot ({_ts_fmt(start_snap.ts_ms)}) is after end ({_ts_fmt(end_ms)})"
-        )
+        raise ValueError(f"period start snapshot ({_ts_fmt(start_snap.ts_ms)}) is after end ({_ts_fmt(end_ms)})")
 
     period_key = period or period_label_from_ms(start_ms, end_ms)
     end_snap = _resolve_period_end_snapshot(
@@ -629,9 +611,7 @@ def settle_period(
     if persist:
         existing = store.settlement_for_period(manifest.investor_id, period_key)
         if existing is not None and not force:
-            raise RuntimeError(
-                f"Settlement for {period_key!r} already exists; pass force=True to overwrite"
-            )
+            raise RuntimeError(f"Settlement for {period_key!r} already exists; pass force=True to overwrite")
 
     index_by_ccy = {
         "BTC": end_snap.index_btc_usd,
@@ -660,15 +640,11 @@ def settle_period(
 
     flow_baseline = store.load_flow_baseline(manifest.investor_id)
     start_bd = (
-        financial_breakdown_from_snapshot(
-            start_snap, fee_config=fee_config, flow_baseline=flow_baseline
-        )
+        financial_breakdown_from_snapshot(start_snap, fee_config=fee_config, flow_baseline=flow_baseline)
         if start_snap is not None
         else None
     )
-    end_bd = financial_breakdown_from_snapshot(
-        end_snap, fee_config=fee_config, flow_baseline=flow_baseline
-    )
+    end_bd = financial_breakdown_from_snapshot(end_snap, fee_config=fee_config, flow_baseline=flow_baseline)
 
     hwm_start = resolve_hwm(store, manifest.investor_id, fee_config)
     nav_perf_start = start_bd["nav_perf"] if start_bd is not None else hwm_start
@@ -834,9 +810,7 @@ def fee_status(
         "display_name": manifest.display_name,
         "db_path": str(fee_ledger_db_path(root, manifest.investor_id)),
         "hwm_nav_perf": str(hwm),
-        "distributable_above_hwm": (
-            str(max(Decimal("0"), nav_perf - hwm)) if nav_perf is not None else None
-        ),
+        "distributable_above_hwm": (str(max(Decimal("0"), nav_perf - hwm)) if nav_perf is not None else None),
         "flow_baseline": _flow_baseline_dict(baseline),
         "latest_snapshot": latest_snapshot,
         "fee_config": {
@@ -845,9 +819,7 @@ def fee_status(
             "performance_fee_rate": str(fee_config.performance_fee_rate),
             "management_fee_annual_rate": str(fee_config.management_fee_annual_rate),
             "initial_hwm_nav_perf": (
-                str(fee_config.initial_hwm_nav_perf)
-                if fee_config.initial_hwm_nav_perf is not None
-                else None
+                str(fee_config.initial_hwm_nav_perf) if fee_config.initial_hwm_nav_perf is not None else None
             ),
         },
         "settlements": [
@@ -900,17 +872,13 @@ def _snapshot_dict(
         "notes": row.notes,
     }
     if fee_config is not None:
-        bd = financial_breakdown_from_snapshot(
-            row, fee_config=fee_config, flow_baseline=flow_baseline
-        )
+        bd = financial_breakdown_from_snapshot(row, fee_config=fee_config, flow_baseline=flow_baseline)
         out.update(
             {
                 "collateral_spot_usdc": str(bd["collateral_spot_usdc"]),
                 "nav_perf": str(bd["nav_perf"]),
                 "aum_mgmt": str(bd["aum_mgmt"]),
-                "equity_native_by_book": {
-                    k: str(v) for k, v in bd["equity_native_by_book"].items()
-                },
+                "equity_native_by_book": {k: str(v) for k, v in bd["equity_native_by_book"].items()},
                 "equity_usdc_by_book": {k: str(v) for k, v in bd["equity_usdc_by_book"].items()},
                 "agreed_spot_btc_native": str(bd["agreed_spot_btc_native"]),
                 "agreed_spot_eth_native": str(bd["agreed_spot_eth_native"]),

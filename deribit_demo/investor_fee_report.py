@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from .env_layout import find_repo_root, load_investor_manifest
+from .env_layout import find_repo_root, load_investor_manifest, resolve_investor_env_path
 from .fee_snapshot_store import FeeSnapshotStore, FlowBaselineRow, fee_ledger_db_path
 from .investor_cash_flow import (
     SubscriptionFlowLine,
@@ -16,9 +16,9 @@ from .investor_cash_flow import (
     fetch_subscription_flow_lines,
     initial_spot_deduction_usdc,
     native_book_amount_to_usdc,
+    ordered_net_flow_books,
     parse_fee_flow_start_ms,
 )
-from .env_layout import resolve_investor_env_path
 from .investor_fee_config import load_investor_fee_config
 from .investor_nav_snapshot import (
     InvestorNavCapture,
@@ -26,7 +26,6 @@ from .investor_nav_snapshot import (
     capture_investor_nav,
     is_quarter_period,
     parse_quarter_period,
-    period_duration_years,
 )
 from .utils import to_decimal
 
@@ -87,11 +86,14 @@ def settlement_report_path(
     *,
     period_end_ms: int,
 ) -> Path:
-    return settlement_report_dir(
-        repo_root,
-        investor_id,
-        period_end_ms=period_end_ms,
-    ) / f"settlement-{period}.md"
+    return (
+        settlement_report_dir(
+            repo_root,
+            investor_id,
+            period_end_ms=period_end_ms,
+        )
+        / f"settlement-{period}.md"
+    )
 
 
 def _file_stamp(ts_ms: int | None) -> str:
@@ -190,9 +192,7 @@ def _append_current_equity_md(
         )
         usdc = equity_by_book.get(book, Decimal("0"))
         unit = book if book == "USDC" else book
-        lines.append(
-            f"| {book} | `{_native(native, book)}` {unit} | `{_money(usdc)}` |"
-        )
+        lines.append(f"| {book} | `{_native(native, book)}` {unit} | `{_money(usdc)}` |")
     lines.append(f"| **Total** | — | **`{_money(total_equity_usdc)}`** |")
     lines.append("")
 
@@ -219,15 +219,9 @@ def _append_initial_hwm_breakdown_md(
         f"| USDC net subscription | `{_native(usdc_native, 'USDC')}` | "
         f"`{_money(native_book_amount_to_usdc(usdc_native, 'USDC', index_by_ccy))}` |"
     )
-    lines.append(
-        f"| Initial spot to deduct (BTC) | `{_native(btc_native, 'BTC')}` | `-{_money(btc_usdc)}` |"
-    )
-    lines.append(
-        f"| Initial spot to deduct (ETH) | `{_native(eth_native, 'ETH')}` | `-{_money(eth_usdc)}` |"
-    )
-    lines.append(
-        f"| **Net subscription total** | — | **`{_money(cumulative_net_flow_usdc)}`** |"
-    )
+    lines.append(f"| Initial spot to deduct (BTC) | `{_native(btc_native, 'BTC')}` | `-{_money(btc_usdc)}` |")
+    lines.append(f"| Initial spot to deduct (ETH) | `{_native(eth_native, 'ETH')}` | `-{_money(eth_usdc)}` |")
+    lines.append(f"| **Net subscription total** | — | **`{_money(cumulative_net_flow_usdc)}`** |")
     lines.append(f"| **Initial HWM (NAV_perf)** | — | **`{_money(initial_hwm_nav_perf)}`** |")
     lines.append("")
     if index_footer:
@@ -243,9 +237,7 @@ def _append_initial_hwm_breakdown_md(
         "- Initial spot rows use the **BTC/ETH net subscription** from the transaction log; "
         "these amounts are deducted from the total to set Initial HWM (option margin base)."
     )
-    lines.append(
-        "- Formula: `Initial HWM = max(0, net subscription total USDC − BTC spot USDC − ETH spot USDC)`"
-    )
+    lines.append("- Formula: `Initial HWM = max(0, net subscription total USDC − BTC spot USDC − ETH spot USDC)`")
     lines.append("")
 
 
@@ -264,8 +256,7 @@ def _append_snapshot_equity_book_md(
     lines.append(f"- Snapshot time: `{_ts_fmt(int(snap['ts_ms']))}`")
     if snap.get("index_btc_usd") is not None and snap.get("index_eth_usd") is not None:
         lines.append(
-            f"- Index prices: BTC `{_money(snap['index_btc_usd'])}` / "
-            f"ETH `{_money(snap['index_eth_usd'])}` USDC"
+            f"- Index prices: BTC `{_money(snap['index_btc_usd'])}` / ETH `{_money(snap['index_eth_usd'])}` USDC"
         )
     lines.append("")
     native = snap.get("equity_native_by_book") or {}
@@ -273,28 +264,17 @@ def _append_snapshot_equity_book_md(
     lines.append("| Currency | Native balance | USDC equivalent |")
     lines.append("|----------|----------------|-----------------|")
     for book in ("BTC", "ETH", "USDC"):
-        lines.append(
-            f"| {book} | `{_native(to_decimal(native.get(book, 0)), book)}` | "
-            f"`{_money(usdc.get(book, 0))}` |"
-        )
-    lines.append(
-        f"| **Total equity** | — | **`{_money(snap['total_equity_usdc'])}`** |"
-    )
+        lines.append(f"| {book} | `{_native(to_decimal(native.get(book, 0)), book)}` | `{_money(usdc.get(book, 0))}` |")
+    lines.append(f"| **Total equity** | — | **`{_money(snap['total_equity_usdc'])}`** |")
     btc_spot = to_decimal(snap.get("agreed_spot_btc_native", 0))
     eth_spot = to_decimal(snap.get("agreed_spot_eth_native", 0))
     if btc_spot > 0 or eth_spot > 0:
         idx_btc = to_decimal(snap.get("index_btc_usd", 0))
         idx_eth = to_decimal(snap.get("index_eth_usd", 0))
-        lines.append(
-            f"| Agreed spot deducted (BTC) | `{_native(btc_spot, 'BTC')}` | `-{_money(btc_spot * idx_btc)}` |"
-        )
-        lines.append(
-            f"| Agreed spot deducted (ETH) | `{_native(eth_spot, 'ETH')}` | `-{_money(eth_spot * idx_eth)}` |"
-        )
+        lines.append(f"| Agreed spot deducted (BTC) | `{_native(btc_spot, 'BTC')}` | `-{_money(btc_spot * idx_btc)}` |")
+        lines.append(f"| Agreed spot deducted (ETH) | `{_native(eth_spot, 'ETH')}` | `-{_money(eth_spot * idx_eth)}` |")
     if snap.get("collateral_spot_usdc") is not None:
-        lines.append(
-            f"| **Collateral spot (total)** | — | **`-{_money(snap['collateral_spot_usdc'])}`** |"
-        )
+        lines.append(f"| **Collateral spot (total)** | — | **`-{_money(snap['collateral_spot_usdc'])}`** |")
     lines.append(f"| **NAV_perf** (fee basis) | — | **`{_money(snap['nav_perf'])}`** |")
     lines.append("")
 
@@ -325,17 +305,11 @@ def _append_settlement_fee_walkthrough_md(
                 f"- Matches initial bootstrap: BTC/ETH net subscriptions from the transaction log "
                 f"(initial HWM `{_money(flow_baseline.initial_hwm_nav_perf)}` USDC)."
             )
-    lines.append(
-        "- **NAV_perf** at each date = total equity − agreed spot (USDC equivalent at that day's index)."
-    )
-    lines.append(
-        "- **Strategy P&L (USDC)** for the period = NAV_perf at end − NAV_perf at start − net subscription."
-    )
+    lines.append("- **NAV_perf** at each date = total equity − agreed spot (USDC equivalent at that day's index).")
+    lines.append("- **Strategy P&L (USDC)** for the period = NAV_perf at end − NAV_perf at start − net subscription.")
     lines.append("")
 
-    _append_snapshot_equity_book_md(
-        lines, heading="2.1 Period start", snap=start_snapshot
-    )
+    _append_snapshot_equity_book_md(lines, heading="2.1 Period start", snap=start_snapshot)
     _append_snapshot_equity_book_md(lines, heading="2.2 Period end", snap=end_snapshot)
 
     lines.append("### 2.3 Performance fee calculation (USDC)")
@@ -343,28 +317,20 @@ def _append_settlement_fee_walkthrough_md(
     lines.append("| Step | Amount (USDC) |")
     lines.append("|------|---------------|")
     if start_snapshot:
-        lines.append(
-            f"| NAV_perf at period start | `{_money(start_snapshot['nav_perf'])}` |"
-        )
+        lines.append(f"| NAV_perf at period start | `{_money(start_snapshot['nav_perf'])}` |")
     if end_snapshot:
         lines.append(f"| NAV_perf at period end | `{_money(end_snapshot['nav_perf'])}` |")
     period_pnl = to_decimal(s.get("period_nav_perf_pnl", 0))
     net_flow = to_decimal(s["net_flow_usdc"])
-    lines.append(
-        f"| Period NAV_perf change (before subscription) | `{_money(period_pnl + net_flow)}` |"
-    )
+    lines.append(f"| Period NAV_perf change (before subscription) | `{_money(period_pnl + net_flow)}` |")
     lines.append(f"| Net subscription in period | `{_money(net_flow)}` |")
     lines.append(f"| **Strategy P&L (NAV_perf, USDC)** | `{_money(period_pnl)}` |")
     lines.append(f"| HWM at period start | `{_money(s['hwm_start'])}` |")
     lines.append(f"| **Distributable profit** | `{_money(s['distributable_profit'])}` |")
-    lines.append(
-        f"| **Performance fee ({perf_pct:.0f}%)** | `{_money(s['performance_fee'])}` |"
-    )
+    lines.append(f"| **Performance fee ({perf_pct:.0f}%)** | `{_money(s['performance_fee'])}` |")
     lines.append(f"| HWM after fee | `{_money(s['hwm_end'])}` |")
     lines.append("")
-    lines.append(
-        "- Distributable profit = `max(0, NAV_perf at end − HWM at start − net subscription in period)`."
-    )
+    lines.append("- Distributable profit = `max(0, NAV_perf at end − HWM at start − net subscription in period)`.")
     lines.append("")
 
 
@@ -453,9 +419,7 @@ def build_initial_report_context(
         live_nav={
             "total_equity_usdc": str(capture.total_equity_usdc),
             "equity_by_book": {k: str(v) for k, v in capture.equity_by_book.items()},
-            "equity_native_by_book": {
-                k: str(v) for k, v in capture.equity_native_by_book.items()
-            },
+            "equity_native_by_book": {k: str(v) for k, v in capture.equity_native_by_book.items()},
             "ts_ms": str(capture.ts_ms),
         },
     )
@@ -505,9 +469,7 @@ def build_settlement_report_context(
         )
         settlement_payload = {
             **settlement_payload,
-            "start_snapshot": _snapshot_dict(
-                start_row, fee_config=fee_config, flow_baseline=flow_baseline
-            ),
+            "start_snapshot": _snapshot_dict(start_row, fee_config=fee_config, flow_baseline=flow_baseline),
         }
     if settlement_payload.get("end_snapshot") is None:
         end_row = store.snapshot_nearest(
@@ -517,9 +479,7 @@ def build_settlement_report_context(
         )
         settlement_payload = {
             **settlement_payload,
-            "end_snapshot": _snapshot_dict(
-                end_row, fee_config=fee_config, flow_baseline=flow_baseline
-            ),
+            "end_snapshot": _snapshot_dict(end_row, fee_config=fee_config, flow_baseline=flow_baseline),
         }
 
     if index_by_ccy is None:
@@ -594,12 +554,9 @@ def render_initial_fee_report_md(ctx: InitialFeeReportContext) -> str:
 
     lines.append("## 1. Current equity (at generation time)")
     if ctx.live_nav:
-        equity_by_book = {
-            str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_by_book") or {}).items()
-        }
+        equity_by_book = {str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_by_book") or {}).items()}
         equity_native_by_book = {
-            str(k).upper(): to_decimal(v)
-            for k, v in (ctx.live_nav.get("equity_native_by_book") or {}).items()
+            str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_native_by_book") or {}).items()
         }
         _append_current_equity_md(
             lines,
@@ -613,19 +570,14 @@ def render_initial_fee_report_md(ctx: InitialFeeReportContext) -> str:
 
     lines.append("## 2. Fee rates")
     lines.append(f"- Performance fee: `{float(ctx.fee_config['performance_fee_rate']) * 100:.1f}%`")
-    lines.append(
-        f"- Management fee (annual): `{float(ctx.fee_config['management_fee_annual_rate']) * 100:.2f}%`"
-    )
+    lines.append(f"- Management fee (annual): `{float(ctx.fee_config['management_fee_annual_rate']) * 100:.2f}%`")
     lines.append("")
 
     lines.append("## 3. Cumulative net subscriptions & initial HWM")
     if ctx.baseline is not None:
         lines.append(f"- Data source: `{ctx.baseline.source}`")
         scan_start_ms = effective_fee_flow_start_ms(ctx.baseline.start_timestamp_ms)
-        lines.append(
-            f"- Scan window: `{_ts_fmt(scan_start_ms)}` → "
-            f"`{_ts_fmt(ctx.baseline.end_timestamp_ms)}`"
-        )
+        lines.append(f"- Scan window: `{_ts_fmt(scan_start_ms)}` → `{_ts_fmt(ctx.baseline.end_timestamp_ms)}`")
         lines.append(f"- Entry count (deposit + withdrawal): `{ctx.baseline.entry_count}`")
         lines.append(f"- Bootstrap time: `{_ts_fmt(ctx.baseline.bootstrapped_at_ms)}`")
         lines.append("")
@@ -646,15 +598,10 @@ def render_initial_fee_report_md(ctx: InitialFeeReportContext) -> str:
                 continue
             native_by_book[line.book] = native_by_book.get(line.book, Decimal("0")) + line.amount_native
         cumulative = sum(
-            (
-                native_book_amount_to_usdc(amount, book, ctx.index_by_ccy)
-                for book, amount in native_by_book.items()
-            ),
+            (native_book_amount_to_usdc(amount, book, ctx.index_by_ccy) for book, amount in native_by_book.items()),
             Decimal("0"),
         )
-        _btc, _eth, _spot, initial_hwm = initial_spot_deduction_usdc(
-            native_by_book, index_by_ccy=ctx.index_by_ccy
-        )
+        _btc, _eth, _spot, initial_hwm = initial_spot_deduction_usdc(native_by_book, index_by_ccy=ctx.index_by_ccy)
         _append_initial_hwm_breakdown_md(
             lines,
             native_by_book=native_by_book,
@@ -670,9 +617,7 @@ def render_initial_fee_report_md(ctx: InitialFeeReportContext) -> str:
         "- Net subscription = sum of `deposit`, `withdrawal`, and `transfer` (USDC equiv.) "
         "across all configured sub-account APIs; internal sub transfers cancel in the total."
     )
-    lines.append(
-        "- Main-account funding without a main API appears as inbound `transfer` on the sub-account."
-    )
+    lines.append("- Main-account funding without a main API appears as inbound `transfer` on the sub-account.")
     lines.append("- Generated by `fee-report --kind initial` or automatically on first `fee-snapshot` bootstrap.")
     return "\n".join(lines) + "\n"
 

@@ -9,7 +9,6 @@ import pytest
 from deribit_demo.fee_snapshot_store import FeeSnapshotStore, FlowBaselineRow
 from deribit_demo.investor_cash_flow import (
     CumulativeNetFlow,
-    fetch_cumulative_net_flow_usdc,
     initial_hwm_from_net_flow,
     initial_spot_deduction_usdc,
 )
@@ -104,6 +103,7 @@ def test_capture_investor_nav_aligns_usdc_native_with_portfolio(
         "deribit_demo.frontend_server._make_dashboard_accounts",
         lambda **kwargs: [],
     )
+
     class _Manifest:
         investor_id = "demo"
         root = investor_dir
@@ -121,15 +121,13 @@ def test_capture_investor_nav_aligns_usdc_native_with_portfolio(
     assert capture.equity_by_book["USDC"] == Decimal("5974.51")
 
 
-def test_store_nav_capture_writes_capture_nav_on_bootstrap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_store_nav_capture_writes_capture_nav_on_bootstrap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "deribit_demo").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
-    ledger = tmp_path / "data" / "fee_ledger" / "Demo" / "snapshots.db"
+    ledger = tmp_path / "data" / "fee_ledger" / "demo" / "snapshots.db"
     capture = InvestorNavCapture(
         ts_ms=1000,
-        investor_id="Demo",
+        investor_id="demo",
         investor_dir=tmp_path / "config" / "investors" / "demo",
         total_equity_usdc=Decimal("25000"),
         collateral_spot_usdc=Decimal("0"),
@@ -172,7 +170,7 @@ def test_store_nav_capture_writes_capture_nav_on_bootstrap(
     row_id, bootstrap = store_nav_capture(capture, repo_root=tmp_path, snapshot_kind="manual")
     assert bootstrap is not None
     store = FeeSnapshotStore(ledger)
-    snap = store.latest_snapshot("Demo")
+    snap = store.latest_snapshot("demo")
     assert snap is not None
     assert snap.nav_perf == capture.nav_perf
     assert snap.collateral_spot_usdc == capture.collateral_spot_usdc
@@ -183,7 +181,7 @@ def test_bootstrap_hwm_from_transaction_log(tmp_path: Path, monkeypatch: pytest.
     store = FeeSnapshotStore(tmp_path / "snapshots.db")
     capture = InvestorNavCapture(
         ts_ms=1000,
-        investor_id="Demo",
+        investor_id="demo",
         investor_dir=tmp_path / "config" / "investors" / "demo",
         total_equity_usdc=Decimal("106000"),
         collateral_spot_usdc=Decimal("0"),
@@ -219,8 +217,8 @@ def test_bootstrap_hwm_from_transaction_log(tmp_path: Path, monkeypatch: pytest.
     assert result is not None
     assert result["source"] == "transaction_log"
     assert result["initial_hwm_nav_perf"] == "100000"
-    assert store.load_hwm("Demo") == Decimal("100000")
-    assert store.load_flow_baseline("Demo") is not None
+    assert store.load_hwm("demo") == Decimal("100000")
+    assert store.load_flow_baseline("demo") is not None
 
 
 def test_nav_from_equity_excludes_collateral_spot() -> None:
@@ -250,9 +248,7 @@ def test_collateral_spot_usdc() -> None:
         management_fee_annual_rate=Decimal("0.01"),
         initial_hwm_nav_perf=None,
     )
-    assert collateral_spot_usdc(cfg, index_btc_usd=Decimal("40000"), index_eth_usd=Decimal("0")) == Decimal(
-        "20000"
-    )
+    assert collateral_spot_usdc(cfg, index_btc_usd=Decimal("40000"), index_eth_usd=Decimal("0")) == Decimal("20000")
 
 
 def test_parse_quarter_period_q1() -> None:
@@ -325,9 +321,7 @@ def test_average_aum_mgmt(tmp_path: Path) -> None:
             collateral_spot_eth=Decimal("0"),
             equity_by_book={},
         )
-    avg = average_aum_mgmt(
-        store, "An", start_ms=0, end_ms=300, fee_config=cfg, flow_baseline=None
-    )
+    avg = average_aum_mgmt(store, "An", start_ms=0, end_ms=300, fee_config=cfg, flow_baseline=None)
     assert avg == Decimal("150")
 
 
@@ -373,8 +367,8 @@ def test_settle_quarter_computes_performance_fee(tmp_path: Path, monkeypatch: py
     (investor_dir / "accounts.toml").write_text(
         """
 [investor]
-id = "Demo"
-display_name = "Demo"
+id = "demo"
+display_name = "demo"
 
 [[accounts]]
 slug = "naked"
@@ -390,11 +384,11 @@ enabled = true
     (tmp_path / "deribit_demo").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
-    store = FeeSnapshotStore(tmp_path / "data" / "fee_ledger" / "Demo" / "snapshots.db")
+    store = FeeSnapshotStore(tmp_path / "data" / "fee_ledger" / "demo" / "snapshots.db")
     end_ms = quarter_end_settlement_ts_ms("2026-Q1")
     store.append_snapshot(
         ts_ms=end_ms,
-        investor_id="Demo",
+        investor_id="demo",
         snapshot_kind="settlement",
         total_equity_usdc=Decimal("116000"),
         collateral_spot_usdc=Decimal("0"),
@@ -416,7 +410,7 @@ enabled = true
     assert Decimal(result["distributable_profit"]) == Decimal("16000")
     assert Decimal(result["performance_fee"]) == Decimal("1600")
     assert Decimal(result["hwm_end"]) == Decimal("114400")
-    assert store.load_hwm("Demo") == Decimal("114400")
+    assert store.load_hwm("demo") == Decimal("114400")
 
 
 def test_parse_fee_timestamp_date_boundaries() -> None:
@@ -441,8 +435,8 @@ def test_settle_period_since_last_snapshot(tmp_path: Path, monkeypatch: pytest.M
     (investor_dir / "accounts.toml").write_text(
         """
 [investor]
-id = "Demo"
-display_name = "Demo"
+id = "demo"
+display_name = "demo"
 
 [[accounts]]
 slug = "naked"
@@ -458,12 +452,12 @@ enabled = true
     (tmp_path / "deribit_demo").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
 
-    store = FeeSnapshotStore(tmp_path / "data" / "fee_ledger" / "Demo" / "snapshots.db")
-    store.save_hwm(investor_id="Demo", hwm_nav_perf=Decimal("100000"), updated_at_ms=1)
+    store = FeeSnapshotStore(tmp_path / "data" / "fee_ledger" / "demo" / "snapshots.db")
+    store.save_hwm(investor_id="demo", hwm_nav_perf=Decimal("100000"), updated_at_ms=1)
     for ts, nav in ((1_000, "100000"), (2_000, "110000"), (3_000, "115000")):
         store.append_snapshot(
             ts_ms=ts,
-            investor_id="Demo",
+            investor_id="demo",
             snapshot_kind="scheduled",
             total_equity_usdc=Decimal(nav),
             collateral_spot_usdc=Decimal("0"),
@@ -505,6 +499,7 @@ enabled = true
         "deribit_demo.investor_cash_flow.fetch_subscription_flow_lines",
         _fake_flow_lines,
     )
+
     def _no_capture(*_args, **_kwargs):
         raise AssertionError("no live capture")
 
@@ -522,4 +517,4 @@ enabled = true
     assert result["net_flow_usdc"] == "2000"
     assert Decimal(result["distributable_profit"]) == Decimal("13000")
     assert Decimal(result["performance_fee"]) == Decimal("1300")
-    assert store.load_hwm("Demo") == Decimal("100000")
+    assert store.load_hwm("demo") == Decimal("100000")

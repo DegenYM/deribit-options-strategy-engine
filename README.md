@@ -58,11 +58,21 @@ This project is not affiliated with or endorsed by Deribit.
 
 ```bash
 cd deribit-options-strategy-engine
-python3 -m venv .venv
+python3.11 -m venv .venv   # Python 3.11+ required (uses datetime.UTC)
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 cp .env.example .env
 ```
+
+開發時跑測試與 lint：
+
+```bash
+pytest tests/ -q
+ruff check deribit_demo tests scripts
+ruff format --check deribit_demo tests scripts
+```
+
+僅部署 bot / frontend 時可只裝 `pip install -r requirements.txt`。
 
 ## Environment
 
@@ -78,6 +88,7 @@ cp .env.example .env
 - **投資人前置作業**（入金、子帳、API Key、Zero Trust Email）：[`docs/investor-onboarding-zh-TW.md`](docs/investor-onboarding-zh-TW.md)。
 - **管理方新增投資人**（CLI：`investor init` / `import-handoff` / `validate`；registry 與 `accounts.toml` 分離）：[`docs/operator-onboarding-zh-TW.md`](docs/operator-onboarding-zh-TW.md)。
 - **目錄架構與 legacy 遷移**：[`docs/repo-layout-zh-TW.md`](docs/repo-layout-zh-TW.md)。
+- **維護與優化路線圖**（CI、營運、架構拆分）：[`docs/optimization-plan-zh-TW.md`](docs/optimization-plan-zh-TW.md)。
 - 策略 tuning 在 [`config/shared/strategies/`](config/shared/strategies/)；子帳至少放憑證與資金規模，有需要時也可在同一檔覆寫少數策略鍵（見下方載入順序）。
 
 ### Investor / Sub-account Layout（建議）
@@ -128,7 +139,7 @@ cp -R config/investors/_example config/investors/youming
 
 - **策略狀態**：`STATE_FILE` 建議設為 `.state/investors/<investor_id>/<slug>.json`（範本已採此格式）。
 - **Dashboard**：`./bot --investor <id> frontend` 會自動寫入 `data/frontend_ledger/<investor_id>/`；多子帳時再分子目錄 `<slug>/`。`metrics.db` 為 `data/frontend_ledger/<investor_id>/metrics.db`。
-- **Live 監督**：`python scripts/run_live_profiles.py --investor <id> --restart-failed` 日誌預設在 `logs/live/<investor_id>/<slug>.log`；429 等暫時性 API 錯誤 bot 會退避重試，子程序異常退出時監督腳本會自動重啟該 profile。macOS 常駐範本（jack / youming / an）：[`docs/live-profiles-launchd-zh-TW.md`](docs/live-profiles-launchd-zh-TW.md)。
+- **Live 監督**：`python scripts/run_live_profiles.py --investor <id> --restart-failed` 只跑 `accounts.toml` 內 **`enabled = true` 且 `live_enabled = true`**（預設 true）且有 API 的子帳；日誌在 `logs/live/<investor_id>/<slug>.log`。若要 dashboard 繼續追蹤某策略但不自動下單，在該列設 `live_enabled = false`（仍須 `enabled = true`）。429 等暫時性 API 錯誤 bot 會退避重試，子程序異常退出時監督腳本會自動重啟該 profile。macOS 常駐範本（jack / youming / an）：[`docs/live-profiles-launchd-zh-TW.md`](docs/live-profiles-launchd-zh-TW.md)。
 - **不可混用**：同一個 `frontend` 行程不要同時載入兩位投資人的 env；請各開一個 `--port`（對外 Tunnel 亦一人一路）。
 - **覆寫路徑**（進階）：`FRONTEND_LEDGER_DIR`、`FRONTEND_METRICS_DB`；live 則用 `--log-dir`。
 - **從舊版 flat ledger 遷移**（曾寫入 `data/frontend_ledger/naked/` 等）：搬到 `data/frontend_ledger/<investor_id>/naked/`，`metrics.db` 搬到 `data/frontend_ledger/<investor_id>/metrics.db`。可執行 `./scripts/cleanup_legacy_layout.sh` 自動清理本機 legacy 產物（詳見 [`docs/repo-layout-zh-TW.md`](docs/repo-layout-zh-TW.md)）。
@@ -490,7 +501,7 @@ MAX_CONCURRENT_GROUPS=6
 ./bot --investor youming frontend --port 9000
 ./bot frontend --account-env-files config/investors/youming/accounts/.env.naked,config/investors/youming/accounts/.env.bull_put
 
-# 同時啟動 accounts.toml 內所有 enabled 子帳的 `run --live`（log：logs/live/<investor_id>/<slug>.log）
+# 同時啟動 accounts.toml 內 live_enabled 子帳的 `run --live`（log：logs/live/<investor_id>/<slug>.log）
 python scripts/run_live_profiles.py --investor youming --restart-failed
 python scripts/run_live_profiles.py --investor alice --restart-failed
 

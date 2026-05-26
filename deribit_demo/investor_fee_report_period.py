@@ -37,6 +37,7 @@ def _native(x: Decimal | str, book: str) -> str:
     places = 8 if book in {"BTC", "ETH"} else 2
     return f"{value:.{places}f}"
 
+
 @dataclass(frozen=True)
 class PeriodBookSnapshot:
     label: str
@@ -253,9 +254,7 @@ def build_investor_period_report(
         "ETH": to_decimal((ctx.end_snapshot or {}).get("index_eth_usd", ctx.index_by_ccy["ETH"])),
         "USDC": Decimal("1"),
     }
-    earned_usdc = {
-        book: native_book_amount_to_usdc(earned[book], book, index_end) for book in _BOOKS
-    }
+    earned_usdc = {book: native_book_amount_to_usdc(earned[book], book, index_end) for book in _BOOKS}
 
     closed_trades = fetch_period_closed_trades(
         ctx.investor_id,
@@ -274,9 +273,7 @@ def build_investor_period_report(
     collateral_spot_start = to_decimal((ctx.start_snapshot or {}).get("collateral_spot_usdc", 0))
     collateral_spot_end = to_decimal((ctx.end_snapshot or {}).get("collateral_spot_usdc", 0))
     total_equity_change = day_b_view.total_equity_usdc - day_a_view.total_equity_usdc
-    usdc_equiv_change = {
-        book: day_b_view.usdc_equiv[book] - day_a_view.usdc_equiv[book] for book in _BOOKS
-    }
+    usdc_equiv_change = {book: day_b_view.usdc_equiv[book] - day_a_view.usdc_equiv[book] for book in _BOOKS}
     net_flow_usdc = to_decimal(s["net_flow_usdc"])
     distributable_profit = to_decimal(s["distributable_profit"])
 
@@ -342,8 +339,7 @@ def render_period_summary_md(report: InvestorPeriodReport) -> list[str]:
     lines.append(f"- From: `{report.day_a.label}`")
     lines.append(f"- To: `{report.day_b.label}`")
     lines.append(
-        f"- Index at period end: BTC `{_money(report.index_end['BTC'])}` / "
-        f"ETH `{_money(report.index_end['ETH'])}` USDC"
+        f"- Index at period end: BTC `{_money(report.index_end['BTC'])}` / ETH `{_money(report.index_end['ETH'])}` USDC"
     )
     lines.append("")
     lines.append("## Account balances")
@@ -436,18 +432,12 @@ def render_period_summary_md(report: InvestorPeriodReport) -> list[str]:
     lines.append("")
     lines.append("## Fees (USDC)")
     lines.append("")
-    lines.append(
-        f"- **Strategy P&L (period NAV change)**: **`{_money(report.total_usdc_earned)}`**"
-    )
-    lines.append(
-        f"- **Distributable profit (above HWM)**: **`{_money(report.distributable_profit)}`**"
-    )
+    lines.append(f"- **Strategy P&L (period NAV change)**: **`{_money(report.total_usdc_earned)}`**")
+    lines.append(f"- **Distributable profit (above HWM)**: **`{_money(report.distributable_profit)}`**")
     lines.append(
         f"- **Performance fee** ({float(report.performance_fee_rate) * 100:.0f}%): **`{_money(report.performance_fee)}`**"
     )
-    lines.append(
-        f"- **Management fee**: **`{_money(report.management_fee)}`**"
-    )
+    lines.append(f"- **Management fee**: **`{_money(report.management_fee)}`**")
     lines.append(
         f"- Deposit total (USDC equiv.): `{_money(_total_usdc(report.deposit_native, report.index_end))}` · "
         f"Withdrawal total (USDC equiv.): `{_money(_total_usdc(report.withdraw_native, report.index_end))}`"
@@ -490,12 +480,10 @@ def render_period_trades_md(report: InvestorPeriodReport) -> list[str]:
     lines.append("## Closed option trades (period)")
     lines.append("")
     lines.append(
-        "| Closed (UTC) | Account | Strategy | Instrument | Collateral | "
-        "Qty | PnL (native) | PnL (USDC) | Reason |"
+        "| Closed (UTC) | Account | Strategy | Instrument | Collateral | Qty | PnL (native) | PnL (USDC) | Reason |"
     )
     lines.append(
-        "|--------------|---------|----------|------------|------------|"
-        "-----|--------------|------------|--------|"
+        "|--------------|---------|----------|------------|------------|-----|--------------|------------|--------|"
     )
     if not report.closed_trades:
         lines.append("| — | — | — | — | — | — | — | — | — |")

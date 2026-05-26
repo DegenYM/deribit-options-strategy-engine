@@ -14,11 +14,19 @@ from .env_layout import find_repo_root
 from .exceptions import ConfigurationError
 from .investor_launchd_common import (
     LaunchdAction as FrontendLaunchdAction,
-    bootstrap_plist as _bootstrap_plist,
+)
+from .investor_launchd_common import (
     bootout_plist as _bootout_plist,
+)
+from .investor_launchd_common import (
+    bootstrap_plist as _bootstrap_plist,
+)
+from .investor_launchd_common import (
     install_plist_file,
     is_launchd_loaded,
     launch_agents_dir,
+)
+from .investor_launchd_common import (
     reload_plist as _reload_frontend_plist,
 )
 from .investor_ops import render_launchd_plists
@@ -83,12 +91,12 @@ def frontend_targets(
         if entry is None:
             raise ConfigurationError(f"Investor {normalized!r} not found in registry.toml")
         if not entry.frontend_enabled and not include_disabled:
-            raise ConfigurationError(
-                f"Investor {normalized!r} has frontend_enabled=false in registry.toml"
-            )
+            raise ConfigurationError(f"Investor {normalized!r} has frontend_enabled=false in registry.toml")
         return (entry,)
-    rows = registry.investors if include_disabled else tuple(
-        entry for entry in registry.investors if entry.frontend_enabled
+    rows = (
+        registry.investors
+        if include_disabled
+        else tuple(entry for entry in registry.investors if entry.frontend_enabled)
     )
     if not rows:
         raise ConfigurationError("No investors with frontend_enabled=true in registry.toml")
@@ -291,12 +299,7 @@ def manage_frontend_launchd(
                 listen_port=listen_port,
                 check_health=check_health,
             )
-            if (
-                not result.ok
-                and result.health_ok is False
-                and loaded
-                and not plist_changed
-            ):
+            if not result.ok and result.health_ok is False and loaded and not plist_changed:
                 reload_ok, reload_msg = _reload_frontend_plist(plist_path, label)
                 if reload_ok:
                     result = _finalize_launchd_result(

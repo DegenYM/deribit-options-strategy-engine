@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import UTC, datetime
-from decimal import Decimal, ROUND_DOWN, ROUND_UP, getcontext
+from decimal import ROUND_DOWN, ROUND_UP, Decimal, getcontext
 from enum import Enum
 from typing import Any
 

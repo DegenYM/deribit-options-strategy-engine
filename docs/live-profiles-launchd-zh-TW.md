@@ -12,7 +12,7 @@
 ```
 launchd（每位投資人一個 LaunchAgent）
   └── run_live_profiles.py --investor <id> --restart-failed
-        ├── accounts.toml 內各 enabled 子帳 bot
+        ├── accounts.toml 內 enabled + live_enabled 子帳 bot
         └── ...
 ```
 

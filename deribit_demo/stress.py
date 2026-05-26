@@ -20,6 +20,7 @@ def _intrinsic(*, spot: Decimal, strike: Decimal, option_type: str) -> Decimal:
         return max(spot - strike, ZERO)
     return max(strike - spot, ZERO)
 
+
 def _intrinsic_settlement(
     instrument: OptionInstrument,
     *,
@@ -61,7 +62,7 @@ def stress_short_option_loss_usdc(
     if shocked_spot <= 0:
         shocked_spot = ZERO
     repurchase = _intrinsic_settlement(instrument, shocked_spot=shocked_spot, option_type=option_type)
-    repurchase *= (ONE + scenario.liquidity_slippage)
+    repurchase *= ONE + scenario.liquidity_slippage
 
     # PnL in settlement currency: short receives entry_premium, pays repurchase.
     pnl_settle = (entry_premium - repurchase) * quantity
@@ -236,4 +237,3 @@ def summarize_loss_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
         summary["worst_by_book"] = worst_entry.get("by_book")
         summary["worst_components"] = worst_entry.get("components")
     return summary
-

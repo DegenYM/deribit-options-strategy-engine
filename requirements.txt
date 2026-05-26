@@ -1,9 +1,8 @@
-requests
-python-dotenv
-pytest
-fastapi
-uvicorn[standard]
-reportlab
-matplotlib
-numpy
-pillow
+requests>=2.31,<3
+python-dotenv>=1.0,<2
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+reportlab>=4.0,<5
+matplotlib>=3.8,<4
+numpy>=1.26,<3
+pillow>=10.0,<12

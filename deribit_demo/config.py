@@ -489,9 +489,7 @@ def _load_env_values_with_strategy_profile(
         values["ACCOUNT_ROLE"] = ACCOUNT_ROLE_FEE
         return values
 
-    base_strategy = _option_strategy(
-        strategy_override or _optional(seed, "OPTION_STRATEGY", "naked_short")
-    )
+    base_strategy = _option_strategy(strategy_override or _optional(seed, "OPTION_STRATEGY", "naked_short"))
 
     values: dict[str, str] = {}
     for layer_path in env_layer_paths(env_path, base_strategy):
@@ -556,28 +554,22 @@ def load_config(
     option_strategy = _option_strategy(_optional(values, "OPTION_STRATEGY", "naked_short"))
     option_markets_profile = _optional(values, "OPTION_MARKETS_PROFILE", "all").lower()
     if option_markets_profile not in {"inverse_native", "all", "linear_usdc"}:
-        raise ConfigurationError(
-            "OPTION_MARKETS_PROFILE must be one of: all, linear_usdc, inverse_native"
-        )
+        raise ConfigurationError("OPTION_MARKETS_PROFILE must be one of: all, linear_usdc, inverse_native")
 
     book_im_hard_value = to_decimal(_optional(values, "BOOK_IM_HARD", "0.45"))
 
     scan_assets = parse_csv(_optional(values, "SCAN_ASSETS", ""), upper=True)
-    managed_currencies = scan_assets or parse_csv(_optional(values, "MANAGED_CURRENCIES", "BTC,ETH"), upper=True) or ("BTC", "ETH")
+    managed_currencies = (
+        scan_assets or parse_csv(_optional(values, "MANAGED_CURRENCIES", "BTC,ETH"), upper=True) or ("BTC", "ETH")
+    )
 
     # Stage C: ``SCAN_UNDERLYINGS`` aliases the legacy ``MANAGED_CURRENCIES`` /
     # ``SCAN_ASSETS`` list and defines which underlyings the scanner looks at.
     # ``TRADED_COLLATERALS`` is a new, independent lever that selects which
     # collateral pools the engine builds books for (BTC, ETH, USDC). When
     # absent, every collateral pool is built (backward compatible).
-    scan_underlyings = (
-        parse_csv(_optional(values, "SCAN_UNDERLYINGS", ""), upper=True)
-        or managed_currencies
-    )
-    traded_collaterals = (
-        parse_csv(_optional(values, "TRADED_COLLATERALS", ""), upper=True)
-        or ("BTC", "ETH", "USDC")
-    )
+    scan_underlyings = parse_csv(_optional(values, "SCAN_UNDERLYINGS", ""), upper=True) or managed_currencies
+    traded_collaterals = parse_csv(_optional(values, "TRADED_COLLATERALS", ""), upper=True) or ("BTC", "ETH", "USDC")
     min_book_equity_usdc = to_decimal(_optional(values, "MIN_BOOK_EQUITY_USDC", "0"))
     cash_flow_query_interval_seconds = max(
         30,
@@ -593,9 +585,7 @@ def load_config(
     if side_override is None:
         enable_short_put = _to_bool(_optional(values, "ENABLE_SHORT_PUT", "true"), default=True)
         enable_short_call = _to_bool(_optional(values, "ENABLE_SHORT_CALL", "false"))
-        short_call_fallback_only = _to_bool(
-            _optional(values, "SHORT_CALL_FALLBACK_ONLY", "true"), default=True
-        )
+        short_call_fallback_only = _to_bool(_optional(values, "SHORT_CALL_FALLBACK_ONLY", "true"), default=True)
     else:
         enable_short_put, enable_short_call, short_call_fallback_only = side_override
 
@@ -629,9 +619,7 @@ def load_config(
         put_otm_min=to_decimal(_optional(values, "PUT_OTM_MIN", "0.08")),
         put_otm_max=to_decimal(_optional(values, "PUT_OTM_MAX", "0.18")),
         min_liquid_expiries_required=max(1, int(_optional(values, "MIN_LIQUID_EXPIRIES_REQUIRED", "2"))),
-        halt_open_max_loss_pct=to_decimal(
-            _optional(values, "OPEN_MAX_LOSS_HALT_RATIO", str(book_im_hard_value))
-        ),
+        halt_open_max_loss_pct=to_decimal(_optional(values, "OPEN_MAX_LOSS_HALT_RATIO", str(book_im_hard_value))),
         tp_capture_pct=to_decimal(_optional(values, "TP_CAPTURE_PCT", "0.60")),
         enable_early_exit=_to_bool(_optional(values, "ENABLE_EARLY_EXIT", "true"), default=True),
         early_exit_remaining_apr=to_decimal(_optional(values, "EARLY_EXIT_REMAINING_APR", "0.08")),
@@ -656,7 +644,9 @@ def load_config(
         dvol_crisis_multiplier=to_decimal(_optional(values, "DVOL_CRISIS_MULTIPLIER", "1.60")),
         halt_drawdown_pct=to_decimal(_optional(values, "HALT_DRAWDOWN_PCT", "0.03")),
         hard_derisk_drawdown_pct=to_decimal(_optional(values, "HARD_DERISK_DRAWDOWN_PCT", "0.06")),
-        hard_derisk_maintenance_margin_ratio=to_decimal(_optional(values, "HARD_DERISK_MAINTENANCE_MARGIN_RATIO", "0.12")),
+        hard_derisk_maintenance_margin_ratio=to_decimal(
+            _optional(values, "HARD_DERISK_MAINTENANCE_MARGIN_RATIO", "0.12")
+        ),
         hard_derisk_on_crisis_open_group=_to_bool(_optional(values, "HARD_DERISK_ON_CRISIS_OPEN_GROUP", "false")),
         enable_perp_hedge=_to_bool(_optional(values, "ENABLE_PERP_HEDGE", "false")),
         soft_hedge_delta_cap_pct=to_decimal(_optional(values, "SOFT_HEDGE_DELTA_CAP_PCT", "0.10")),
@@ -670,8 +660,12 @@ def load_config(
         min_net_apr=to_decimal(_optional(values, "MIN_NET_APR", "0.12")),
         target_net_apr_min=to_decimal(_optional(values, "TARGET_NET_APR_MIN", "0.15")),
         target_net_apr_max=to_decimal(_optional(values, "TARGET_NET_APR_MAX", "0.20")),
-        btc_put_delta_min=to_decimal(_optional(values, "BTC_PUT_DELTA_MIN", _optional(values, "SHORT_PUT_DELTA_MIN", "0.08"))),
-        btc_put_delta_max=to_decimal(_optional(values, "BTC_PUT_DELTA_MAX", _optional(values, "SHORT_PUT_DELTA_MAX", "0.12"))),
+        btc_put_delta_min=to_decimal(
+            _optional(values, "BTC_PUT_DELTA_MIN", _optional(values, "SHORT_PUT_DELTA_MIN", "0.08"))
+        ),
+        btc_put_delta_max=to_decimal(
+            _optional(values, "BTC_PUT_DELTA_MAX", _optional(values, "SHORT_PUT_DELTA_MAX", "0.12"))
+        ),
         eth_put_delta_min=to_decimal(_optional(values, "ETH_PUT_DELTA_MIN", "0.06")),
         eth_put_delta_max=to_decimal(_optional(values, "ETH_PUT_DELTA_MAX", "0.10")),
         btc_put_otm_min=to_decimal(_optional(values, "BTC_PUT_OTM_MIN", _optional(values, "PUT_OTM_MIN", "0.10"))),
@@ -691,7 +685,9 @@ def load_config(
         eth_preferred_otm_min=to_decimal(_optional(values, "ETH_PREFERRED_OTM_MIN", "0.14")),
         eth_preferred_otm_max=to_decimal(_optional(values, "ETH_PREFERRED_OTM_MAX", "0.18")),
         enable_naked_topup=_to_bool(_optional(values, "ENABLE_NAKED_TOPUP", "false")),
-        enable_adopt_exchange_positions=_to_bool(_optional(values, "ENABLE_ADOPT_EXCHANGE_POSITIONS", "true"), default=True),
+        enable_adopt_exchange_positions=_to_bool(
+            _optional(values, "ENABLE_ADOPT_EXCHANGE_POSITIONS", "true"), default=True
+        ),
         enable_short_put=enable_short_put,
         enable_short_call=enable_short_call,
         short_call_delta_min=to_decimal(_optional(values, "SHORT_CALL_DELTA_MIN", "0.08")),
@@ -741,9 +737,7 @@ def load_config(
         btc_linear_min_open_interest=btc_linear_min_open_interest,
         eth_linear_min_open_interest=eth_linear_min_open_interest,
         linear_max_spread_ratio=to_decimal(_optional(values, "LINEAR_MAX_SPREAD_RATIO", "0.14")),
-        linear_min_book_notional_usdc=to_decimal(
-            _optional(values, "LINEAR_MIN_BOOK_NOTIONAL_USDC", "4000")
-        ),
+        linear_min_book_notional_usdc=to_decimal(_optional(values, "LINEAR_MIN_BOOK_NOTIONAL_USDC", "4000")),
         max_groups_per_book=int(
             _optional(values, "MAX_GROUPS_PER_BOOK", _optional(values, "MAX_GROUPS_PER_CURRENCY", "3"))
         ),
@@ -758,18 +752,10 @@ def load_config(
         traded_collaterals=traded_collaterals,
         min_book_equity_usdc=min_book_equity_usdc,
         cash_flow_query_interval_seconds=cash_flow_query_interval_seconds,
-        covered_call_spot_exit_enabled=_to_bool(
-            _optional(values, "COVERED_CALL_SPOT_EXIT_ENABLED", "false")
-        ),
-        covered_call_robust_exit_enabled=_to_bool(
-            _optional(values, "COVERED_CALL_ROBUST_EXIT_ENABLED", "false")
-        ),
-        covered_call_robust_exit_dte=to_decimal(
-            _optional(values, "COVERED_CALL_ROBUST_EXIT_DTE", "0.5")
-        ),
-        covered_call_itm_buffer_pct=to_decimal(
-            _optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")
-        ),
+        covered_call_spot_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_SPOT_EXIT_ENABLED", "false")),
+        covered_call_robust_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_ROBUST_EXIT_ENABLED", "false")),
+        covered_call_robust_exit_dte=to_decimal(_optional(values, "COVERED_CALL_ROBUST_EXIT_DTE", "0.5")),
+        covered_call_itm_buffer_pct=to_decimal(_optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")),
         covered_call_spot_order_type=covered_call_spot_order_type,
         account_role=account_role,
     )

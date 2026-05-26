@@ -3,11 +3,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from conftest import FakeClient, make_config
 
 from deribit_demo.engine import DeribitOptionTrialBot
 from deribit_demo.models import OptionInstrument, TradeGroup
-
-from conftest import FakeClient, make_config
 
 
 @pytest.fixture

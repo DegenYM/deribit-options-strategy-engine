@@ -16,4 +16,3 @@ class ExchangeError(BotError):
 
 class TransientExchangeError(BotError):
     """Raised for retryable network or server-side failures."""
-

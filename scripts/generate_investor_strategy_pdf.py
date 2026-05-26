@@ -69,9 +69,7 @@ ILLUSTRATION: dict = {
             "ITM settlement approx. max(S-K,0)/S BTC paid from seller."
         ),
         "title_usd": "Covered call (USD / linear-style)",
-        "subtitle_usd": (
-            "Long 1 BTC + short call + premium: terminal USD value min(S,K)+P, capped at K+P when S≥K."
-        ),
+        "subtitle_usd": ("Long 1 BTC + short call + premium: terminal USD value min(S,K)+P, capped at K+P when S≥K."),
         "y_label_usd": "Position value at expiry (USD)",
         "line_color_usd": "#0369a1",
         "footer_template_usd": (
@@ -954,12 +952,7 @@ def build_pdf(out_path: Path, repo_root: Path) -> None:
 
     def _glance_cell(text: str, *, header: bool = False) -> Paragraph:
         # Paragraph + column width fixes occasional ReportLab string-cell overlap on grid lines.
-        safe = (
-            str(text)
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
+        safe = str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         return Paragraph(safe, styles["TableCellHeader"] if header else styles["TableCell"])
 
     data = [

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .client import DeribitClient
 from .models import OptionInstrument
@@ -37,7 +38,7 @@ class TradingViewSeries:
     status: str
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "TradingViewSeries":
+    def from_api(cls, payload: dict[str, Any]) -> TradingViewSeries:
         status = str(payload.get("status") or "")
         ticks = payload.get("ticks") or []
         return cls(
@@ -62,7 +63,7 @@ class TradingViewSeries:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "TradingViewSeries":
+    def from_dict(cls, payload: dict[str, Any]) -> TradingViewSeries:
         return cls(
             t=tuple(int(x) for x in (payload.get("t") or [])),
             o=tuple(payload.get("o") or []),
@@ -245,4 +246,3 @@ def to_decimal_or_none(value: Any) -> Any | None:
         return None
     d = to_decimal(value)
     return d
-

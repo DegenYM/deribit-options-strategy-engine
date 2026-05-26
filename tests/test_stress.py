@@ -88,4 +88,3 @@ def test_black_swan_analysis_normalizes_put_spread_alias():
 
     assert analysis["label"] == "bull_put_spread"
     assert "long put" in analysis["summary"]
-

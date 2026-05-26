@@ -108,14 +108,55 @@ def test_operational_accounts_skip_enabled_rows_without_api_creds(tmp_path: Path
 
     creds_account = investor / "accounts" / ".env.bull_put"
     creds_account.write_text(
-        creds_account.read_text(encoding="utf-8")
-        + "\nDERIBIT_CLIENT_ID=test-id\nDERIBIT_CLIENT_SECRET=test-secret\n",
+        creds_account.read_text(encoding="utf-8") + "\nDERIBIT_CLIENT_ID=test-id\nDERIBIT_CLIENT_SECRET=test-secret\n",
         encoding="utf-8",
     )
     manifest = load_investor_manifest("alpha", repo_root=tmp_path)
     assert [account.slug for account in manifest.operational_accounts()] == ["bull_put"]
     assert [account.slug for account in manifest.accounts_without_creds()] == ["naked"]
     assert manifest.account_env_files(require_creds=True)[0].name == ".env.bull_put"
+
+
+def test_live_operational_accounts_respect_live_enabled_flag(tmp_path: Path):
+    _write_layout(tmp_path)
+    investor = tmp_path / "config/investors/alpha"
+    account = investor / "accounts" / ".env.bull_put"
+    account.write_text(
+        account.read_text(encoding="utf-8") + "\nDERIBIT_CLIENT_ID=test-id\nDERIBIT_CLIENT_SECRET=test-secret\n",
+        encoding="utf-8",
+    )
+    (investor / "accounts" / ".env.naked").write_text(
+        "\n".join(
+            [
+                "DERIBIT_ENV=mainnet",
+                "OPTION_STRATEGY=naked_short",
+                "STATE_FILE=.state/alpha/naked.json",
+                "DERIBIT_CLIENT_ID=test-id-2",
+                "DERIBIT_CLIENT_SECRET=test-secret-2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (investor / "accounts.toml").write_text(
+        "\n".join(
+            [
+                '[investor]\nid = "alpha"\ndisplay_name = "Alpha"\n',
+                '[[accounts]]\nslug = "bull_put"\nstrategy = "bull_put_spread"\nenabled = true\n',
+                '[[accounts]]\nslug = "naked"\nstrategy = "naked_short"\nenabled = true\nlive_enabled = false\n',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manifest = load_investor_manifest("alpha", repo_root=tmp_path)
+    assert [account.slug for account in manifest.enabled_accounts()] == ["bull_put", "naked"]
+    assert [account.slug for account in manifest.live_operational_accounts()] == ["bull_put"]
+    assert [path.name for path in manifest.account_env_files(require_creds=True)] == [
+        ".env.bull_put",
+        ".env.naked",
+    ]
+    assert [path.name for path in manifest.account_env_files(require_creds=True, require_live=True)] == [
+        ".env.bull_put",
+    ]
 
 
 def test_resolve_investor_scope_rejects_mixed_investors(tmp_path: Path):
@@ -128,7 +169,9 @@ def test_resolve_investor_scope_rejects_mixed_investors(tmp_path: Path):
         encoding="utf-8",
     )
     beta_account = beta / "accounts/.env.naked"
-    beta_account.write_text("OPTION_STRATEGY=naked_short\nSTATE_FILE=.state/investors/beta/naked.json\n", encoding="utf-8")
+    beta_account.write_text(
+        "OPTION_STRATEGY=naked_short\nSTATE_FILE=.state/investors/beta/naked.json\n", encoding="utf-8"
+    )
     with pytest.raises(ConfigurationError, match="multiple investors"):
         resolve_investor_scope((alpha_account, beta_account), repo_root=tmp_path)
 

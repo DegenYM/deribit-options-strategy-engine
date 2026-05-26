@@ -234,7 +234,17 @@ def _stress_scenarios(
             loss_by_book[book] = loss_by_book.get(book, ZERO) + total
             base_by_book[book] = base_by_book.get(book, ZERO) + to_decimal(bd["base_move_usdc"])
             slip_by_book[book] = slip_by_book.get(book, ZERO) + to_decimal(bd["slippage_usdc"])
-            worst_legs.append((total, {**pos, "loss_usdc": total, "base_move_usdc": bd["base_move_usdc"], "slippage_usdc": bd["slippage_usdc"]}))
+            worst_legs.append(
+                (
+                    total,
+                    {
+                        **pos,
+                        "loss_usdc": total,
+                        "base_move_usdc": bd["base_move_usdc"],
+                        "slippage_usdc": bd["slippage_usdc"],
+                    },
+                )
+            )
 
         if config.option_strategy == "covered_call":
             for book, equity_usdc in equity_usdc_by_book.items():
@@ -321,9 +331,7 @@ def compute_stress_from_prefetch(
     client: DeribitClient | None = None,
 ) -> CurrentStressResult:
     """Stress from a dashboard exchange prefetch (no account summary / position refetch)."""
-    opt_positions = [
-        p for p in prefetch.positions if p.kind == "option" and p.instrument_name and p.size != 0
-    ]
+    opt_positions = [p for p in prefetch.positions if p.kind == "option" and p.instrument_name and p.size != 0]
     resolved_index = _index_by_ccy_for_stress(
         config,
         opt_positions=opt_positions,
@@ -384,22 +392,28 @@ def render_current_stress_md(result: CurrentStressResult) -> str:
     lines.append("")
     lines.append("## 目前 options 部位（節錄）")
     for p in result.positions[:20]:
-        lines.append(f"- `{p['instrument_name']}` dir={p['direction']} qty={p['quantity']} mark={p['mark_price']} strike={p['strike']} settle={p['settlement_currency']}")
+        lines.append(
+            f"- `{p['instrument_name']}` dir={p['direction']} qty={p['quantity']} mark={p['mark_price']} strike={p['strike']} settle={p['settlement_currency']}"
+        )
     lines.append("")
     lines.append("## 情境結果（由輕到重）")
     for s in result.scenarios:
         lines.append(
             f"- shock={s['shock']} slip={s['slippage']} → total_loss={s['loss_usdc_total']} "
-            f"({to_decimal(s['loss_usdc_pct_of_total_equity'])*Decimal('100'):.2f}% of equity)"
+            f"({to_decimal(s['loss_usdc_pct_of_total_equity']) * Decimal('100'):.2f}% of equity)"
         )
         lines.append(f"  - by_book={s['loss_by_book_usdc']}")
         lines.append(f"  - components={s['components_total_usdc']}")
         if s["worst_legs"]:
             top = s["worst_legs"][0]
-            lines.append(f"  - worst_leg={top['instrument_name']} loss={top['loss_usdc']} base_move={top['base_move_usdc']} slip={top['slippage_usdc']}")
+            lines.append(
+                f"  - worst_leg={top['instrument_name']} loss={top['loss_usdc']} base_move={top['base_move_usdc']} slip={top['slippage_usdc']}"
+            )
     lines.append("")
     lines.append("## 解讀")
-    lines.append("- `base_move_usdc` 代表 option legs 在 shocked intrinsic 下的重估損益；short put 下跌會變差，long put 會抵銷。")
+    lines.append(
+        "- `base_move_usdc` 代表 option legs 在 shocked intrinsic 下的重估損益；short put 下跌會變差，long put 會抵銷。"
+    )
     lines.append("- `slippage_usdc` 是回補 short 或出清 long option 時的保守流動性折價。")
     lines.append("- `spot_cover_usdc` 只在 `covered_call` 下列入，用來估 BTC/ETH 現貨 cover 的 USDC 等值縮水。")
     lines.append("- 每本帳損失做了 equity 上限（最慘歸零），用來近似強制平倉/爆倉上限。")

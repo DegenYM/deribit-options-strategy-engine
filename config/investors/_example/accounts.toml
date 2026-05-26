@@ -11,6 +11,7 @@ slug = "covered_call"
 strategy = "covered_call"
 display_name = "Covered call (BTC/ETH inventory)"
 enabled = true
+# live_enabled = false  # optional: keep on dashboard but skip run_live_profiles / launchd live
 
 [[accounts]]
 slug = "naked"

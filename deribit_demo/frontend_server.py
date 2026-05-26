@@ -19,15 +19,18 @@ import re
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .client import DeribitClient
 from .config import BotConfig, has_private_creds_config, load_config
+from .current_stress import CurrentStressResult, compute_current_stress, compute_stress_from_prefetch
+from .engine import DeribitOptionTrialBot, ExchangePrefetch
 from .env_layout import (
     account_slug_from_env_path,
     find_repo_root,
@@ -36,18 +39,21 @@ from .env_layout import (
     load_investor_manifest,
     resolve_investor_scope,
 )
-from .current_stress import CurrentStressResult, compute_current_stress, compute_stress_from_prefetch
-from .engine import DeribitOptionTrialBot, ExchangePrefetch
 from .exceptions import ConfigurationError
-from .models import OrderBookSnapshot, TradeGroup, normalize_strategy_name
-from .stress import black_swan_strategy_analysis
 from .metrics_store import MetricsStore, fingerprint_from_cache_key, performance_scope_key
+from .models import (
+    OrderBookSnapshot,
+    TradeGroup,
+    is_phantom_reconcile_close,
+    normalize_strategy_name,
+    open_short_instrument_names,
+)
 from .realized_summary import realized_summary_from_closed
+from .state import StrategyStateStore, load_performance_exclusion_group_ids
+from .stress import black_swan_strategy_analysis
+from .trade_apr import entry_dte_days_at_open, realized_apr_from_close
 from .trade_journal import TradeJournalStore, journal_db_path_for_state, scope_key_for_state
 from .trade_journal_backfill import sync_incremental_journal
-from .models import is_phantom_reconcile_close, open_short_instrument_names
-from .state import StrategyStateStore, load_performance_exclusion_group_ids
-from .trade_apr import entry_dte_days_at_open, realized_apr_from_close
 from .utils import format_decimal, json_default, parse_option_name, to_decimal, utc_now, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
@@ -127,7 +133,9 @@ def _group_index_usd_for_apr(group: dict[str, Any], index_usd: dict[str, Decimal
                 return strike
             return Decimal("0")
         return Decimal("0")
-    idx = index_usd.get(coll) or _dec(group.get("close_index_usd")) or _dec(group.get("entry_index_usd")) or Decimal("0")
+    idx = (
+        index_usd.get(coll) or _dec(group.get("close_index_usd")) or _dec(group.get("entry_index_usd")) or Decimal("0")
+    )
     return idx
 
 
@@ -247,9 +255,7 @@ def _merge_portfolio_for_same_api_identity(base: dict[str, Any], extra: dict[str
         base_detail.setdefault(kk, []).extend(list(details or []))
     base["regime_detail_by_currency"] = base_detail
 
-    base_halt_book = {
-        str(k).upper(): list(v or []) for k, v in (base.get("halt_entry_reasons_by_book") or {}).items()
-    }
+    base_halt_book = {str(k).upper(): list(v or []) for k, v in (base.get("halt_entry_reasons_by_book") or {}).items()}
     for raw_k, reasons in (extra.get("halt_entry_reasons_by_book") or {}).items():
         kk = str(raw_k).upper()
         base_halt_book.setdefault(kk, []).extend(list(reasons or []))
@@ -633,24 +639,14 @@ class EquitySnapshotScheduler:
                 "initial_margin_ratio": str(snapshot.initial_margin_ratio),
                 "maintenance_margin_ratio": str(snapshot.maintenance_margin_ratio),
                 "equity_by_book": {k: str(v) for k, v in snapshot.equity_by_book.items()},
-                "day_start_equity_by_book": {
-                    k: str(v) for k, v in snapshot.day_start_equity_by_book.items()
-                },
-                "day_net_flow_usdc_by_book": {
-                    k: str(v) for k, v in snapshot.day_net_flow_usdc_by_book.items()
-                },
-                "day_pnl_usdc_ex_flow_by_book": {
-                    k: str(v) for k, v in snapshot.day_pnl_usdc_ex_flow_by_book.items()
-                },
+                "day_start_equity_by_book": {k: str(v) for k, v in snapshot.day_start_equity_by_book.items()},
+                "day_net_flow_usdc_by_book": {k: str(v) for k, v in snapshot.day_net_flow_usdc_by_book.items()},
+                "day_pnl_usdc_ex_flow_by_book": {k: str(v) for k, v in snapshot.day_pnl_usdc_ex_flow_by_book.items()},
                 "day_pnl_usdc_ex_flow_ex_spot_by_book": {
                     k: str(v) for k, v in snapshot.day_pnl_usdc_ex_flow_ex_spot_by_book.items()
                 },
-                "delta_totals_by_currency": {
-                    k: str(v) for k, v in snapshot.delta_totals_by_currency.items()
-                },
-                "regime_by_currency": {
-                    k: v.value for k, v in snapshot.regime_by_currency.items()
-                },
+                "delta_totals_by_currency": {k: str(v) for k, v in snapshot.delta_totals_by_currency.items()},
+                "regime_by_currency": {k: v.value for k, v in snapshot.regime_by_currency.items()},
                 "halt_new_entries": snapshot.halt_new_entries,
                 "hard_derisk": snapshot.hard_derisk,
             }
@@ -1152,10 +1148,7 @@ def _cumulative_pnl_series_from_daily(
 
     daily_total_rows = [{"date": day, "pnl_usdc": str(daily_total[day])} for day in days_sorted]
     daily_by_book_rows = {
-        book: [
-            {"date": day, "pnl_usdc": str(daily_by_book[book].get(day, Decimal("0")))}
-            for day in days_sorted
-        ]
+        book: [{"date": day, "pnl_usdc": str(daily_by_book[book].get(day, Decimal("0")))} for day in days_sorted]
         for book in books_sorted
     }
 
@@ -1178,10 +1171,7 @@ def _cumulative_pnl_series(closed: list[dict[str, Any]]) -> dict[str, Any]:
     """
     daily_by_book: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
     daily_total: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-    realized = [
-        g for g in closed
-        if g.get("closed_timestamp_ms") is not None and g.get("realized_pnl") is not None
-    ]
+    realized = [g for g in closed if g.get("closed_timestamp_ms") is not None and g.get("realized_pnl") is not None]
     for g in realized:
         day = _bucket_day_utc(int(g["closed_timestamp_ms"]))
         pnl = to_decimal(g["realized_pnl"])
@@ -1207,14 +1197,9 @@ def _cumulative_pnl_series(closed: list[dict[str, Any]]) -> dict[str, Any]:
             rows.append({"date": day, "pnl_usdc": str(running)})
         cumulative_by_book[book] = rows
 
-    daily_total_rows = [
-        {"date": day, "pnl_usdc": str(daily_total[day])} for day in days_sorted
-    ]
+    daily_total_rows = [{"date": day, "pnl_usdc": str(daily_total[day])} for day in days_sorted]
     daily_by_book_rows = {
-        book: [
-            {"date": day, "pnl_usdc": str(daily_by_book[book].get(day, Decimal("0")))}
-            for day in days_sorted
-        ]
+        book: [{"date": day, "pnl_usdc": str(daily_by_book[book].get(day, Decimal("0")))} for day in days_sorted]
         for book in books_sorted
     }
 
@@ -1541,10 +1526,7 @@ def _weighted_ratio_by_book(
             ratio = _dec((ratios or {}).get(ratio_key))
             numerators[book_key] += ratio * equity
             denominators[book_key] += equity
-    return {
-        book: _ratio(numerators[book], denominators[book])
-        for book in sorted(set(numerators) | set(denominators))
-    }
+    return {book: _ratio(numerators[book], denominators[book]) for book in sorted(set(numerators) | set(denominators))}
 
 
 def _aggregate_portfolios(
@@ -1625,11 +1607,17 @@ def _aggregate_portfolios(
         "open_max_loss": open_max_loss,
         "open_max_loss_pct": _ratio(open_max_loss, total_equity),
         "initial_margin_ratio": _ratio(
-            sum((_dec(p.get("initial_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in equity_portfolios), Decimal("0")),
+            sum(
+                (_dec(p.get("initial_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in equity_portfolios),
+                Decimal("0"),
+            ),
             total_equity,
         ),
         "maintenance_margin_ratio": _ratio(
-            sum((_dec(p.get("maintenance_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in equity_portfolios), Decimal("0")),
+            sum(
+                (_dec(p.get("maintenance_margin_ratio")) * _dec(p.get("total_equity_usdc")) for p in equity_portfolios),
+                Decimal("0"),
+            ),
             total_equity,
         ),
         "projected_max_profit_run_rate_usdc": run_rate,
@@ -1655,7 +1643,8 @@ def _aggregate_portfolios(
             book: max(
                 (int((p.get("cooldown_until_ms_by_book") or {}).get(book) or 0) for p in equity_portfolios),
                 default=0,
-            ) or None
+            )
+            or None
             for book in sorted(equity_by_book)
         },
         "cooling_down_by_book": _bool_by_book("cooling_down_by_book"),
@@ -1921,14 +1910,20 @@ def _aggregate_report(accounts: list[DashboardAccount], *, days: int) -> dict[st
     total_realized = _sum_decimal_field(summaries, "realized_pnl_usdc")
     window_realized = _sum_decimal_field(summaries, "window_realized_pnl_usdc")
     total_holding_days = sum(
-        (_dec(summary.get("avg_holding_days")) * Decimal(str(int(summary.get("realized_closed_group_count") or 0))) for summary in summaries),
+        (
+            _dec(summary.get("avg_holding_days")) * Decimal(str(int(summary.get("realized_closed_group_count") or 0)))
+            for summary in summaries
+        ),
         Decimal("0"),
     )
     wins = sum(1 for row in recent_closed if _dec(row.get("realized_pnl")) > 0)
     lifetime_days = max((_dec(summary.get("lifetime_sample_days")) for summary in summaries), default=Decimal("0"))
     window_days_used = max((_dec(summary.get("window_days_used")) for summary in summaries), default=Decimal(str(days)))
     target_num = sum(
-        (_dec(summary.get("target_portfolio_apr")) * _dec(summary.get("effective_capital_usdc")) for summary in summaries),
+        (
+            _dec(summary.get("target_portfolio_apr")) * _dec(summary.get("effective_capital_usdc"))
+            for summary in summaries
+        ),
         Decimal("0"),
     )
 
@@ -1955,7 +1950,9 @@ def _aggregate_report(accounts: list[DashboardAccount], *, days: int) -> dict[st
             "lifetime_realized_apr": _ratio(total_realized * Decimal("365"), lifetime_days * effective_capital),
             "window_days_requested": days,
             "window_days_used": window_days_used,
-            "window_realized_closed_group_count": sum(int(summary.get("window_realized_closed_group_count") or 0) for summary in summaries),
+            "window_realized_closed_group_count": sum(
+                int(summary.get("window_realized_closed_group_count") or 0) for summary in summaries
+            ),
             "window_realized_pnl_usdc": window_realized,
             "window_realized_apr": _ratio(window_realized * Decimal("365"), window_days_used * effective_capital),
         },
@@ -2117,9 +2114,7 @@ def _aggregate_stress(
     strategy_buckets: dict[str, dict[str, Any]] = {}
     aggregate_identity: set[str] = set()
     prefetches = (
-        _prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
-        if exchange_prefetch_cache is not None
-        else {}
+        _prefetch_all_accounts(accounts, cache=exchange_prefetch_cache) if exchange_prefetch_cache is not None else {}
     )
     results_by_identity: dict[str, CurrentStressResult] = {}
 
@@ -2134,7 +2129,9 @@ def _aggregate_stress(
         )
         cfg = account.config
         strategy = normalize_strategy_name(result.option_strategy or cfg.option_strategy)
-        strategy_bucket = strategy_buckets.setdefault(strategy, _new_stress_bucket(strategy, analysis=result.strategy_analysis))
+        strategy_bucket = strategy_buckets.setdefault(
+            strategy, _new_stress_bucket(strategy, analysis=result.strategy_analysis)
+        )
         ident = _live_api_identity_config(cfg, account.name)
         if ident not in aggregate_identity:
             aggregate_identity.add(ident)
@@ -2167,7 +2164,7 @@ def create_app(
     snapshot_interval_sec: int | None = None,
     investor_portal: bool = False,
     skipped_accounts: tuple[dict[str, str], ...] | None = None,
-) -> "Any":
+) -> Any:
     """Build the FastAPI application.
 
     Imports are local so the rest of the package stays usable on machines
@@ -2181,9 +2178,7 @@ def create_app(
         from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:  # pragma: no cover — surfaces a clear hint.
-        raise RuntimeError(
-            "fastapi/uvicorn not installed; run `pip install -r requirements.txt`"
-        ) from exc
+        raise RuntimeError("fastapi/uvicorn not installed; run `pip install -r requirements.txt`") from exc
 
     accounts = _make_dashboard_accounts(
         env_file=env_file,
@@ -2256,7 +2251,7 @@ def create_app(
     background_schedulers: list[Any] = [*equity_schedulers, journal_scheduler]
 
     @asynccontextmanager
-    async def _lifespan(_app: "FastAPI"):
+    async def _lifespan(_app: FastAPI):
         if enable_scheduler:
             for scheduler in background_schedulers:
                 scheduler.start()
@@ -2305,12 +2300,8 @@ def create_app(
     def health() -> dict[str, Any]:
         any_have_creds = any(_has_private_creds(account.config) for account in accounts)
         any_scheduler_running = any(scheduler.state.running for scheduler in background_schedulers)
-        last_attempts = [
-            s.state.last_attempt_ms for s in equity_schedulers if s.state.last_attempt_ms is not None
-        ]
-        last_successes = [
-            s.state.last_success_ms for s in equity_schedulers if s.state.last_success_ms is not None
-        ]
+        last_attempts = [s.state.last_attempt_ms for s in equity_schedulers if s.state.last_attempt_ms is not None]
+        last_successes = [s.state.last_success_ms for s in equity_schedulers if s.state.last_success_ms is not None]
         last_errors = [
             f"{account.name}: {scheduler.state.last_error}"
             for account, scheduler in zip(accounts, equity_schedulers, strict=False)
@@ -2339,11 +2330,16 @@ def create_app(
             "managed_currencies": list(config_public.managed_currencies),
             "traded_collaterals": list(config_public.traded_collaterals),
             "option_strategy": "multi_account" if multi_account else config_public.option_strategy,
-            "reference_capital_usdc": str(sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))),
+            "reference_capital_usdc": str(
+                sum((account.config.reference_capital_usdc for account in accounts), Decimal("0"))
+            ),
             "target_portfolio_apr": str(
                 _ratio(
                     sum(
-                        (account.config.target_portfolio_apr * account.config.reference_capital_usdc for account in accounts),
+                        (
+                            account.config.target_portfolio_apr * account.config.reference_capital_usdc
+                            for account in accounts
+                        ),
                         Decimal("0"),
                     ),
                     sum((account.config.reference_capital_usdc for account in accounts), Decimal("0")),
@@ -2584,11 +2580,13 @@ def create_app(
         for account in accounts:
             rows.extend(_read_ledger(account.ledger_root, since_ms=since_ms))
         rows.sort(key=lambda row: int(row.get("ts_ms") or 0))
-        return JSONResponse({
-            "days_requested": days,
-            "row_count": len(rows),
-            "rows": rows,
-        })
+        return JSONResponse(
+            {
+                "days_requested": days,
+                "row_count": len(rows),
+                "rows": rows,
+            }
+        )
 
     @app.get("/api/trade_journal/sync")
     def api_trade_journal_sync() -> Any:
@@ -2661,11 +2659,13 @@ def create_app(
                 row["account_name"] = account.name
                 rows.append(row)
         rows.sort(key=lambda item: int(item.get("ts_ms") or 0), reverse=True)
-        return JSONResponse({
-            "since_days": since_days,
-            "row_count": len(rows[:limit]),
-            "rows": rows[:limit],
-        })
+        return JSONResponse(
+            {
+                "since_days": since_days,
+                "row_count": len(rows[:limit]),
+                "rows": rows[:limit],
+            }
+        )
 
     @app.get("/api/cumulative_pnl_series")
     def api_cumulative_pnl_series() -> Any:
@@ -2804,9 +2804,7 @@ def serve(
     try:
         import uvicorn
     except ImportError as exc:  # pragma: no cover — clear hint.
-        raise RuntimeError(
-            "uvicorn not installed; run `pip install -r requirements.txt`"
-        ) from exc
+        raise RuntimeError("uvicorn not installed; run `pip install -r requirements.txt`") from exc
 
     app = create_app(
         env_file=env_file,

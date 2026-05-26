@@ -11,8 +11,8 @@ from .env_layout import find_repo_root
 from .exceptions import ConfigurationError
 from .investor_launchd_common import (
     LaunchdAction,
-    bootstrap_plist,
     bootout_plist,
+    bootstrap_plist,
     install_plist_file,
     is_launchd_loaded,
     launch_agents_dir,
@@ -82,12 +82,10 @@ def live_targets(
         if entry is None:
             raise ConfigurationError(f"Investor {normalized!r} not found in registry.toml")
         if not entry.live_enabled and not include_disabled:
-            raise ConfigurationError(
-                f"Investor {normalized!r} has live_enabled=false in registry.toml"
-            )
+            raise ConfigurationError(f"Investor {normalized!r} has live_enabled=false in registry.toml")
         return (entry,)
-    rows = registry.investors if include_disabled else tuple(
-        entry for entry in registry.investors if entry.live_enabled
+    rows = (
+        registry.investors if include_disabled else tuple(entry for entry in registry.investors if entry.live_enabled)
     )
     if not rows:
         raise ConfigurationError("No investors with live_enabled=true in registry.toml")
@@ -252,12 +250,7 @@ def manage_live_launchd(
                 repo_root=effective_repo,
                 check_supervisor=check_supervisor,
             )
-            if (
-                not result.ok
-                and result.supervisor_ok is False
-                and loaded
-                and not plist_changed
-            ):
+            if not result.ok and result.supervisor_ok is False and loaded and not plist_changed:
                 reload_ok, _reload_msg = reload_plist(plist_path, label)
                 if reload_ok:
                     result = _finalize_live_result(
@@ -338,9 +331,7 @@ def manage_live_launchd(
         if action == "status":
             loaded = is_launchd_loaded(label)
             supervisor_ok = (
-                probe_live_supervisor(effective_repo, entry.investor_id)
-                if check_supervisor and loaded
-                else None
+                probe_live_supervisor(effective_repo, entry.investor_id) if check_supervisor and loaded else None
             )
             if loaded and supervisor_ok is True:
                 state, msg, ok = "running", "launchd loaded; supervisor has started bot(s)", True

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Any
 
 from .backtest_data import BacktestDataClient, pick_nearest_value
 from .config import BotConfig
@@ -19,7 +20,7 @@ from .margin import (
     short_put_initial_unit,
     short_put_maintenance_unit,
 )
-from .models import OptionInstrument, OptionSide, RiskRegime
+from .models import OptionInstrument, RiskRegime
 from .strategy import StrategySelector
 from .stress import StressScenario, stress_short_option_loss_breakdown_usdc, summarize_loss_entries
 from .utils import ONE, ZERO, dte_days, safe_div, to_decimal
@@ -27,6 +28,7 @@ from .utils import ONE, ZERO, dte_days, safe_div, to_decimal
 
 def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
 
 def _norm_pdf(x: float) -> float:
     return (1.0 / math.sqrt(2.0 * math.pi)) * math.exp(-0.5 * x * x)
@@ -44,6 +46,7 @@ def bs_delta(*, spot: float, strike: float, t_years: float, sigma: float, option
     if option_type == "call":
         return call
     return call - 1.0
+
 
 def bs_price(*, spot: float, strike: float, t_years: float, sigma: float, option_type: str) -> float:
     """Black-Scholes option price in quote currency (USD-like), r=0."""
@@ -72,7 +75,9 @@ class BacktestConfig:
 
     def __post_init__(self):
         if self.book_weights is None:
-            object.__setattr__(self, "book_weights", {"BTC": Decimal("0.3334"), "ETH": Decimal("0.3333"), "USDC": Decimal("0.3333")})
+            object.__setattr__(
+                self, "book_weights", {"BTC": Decimal("0.3334"), "ETH": Decimal("0.3333"), "USDC": Decimal("0.3333")}
+            )
 
 
 @dataclass
@@ -257,7 +262,9 @@ def run_backtest(
     # Load DVOL series for sigma proxy.
     dvol_by_ccy: dict[str, list[tuple[int, Any]]] = {}
     for c in currencies:
-        dvol_by_ccy[c.upper()] = data.get_dvol_series(c.upper(), start_timestamp=start_ms, end_timestamp=end_ms, resolution="1D")
+        dvol_by_ccy[c.upper()] = data.get_dvol_series(
+            c.upper(), start_timestamp=start_ms, end_timestamp=end_ms, resolution="1D"
+        )
 
     # Load index series (Deribit index chart is coarse for range; we still use it for 24h return).
     index_by_ccy: dict[str, list[tuple[int, Any]]] = {}
@@ -310,7 +317,9 @@ def run_backtest(
             if leg.collateral_currency.upper() != collateral.upper():
                 continue
             exp = int(leg.instrument.expiration_timestamp_ms)
-            totals[exp] = totals.get(exp, ZERO) + (leg.estimated_im_collateral if leg.estimated_im_collateral > 0 else ZERO)
+            totals[exp] = totals.get(exp, ZERO) + (
+                leg.estimated_im_collateral if leg.estimated_im_collateral > 0 else ZERO
+            )
         return totals
 
     for i, day in enumerate(days):
@@ -327,6 +336,10 @@ def run_backtest(
             "notes": [],
         }
 
+        primary_ccy = currencies[0].upper()
+        spot = to_decimal(pick_nearest_value(index_by_ccy[primary_ccy], ts_ms=day_ms) or 0)
+        sigma = _estimate_sigma_from_dvol(pick_nearest_value(dvol_by_ccy[primary_ccy], ts_ms=day_ms))
+
         # Helper: theoretical premium at `day` (BS proxy).
         def mark_premium(inst: OptionInstrument) -> Decimal:
             dte = dte_days(inst.expiration_timestamp_ms, now=day)
@@ -341,7 +354,11 @@ def run_backtest(
             if px_usd <= 0:
                 return ZERO
             inst_type = (inst.instrument_type or "").lower()
-            if inst.settlement_currency.upper() == "USDC" or inst_type == "linear" or inst.quote_currency.upper() == "USDC":
+            if (
+                inst.settlement_currency.upper() == "USDC"
+                or inst_type == "linear"
+                or inst.quote_currency.upper() == "USDC"
+            ):
                 return to_decimal(px_usd) * (inst.contract_size if inst.contract_size > 0 else ONE)
             return safe_div(to_decimal(px_usd), spot, ZERO)
 
@@ -350,10 +367,17 @@ def run_backtest(
         for leg in open_legs:
             # If expired, close at intrinsic.
             if leg.instrument.expiration_timestamp_ms <= day_ms:
-                spot = to_decimal(pick_nearest_value(index_by_ccy[leg.instrument.base_currency.upper()], ts_ms=leg.instrument.expiration_timestamp_ms) or 0)
+                spot = to_decimal(
+                    pick_nearest_value(
+                        index_by_ccy[leg.instrument.base_currency.upper()], ts_ms=leg.instrument.expiration_timestamp_ms
+                    )
+                    or 0
+                )
                 if spot <= 0:
                     spot = leg.entry_spot
-                intrinsic = max(leg.strike() - spot, ZERO) if leg.option_type == "put" else max(spot - leg.strike(), ZERO)
+                intrinsic = (
+                    max(leg.strike() - spot, ZERO) if leg.option_type == "put" else max(spot - leg.strike(), ZERO)
+                )
                 # Settlement: linear is USDC, inverse is coin. Convert to USDC using spot if needed.
                 pnl_settle = leg.entry_premium * leg.quantity - intrinsic * leg.quantity
                 if leg.instrument.settlement_currency.upper() != "USDC":
@@ -467,7 +491,9 @@ def run_backtest(
             dvol_ratio = None
             if baseline is not None and baseline > 0 and dv_today > 0:
                 dvol_ratio = dv_today / baseline
-            regime_by_ccy[c.upper()] = _regime_from_drawdown_and_dvol(config, spot_return_24h=ret, dvol_ratio=dvol_ratio)
+            regime_by_ccy[c.upper()] = _regime_from_drawdown_and_dvol(
+                config, spot_return_24h=ret, dvol_ratio=dvol_ratio
+            )
 
         # 3) Entry: one new leg per day max, obey crisis halt + book weights + IM cap approximation.
         if len(open_legs) >= config.max_concurrent_groups:
@@ -560,7 +586,11 @@ def run_backtest(
                     continue
                 premium_by_name[inst.instrument_name] = prem
                 delta_by_name[inst.instrument_name] = Decimal(str(delta_f))
-                collateral = inst.settlement_currency.upper() if inst.settlement_currency else (inst.quote_currency.upper() or "USDC")
+                collateral = (
+                    inst.settlement_currency.upper()
+                    if inst.settlement_currency
+                    else (inst.quote_currency.upper() or "USDC")
+                )
                 by_collateral.setdefault(collateral, []).append(inst)
 
             for collateral, insts in sorted(by_collateral.items()):
@@ -589,9 +619,7 @@ def run_backtest(
                         currency=ccy,
                         existing_im_by_expiry=existing_im,
                     )
-                if config.enable_short_call and (
-                    not config.short_call_fallback_only or not candidates
-                ):
+                if config.enable_short_call and (not config.short_call_fallback_only or not candidates):
                     candidates.extend(
                         selector.build_naked_short_call_candidates(
                             insts,
@@ -617,13 +645,20 @@ def run_backtest(
                 payload = {
                     "currency": ccy,
                     "instrument": top.short_leg.instrument_name,
-                    "option_type": top.short_leg.instrument_name.split("-")[-1].lower().replace("p", "put").replace("c", "call"),
+                    "option_type": top.short_leg.instrument_name.split("-")[-1]
+                    .lower()
+                    .replace("p", "put")
+                    .replace("c", "call"),
                     "spot": spot,
                     "premium": entry_prem,
                     "qty": top.quantity,
                     "collateral": collateral,
                     "delta_est": top.short_leg.delta,
-                    "otm": _otm_ratio(spot=spot, strike=top.short_leg.strike, option_type="put" if top.short_leg.instrument_name.upper().endswith("-P") else "call"),
+                    "otm": _otm_ratio(
+                        spot=spot,
+                        strike=top.short_leg.strike,
+                        option_type="put" if top.short_leg.instrument_name.upper().endswith("-P") else "call",
+                    ),
                     "im_usdc": (top.estimated_im_total if collateral == "USDC" else top.estimated_im_total * spot),
                     "score": score,
                     "estimated_im_collateral": top.estimated_im_total,
@@ -720,7 +755,9 @@ def run_backtest(
                     "loss": capped_total,
                     "by_book": {k: str(v) for k, v in capped_by_book.items()},
                     "components": {
-                        "by_book": {bk: {ck: str(cv) for ck, cv in comps.items()} for bk, comps in capped_components.items()},
+                        "by_book": {
+                            bk: {ck: str(cv) for ck, cv in comps.items()} for bk, comps in capped_components.items()
+                        },
                         "total": {
                             "base_move_usdc": str(sum((c["base_move_usdc"] for c in capped_components.values()), ZERO)),
                             "slippage_usdc": str(sum((c["slippage_usdc"] for c in capped_components.values()), ZERO)),
@@ -745,7 +782,9 @@ def run_backtest(
         final_day = days[-1]
         final_ms = _ms(final_day)
         for leg in list(open_legs):
-            leg_spot = to_decimal(pick_nearest_value(index_by_ccy[leg.instrument.base_currency.upper()], ts_ms=final_ms) or leg.entry_spot)
+            leg_spot = to_decimal(
+                pick_nearest_value(index_by_ccy[leg.instrument.base_currency.upper()], ts_ms=final_ms) or leg.entry_spot
+            )
             leg_dvol_close = pick_nearest_value(dvol_by_ccy[leg.instrument.base_currency.upper()], ts_ms=final_ms)
             leg_sigma = _estimate_sigma_from_dvol(leg_dvol_close)
             spot_saved, sigma_saved = spot, sigma
@@ -793,4 +832,3 @@ def run_backtest(
         notes=notes,
         stress=stress_summary,
     )
-

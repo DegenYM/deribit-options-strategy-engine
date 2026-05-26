@@ -13,7 +13,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
-from .investor_cash_flow import effective_fee_flow_start_ms, initial_spot_deduction_usdc, native_book_amount_to_usdc
+from .investor_cash_flow import initial_spot_deduction_usdc, native_book_amount_to_usdc
 from .investor_fee_report import (
     InitialFeeReportContext,
     SettlementFeeReportContext,
@@ -181,7 +181,6 @@ def _append_flow_section_pdf(
     styles: dict[str, ParagraphStyle],
     period_label: str | None = None,
 ) -> None:
-    from .investor_cash_flow import SubscriptionFlowLine
 
     title = f"{section_num}. Cash flow detail"
     if period_label:
@@ -236,12 +235,9 @@ def write_initial_fee_report_pdf(ctx: InitialFeeReportContext, path: Path) -> Pa
 
     story.append(Paragraph("1. Current equity", styles["h2"]))
     if ctx.live_nav:
-        equity_by_book = {
-            str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_by_book") or {}).items()
-        }
+        equity_by_book = {str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_by_book") or {}).items()}
         equity_native_by_book = {
-            str(k).upper(): to_decimal(v)
-            for k, v in (ctx.live_nav.get("equity_native_by_book") or {}).items()
+            str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_native_by_book") or {}).items()
         }
         rows = [["Currency", "Native", "USDC equiv."]]
         for book in ("BTC", "ETH", "USDC"):
@@ -272,12 +268,14 @@ def write_initial_fee_report_pdf(ctx: InitialFeeReportContext, path: Path) -> Pa
 
     story.append(Paragraph("3. Net subscription & initial HWM", styles["h2"]))
     if ctx.baseline is not None:
-        story.append(_net_flow_breakdown_table(
-            ctx.baseline.net_flow_native_by_book,
-            index_by_ccy=ctx.index_by_ccy,
-            cumulative_net_flow_usdc=ctx.baseline.cumulative_net_flow_usdc,
-            initial_hwm_nav_perf=ctx.baseline.initial_hwm_nav_perf,
-        ))
+        story.append(
+            _net_flow_breakdown_table(
+                ctx.baseline.net_flow_native_by_book,
+                index_by_ccy=ctx.index_by_ccy,
+                cumulative_net_flow_usdc=ctx.baseline.cumulative_net_flow_usdc,
+                initial_hwm_nav_perf=ctx.baseline.initial_hwm_nav_perf,
+            )
+        )
     else:
         native_by_book: dict[str, Decimal] = {}
         for line in ctx.flow_lines:
@@ -285,12 +283,14 @@ def write_initial_fee_report_pdf(ctx: InitialFeeReportContext, path: Path) -> Pa
                 native_by_book[line.book] = native_by_book.get(line.book, Decimal("0")) + line.amount_native
         cumulative = sum((line.usdc_equiv for line in ctx.flow_lines if line.included_in_subscription), Decimal("0"))
         _btc, _eth, _spot, initial_hwm = initial_spot_deduction_usdc(native_by_book, index_by_ccy=ctx.index_by_ccy)
-        story.append(_net_flow_breakdown_table(
-            native_by_book,
-            index_by_ccy=ctx.index_by_ccy,
-            cumulative_net_flow_usdc=cumulative,
-            initial_hwm_nav_perf=initial_hwm,
-        ))
+        story.append(
+            _net_flow_breakdown_table(
+                native_by_book,
+                index_by_ccy=ctx.index_by_ccy,
+                cumulative_net_flow_usdc=cumulative,
+                initial_hwm_nav_perf=initial_hwm,
+            )
+        )
     story.append(Spacer(1, 8))
 
     _append_flow_section_pdf(story, ctx.flow_lines, section_num=4, styles=styles)
@@ -363,8 +363,8 @@ def write_settlement_fee_report_pdf(
         _grid_table(
             ["", "BTC", "ETH", "USDC"],
             [
-                _balance_row(f"Day A", report.day_a.native),
-                _balance_row(f"Day B", report.day_b.native),
+                _balance_row("Day A", report.day_a.native),
+                _balance_row("Day B", report.day_b.native),
                 _balance_row("Period deposits", report.deposit_native),
                 _balance_row("Period withdrawals", report.withdraw_native),
                 [

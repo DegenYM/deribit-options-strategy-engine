@@ -5,8 +5,8 @@ import errno
 import json
 import logging
 import os
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from .models import StrategyState
 from .utils import json_default, utc_now_ms

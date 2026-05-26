@@ -10,7 +10,6 @@ from typing import Any
 from .investor_cash_flow import (
     SubscriptionFlowLine,
     effective_fee_flow_start_ms,
-    initial_hwm_from_net_flow,
     initial_spot_deduction_usdc,
     native_book_amount_to_usdc,
     ordered_net_flow_books,
@@ -21,7 +20,6 @@ from .investor_fee_report import (
     _equity_native_for_book,
     _money,
     _native,
-    _signed_native,
     _ts_fmt,
 )
 from .utils import to_decimal
@@ -99,13 +97,9 @@ def write_initial_fee_report_csv(
     ]
     if ctx.live_nav:
         summary_pairs.append(("total_equity_usdc", _money(ctx.live_nav["total_equity_usdc"])))
-        equity_by_book = {
-            str(k).upper(): to_decimal(v)
-            for k, v in (ctx.live_nav.get("equity_by_book") or {}).items()
-        }
+        equity_by_book = {str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_by_book") or {}).items()}
         equity_native_by_book = {
-            str(k).upper(): to_decimal(v)
-            for k, v in (ctx.live_nav.get("equity_native_by_book") or {}).items()
+            str(k).upper(): to_decimal(v) for k, v in (ctx.live_nav.get("equity_native_by_book") or {}).items()
         }
         for book in ("BTC", "ETH", "USDC"):
             usdc = equity_by_book.get(book, Decimal("0"))

@@ -20,9 +20,9 @@ builds one ``Book`` per enabled collateral every scan/manage tick.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Iterable
 
 from .config import BotConfig
 from .models import AccountSummary
@@ -134,7 +134,7 @@ class BookRouter:
         cls,
         config: BotConfig,
         summaries: dict[str, AccountSummary],
-    ) -> "BookRouter":
+    ) -> BookRouter:
         books: list[Book] = []
         scan_underlyings = tuple(c.upper() for c in config.scan_underlyings)
         traded_collaterals = tuple(c.upper() for c in config.traded_collaterals)

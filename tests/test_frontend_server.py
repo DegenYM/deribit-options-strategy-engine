@@ -4,13 +4,14 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from conftest import future_expiry, make_config
+
 import deribit_demo.frontend_server as frontend_server
 from deribit_demo.current_stress import CurrentStressResult
 from deribit_demo.frontend_server import DashboardAccount
 from deribit_demo.models import StrategyState, TradeGroup
 from deribit_demo.state import StrategyStateStore, performance_exclusions_path
 from deribit_demo.stress import black_swan_strategy_analysis
-from conftest import future_expiry, make_config
 
 
 def _stress_result(strategy: str, book: str, loss: Decimal) -> CurrentStressResult:
@@ -917,9 +918,7 @@ def test_aggregate_groups_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
     monkeypatch.setattr(
         frontend_server,
         "_prefetch_all_accounts",
-        lambda _accounts, cache: {
-            frontend_server._live_api_identity(account): prefetch for account in accounts
-        },
+        lambda _accounts, cache: {frontend_server._live_api_identity(account): prefetch for account in accounts},
     )
     cache = frontend_server._TtlCache(15.0)
 
@@ -975,9 +974,7 @@ def test_aggregate_stress_reuses_prefetch_without_account_refetch(tmp_path, monk
     monkeypatch.setattr(
         frontend_server,
         "_prefetch_all_accounts",
-        lambda _accounts, cache: {
-            frontend_server._live_api_identity(account): prefetch for account in accounts
-        },
+        lambda _accounts, cache: {frontend_server._live_api_identity(account): prefetch for account in accounts},
     )
     cache = frontend_server._TtlCache(15.0)
 

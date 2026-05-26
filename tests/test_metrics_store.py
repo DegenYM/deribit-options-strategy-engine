@@ -44,7 +44,8 @@ def test_metrics_store_sync_and_reload(tmp_path):
     store.sync_from_closed(
         scope,
         "fp-v2",
-        closed + [
+        closed
+        + [
             {
                 "closed_timestamp_ms": int(datetime(2024, 6, 3, tzinfo=UTC).timestamp() * 1000),
                 "realized_pnl": "25",

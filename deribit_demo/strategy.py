@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable, Iterable
 from decimal import Decimal
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from .book import Book
 from .config import BotConfig
@@ -328,11 +329,7 @@ class StrategySelector:
         if side not in {"put", "call"}:
             return False, [f"unsupported_regime_liquidity_side={side}"]
         option_value = OptionSide.PUT.value if side == "put" else OptionSide.CALL.value
-        is_valid = (
-            self._is_valid_naked_short_put
-            if side == "put"
-            else self._is_valid_naked_short_call
-        )
+        is_valid = self._is_valid_naked_short_put if side == "put" else self._is_valid_naked_short_call
         instruments = [
             item
             for item in markets
@@ -904,7 +901,9 @@ class StrategySelector:
                     examples.append(f"{inst.instrument_name} [liquidity] {liq}")
                 continue
 
-            mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            mark = (
+                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            )
             if mark <= 0 or book.index_price <= 0:
                 after_counts["mark_or_index_invalid"] += 1
                 if len(examples) < max_examples:
@@ -940,7 +939,9 @@ class StrategySelector:
             exp_key = inst.expiration_timestamp_ms
             existing_im = existing_im_by_expiry.get(exp_key, Decimal("0"))
             max_by_expiry = floor_to_step((summary_equity * exp_cap - existing_im) / im_1, inst.min_trade_amount)
-            max_by_mm = floor_to_step((summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount)
+            max_by_mm = floor_to_step(
+                (summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount
+            )
             max_by_liquidity = floor_to_step(book.best_bid_amount, inst.min_trade_amount)
             quantity = min(max_by_im_leg, max_by_expiry, max_by_mm, max_by_liquidity)
             if quantity < inst.min_trade_amount:
@@ -1042,7 +1043,9 @@ class StrategySelector:
                     examples.append(f"{inst.instrument_name} [liquidity] {liq}")
                 continue
 
-            mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            mark = (
+                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            )
             if mark <= 0 or book.index_price <= 0:
                 after_counts["mark_or_index_invalid"] += 1
                 if len(examples) < max_examples:
@@ -1065,7 +1068,9 @@ class StrategySelector:
             exp_key = inst.expiration_timestamp_ms
             existing_im = existing_im_by_expiry.get(exp_key, Decimal("0"))
             max_by_expiry = floor_to_step((summary_equity * exp_cap - existing_im) / im_1, inst.min_trade_amount)
-            max_by_mm = floor_to_step((summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount)
+            max_by_mm = floor_to_step(
+                (summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount
+            )
             max_by_liquidity = floor_to_step(book.best_bid_amount, inst.min_trade_amount)
             quantity = min(max_by_im_leg, max_by_expiry, max_by_mm, max_by_liquidity)
             if quantity < inst.min_trade_amount:
@@ -1159,7 +1164,9 @@ class StrategySelector:
             book = orderbook_loader(inst.instrument_name)
             if self._naked_short_call_rejection_reason(currency, inst, book) is not None:
                 continue
-            mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            mark = (
+                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            )
             if mark <= 0 or book.index_price <= 0:
                 continue
             im_1, mm_1 = self._short_call_unit_margin(
@@ -1174,7 +1181,9 @@ class StrategySelector:
             exp_key = inst.expiration_timestamp_ms
             existing_im = existing_im_by_expiry.get(exp_key, Decimal("0"))
             max_by_expiry = floor_to_step((summary_equity * exp_cap - existing_im) / im_1, inst.min_trade_amount)
-            max_by_mm = floor_to_step((summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount)
+            max_by_mm = floor_to_step(
+                (summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount
+            )
             max_by_liquidity = floor_to_step(book.best_bid_amount, inst.min_trade_amount)
             quantity = min(max_by_im_leg, max_by_expiry, max_by_mm, max_by_liquidity)
             if quantity < inst.min_trade_amount:
@@ -1223,9 +1232,7 @@ class StrategySelector:
                 continue
             if book.index_price <= 0:
                 continue
-            min_oi, _max_spread, min_notional = self.config.liquidity_gates(
-                inst.instrument_type, inst.base_currency
-            )
+            min_oi, _max_spread, min_notional = self.config.liquidity_gates(inst.instrument_type, inst.base_currency)
             if book.open_interest < min_oi or book.book_notional_usdc < min_notional:
                 continue
             abs_delta = abs(book.delta)
@@ -1285,7 +1292,11 @@ class StrategySelector:
             premium=long_price,
             quantity=quantity,
         )
-        fee_usdc = fees_native if short_candidate.collateral_currency.upper() == "USDC" else fees_native * short_book.index_price
+        fee_usdc = (
+            fees_native
+            if short_candidate.collateral_currency.upper() == "USDC"
+            else fees_native * short_book.index_price
+        )
         net_credit_usdc = short_credit_usdc - long_debit_usdc - fee_usdc
         max_loss_usdc = width_usdc - net_credit_usdc
         if max_loss_usdc <= 0:
@@ -1353,7 +1364,9 @@ class StrategySelector:
             dte_days=short_instrument.dte_days(),
             short_leg=short_leg,
             screening_bid=short_price,
-            screening_mark=short_book.mark_price if short_book.mark_price > 0 else (short_book.best_bid_price + short_book.best_ask_price) / Decimal("2"),
+            screening_mark=short_book.mark_price
+            if short_book.mark_price > 0
+            else (short_book.best_bid_price + short_book.best_ask_price) / Decimal("2"),
             target_limit_price=short_leg.target_price,
             net_premium_native=net_credit_native,
             fee_native=fees_native,
@@ -1411,7 +1424,9 @@ class StrategySelector:
                     short_candidate.quantity,
                     floor_to_step(long_book.best_ask_amount, long_instrument.min_trade_amount),
                 )
-                quantity = floor_to_step(quantity, max(short_instrument.min_trade_amount, long_instrument.min_trade_amount))
+                quantity = floor_to_step(
+                    quantity, max(short_instrument.min_trade_amount, long_instrument.min_trade_amount)
+                )
                 if quantity < max(short_instrument.min_trade_amount, long_instrument.min_trade_amount):
                     continue
                 candidate = self._try_build_bull_put_spread_for_quantity(
@@ -1422,7 +1437,9 @@ class StrategySelector:
                     long_book=long_book,
                     quantity=quantity,
                     summary_equity=summary_equity,
-                    existing_im_for_expiry=existing_im_by_expiry.get(short_instrument.expiration_timestamp_ms, Decimal("0")),
+                    existing_im_for_expiry=existing_im_by_expiry.get(
+                        short_instrument.expiration_timestamp_ms, Decimal("0")
+                    ),
                 )
                 if candidate is not None:
                     candidates.append(candidate)
@@ -1452,12 +1469,8 @@ class StrategySelector:
                 contract_size=instrument.contract_size,
             )
         else:
-            im_1 = short_call_initial_unit(
-                index_price=book.index_price, strike=instrument.strike, mark_price=mark
-            )
-            mm_1 = short_call_maintenance_unit(
-                index_price=book.index_price, strike=instrument.strike, mark_price=mark
-            )
+            im_1 = short_call_initial_unit(index_price=book.index_price, strike=instrument.strike, mark_price=mark)
+            mm_1 = short_call_maintenance_unit(index_price=book.index_price, strike=instrument.strike, mark_price=mark)
         return im_1, mm_1
 
     def _try_build_naked_call_for_quantity(
@@ -1608,7 +1621,10 @@ class StrategySelector:
     ) -> tuple[NakedPutCandidate | None, str | None]:
         if quantity <= 0:
             return None, "quantity<=0"
-        if collateral_currency.upper() != currency.upper() or instrument.settlement_currency.upper() != currency.upper():
+        if (
+            collateral_currency.upper() != currency.upper()
+            or instrument.settlement_currency.upper() != currency.upper()
+        ):
             return None, "not_native_cover_book"
         screening_bid = book.best_bid_price
         mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
@@ -1711,7 +1727,10 @@ class StrategySelector:
                 maybe_append_example(f"{inst.instrument_name} [liquidity] {liq}", inst, book)
                 continue
 
-            if collateral_currency.upper() != currency.upper() or (inst.settlement_currency or "").upper() != currency.upper():
+            if (
+                collateral_currency.upper() != currency.upper()
+                or (inst.settlement_currency or "").upper() != currency.upper()
+            ):
                 after_counts["not_native_cover_book"] += 1
                 maybe_append_example(f"{inst.instrument_name} [post] not_native_cover_book", inst, book)
                 continue
@@ -1873,9 +1892,7 @@ class StrategySelector:
             return put_candidates, "put"
 
         call_candidates: list[NakedPutCandidate] = []
-        should_scan_calls = config.enable_short_call and (
-            not config.short_call_fallback_only or not put_candidates
-        )
+        should_scan_calls = config.enable_short_call and (not config.short_call_fallback_only or not put_candidates)
         if should_scan_calls:
             for currency in book.underlyings:
                 markets = markets_by_currency.get(currency, [])
@@ -1938,7 +1955,9 @@ class StrategySelector:
             reason = self._naked_short_put_rejection_reason(currency, inst, book)
             if reason is not None:
                 continue
-            mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            mark = (
+                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            )
             if mark <= 0 or book.index_price <= 0:
                 continue
             usdc_collateral = collateral_currency.upper() == "USDC"
@@ -1967,7 +1986,9 @@ class StrategySelector:
             exp_key = inst.expiration_timestamp_ms
             existing_im = existing_im_by_expiry.get(exp_key, Decimal("0"))
             max_by_expiry = floor_to_step((summary_equity * exp_cap - existing_im) / im_1, inst.min_trade_amount)
-            max_by_mm = floor_to_step((summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount)
+            max_by_mm = floor_to_step(
+                (summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount
+            )
             max_by_liquidity = floor_to_step(book.best_bid_amount, inst.min_trade_amount)
             quantity = min(max_by_im_leg, max_by_expiry, max_by_mm, max_by_liquidity)
             if quantity < inst.min_trade_amount:

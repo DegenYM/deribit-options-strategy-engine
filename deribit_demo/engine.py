@@ -4,21 +4,20 @@ import logging
 import re
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any
 
 from .client import DeribitClient
 from .config import BotConfig
 from .exceptions import AuthenticationError, ExchangeError, TransientExchangeError
 from .fees import (
-    annualized_return,
     option_trade_fee_native,
     option_trade_fee_usdc,
-    premium_value_native,
     premium_value_usdc,
 )
-from .trade_apr import realized_apr_from_close
 from .margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
     linear_usdc_short_put_initial_per_contract_usdc,
@@ -37,21 +36,21 @@ from .models import (
     Position,
     RiskRegime,
     SpreadLeg,
-    TradeGroup,
     StrategyState,
-    TransactionEntry,
+    TradeGroup,
     is_phantom_reconcile_close,
     normalize_strategy_name,
     open_short_instrument_names,
 )
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
+from .strategy import StrategySelector
+from .trade_apr import realized_apr_from_close
 from .trade_journal import (
     TradeJournalStore,
     ingest_engine_actions,
     journal_db_path_for_state,
     scope_key_for_state,
 )
-from .strategy import StrategySelector
 from .utils import (
     align_option_order_amount,
     format_decimal,
@@ -67,6 +66,9 @@ LOGGER = logging.getLogger(__name__)
 LOG_REASON_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
 # Defer reconciled_external closes right after entry while Deribit positions API catches up.
 RECONCILE_EXTERNAL_CLOSE_GRACE_MS = 180_000
+_TELEGRAM_CLOSE_REASONS = frozenset(
+    {"hard_stop", "panic_close", "soft_stop", "soft_stop_no_hedge", "covered_call_robust_exit"}
+)
 # When logging scan blockers, avoid megabytes of text per cycle.
 _MAX_SCAN_BLOCKER_LOG_LINES = 36
 # Append at most this many `example_messages` from scan rejection detail per side.
@@ -124,6 +126,45 @@ class DeribitOptionTrialBot:
 
     def _journal_scope_key(self) -> str:
         return scope_key_for_state(self.config.state_file)
+
+    def _telegram_scope(self) -> dict[str, str]:
+        parts = self.config.state_file.parts
+        investor_id = "local"
+        slug = self.config.order_label_prefix
+        try:
+            idx = parts.index("investors")
+            if idx + 2 <= len(parts) - 1:
+                investor_id = parts[idx + 1]
+                slug = self.config.state_file.stem
+        except ValueError:
+            pass
+        return {
+            "investor_id": investor_id,
+            "slug": slug,
+            "strategy": self.config.option_strategy,
+            "deribit_env": self.config.env,
+        }
+
+    def _telegram_alert(
+        self,
+        title: str,
+        *,
+        body: str = "",
+        event_key: str,
+        level: str = "warning",
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        from .telegram_alerts import format_alert_message, send_telegram_alert
+
+        scope = self._telegram_scope()
+        message = format_alert_message(
+            title=title,
+            body=body,
+            level=level,
+            extra=extra,
+            **scope,
+        )
+        send_telegram_alert(message, event_key=event_key, level=level)
 
     def _trade_journal(self) -> TradeJournalStore:
         if self._trade_journal_store is None:
@@ -505,9 +546,7 @@ class DeribitOptionTrialBot:
         )
         option_positions = [item for item in positions if item.kind == "option"]
         future_positions = [
-            item
-            for item in positions
-            if item.kind in {"future", "future_combo"} or "PERPETUAL" in item.instrument_name
+            item for item in positions if item.kind in {"future", "future_combo"} or "PERPETUAL" in item.instrument_name
         ]
         return ExchangePrefetch(
             summaries=summaries,
@@ -542,9 +581,7 @@ class DeribitOptionTrialBot:
             and not is_phantom_reconcile_close(group, open_short_names=open_short_names)
         ]
         realized_groups = [
-            group
-            for group in closed_groups
-            if group.realized_pnl is not None and group.closed_timestamp_ms is not None
+            group for group in closed_groups if group.realized_pnl is not None and group.closed_timestamp_ms is not None
         ]
         unresolved_closed_groups = [group for group in closed_groups if group not in realized_groups]
         total_realized_pnl = sum((group.realized_pnl or Decimal("0") for group in realized_groups), Decimal("0"))
@@ -560,9 +597,7 @@ class DeribitOptionTrialBot:
         if self.config.has_private_credentials and open_groups:
             runtime = self._load_runtime()
             summaries = runtime.summaries
-            open_trades = self._trade_groups_payload(
-                open_groups, runtime.option_positions, runtime.orderbook_cache
-            )
+            open_trades = self._trade_groups_payload(open_groups, runtime.option_positions, runtime.orderbook_cache)
         elif self.config.has_private_credentials:
             summaries = self._account_summaries_by_currency()
             open_trades = self._trade_groups_payload(open_groups, None, None)
@@ -652,15 +687,21 @@ class DeribitOptionTrialBot:
             # derisk so the other books keep trading. Fall back to a portfolio-
             # wide cooldown for global triggers (crisis regime on an open group,
             # hard-defense delta / stop-loss hits) that aren't book-scoped.
-            hard_books = [
-                book for book, flag in context.snapshot.hard_derisk_by_book.items() if flag
-            ]
+            hard_books = [book for book, flag in context.snapshot.hard_derisk_by_book.items() if flag]
             global_trigger = context.snapshot.hard_derisk and not hard_books
             if live:
                 for book in hard_books:
                     context.state.cooldown_until_ms_by_book[book] = cooldown_until
                 if global_trigger:
                     context.state.cooldown_until_ms = cooldown_until
+                reasons = context.snapshot.halt_entry_reasons
+                self._telegram_alert(
+                    "Hard derisk triggered",
+                    body=f"books={hard_books or ['portfolio']}",
+                    event_key=f"hard_derisk:{self._journal_scope_key()}",
+                    level="critical",
+                    extra={"reasons": "; ".join(reasons[:5]) if reasons else None},
+                )
             actions.append(
                 {
                     "action": "cooldown_started" if live else "cooldown_recommended",
@@ -706,6 +747,7 @@ class DeribitOptionTrialBot:
         cycle_results: list[dict[str, Any]] = []
         retain_results = cycles > 0
         last_log_signature: tuple[Any, ...] | None = None
+        transient_failures = 0
         while cycles <= 0 or iteration < cycles:
             cycle_no = iteration + 1
             sleep_seconds = self.config.poll_seconds_normal
@@ -721,13 +763,17 @@ class DeribitOptionTrialBot:
                 portfolio = status_after_manage["portfolio"]
                 can_enter = not portfolio["halt_new_entries"]
                 if can_enter:
-                    cycle_result["entry"] = self._enter_best_from_candidates(context, candidates=candidates[:1], live=live)
+                    cycle_result["entry"] = self._enter_best_from_candidates(
+                        context, candidates=candidates[:1], live=live
+                    )
                     if cycle_result["entry"].get("group") is not None:
                         context.state.groups.append(cycle_result["entry"]["group"])
                 else:
                     reason = (
-                        "hard_derisk" if portfolio["hard_derisk"]
-                        else "cooling_down" if portfolio["cooling_down"]
+                        "hard_derisk"
+                        if portfolio["hard_derisk"]
+                        else "cooling_down"
+                        if portfolio["cooling_down"]
                         else "halt_limit_reached"
                     )
                     cycle_result["entry"] = {
@@ -759,13 +805,33 @@ class DeribitOptionTrialBot:
                     if portfolio["regime"] != RiskRegime.NORMAL.value
                     else self.config.poll_seconds_normal
                 )
+                transient_failures = 0
             except TransientExchangeError as exc:
+                transient_failures += 1
                 LOGGER.warning(
                     "run cycle=%s transient exchange error: %s; backing off before retry",
                     cycle_no,
                     exc,
                 )
                 sleep_seconds = max(self.config.poll_seconds_stress * 6, 60)
+                if live and transient_failures >= 5:
+                    self._telegram_alert(
+                        "Repeated Deribit API errors",
+                        body=str(exc),
+                        event_key=f"transient_api:{self._journal_scope_key()}",
+                        level="warning",
+                        extra={"consecutive_failures": transient_failures, "cycle": cycle_no},
+                    )
+            except Exception as exc:
+                if live:
+                    self._telegram_alert(
+                        "Bot run loop crashed",
+                        body=str(exc),
+                        event_key=f"run_fatal:{self._journal_scope_key()}",
+                        level="critical",
+                        extra={"cycle": cycle_no},
+                    )
+                raise
             self.sleep_fn(sleep_seconds)
         return {"action": "run", "cycles": iteration, "results": cycle_results}
 
@@ -786,9 +852,7 @@ class DeribitOptionTrialBot:
         if not self.config.has_private_credentials:
             raise AuthenticationError("close-position requires private API credentials")
 
-        positions = [
-            Position.from_api(row) for row in self.client.get_positions(currency="any", kind="any")
-        ]
+        positions = [Position.from_api(row) for row in self.client.get_positions(currency="any", kind="any")]
         open_positions = [item for item in positions if abs(item.size) > 0]
 
         if list_only:
@@ -1044,6 +1108,13 @@ class DeribitOptionTrialBot:
             # cooldown so post-panic re-entries are blocked evenly across books.
             for book in context.snapshot.equity_by_book:
                 context.state.cooldown_until_ms_by_book[book] = cooldown_until
+            open_count = sum(1 for action in actions if action.get("action") == "close_group")
+            self._telegram_alert(
+                "Panic close executed",
+                body=f"closed_groups={open_count} cancelled_orders={sum(1 for a in actions if a.get('action') == 'cancel_order')}",
+                event_key=f"panic_close:{self._journal_scope_key()}",
+                level="critical",
+            )
         self.state_store.save(context.state)
         return {"action": "panic_close", "live": live, "actions": actions}
 
@@ -1073,9 +1144,7 @@ class DeribitOptionTrialBot:
             option_positions = []
             future_positions = []
             future_markets_by_name = {}
-            markets_by_currency = {
-                currency: [] for currency in self.config.managed_currencies
-            }
+            markets_by_currency = {currency: [] for currency in self.config.managed_currencies}
         orderbook_cache: dict[str, OrderBookSnapshot] = {}
         state = self._reset_daily_state(state, summaries)
         # Refresh external cash-flow (deposit / withdrawal / transfer) tallies
@@ -1166,11 +1235,7 @@ class DeribitOptionTrialBot:
         option_counts = Counter((c.option_type or "put") for c in candidates)
         is_covered_call = self.config.option_strategy == "covered_call"
         note_zh = None
-        if (
-            not is_covered_call
-            and self.config.enable_short_call
-            and self.config.short_call_fallback_only
-        ):
+        if not is_covered_call and self.config.enable_short_call and self.config.short_call_fallback_only:
             note_zh = (
                 "short_call_fallback_only=true：本輪只要有 put 通過 min_net_apr，就不會掃描 short call；"
                 "要看 call 請設 SHORT_OPTION_SIDE=both 或 SHORT_CALL_FALLBACK_ONLY=false。"
@@ -1364,9 +1429,7 @@ class DeribitOptionTrialBot:
             for collateral_ccy, collateral_markets in sorted(naked_markets_by_collateral.items()):
                 collateral_summary = context.summaries.get(collateral_ccy)
                 if collateral_summary is None or collateral_summary.equity <= 0:
-                    blockers.append(
-                        f"{currency}/{collateral_ccy}: book equity<=0 or missing account summary"
-                    )
+                    blockers.append(f"{currency}/{collateral_ccy}: book equity<=0 or missing account summary")
                     continue
                 ccy_ratios = snap.margin_ratios_by_currency.get(collateral_ccy)
                 if ccy_ratios:
@@ -1392,15 +1455,14 @@ class DeribitOptionTrialBot:
                 if self.config.enable_short_call:
                     builder_map.append(("call", self.strategy.build_naked_short_call_candidates))
                 if not builder_map:
-                    blockers.append(f"{currency}/{collateral_ccy}: no option sides enabled (enable_short_put/enable_short_call both disabled)")
+                    blockers.append(
+                        f"{currency}/{collateral_ccy}: no option sides enabled (enable_short_put/enable_short_call both disabled)"
+                    )
                     continue
                 for side, builder in builder_map:
                     strategy_key = "naked_short"
                     open_for_strategy = self._open_group_count_for_strategy(context.state, strategy_key)
-                    if (
-                        self.config.max_concurrent_groups > 0
-                        and open_for_strategy >= self.config.max_concurrent_groups
-                    ):
+                    if self.config.max_concurrent_groups > 0 and open_for_strategy >= self.config.max_concurrent_groups:
                         blockers.append(
                             f"{currency}/{collateral_ccy} [{strategy_key}]: max_concurrent_groups "
                             f"(open_for_strategy={open_for_strategy} >= {self.config.max_concurrent_groups})"
@@ -1456,9 +1518,7 @@ class DeribitOptionTrialBot:
                             for ex in post_ex[:_MAX_SCAN_REJECTION_EXAMPLE_LOG_LINES]:
                                 blockers.append(f"{prefix}: {ex}")
                             if not liq_line and not post_line:
-                                blockers.append(
-                                    f"{prefix}: puts_in_dte_window={detail.get('puts_in_dte_window', 0)}"
-                                )
+                                blockers.append(f"{prefix}: puts_in_dte_window={detail.get('puts_in_dte_window', 0)}")
                         else:
                             detail = self.strategy.naked_call_scan_rejection_detail(
                                 currency,
@@ -1483,11 +1543,11 @@ class DeribitOptionTrialBot:
                             for ex in post_ex[:_MAX_SCAN_REJECTION_EXAMPLE_LOG_LINES]:
                                 blockers.append(f"{prefix}: {ex}")
                             if not liq_line and not post_line:
-                                blockers.append(
-                                    f"{prefix}: calls_in_dte_window={detail.get('calls_in_dte_window', 0)}"
-                                )
+                                blockers.append(f"{prefix}: calls_in_dte_window={detail.get('calls_in_dte_window', 0)}")
                         continue
-                    deduped_naked = [c for c in raw_naked if not self._naked_candidate_matches_open_group(context.state, c)]
+                    deduped_naked = [
+                        c for c in raw_naked if not self._naked_candidate_matches_open_group(context.state, c)
+                    ]
                     if not deduped_naked:
                         blockers.append(f"{currency}/{collateral_ccy} [{side}]: all naked candidates already open")
                         continue
@@ -1516,10 +1576,7 @@ class DeribitOptionTrialBot:
         for currency in selected_currencies:
             ccy = currency.upper()
             open_for_strategy = self._open_group_count_for_strategy(context.state, "covered_call")
-            if (
-                self.config.max_concurrent_groups > 0
-                and open_for_strategy >= self.config.max_concurrent_groups
-            ):
+            if self.config.max_concurrent_groups > 0 and open_for_strategy >= self.config.max_concurrent_groups:
                 blockers.append(
                     f"{ccy} [covered_call]: max_concurrent_groups "
                     f"(open_for_strategy={open_for_strategy} >= {self.config.max_concurrent_groups})"
@@ -1619,9 +1676,7 @@ class DeribitOptionTrialBot:
                 for ex in post_ex[:_MAX_SCAN_REJECTION_EXAMPLE_LOG_LINES]:
                     blockers.append(f"{prefix}: {ex}")
                 if not liq_line and not post_line:
-                    blockers.append(
-                        f"{prefix}: calls_in_dte_window={detail.get('calls_in_dte_window', 0)}"
-                    )
+                    blockers.append(f"{prefix}: calls_in_dte_window={detail.get('calls_in_dte_window', 0)}")
                 continue
             deduped = [
                 candidate
@@ -1784,9 +1839,7 @@ class DeribitOptionTrialBot:
                     portfolio.get("regime_by_currency", {}).get(currency),
                     self._normalized_log_reasons(detail),
                 )
-                for currency, detail in sorted(
-                    (portfolio.get("regime_detail_by_currency") or {}).items()
-                )
+                for currency, detail in sorted((portfolio.get("regime_detail_by_currency") or {}).items())
             ),
             (
                 entry.get("action"),
@@ -1857,7 +1910,9 @@ class DeribitOptionTrialBot:
             if strategy == "naked_short":
                 dry_action = f"dry_run_enter_naked_{candidate.option_type}"
             requests: dict[str, Any] = {
-                "short_leg": self._entry_naked_short_request(candidate, labels["short"], quantity=candidate.quantity, aggressive=False),
+                "short_leg": self._entry_naked_short_request(
+                    candidate, labels["short"], quantity=candidate.quantity, aggressive=False
+                ),
             }
             execution_mode = "naked_short_post_only"
             if strategy == "bull_put_spread" and candidate.long_leg is not None:
@@ -2054,7 +2109,9 @@ class DeribitOptionTrialBot:
             return self._manage_covered_call_group(context, group, live=live)
         soft_delta, hard_delta = self._defense_delta_thresholds(group)
         hard_trigger = group.short_delta >= hard_delta or group.loss_pct_of_max_loss >= self.config.hard_stop_loss_pct
-        soft_trigger = group.short_delta >= soft_delta or group.loss_pct_of_max_loss >= self.config.soft_defense_loss_pct
+        soft_trigger = (
+            group.short_delta >= soft_delta or group.loss_pct_of_max_loss >= self.config.soft_defense_loss_pct
+        )
         if hard_trigger:
             if self.config.enable_perp_hedge:
                 hedge_plan = self._build_hedge_plan(context, group.currency, mode="hard")
@@ -2175,11 +2232,7 @@ class DeribitOptionTrialBot:
             return []
         actions: list[dict[str, Any]] = []
         for group in context.state.groups:
-            if (
-                group.status == "closed"
-                and self._is_covered_call_group(group)
-                and group.spot_exit_status == "pending"
-            ):
+            if group.status == "closed" and self._is_covered_call_group(group) and group.spot_exit_status == "pending":
                 actions.append(
                     self._execute_covered_call_spot_exit(
                         context,
@@ -2489,7 +2542,9 @@ class DeribitOptionTrialBot:
             action["response"] = response
         return action
 
-    def _close_group(self, context: RuntimeContext, group: TradeGroup, *, reason: str, live: bool) -> list[dict[str, Any]]:
+    def _close_group(
+        self, context: RuntimeContext, group: TradeGroup, *, reason: str, live: bool
+    ) -> list[dict[str, Any]]:
         short_book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
         close_short = {
             "instrument_name": group.short_instrument_name,
@@ -2639,6 +2694,17 @@ class DeribitOptionTrialBot:
             },
         }
         close_action["trades"] = self._collect_close_trades(short_result, long_response)
+        if live and reason in _TELEGRAM_CLOSE_REASONS:
+            self._telegram_alert(
+                f"Position closed ({reason})",
+                body=f"group={group.group_id} instrument={group.short_instrument_name}",
+                event_key=f"close:{reason}:{group.group_id}",
+                level="critical" if reason in {"hard_stop", "panic_close"} else "warning",
+                extra={
+                    "realized_pnl": close_action.get("realized_pnl"),
+                    "currency": group.currency,
+                },
+            )
         return [close_action]
 
     def _collect_close_trades(
@@ -2972,7 +3038,9 @@ class DeribitOptionTrialBot:
                 break
             latest_candidate = refreshed
             aggressive = len(requests) > 0
-            request = self._entry_naked_short_request(latest_candidate, label, quantity=remaining, aggressive=aggressive)
+            request = self._entry_naked_short_request(
+                latest_candidate, label, quantity=remaining, aggressive=aggressive
+            )
             response = self._place_entry_order(context, "sell", request)
             window = min(self.config.order_poll_seconds, self.config.short_entry_wait_seconds - waited)
             state = self._await_entry_order(response, max_wait_seconds=window)
@@ -3169,8 +3237,17 @@ class DeribitOptionTrialBot:
             return {
                 "action": "entry_aborted_short_unfilled",
                 "candidate": candidate.to_dict(),
-                "requests": {"long_leg": long_request, "short_leg": short_request, "short_attempts": execution["requests"]},
-                "responses": {"long_leg": long_state, "short_leg": short_state, "short_attempts": execution["responses"], "long_unwind": unwind},
+                "requests": {
+                    "long_leg": long_request,
+                    "short_leg": short_request,
+                    "short_attempts": execution["requests"],
+                },
+                "responses": {
+                    "long_leg": long_state,
+                    "short_leg": short_state,
+                    "short_attempts": execution["responses"],
+                    "long_unwind": unwind,
+                },
                 "reason": execution["reason"],
             }
 
@@ -3260,7 +3337,11 @@ class DeribitOptionTrialBot:
             long_strike=candidate.long_leg.strike,
         )
         self._attach_open_group_stats(group)
-        responses: dict[str, Any] = {"long_leg": long_state, "short_leg": short_state, "short_attempts": execution["responses"]}
+        responses: dict[str, Any] = {
+            "long_leg": long_state,
+            "short_leg": short_state,
+            "short_attempts": execution["responses"],
+        }
         if long_unwind is not None:
             responses["long_unwind"] = long_unwind
         return {
@@ -3314,12 +3395,10 @@ class DeribitOptionTrialBot:
         # ``day_net_flow_usdc_by_book`` is refreshed from Deribit's transaction log
         # and tracks external cash flow since UTC day-start.
         day_net_flow_usdc_by_book: dict[str, Decimal] = {
-            book: state.day_net_flow_usdc_by_book.get(book, Decimal("0"))
-            for book in per_book_equities
+            book: state.day_net_flow_usdc_by_book.get(book, Decimal("0")) for book in per_book_equities
         }
         day_net_flow_native_by_book: dict[str, Decimal] = {
-            book: state.day_net_flow_native_by_book.get(book, Decimal("0"))
-            for book in per_book_equities
+            book: state.day_net_flow_native_by_book.get(book, Decimal("0")) for book in per_book_equities
         }
         day_pnl_usdc_ex_flow_by_book: dict[str, Decimal] = {
             book: per_book_equities.get(book, Decimal("0"))
@@ -3335,9 +3414,7 @@ class DeribitOptionTrialBot:
             native_start = per_book_native_day_start.get(book, native_equity)
             native_flow = day_net_flow_native_by_book.get(book, Decimal("0"))
             spot = Decimal("1") if book == "USDC" else self._currency_index_price(book, orderbook_cache)
-            day_pnl_usdc_ex_flow_ex_spot_by_book[book] = (
-                native_equity - native_start - native_flow
-            ) * spot
+            day_pnl_usdc_ex_flow_ex_spot_by_book[book] = (native_equity - native_start - native_flow) * spot
         day_pnl_usdc_ex_flow_ex_spot = sum(
             day_pnl_usdc_ex_flow_ex_spot_by_book.values(),
             Decimal("0"),
@@ -3371,9 +3448,10 @@ class DeribitOptionTrialBot:
             start = per_book_native_day_start.get(book, equity)
             if start <= 0:
                 continue
-            net_flow = day_net_flow_native_by_book.get(book)
-            if net_flow is None:
-                net_flow = day_net_flow_usdc_by_book.get(book, Decimal("0")) if book == "USDC" else Decimal("0")
+            if book == "USDC":
+                net_flow = day_net_flow_usdc_by_book.get(book, Decimal("0"))
+            else:
+                net_flow = day_net_flow_native_by_book.get(book, Decimal("0"))
             adjusted_start = start + net_flow
             per_book_drawdown[book] = safe_div(
                 max(adjusted_start - equity, Decimal("0")),
@@ -3398,13 +3476,13 @@ class DeribitOptionTrialBot:
         cooldown_by_book: dict[str, int | None] = {
             book: state.cooldown_until_ms_by_book.get(book) for book in per_book_equities
         }
-        cooling_by_book: dict[str, bool] = {
-            book: bool(ts and ts > now_ms) for book, ts in cooldown_by_book.items()
-        }
+        cooling_by_book: dict[str, bool] = {book: bool(ts and ts > now_ms) for book, ts in cooldown_by_book.items()}
         legacy_cooling = bool(state.cooldown_until_ms and state.cooldown_until_ms > now_ms)
         cooling_down = legacy_cooling or any(cooling_by_book.values())
         open_groups = self._open_groups(state)
-        crisis_open_group = any(regime_by_currency.get(group.currency, RiskRegime.CRISIS) is RiskRegime.CRISIS for group in open_groups)
+        crisis_open_group = any(
+            regime_by_currency.get(group.currency, RiskRegime.CRISIS) is RiskRegime.CRISIS for group in open_groups
+        )
         crisis_derisk = self.config.hard_derisk_on_crisis_open_group and crisis_open_group
         hard_stop_groups = (
             [group for group in open_groups if not self._is_covered_call_group(group)]
@@ -3448,9 +3526,7 @@ class DeribitOptionTrialBot:
                 state,
                 summaries,
                 collateral_ccy,
-                available_cover=self._available_covered_call_quantity_from_summaries(
-                    state, summaries, collateral_ccy
-                ),
+                available_cover=self._available_covered_call_quantity_from_summaries(state, summaries, collateral_ccy),
             ):
                 continue
             if book_im >= self.config.book_im_hard:
@@ -3461,9 +3537,7 @@ class DeribitOptionTrialBot:
                 book_hard_breaches.append(breach)
                 hard_derisk_by_book[collateral_ccy] = True
                 halt_entries_by_book[collateral_ccy] = True
-                halt_reasons_by_book.setdefault(collateral_ccy, []).append(
-                    f"hard_derisk: book {breach}"
-                )
+                halt_reasons_by_book.setdefault(collateral_ccy, []).append(f"hard_derisk: book {breach}")
             if book_mm >= self.config.book_mm_hard:
                 breach = (
                     f"{collateral_ccy}: mm_ratio>=book_mm_hard "
@@ -3472,9 +3546,7 @@ class DeribitOptionTrialBot:
                 book_hard_breaches.append(breach)
                 hard_derisk_by_book[collateral_ccy] = True
                 halt_entries_by_book[collateral_ccy] = True
-                halt_reasons_by_book.setdefault(collateral_ccy, []).append(
-                    f"hard_derisk: book {breach}"
-                )
+                halt_reasons_by_book.setdefault(collateral_ccy, []).append(f"hard_derisk: book {breach}")
 
         book_hard_derisk = bool(book_hard_breaches) or any(hard_derisk_by_book.values())
         hard_derisk = book_hard_derisk or crisis_derisk or hard_stop_open_group
@@ -3486,9 +3558,7 @@ class DeribitOptionTrialBot:
             any(note.startswith("data_unavailable") for note in regime_detail_by_currency.get(currency, ()))
             for currency in regime_by_currency
         )
-        non_normal_regime = any(
-            regime is not RiskRegime.NORMAL for regime in regime_by_currency.values()
-        )
+        non_normal_regime = any(regime is not RiskRegime.NORMAL for regime in regime_by_currency.values())
         halt_new_entries = (
             cooling_down
             or open_max_loss_pct >= self.config.halt_open_max_loss_pct
@@ -3521,9 +3591,7 @@ class DeribitOptionTrialBot:
                 for currency in sorted(regime_by_currency)
                 if any(note.startswith("data_unavailable") for note in regime_detail_by_currency.get(currency, ()))
             ]
-            halt_entry_reasons.append(
-                "regime data_unavailable: " + ", ".join(affected)
-            )
+            halt_entry_reasons.append("regime data_unavailable: " + ", ".join(affected))
         elif non_normal_regime:
             escalated = [
                 f"{currency}={regime.value}"
@@ -3567,9 +3635,7 @@ class DeribitOptionTrialBot:
             cooling_down_by_book=cooling_by_book,
             hard_derisk_by_book=hard_derisk_by_book,
             halt_entries_by_book=halt_entries_by_book,
-            halt_entry_reasons_by_book={
-                book: tuple(reasons) for book, reasons in halt_reasons_by_book.items()
-            },
+            halt_entry_reasons_by_book={book: tuple(reasons) for book, reasons in halt_reasons_by_book.items()},
         )
 
     def _determine_regime_with_detail(
@@ -3708,7 +3774,11 @@ class DeribitOptionTrialBot:
         if position.size == 0:
             return None
         if not live:
-            return {"action": "close_perp_preview", "instrument_name": position.instrument_name, "direction": position.direction}
+            return {
+                "action": "close_perp_preview",
+                "instrument_name": position.instrument_name,
+                "direction": position.direction,
+            }
         response = self.client.close_position(position.instrument_name, order_type="market")
         return {"action": "close_perp", "instrument_name": position.instrument_name, "response": response}
 
@@ -3777,9 +3847,7 @@ class DeribitOptionTrialBot:
         instrument_name = str(request["instrument_name"])
         instrument = self._find_instrument(context, instrument_name)
         raw = to_decimal(request["amount"])
-        capacity = self._option_reduce_only_capacity(
-            instrument_name, "sell", option_positions=context.option_positions
-        )
+        capacity = self._option_reduce_only_capacity(instrument_name, "sell", option_positions=context.option_positions)
         capped = min(raw, capacity)
         amount = align_option_order_amount(capped, instrument.contract_size, instrument.min_trade_amount)
         if amount <= 0:
@@ -3859,10 +3927,11 @@ class DeribitOptionTrialBot:
             return markets_usdc
 
         linear_markets = [
-            OptionInstrument.from_api(row)
-            for row in self.client.get_instruments("USDC", kind="option", expired=False)
+            OptionInstrument.from_api(row) for row in self.client.get_instruments("USDC", kind="option", expired=False)
         ]
-        linear_by_currency: dict[str, list[OptionInstrument]] = {currency: [] for currency in self.config.managed_currencies}
+        linear_by_currency: dict[str, list[OptionInstrument]] = {
+            currency: [] for currency in self.config.managed_currencies
+        }
         for market in linear_markets:
             if market.base_currency in managed and self._supports_option_market(market):
                 linear_by_currency[market.base_currency].append(market)
@@ -3903,17 +3972,18 @@ class DeribitOptionTrialBot:
                 and market.settlement_currency == "USDC"
                 and market.base_currency in self.config.managed_currencies
             )
-        if self.config.option_markets_profile == "inverse_native" and market.quote_currency == "USDC" and market.settlement_currency == "USDC":
+        if (
+            self.config.option_markets_profile == "inverse_native"
+            and market.quote_currency == "USDC"
+            and market.settlement_currency == "USDC"
+        ):
             return False
         if market.quote_currency == "USDC" and market.settlement_currency == "USDC":
             return True
-        return (
-            market.instrument_type == "reversed"
-            or (
-                market.base_currency
-                and market.quote_currency in {"", market.base_currency}
-                and market.settlement_currency == market.base_currency
-            )
+        return market.instrument_type == "reversed" or (
+            market.base_currency
+            and market.quote_currency in {"", market.base_currency}
+            and market.settlement_currency == market.base_currency
         )
 
     def _find_instrument(self, context: RuntimeContext, instrument_name: str) -> OptionInstrument:
@@ -4000,7 +4070,9 @@ class DeribitOptionTrialBot:
             ordered.append(currency)
         return tuple(ordered)
 
-    def _await_entry_order(self, initial_response: dict[str, Any] | None, *, max_wait_seconds: int | None = None) -> dict[str, Any]:
+    def _await_entry_order(
+        self, initial_response: dict[str, Any] | None, *, max_wait_seconds: int | None = None
+    ) -> dict[str, Any]:
         if not isinstance(initial_response, dict):
             return {}
         order = self._response_order(initial_response)
@@ -4115,7 +4187,11 @@ class DeribitOptionTrialBot:
         *,
         total_equity_usdc: Decimal | None = None,
     ) -> Decimal:
-        effective_cap = self._effective_capital(total_equity_usdc) if total_equity_usdc is not None else self.config.reference_capital_usdc
+        effective_cap = (
+            self._effective_capital(total_equity_usdc)
+            if total_equity_usdc is not None
+            else self.config.reference_capital_usdc
+        )
         return min(
             effective_cap,
             self._summary_equity_usdc(summaries.get(collateral_currency), collateral_currency, orderbook_cache),
@@ -4162,13 +4238,7 @@ class DeribitOptionTrialBot:
         return normalize_strategy_name(group.strategy, default="naked_short")
 
     def _open_group_count_for_strategy(self, state: StrategyState, strategy: str) -> int:
-        return len(
-            [
-                group
-                for group in self._open_groups(state)
-                if self._group_strategy_key(group) == strategy
-            ]
-        )
+        return len([group for group in self._open_groups(state) if self._group_strategy_key(group) == strategy])
 
     def _open_group_count_for_currency(
         self,
@@ -4182,8 +4252,7 @@ class DeribitOptionTrialBot:
             [
                 group
                 for group in self._open_groups(state)
-                if group.currency == ccy
-                and (strategy is None or self._group_strategy_key(group) == strategy)
+                if group.currency == ccy and (strategy is None or self._group_strategy_key(group) == strategy)
             ]
         )
 
@@ -4237,7 +4306,9 @@ class DeribitOptionTrialBot:
             Decimal("0"),
         )
 
-    def _projected_max_profit_run_rate(self, state: StrategyState, *, collateral_currency: str | None = None) -> Decimal:
+    def _projected_max_profit_run_rate(
+        self, state: StrategyState, *, collateral_currency: str | None = None
+    ) -> Decimal:
         return sum(
             (
                 self._max_profit_run_rate_for_group(group)
@@ -4324,9 +4395,9 @@ class DeribitOptionTrialBot:
         if not day_key:
             return 0
         try:
-            from datetime import datetime, timezone
+            from datetime import datetime
 
-            dt = datetime.strptime(day_key, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(day_key, "%Y-%m-%d").replace(tzinfo=UTC)
             return int(dt.timestamp() * 1000)
         except (ValueError, TypeError):
             return 0
@@ -4356,10 +4427,7 @@ class DeribitOptionTrialBot:
         start_native = state.day_start_equity_native_by_book.get(book, Decimal("0"))
         if start_native > 0 and flow_native > 0:
             ratio = safe_div(flow_native, start_native)
-            if (
-                Decimal("0.95") <= ratio <= Decimal("1.05")
-                and equity_native >= start_native * Decimal("0.95")
-            ):
+            if Decimal("0.95") <= ratio <= Decimal("1.05") and equity_native >= start_native * Decimal("0.95"):
                 state.day_equity_anchor_ms_by_book[book] = now_ms
                 state.day_net_flow_usdc_by_book[book] = Decimal("0")
                 state.day_net_flow_native_by_book[book] = Decimal("0")
@@ -4526,9 +4594,7 @@ class DeribitOptionTrialBot:
                 continue
             book = loader(group.short_instrument_name)
             im_by_exp = dict(
-                self._naked_im_by_expiry(
-                    context.state, collateral_ccy, orderbook_cache=context.orderbook_cache
-                )
+                self._naked_im_by_expiry(context.state, collateral_ccy, orderbook_cache=context.orderbook_cache)
             )
             exp_key = group.expiration_timestamp_ms
             own_im = self._group_im_in_collateral(group, orderbook_cache=context.orderbook_cache)
@@ -4572,15 +4638,17 @@ class DeribitOptionTrialBot:
                 continue
 
             if not live:
-                actions.append({
-                    "action": "dry_run_topup_naked",
-                    "group_id": group.group_id,
-                    "instrument": group.short_instrument_name,
-                    "current_qty": group.quantity,
-                    "topup_qty": topup_qty,
-                    "new_total_qty": new_max_qty,
-                    "candidate": topup_candidate.to_dict(),
-                })
+                actions.append(
+                    {
+                        "action": "dry_run_topup_naked",
+                        "group_id": group.group_id,
+                        "instrument": group.short_instrument_name,
+                        "current_qty": group.quantity,
+                        "topup_qty": topup_qty,
+                        "new_total_qty": new_max_qty,
+                        "candidate": topup_candidate.to_dict(),
+                    }
+                )
                 continue
 
             execution = self._execute_repriced_naked_short(
@@ -4591,23 +4659,27 @@ class DeribitOptionTrialBot:
             )
             filled = execution["filled_amount"]
             if filled <= 0:
-                actions.append({
-                    "action": "topup_unfilled",
+                actions.append(
+                    {
+                        "action": "topup_unfilled",
+                        "group_id": group.group_id,
+                        "instrument": group.short_instrument_name,
+                        "topup_qty": topup_qty,
+                        "reason": execution["reason"],
+                    }
+                )
+                continue
+            actions.append(
+                {
+                    "action": "topup_naked_executed",
                     "group_id": group.group_id,
                     "instrument": group.short_instrument_name,
-                    "topup_qty": topup_qty,
+                    "current_qty": group.quantity,
+                    "topup_filled": filled,
+                    "new_total_qty": group.quantity + filled,
                     "reason": execution["reason"],
-                })
-                continue
-            actions.append({
-                "action": "topup_naked_executed",
-                "group_id": group.group_id,
-                "instrument": group.short_instrument_name,
-                "current_qty": group.quantity,
-                "topup_filled": filled,
-                "new_total_qty": group.quantity + filled,
-                "reason": execution["reason"],
-            })
+                }
+            )
             LOGGER.info(
                 "topup group=%s instrument=%s filled=%s (was %s → %s)",
                 group.group_id,
@@ -4731,7 +4803,9 @@ class DeribitOptionTrialBot:
         short_book = self._get_orderbook(short_instrument.instrument_name, orderbook_cache)
         long_book = self._get_orderbook(long_instrument.instrument_name, orderbook_cache)
         idx = short_book.index_price if short_book.index_price > 0 else long_book.index_price
-        short_premium = abs(short_position.average_price) if short_position.average_price != 0 else short_book.mark_price
+        short_premium = (
+            abs(short_position.average_price) if short_position.average_price != 0 else short_book.mark_price
+        )
         long_premium = abs(long_position.average_price) if long_position.average_price != 0 else long_book.mark_price
         short_credit = self._premium_value_usdc(
             premium=short_premium,
@@ -4765,8 +4839,15 @@ class DeribitOptionTrialBot:
         net_credit = short_credit - long_debit - entry_fee
         width_usdc = max(short_instrument.strike - long_instrument.strike, Decimal("0")) * quantity
         max_loss_usdc = max(width_usdc - net_credit, Decimal("0"))
-        collateral = "USDC" if short_instrument.quote_currency.upper() == "USDC" and short_instrument.settlement_currency.upper() == "USDC" else short_instrument.base_currency
-        estimated_im_collateral = max_loss_usdc if collateral == "USDC" else (max_loss_usdc / idx if idx > 0 else Decimal("0"))
+        collateral = (
+            "USDC"
+            if short_instrument.quote_currency.upper() == "USDC"
+            and short_instrument.settlement_currency.upper() == "USDC"
+            else short_instrument.base_currency
+        )
+        estimated_im_collateral = (
+            max_loss_usdc if collateral == "USDC" else (max_loss_usdc / idx if idx > 0 else Decimal("0"))
+        )
         return {
             "entry_credit": net_credit,
             "entry_fee": entry_fee,
@@ -4818,7 +4899,9 @@ class DeribitOptionTrialBot:
     ) -> None:
         if self.config.option_strategy != "bull_put_spread":
             return
-        short_positions = {p.instrument_name: p for p in option_positions if self._short_option_open_size(p) is not None}
+        short_positions = {
+            p.instrument_name: p for p in option_positions if self._short_option_open_size(p) is not None
+        }
         used_long_names = {g.long_instrument_name for g in self._open_groups(state) if g.long_instrument_name}
         for group in self._open_groups(state):
             if group.option_type != "put" or group.long_instrument_name:
@@ -4902,7 +4985,9 @@ class DeribitOptionTrialBot:
             idx = book.index_price
             if idx <= 0:
                 continue
-            mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            mark = (
+                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+            )
             if mark <= 0:
                 continue
 
@@ -5096,7 +5181,9 @@ class DeribitOptionTrialBot:
                 and self._covered_call_itm_from_cache(group, orderbook_cache)
             ):
                 group.spot_exit_status = "pending"
-                group.spot_exit_amount = group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
+                group.spot_exit_amount = (
+                    group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
+                )
                 group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
                 group.spot_exit_reason = "covered_call_settlement_exit"
             group.backfill_realized_pnl_collateral_native()
@@ -5225,10 +5312,17 @@ class DeribitOptionTrialBot:
                     quote_currency=long_instrument.quote_currency,
                     settlement_currency=long_instrument.settlement_currency,
                 )
-                group.current_debit = max(group.current_debit - max(long_credit - long_close_fee, Decimal("0")), Decimal("0"))
+                group.current_debit = max(
+                    group.current_debit - max(long_credit - long_close_fee, Decimal("0")), Decimal("0")
+                )
                 group.current_close_fee += long_close_fee
             except Exception as exc:
-                LOGGER.warning("refresh_group %s: unable to refresh long leg %s (%s)", group.group_id, group.long_instrument_name, exc)
+                LOGGER.warning(
+                    "refresh_group %s: unable to refresh long leg %s (%s)",
+                    group.group_id,
+                    group.long_instrument_name,
+                    exc,
+                )
         group.profit_capture = safe_div(max(group.entry_credit - group.current_debit, Decimal("0")), group.entry_credit)
         group.short_delta = abs(short_book.delta)
 
@@ -5276,7 +5370,10 @@ class DeribitOptionTrialBot:
 
     def _current_hedge_base(self, positions: list[Position], currency: str) -> Decimal:
         instrument_name = self._perp_instrument(currency)
-        return sum((position.signed_size_currency for position in positions if position.instrument_name == instrument_name), Decimal("0"))
+        return sum(
+            (position.signed_size_currency for position in positions if position.instrument_name == instrument_name),
+            Decimal("0"),
+        )
 
     def _overall_regime(self, values: Any) -> RiskRegime:
         severity = {RiskRegime.NORMAL: 0, RiskRegime.ELEVATED: 1, RiskRegime.CRISIS: 2}
@@ -5336,7 +5433,9 @@ class DeribitOptionTrialBot:
             books.add("USDC")
         return frozenset(books)
 
-    def _total_equity_usdc(self, summaries: dict[str, AccountSummary], orderbook_cache: dict[str, OrderBookSnapshot]) -> Decimal:
+    def _total_equity_usdc(
+        self, summaries: dict[str, AccountSummary], orderbook_cache: dict[str, OrderBookSnapshot]
+    ) -> Decimal:
         return sum(self._book_equities_usdc(summaries, orderbook_cache).values(), Decimal("0"))
 
     def _book_equities_usdc(
@@ -5418,7 +5517,8 @@ class DeribitOptionTrialBot:
         return total
 
     def _per_currency_margin_ratios(
-        self, summaries: dict[str, AccountSummary],
+        self,
+        summaries: dict[str, AccountSummary],
     ) -> dict[str, tuple[Decimal, Decimal]]:
         """Per-account (im_ratio, mm_ratio) for each segregated margin account."""
         result: dict[str, tuple[Decimal, Decimal]] = {}
@@ -5695,8 +5795,12 @@ class DeribitOptionTrialBot:
             "spot_exit_instrument_name": group.spot_exit_instrument_name or None,
             "spot_exit_order_id": group.spot_exit_order_id or None,
             "spot_exit_reason": group.spot_exit_reason or None,
-            "realized_close_debit": format_decimal(group.realized_close_debit, 8) if group.realized_close_debit is not None else None,
-            "realized_close_fee": format_decimal(group.realized_close_fee, 8) if group.realized_close_fee is not None else None,
+            "realized_close_debit": format_decimal(group.realized_close_debit, 8)
+            if group.realized_close_debit is not None
+            else None,
+            "realized_close_fee": format_decimal(group.realized_close_fee, 8)
+            if group.realized_close_fee is not None
+            else None,
             "short_close_average_price": format_decimal(group.short_close_average_price, 8)
             if group.short_close_average_price is not None
             else None,
@@ -5732,22 +5836,33 @@ class DeribitOptionTrialBot:
         if short_position is not None and short_position.instrument_name == group.short_instrument_name:
             payload["short_average_price"] = format_decimal(short_position.average_price, 8)
             payload["short_mark_price"] = format_decimal(short_position.mark_price, 8)
+            pnl_scale = self._group_leg_pnl_scale(short_position, group.quantity)
             payload["short_has_floating_profit_loss"] = short_position.has_floating_profit_loss
             if short_position.has_floating_profit_loss:
                 payload["short_floating_profit_loss"] = format_decimal(
-                    short_position.floating_profit_loss,
+                    short_position.floating_profit_loss * pnl_scale,
                     8,
                 )
             payload["short_has_floating_profit_loss_usd"] = short_position.has_floating_profit_loss_usd
             if short_position.has_floating_profit_loss_usd:
                 payload["short_floating_profit_loss_usd"] = format_decimal(
-                    short_position.floating_profit_loss_usd,
+                    short_position.floating_profit_loss_usd * pnl_scale,
                     8,
                 )
         else:
             payload["short_average_price"] = None
             payload["short_mark_price"] = None
         return payload
+
+    @staticmethod
+    def _group_leg_pnl_scale(position: Position, group_quantity: Decimal) -> Decimal:
+        """Scale exchange leg PnL to one trade group when multiple groups share the instrument."""
+        pos_size = abs(position.size)
+        if pos_size <= 0 or group_quantity <= 0:
+            return Decimal("1")
+        if pos_size == group_quantity:
+            return Decimal("1")
+        return group_quantity / pos_size
 
     @staticmethod
     def _order_payload(order: OpenOrder) -> dict[str, Any]:

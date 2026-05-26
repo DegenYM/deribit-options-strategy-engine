@@ -73,9 +73,7 @@ class DeribitClient:
 
     def _require_credentials(self) -> None:
         if not self.config.has_private_credentials:
-            raise AuthenticationError(
-                "Private Deribit method requires DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET"
-            )
+            raise AuthenticationError("Private Deribit method requires DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET")
 
     def _token_expired(self) -> bool:
         if not self._access_token:
@@ -85,9 +83,7 @@ class DeribitClient:
 
     def _auth_cache_key(self) -> str:
         return (
-            f"{self.config.rest_base_url}\0"
-            f"{self.config.client_id.strip().lower()}\0"
-            f"{self.config.client_secret.strip()}"
+            f"{self.config.rest_base_url}\0{self.config.client_id.strip().lower()}\0{self.config.client_secret.strip()}"
         )
 
     def _hydrate_auth_from_cache(self) -> bool:
@@ -198,9 +194,7 @@ class DeribitClient:
                     continue
                 raise TransientExchangeError(f"public/auth HTTP {status}")
             if status >= 400:
-                raise AuthenticationError(
-                    f"public/auth failed: HTTP {status} {response.text}"
-                )
+                raise AuthenticationError(f"public/auth failed: HTTP {status} {response.text}")
             data = self._parse_jsonrpc(response, "public/auth")
             result = data.get("result")
             if not isinstance(result, dict):
@@ -348,9 +342,7 @@ class DeribitClient:
                 self._invalidate_auth_cache()
                 continue
             if status >= 400:
-                raise ExchangeError(
-                    f"{method_name} failed: HTTP {status} {response.text}"
-                )
+                raise ExchangeError(f"{method_name} failed: HTTP {status} {response.text}")
 
             payload = self._parse_jsonrpc(response, method_name)
             error = payload.get("error")
@@ -387,25 +379,17 @@ class DeribitClient:
                 ) from exc
             except requests.exceptions.Timeout as exc:
                 # Non-idempotent: order may have been accepted. Caller must reconcile.
-                raise TransientExchangeError(
-                    f"{method_name} timed out; reconcile required: {exc}"
-                ) from exc
+                raise TransientExchangeError(f"{method_name} timed out; reconcile required: {exc}") from exc
             except requests.exceptions.RequestException as exc:
                 raise TransientExchangeError(f"{method_name} request error: {exc}") from exc
 
             status = response.status_code
             if status == self.RATE_LIMIT_STATUS:
-                raise TransientExchangeError(
-                    f"{method_name} rate limited: HTTP 429 (no auto-retry for unsafe calls)"
-                )
+                raise TransientExchangeError(f"{method_name} rate limited: HTTP 429 (no auto-retry for unsafe calls)")
             if status in self.RETRYABLE_STATUS_CODES:
-                raise TransientExchangeError(
-                    f"{method_name} server error HTTP {status}; reconcile required"
-                )
+                raise TransientExchangeError(f"{method_name} server error HTTP {status}; reconcile required")
             if status >= 400:
-                raise ExchangeError(
-                    f"{method_name} failed: HTTP {status} {response.text}"
-                )
+                raise ExchangeError(f"{method_name} failed: HTTP {status} {response.text}")
             payload = self._parse_jsonrpc(response, method_name)
             error = payload.get("error")
             if isinstance(error, dict) and error:
@@ -440,10 +424,13 @@ class DeribitClient:
         return result or []
 
     def get_instrument(self, instrument_name: str) -> dict[str, Any]:
-        return self._request(
-            "public/get_instrument",
-            params={"instrument_name": instrument_name},
-        ) or {}
+        return (
+            self._request(
+                "public/get_instrument",
+                params={"instrument_name": instrument_name},
+            )
+            or {}
+        )
 
     def get_tradingview_chart_data(
         self,
@@ -487,21 +474,27 @@ class DeribitClient:
         end_timestamp: int,
         resolution: str = "1D",
     ) -> dict[str, Any]:
-        return self._request(
-            "public/get_volatility_index_data",
-            params={
-                "currency": currency.upper(),
-                "start_timestamp": start_timestamp,
-                "end_timestamp": end_timestamp,
-                "resolution": resolution,
-            },
-        ) or {}
+        return (
+            self._request(
+                "public/get_volatility_index_data",
+                params={
+                    "currency": currency.upper(),
+                    "start_timestamp": start_timestamp,
+                    "end_timestamp": end_timestamp,
+                    "resolution": resolution,
+                },
+            )
+            or {}
+        )
 
     def get_funding_chart_data(self, instrument_name: str, *, length: str = "8h") -> dict[str, Any]:
-        return self._request(
-            "public/get_funding_chart_data",
-            params={"instrument_name": instrument_name, "length": length},
-        ) or {}
+        return (
+            self._request(
+                "public/get_funding_chart_data",
+                params={"instrument_name": instrument_name, "length": length},
+            )
+            or {}
+        )
 
     def get_account_summaries(self, *, extended: bool = False) -> list[dict[str, Any]]:
         result = self._request(
@@ -644,11 +637,14 @@ class DeribitClient:
         return self._request("private/get_order_state", params={"order_id": order_id}, private=True) or {}
 
     def get_order_state_by_label(self, currency: str, label: str) -> dict[str, Any]:
-        return self._request(
-            "private/get_order_state_by_label",
-            params={"currency": currency.upper(), "label": label},
-            private=True,
-        ) or {}
+        return (
+            self._request(
+                "private/get_order_state_by_label",
+                params={"currency": currency.upper(), "label": label},
+                private=True,
+            )
+            or {}
+        )
 
     def get_user_trades_by_order(self, order_id: str, *, historical: bool = False) -> list[dict[str, Any]]:
         result = self._request(

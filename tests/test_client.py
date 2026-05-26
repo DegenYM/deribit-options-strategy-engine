@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import pytest
 import requests
+from conftest import make_config
 
 from deribit_demo.client import DeribitClient
-from deribit_demo.exceptions import AuthenticationError, ExchangeError, TransientExchangeError
-
-from conftest import make_config
+from deribit_demo.exceptions import ExchangeError, TransientExchangeError
 
 
 @pytest.fixture(autouse=True)
@@ -143,9 +142,7 @@ def test_idempotent_request_retries_on_retryable_http(tmp_path, monkeypatch):
 
 def test_idempotent_request_raises_after_retry_exhaustion(tmp_path, monkeypatch):
     monkeypatch.setattr("deribit_demo.client.time.sleep", lambda _s: None)
-    session = FakeSession(
-        [FakeResponse({}, status_code=522, text="timeout")] * 4
-    )
+    session = FakeSession([FakeResponse({}, status_code=522, text="timeout")] * 4)
     client = _make_client(tmp_path, session)
 
     with pytest.raises(TransientExchangeError, match="HTTP 522"):
@@ -269,7 +266,11 @@ def test_place_order_retries_once_on_connection_error(tmp_path, monkeypatch):
     with pytest.raises(TransientExchangeError, match="connection failed"):
         # Only one connection-error retry is allowed (2 total calls after auth).
         # Provide two failures, the second after retry, to confirm the cap.
-        session.raise_on_calls = [None, requests.exceptions.ConnectionError("down"), requests.exceptions.ConnectionError("down")]
+        session.raise_on_calls = [
+            None,
+            requests.exceptions.ConnectionError("down"),
+            requests.exceptions.ConnectionError("down"),
+        ]
         client.place_order(
             direction="sell",
             instrument_name="BTC-PERPETUAL",
@@ -411,9 +412,7 @@ def test_get_account_summaries_supports_object_wrapped_response(tmp_path):
 
 
 def test_business_error_raises_exchange_error(tmp_path):
-    session = FakeSession(
-        [FakeResponse(_error_body(code=11044, message="not_enough_funds"))]
-    )
+    session = FakeSession([FakeResponse(_error_body(code=11044, message="not_enough_funds"))])
     client = _make_client(tmp_path, session)
 
     with pytest.raises(ExchangeError, match="not_enough_funds"):

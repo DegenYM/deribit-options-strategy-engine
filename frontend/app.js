@@ -507,7 +507,12 @@
   }
 
   /** Short option amount: negative qty (Deribit Amount column). */
-  function fmtShortAmountDisplay(g, status) {
+  function fmtShortAmountDisplay(g, status, groups = null) {
+    const ctx = groups ?? STATE.groups;
+    if (countOpenGroupsSharingLeg(status, ctx, g, "short") > 1) {
+      const groupSize = openRowLegGroupSignedSize(g, "short");
+      if (groupSize !== null) return fmtNum(groupSize, 4);
+    }
     const p = openRowPosition(status, g);
     const signed = openRowPositionSignedSizeForDisplay(p);
     if (signed !== null) return fmtNum(signed, 4);
@@ -519,6 +524,33 @@
 
   function openRowLegInstrumentName(g, role) {
     return role === "long" ? String(g?.long_instrument_name || "") : String(g?.short_instrument_name || "");
+  }
+
+  function openRowLegGroupSignedSize(g, role) {
+    const q = num(g.quantity);
+    if (q === null) return null;
+    return role === "short" ? -Math.abs(q) : Math.abs(q);
+  }
+
+  /** Open groups on the same account sharing one exchange instrument (aggregated position). */
+  function countOpenGroupsSharingLeg(status, groups, g, role) {
+    const instrument = openRowLegInstrumentName(g, role);
+    if (!instrument) return 0;
+    const account = String(g?.account_name || "");
+    const seen = new Set();
+    let count = 0;
+    for (const src of [status?.trade_groups || [], groups?.open || []]) {
+      for (const row of src) {
+        if (!isOpenTradeGroup(row)) continue;
+        const key = tradeGroupKey(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (openRowLegInstrumentName(row, role) !== instrument) continue;
+        if (account && String(row?.account_name || "") !== account) continue;
+        count++;
+      }
+    }
+    return count;
   }
 
   function openRowLegPosition(status, g, role) {
@@ -539,7 +571,8 @@
     return openRowLegPosition(status, g, "short");
   }
 
-  function enrichOpenGroupRow(status, g) {
+  function enrichOpenGroupRow(status, g, groups = null) {
+    const ctx = groups ?? STATE.groups;
     let avg = g.short_average_price;
     let mrk = g.short_mark_price;
     let fpl = g.short_floating_profit_loss;
@@ -550,6 +583,7 @@
     const missingMrk = mrk === null || mrk === undefined || mrk === "";
     const missingFpl = fpl === null || fpl === undefined || fpl === "";
     const missingFplUsd = fplUsd === null || fplUsd === undefined || fplUsd === "";
+    const sharedShort = countOpenGroupsSharingLeg(status, ctx, g, "short") > 1;
     if (
       (missingAvg ||
         missingMrk ||
@@ -563,10 +597,12 @@
       if (p) {
         if (missingAvg) avg = p.average_price;
         if (missingMrk) mrk = p.mark_price;
-        if (missingFpl) fpl = p.floating_profit_loss;
-        if (hasFpl === undefined) hasFpl = p.has_floating_profit_loss;
-        if (missingFplUsd) fplUsd = p.floating_profit_loss_usd;
-        if (hasFplUsd === undefined) hasFplUsd = p.has_floating_profit_loss_usd;
+        if (!sharedShort) {
+          if (missingFpl) fpl = p.floating_profit_loss;
+          if (hasFpl === undefined) hasFpl = p.has_floating_profit_loss;
+          if (missingFplUsd) fplUsd = p.floating_profit_loss_usd;
+          if (hasFplUsd === undefined) hasFplUsd = p.has_floating_profit_loss_usd;
+        }
       }
     }
     return {
@@ -724,13 +760,16 @@
     return openRowPositionSignedSizeForDisplay(p);
   }
 
-  function openRowLegSignedSizeForDisplay(g, status, role) {
+  function openRowLegSignedSizeForDisplay(g, status, role, groups = null) {
+    const ctx = groups ?? STATE.groups;
+    const groupSize = openRowLegGroupSignedSize(g, role);
+    if (groupSize !== null && countOpenGroupsSharingLeg(status, ctx, g, role) > 1) {
+      return groupSize;
+    }
     const p = openRowLegPosition(status, g, role);
     const signed = openRowPositionSignedSizeForDisplay(p);
     if (signed !== null) return signed;
-    const q = num(g.quantity);
-    if (q === null) return null;
-    return role === "short" ? -Math.abs(q) : Math.abs(q);
+    return groupSize;
   }
 
   function openRowLegFieldValue(g, status, role, fieldName) {
@@ -742,23 +781,33 @@
     return p?.[fieldName] ?? null;
   }
 
-  function openRowLegPremiumMtmNative(status, g, role) {
+  function openRowLegPremiumMtmNative(status, g, role, groups = null) {
     const avg = num(openRowLegFieldValue(g, status, role, "average_price"));
     const mrk = num(openRowLegFieldValue(g, status, role, "mark_price"));
-    const sz = openRowLegSignedSizeForDisplay(g, status, role);
+    const sz = openRowLegSignedSizeForDisplay(g, status, role, groups);
     if (avg === null || mrk === null || sz === null) return null;
     return (mrk - avg) * sz;
   }
 
   function openRowLegPnlUsd(status, g, groups, role) {
-    const native = openRowLegPremiumMtmNative(status, g, role);
+    const native = openRowLegPremiumMtmNative(status, g, role, groups);
     if (native === null) return null;
     const spot = openRowSpotUsdScalarForBook(g, status, groups);
     if (spot === null || spot <= 0) return null;
     return native * spot;
   }
 
-  function openRowPositionPremiumMtmNative(status, g) {
+  function openRowPositionPremiumMtmNative(status, g, groups = null) {
+    const ctx = groups ?? STATE.groups;
+    if (countOpenGroupsSharingLeg(status, ctx, g, "short") > 1) {
+      const p = openRowPosition(status, g);
+      if (!p) return null;
+      const avg = num(p.average_price);
+      const mrk = num(p.mark_price);
+      const sz = openRowLegGroupSignedSize(g, "short");
+      if (avg === null || mrk === null || sz === null) return null;
+      return (mrk - avg) * sz;
+    }
     const p = openRowPosition(status, g);
     if (!p) return null;
     const avg = num(p.average_price);
@@ -784,6 +833,18 @@
   }
 
   function openRowPositionPnlUsd(status, g, groups) {
+    const ctx = groups ?? STATE.groups;
+    if (countOpenGroupsSharingLeg(status, ctx, g, "short") > 1) {
+      const p = openRowPosition(status, g);
+      if (!p) return null;
+      const avg = num(p.average_price);
+      const mrk = num(p.mark_price);
+      const sz = openRowLegGroupSignedSize(g, "short");
+      if (avg === null || mrk === null || sz === null) return null;
+      const spot = openRowSpotUsdScalarForBook(g, status, groups);
+      if (spot === null || spot <= 0) return null;
+      return (mrk - avg) * sz * spot;
+    }
     const p = openRowPosition(status, g);
     if (!p) return null;
     const avg = num(p.average_price);
@@ -914,21 +975,29 @@
     return native * spot;
   }
 
+  // Match USDC equity / day-start: include spot MTM (and exclude external flows).
+  // ``day_pnl_usdc_ex_flow_ex_spot`` is for native-book risk gates only.
   function portfolioDayPnlUsdForDisplay(portfolio, totalEquity, dayStart) {
+    const netFlow = num(portfolio?.day_net_flow_usdc);
     return (
-      num(portfolio?.day_pnl_usdc_ex_flow_ex_spot) ??
       num(portfolio?.day_pnl_usdc_ex_flow) ??
-      (totalEquity !== null && dayStart !== null ? totalEquity - dayStart : null)
+      num(portfolio?.day_pnl_usdc_ex_flow_ex_spot) ??
+      (totalEquity !== null && dayStart !== null
+        ? totalEquity - dayStart - (netFlow ?? 0)
+        : null)
     );
   }
 
   function bookDayPnlUsdForDisplay(book, status, equityUsdc, dayStartUsdc) {
     const b = String(book || "").toUpperCase();
     const portfolio = status?.portfolio || {};
+    const netFlow = num(portfolio?.day_net_flow_usdc_by_book?.[b]);
     return (
-      num(portfolio?.day_pnl_usdc_ex_flow_ex_spot_by_book?.[b]) ??
       num(portfolio?.day_pnl_usdc_ex_flow_by_book?.[b]) ??
-      (equityUsdc !== null && dayStartUsdc !== null ? equityUsdc - dayStartUsdc : null)
+      num(portfolio?.day_pnl_usdc_ex_flow_ex_spot_by_book?.[b]) ??
+      (equityUsdc !== null && dayStartUsdc !== null
+        ? equityUsdc - dayStartUsdc - (netFlow ?? 0)
+        : null)
     );
   }
 
@@ -1225,7 +1294,7 @@
       seen.add(key);
       out.push(g);
     }
-    return out.map((g) => enrichOpenGroupRow(status, g));
+    return out.map((g) => enrichOpenGroupRow(status, g, groups));
   }
 
   function mergedClosedRows(report, groups, limit = 20, status = null) {
@@ -1626,11 +1695,12 @@
     return annualizedAprOnPositionCapital(g, status);
   }
 
-  function activityAmountDisplay(g, status) {
+  function activityAmountDisplay(g, status, groups = null) {
+    const ctx = groups ?? STATE.groups;
     const id = strategyId(g);
     if (id === "bull_put_spread") {
-      const shortAmt = openRowLegSignedSizeForDisplay(g, status, "short");
-      const longAmt = openRowLegSignedSizeForDisplay(g, status, "long");
+      const shortAmt = openRowLegSignedSizeForDisplay(g, status, "short", ctx);
+      const longAmt = openRowLegSignedSizeForDisplay(g, status, "long", ctx);
       if (shortAmt === null && longAmt === null) {
         const q = num(g.quantity);
         if (q === null) return null;
@@ -1642,7 +1712,7 @@
       return parts.length ? parts.join(" / ") : null;
     }
     if (!isClosedTradeGroup(g)) {
-      const shown = fmtShortAmountDisplay(g, status);
+      const shown = fmtShortAmountDisplay(g, status, ctx);
       return shown === "—" ? null : shown;
     }
     const q = num(g.quantity);
@@ -1815,7 +1885,7 @@
     const pnl = realizedPnlDisplayUsdc(g, status);
     const holding = groupHoldingDays(g);
     const realizedApr = closed ? groupRealizedApr(g, status) : null;
-    const amountLabel = activityAmountDisplay(g, status);
+    const amountLabel = activityAmountDisplay(g, status, groups);
     const title = tradeGroupActivityTitle(g);
     const entryCreditDisplay = credit === null ? "—" : fmtUsdWithNativeBookAmount(credit, creditNative, book);
     const entryAprDisplay = entryApr === null ? "—" : fmtPct(entryApr, 1);

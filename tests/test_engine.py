@@ -2,7 +2,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
+from conftest import FakeClient, future_expiry, make_config
 
 from deribit_demo.engine import DeribitOptionTrialBot
 from deribit_demo.models import (
@@ -14,10 +14,8 @@ from deribit_demo.models import (
     TradeGroup,
     is_phantom_reconcile_close,
 )
-from deribit_demo.utils import utc_now, utc_now_ms
 from deribit_demo.state import performance_exclusions_path
-
-from conftest import FakeClient, future_expiry, make_config
+from deribit_demo.utils import utc_now, utc_now_ms
 
 
 def _build_group(
@@ -149,9 +147,7 @@ def test_covered_call_scan_payload_uses_covered_call_diagnostics(tmp_path):
     assert result["strategy_mode"] == "covered_call"
     assert result["scan_policy"]["note_zh"] is None
     assert result["scan_rejections"]["BTC"]["calls_in_dte_window"] == 2
-    assert result["scan_rejections"]["BTC"]["after_liquidity_rejections"] == {
-        "available_cover_quantity<=0": 2
-    }
+    assert result["scan_rejections"]["BTC"]["after_liquidity_rejections"] == {"available_cover_quantity<=0": 2}
     assert result["scan_rejections_short_call"] is None
     assert result["entry_blockers"]
     assert all("naked" not in blocker for blocker in result["entry_blockers"])
@@ -457,8 +453,7 @@ def test_covered_call_high_delta_skips_hard_derisk_and_cooldown(tmp_path):
 
     assert context.snapshot.hard_derisk is False
     assert not any(
-        "open_group_hard_defense_or_stop_trigger" in reason
-        for reason in context.snapshot.halt_entry_reasons
+        "open_group_hard_defense_or_stop_trigger" in reason for reason in context.snapshot.halt_entry_reasons
     )
     result = engine.manage(live=True)
     assert not any(action.get("action") == "cooldown_started" for action in result["actions"])
@@ -567,6 +562,8 @@ def test_covered_call_otm_time_exit_near_expiry(tmp_path):
 def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake_client):
     from datetime import UTC, datetime
 
+    from deribit_demo.utils import utc_now_ms
+
     config = make_config(
         tmp_path,
         option_strategy="covered_call",
@@ -580,6 +577,7 @@ def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake
     group.currency = "ETH"
     group.collateral_currency = "ETH"
     group.covered_underlying_quantity = Decimal("1")
+    group.entry_timestamp_ms = utc_now_ms() - 60_000
     state = StrategyState()
     state.day_key = today_key
     state.day_start_equity_by_book = {"BTC": Decimal("70000"), "ETH": Decimal("35000"), "USDC": Decimal("1000")}
@@ -590,6 +588,7 @@ def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake
     engine.state_store.save(state)
     fake_client.eth_book_equity = "8"
     fake_client.btc_book_equity = "1"
+    fake_client.positions = [_short_call_position(group)]
 
     context = engine._load_runtime()
 
@@ -745,6 +744,36 @@ def test_group_payload_exposes_official_short_floating_profit_loss(tmp_path, fak
     assert payload["short_floating_profit_loss_usd"] == "22.73"
 
 
+def test_group_payload_scales_short_floating_pnl_when_leg_is_shared(tmp_path, fake_client):
+    config = make_config(tmp_path, option_markets_profile="all")
+    engine = DeribitOptionTrialBot(config, fake_client)
+    group = _build_group(
+        short_instrument_name="BTC-29MAY26-70000-P",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.02"),
+    )
+    position = Position.from_api(
+        {
+            "instrument_name": group.short_instrument_name,
+            "direction": "sell",
+            "kind": "option",
+            "size": "0.07",
+            "size_currency": "0.07",
+            "mark_price": "0.0091",
+            "average_price": "0.012",
+            "floating_profit_loss": "0.001",
+            "floating_profit_loss_usd": "70",
+            "delta": "-0.07",
+        }
+    )
+
+    payload = engine._group_payload(group, short_position=position, orderbook_cache=None)
+
+    assert payload["short_floating_profit_loss"] == "0.00028571"
+    assert payload["short_floating_profit_loss_usd"] == "20"
+
+
 def test_enter_best_dry_run_returns_preview_or_noop(tmp_path, fake_client):
     config = make_config(
         tmp_path,
@@ -765,9 +794,7 @@ def test_manage_no_open_groups_returns_empty_actions(tmp_path, fake_client):
     engine = DeribitOptionTrialBot(config, fake_client)
     result = engine.manage(live=False)
     assert result["action"] == "manage"
-    assert result["actions"] == [] or all(
-        a["action"] != "close_group" for a in result["actions"]
-    )
+    assert result["actions"] == [] or all(a["action"] != "close_group" for a in result["actions"])
 
 
 def test_report_returns_naked_report_payload(tmp_path, fake_client):
@@ -879,9 +906,7 @@ def test_close_position_preview_skips_unknown_instrument(tmp_path, fake_client):
     )
 
     assert result["targets"] == []
-    assert result["skipped"] == [
-        {"instrument_name": "BTC_USDC-14APR30-63000-P", "reason": "no_open_position"}
-    ]
+    assert result["skipped"] == [{"instrument_name": "BTC_USDC-14APR30-63000-P", "reason": "no_open_position"}]
 
 
 def test_close_position_preview_short_option(tmp_path, fake_client):
@@ -1095,14 +1120,10 @@ def test_regime_uses_cached_value_when_feeds_fail_after_success(tmp_path):
         for item in engine.client.get_instruments("BTC", kind="option", expired=False)
     ]
 
-    first_regime, first_detail = engine._determine_regime_with_detail(
-        "BTC", markets=instruments, orderbook_cache={}
-    )
+    first_regime, first_detail = engine._determine_regime_with_detail("BTC", markets=instruments, orderbook_cache={})
     assert first_regime is RiskRegime.NORMAL
 
-    second_regime, second_detail = engine._determine_regime_with_detail(
-        "BTC", markets=instruments, orderbook_cache={}
-    )
+    second_regime, second_detail = engine._determine_regime_with_detail("BTC", markets=instruments, orderbook_cache={})
     # feeds now fail — must reuse cached value from the first call, not escalate to crisis.
     assert second_regime is RiskRegime.NORMAL
     assert any("cached" in note for note in second_detail)
@@ -1678,9 +1699,7 @@ def test_portfolio_snapshot_hard_derisks_when_book_im_exceeds_hard_cap(tmp_path,
     engine = DeribitOptionTrialBot(config, fake_client)
     state = StrategyState()
     summaries = {
-        "USDC": _make_summary(
-            "USDC", equity="1000", initial_margin="500", maintenance_margin="100"
-        ),
+        "USDC": _make_summary("USDC", equity="1000", initial_margin="500", maintenance_margin="100"),
         "BTC": _make_summary("BTC", equity="1", initial_margin="0", maintenance_margin="0.01"),
         "ETH": _make_summary("ETH", equity="10", initial_margin="0", maintenance_margin="0.01"),
     }
@@ -1716,9 +1735,7 @@ def test_portfolio_snapshot_stays_green_below_book_caps(tmp_path, fake_client):
     engine = DeribitOptionTrialBot(config, fake_client)
     state = StrategyState()
     summaries = {
-        "USDC": _make_summary(
-            "USDC", equity="1000", initial_margin="100", maintenance_margin="40"
-        ),
+        "USDC": _make_summary("USDC", equity="1000", initial_margin="100", maintenance_margin="40"),
         "BTC": _make_summary("BTC", equity="1", initial_margin="0", maintenance_margin="0.01"),
         "ETH": _make_summary("ETH", equity="10", initial_margin="0", maintenance_margin="0.01"),
     }
@@ -1845,6 +1862,7 @@ def test_manage_writes_cooldown_only_to_triggering_book(tmp_path, fake_client):
     # day_key must match today's UTC key so ``_reset_daily_state`` doesn't
     # stomp ``day_start_equity_by_book`` during ``_load_runtime``.
     from datetime import UTC, datetime
+
     today_key = datetime.now(tz=UTC).strftime("%Y-%m-%d")
     store = engine.state_store
     state = StrategyState()
@@ -2200,15 +2218,18 @@ def test_trade_group_round_trips_without_spread_fields(tmp_path):
     assert "long_instrument_name" not in payload
     assert "long_strike" not in payload
     assert "roll_count" not in payload
-    restored = TradeGroup.from_dict({**payload,
-        "quantity": str(payload["quantity"]),
-        "entry_timestamp_ms": payload["entry_timestamp_ms"],
-        "expiration_timestamp_ms": payload["expiration_timestamp_ms"],
-        "short_strike": str(payload["short_strike"]),
-        "entry_credit": str(payload["entry_credit"]),
-        "original_entry_credit": str(payload["original_entry_credit"]),
-        "max_loss": str(payload["max_loss"]),
-    })
+    restored = TradeGroup.from_dict(
+        {
+            **payload,
+            "quantity": str(payload["quantity"]),
+            "entry_timestamp_ms": payload["entry_timestamp_ms"],
+            "expiration_timestamp_ms": payload["expiration_timestamp_ms"],
+            "short_strike": str(payload["short_strike"]),
+            "entry_credit": str(payload["entry_credit"]),
+            "original_entry_credit": str(payload["original_entry_credit"]),
+            "max_loss": str(payload["max_loss"]),
+        }
+    )
     assert restored.group_id == group.group_id
     assert restored.short_instrument_name == group.short_instrument_name
 
@@ -2259,9 +2280,7 @@ def test_naked_im_by_expiry_keeps_inverse_and_usdc_units_separate(tmp_path, fake
     assert btc_equity * Decimal("0.3") - btc_by_exp[exp] > 0
 
 
-def test_naked_im_by_expiry_fallback_uses_current_index_for_legacy_inverse(
-    tmp_path, fake_client, monkeypatch
-):
+def test_naked_im_by_expiry_fallback_uses_current_index_for_legacy_inverse(tmp_path, fake_client, monkeypatch):
     """Legacy groups (no ``estimated_im_collateral``) must still aggregate
     in coin units via the current index price, not raw USDC ``max_loss``."""
     config = make_config(tmp_path, option_markets_profile="all")

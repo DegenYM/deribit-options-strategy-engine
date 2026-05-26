@@ -3,20 +3,21 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import timedelta
+from typing import Any
 
-from .client import DeribitClient
-from .config import load_config, assert_trading_account
-from .env_layout import find_repo_root, load_investor_manifest
-from .exceptions import ConfigurationError
 from .backtest import BacktestConfig, run_backtest
 from .backtest_data import BacktestCache, BacktestDataClient
+from .client import DeribitClient
+from .config import assert_trading_account, load_config
+from .current_stress import compute_current_stress, render_current_stress_md
 from .engine import DeribitOptionTrialBot
+from .env_layout import find_repo_root, load_investor_manifest
+from .exceptions import ConfigurationError
 from .param_scan import run_param_scan
 from .report_md import render_backtest_report_md
-from .current_stress import compute_current_stress, render_current_stress_md
 from .utils import json_default, parse_csv, to_decimal
 
 
@@ -79,9 +80,7 @@ def _apply_investor_cli_args(args: argparse.Namespace) -> None:
                     slugs,
                 )
             if not files:
-                raise SystemExit(
-                    f"No enabled accounts with API credentials in {manifest.root / 'accounts.toml'}"
-                )
+                raise SystemExit(f"No enabled accounts with API credentials in {manifest.root / 'accounts.toml'}")
             args.account_env_files = ",".join(str(path) for path in files)
             args.investor_skipped_accounts = tuple(
                 {
@@ -154,6 +153,13 @@ def main(argv: list[str] | None = None) -> int:
     _add_env_file_after_subcommand(ping_parser)
     ping_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
+    telegram_parser = subparsers.add_parser(
+        "telegram-test",
+        help="Send a test message to the configured Telegram chat",
+    )
+    _add_env_file_after_subcommand(telegram_parser)
+    telegram_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
     status_parser = subparsers.add_parser("status", help="Show portfolio state, trade groups, orders, and positions")
     _add_env_file_after_subcommand(status_parser)
     status_parser.add_argument("--json", action="store_true", help="Emit JSON")
@@ -169,11 +175,19 @@ def main(argv: list[str] | None = None) -> int:
     backtest_parser.add_argument("--end", default="today", help="YYYY-MM-DD or 'today'")
     backtest_parser.add_argument("--resolution", default="1D", help="TradingView resolution (e.g. 1D, 60)")
     backtest_parser.add_argument("--cache-root", default="data/backtest_cache", help="Cache directory for public data")
-    backtest_parser.add_argument("--report", default="docs/backtest/backtest_black_swan.md", help="Output markdown path")
-    backtest_parser.add_argument("--scan-params", action="store_true", help="Run baseline/conservative/profit-seek scan")
-    backtest_parser.add_argument("--auto-fallback-window-days", type=int, default=30, help="If 0 trades, fallback to last N days (0 disables)")
+    backtest_parser.add_argument(
+        "--report", default="docs/backtest/backtest_black_swan.md", help="Output markdown path"
+    )
+    backtest_parser.add_argument(
+        "--scan-params", action="store_true", help="Run baseline/conservative/profit-seek scan"
+    )
+    backtest_parser.add_argument(
+        "--auto-fallback-window-days", type=int, default=30, help="If 0 trades, fallback to last N days (0 disables)"
+    )
     backtest_parser.add_argument("--currencies", help="Comma-separated currencies, e.g. BTC,ETH")
-    backtest_parser.add_argument("--json", action="store_true", help="Emit JSON (also writes report unless --report is empty)")
+    backtest_parser.add_argument(
+        "--json", action="store_true", help="Emit JSON (also writes report unless --report is empty)"
+    )
 
     scan_parser = subparsers.add_parser("scan", help="Scan option strategy candidates")
     _add_env_file_after_subcommand(scan_parser)
@@ -248,7 +262,9 @@ def main(argv: list[str] | None = None) -> int:
 
     stress_parser = subparsers.add_parser("stress-current", help="Stress test current live positions (uses index)")
     _add_env_file_after_subcommand(stress_parser)
-    stress_parser.add_argument("--shocks", default="0.10,0.20,0.30,0.40,0.50,0.60", help="Comma-separated magnitudes, e.g. 0.1,0.2")
+    stress_parser.add_argument(
+        "--shocks", default="0.10,0.20,0.30,0.40,0.50,0.60", help="Comma-separated magnitudes, e.g. 0.1,0.2"
+    )
     stress_parser.add_argument("--report", default="docs/backtest/current_black_swan.md", help="Output markdown path")
     stress_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
@@ -674,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
                 "frontend_port": result.frontend_port,
                 "launchd_paths": [str(path) for path in result.launchd_paths],
                 "next_steps": [
-                    f"Fill secrets: ./bot investor import-handoff config/handoff/<id>.toml",
+                    "Fill secrets: ./bot investor import-handoff config/handoff/<id>.toml",
                     f"Validate + initial HWM: ./bot investor validate {result.investor_id}",
                     "Install launchd: see docs/operator-onboarding-zh-TW.md",
                 ],
@@ -703,8 +719,7 @@ def main(argv: list[str] | None = None) -> int:
                 "investor_id": result.investor_id,
                 "ok": result.ok,
                 "issues": [
-                    {"level": issue.level, "code": issue.code, "message": issue.message}
-                    for issue in result.issues
+                    {"level": issue.level, "code": issue.code, "message": issue.message} for issue in result.issues
                 ],
                 "api_checks": list(result.api_checks),
                 "hwm_bootstrap": result.hwm_bootstrap,
@@ -768,10 +783,7 @@ def main(argv: list[str] | None = None) -> int:
                     if row.health_ok is not None:
                         health = " health=" + ("ok" if row.health_ok else "fail")
                     mark = "ok" if row.ok else "FAIL"
-                    print(
-                        f"[{mark}] {row.investor_id} :{port} "
-                        f"{row.state} — {row.message}{health}"
-                    )
+                    print(f"[{mark}] {row.investor_id} :{port} {row.state} — {row.message}{health}")
             return 0 if all(row.ok for row in results) else 1
 
         if args.investor_command == "live":
@@ -885,12 +897,8 @@ def main(argv: list[str] | None = None) -> int:
         if repo_root is None:
             raise SystemExit("Cannot locate repository root")
         end_ms = parse_fee_timestamp(args.to, boundary="end")
-        start_ms = (
-            parse_fee_timestamp(args.from_ts, boundary="start") if args.from_ts else None
-        )
-        net_flow = (
-            to_decimal(args.net_flow_usdc) if args.net_flow_usdc is not None else None
-        )
+        start_ms = parse_fee_timestamp(args.from_ts, boundary="start") if args.from_ts else None
+        net_flow = to_decimal(args.net_flow_usdc) if args.net_flow_usdc is not None else None
         write_pdf = args.format in {"both", "all", "pdf"}
         write_md = args.format in {"both", "all", "md"}
         write_csv = args.format in {"all", "csv"}
@@ -1141,6 +1149,24 @@ def main(argv: list[str] | None = None) -> int:
             args.json,
         )
         return 0
+    if args.command == "telegram-test":
+        from .telegram_alerts import bootstrap_telegram_env, send_test_alert
+
+        repo_root = find_repo_root(Path.cwd())
+        if args.env_file and args.env_file != ".env" and Path(args.env_file).is_file():
+            from dotenv import dotenv_values
+
+            for key, value in dotenv_values(args.env_file).items():
+                if value is not None:
+                    os.environ[key] = str(value)
+        bootstrap_telegram_env(repo_root)
+        try:
+            sent = send_test_alert(repo_root=repo_root)
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from exc
+        payload = {"action": "telegram-test", "sent": sent}
+        render(payload, args.json)
+        return 0 if sent else 1
     bot = build_bot(args)
 
     try:
@@ -1168,7 +1194,9 @@ def main(argv: list[str] | None = None) -> int:
             if (res.params.get("open_trade_count") or 0) == 0 and int(args.auto_fallback_window_days or 0) > 0:
                 days = int(args.auto_fallback_window_days)
                 fallback_start = end - timedelta(days=days)
-                bt2 = BacktestConfig(start=fallback_start, end=end, resolution=str(args.resolution), cache_root=str(args.cache_root))
+                bt2 = BacktestConfig(
+                    start=fallback_start, end=end, resolution=str(args.resolution), cache_root=str(args.cache_root)
+                )
                 res2 = run_backtest(cfg, data, bt2, currencies=currencies)
                 fallback_note = {
                     "reason": "no_trades_in_requested_window (likely limited public expired instruments coverage)",
@@ -1190,7 +1218,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             report_md = render_backtest_report_md(
                 generated_at=datetime.now(tz=UTC),
-                backtest={"params": res.params, "stress": res.stress, "notes": (res.notes + ([str(fallback_note)] if fallback_note else []))},
+                backtest={
+                    "params": res.params,
+                    "stress": res.stress,
+                    "notes": (res.notes + ([str(fallback_note)] if fallback_note else [])),
+                },
                 scan=scan,
             )
             report_path = Path(args.report) if args.report else None

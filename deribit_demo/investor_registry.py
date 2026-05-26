@@ -7,10 +7,9 @@ Separate from per-investor ``accounts.toml`` (strategy manifest). Secrets stay i
 from __future__ import annotations
 
 import re
+import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
-
-import tomllib
 
 from .env_layout import find_repo_root
 from .exceptions import ConfigurationError
@@ -94,9 +93,7 @@ def load_platform_registry(
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
         else:
-            raise ConfigurationError(
-                f"Missing {path}. Copy {example} to {path.name} and edit platform settings."
-            )
+            raise ConfigurationError(f"Missing {path}. Copy {example} to {path.name} and edit platform settings.")
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     platform_raw = data.get("platform") or {}
     repo_raw = platform_raw.get("repo_root")
@@ -123,18 +120,14 @@ def load_platform_registry(
         display_name = str(row.get("display_name") or investor_id).strip()
         access_method = str(row.get("access_method") or "email").strip().lower()
         if access_method not in {"email", "google"}:
-            raise ConfigurationError(
-                f"{path}: investors[{index}].access_method must be 'email' or 'google'"
-            )
+            raise ConfigurationError(f"{path}: investors[{index}].access_method must be 'email' or 'google'")
         port_raw = row.get("frontend_port")
         frontend_port = int(port_raw) if port_raw is not None else None
         investors.append(
             InvestorRegistryEntry(
                 investor_id=investor_id,
                 display_name=display_name,
-                dashboard_email=str(row["dashboard_email"]).strip()
-                if row.get("dashboard_email")
-                else None,
+                dashboard_email=str(row["dashboard_email"]).strip() if row.get("dashboard_email") else None,
                 access_method=access_method,
                 hostname=str(row["hostname"]).strip() if row.get("hostname") else None,
                 frontend_port=frontend_port,

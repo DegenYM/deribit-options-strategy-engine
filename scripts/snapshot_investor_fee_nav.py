@@ -46,8 +46,7 @@ def main() -> int:
         notes=args.notes,
     )
     print(
-        f"snapshot id={row_id} investor={capture.investor_id} "
-        f"nav_perf={capture.nav_perf} aum_mgmt={capture.aum_mgmt}"
+        f"snapshot id={row_id} investor={capture.investor_id} nav_perf={capture.nav_perf} aum_mgmt={capture.aum_mgmt}"
     )
     if bootstrap:
         print(

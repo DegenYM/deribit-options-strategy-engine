@@ -36,6 +36,7 @@ class InvestorAccountSpec:
     strategy: str
     env_path: Path
     enabled: bool = True
+    live_enabled: bool = True
     display_name: str | None = None
 
 
@@ -53,24 +54,30 @@ class InvestorManifest:
         """Enabled manifest rows missing ``DERIBIT_CLIENT_ID`` / ``SECRET``."""
         from .config import has_private_creds_for_env
 
-        return tuple(
-            account
-            for account in self.enabled_accounts()
-            if not has_private_creds_for_env(account.env_path)
-        )
+        return tuple(account for account in self.enabled_accounts() if not has_private_creds_for_env(account.env_path))
 
     def operational_accounts(self) -> tuple[InvestorAccountSpec, ...]:
         """Enabled rows that can call private Deribit APIs (have API credentials)."""
         from .config import has_private_creds_for_env
 
-        return tuple(
-            account
-            for account in self.enabled_accounts()
-            if has_private_creds_for_env(account.env_path)
-        )
+        return tuple(account for account in self.enabled_accounts() if has_private_creds_for_env(account.env_path))
 
-    def account_env_files(self, *, require_creds: bool = False) -> tuple[Path, ...]:
-        accounts = self.operational_accounts() if require_creds else self.enabled_accounts()
+    def live_operational_accounts(self) -> tuple[InvestorAccountSpec, ...]:
+        """Enabled rows with API credentials that should run under live supervision."""
+        return tuple(account for account in self.operational_accounts() if account.live_enabled)
+
+    def account_env_files(
+        self,
+        *,
+        require_creds: bool = False,
+        require_live: bool = False,
+    ) -> tuple[Path, ...]:
+        if require_live:
+            accounts = self.live_operational_accounts()
+        elif require_creds:
+            accounts = self.operational_accounts()
+        else:
+            accounts = self.enabled_accounts()
         return tuple(account.env_path for account in accounts)
 
     def env_for_slug(self, slug: str) -> Path:
@@ -182,8 +189,7 @@ def resolve_investor_scope(
     if len(investor_ids) > 1:
         joined = ", ".join(sorted(investor_ids))
         raise ConfigurationError(
-            f"Account env files span multiple investors ({joined}); "
-            "run one frontend or live supervisor per investor."
+            f"Account env files span multiple investors ({joined}); run one frontend or live supervisor per investor."
         )
     return next(iter(investor_ids)) if investor_ids else None
 
@@ -271,6 +277,7 @@ def load_investor_manifest(
         else:
             env_path = resolve_account_env_path(investor_dir, slug)
         enabled = bool(row.get("enabled", True))
+        live_enabled = bool(row.get("live_enabled", True))
         account_display = row.get("display_name")
         accounts.append(
             InvestorAccountSpec(
@@ -278,6 +285,7 @@ def load_investor_manifest(
                 strategy=strategy,
                 env_path=env_path,
                 enabled=enabled,
+                live_enabled=live_enabled,
                 display_name=str(account_display).strip() if account_display else None,
             )
         )

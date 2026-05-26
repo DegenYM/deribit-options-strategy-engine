@@ -1,7 +1,6 @@
 from decimal import Decimal
 
 from deribit_demo.models import TradeGroup
-from deribit_demo.models import TradeGroup
 from deribit_demo.trade_apr import (
     entry_net_apr_from_actual_open,
     entry_net_apr_from_fill,
@@ -177,9 +176,7 @@ def test_usdc_linear_call_entry_apr_uses_underlying_index_not_usdc_placeholder()
         option_type="call",
     )
     apr = group.entry_net_apr_at_open(contract_size=Decimal("0.1"))
-    expected = (Decimal("15.751311") / (Decimal("2600") * Decimal("1.5"))) * (
-        Decimal("365") / Decimal("11.5")
-    )
+    expected = (Decimal("15.751311") / (Decimal("2600") * Decimal("1.5"))) * (Decimal("365") / Decimal("11.5"))
     assert abs(apr - expected) < Decimal("0.000001")
     assert apr < Decimal("0.5")
     assert apr > Decimal("0.05")

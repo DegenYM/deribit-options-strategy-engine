@@ -10,7 +10,6 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-
 DEFAULT_INVESTOR_ID = "youming"
 
 
@@ -23,7 +22,12 @@ def _env_files_for_investor(repo_root: Path, investor_id: str) -> list[Path]:
     try:
         from deribit_demo.env_layout import load_investor_manifest
 
-        return list(load_investor_manifest(investor_id, repo_root=repo_root).account_env_files(require_creds=True))
+        return list(
+            load_investor_manifest(investor_id, repo_root=repo_root).account_env_files(
+                require_creds=True,
+                require_live=True,
+            )
+        )
     finally:
         if sys.path and sys.path[0] == str(repo_root):
             sys.path.pop(0)
@@ -183,6 +187,30 @@ def main(argv: list[str] | None = None) -> int:
         args.keep_going = True
 
     repo_root = _repo_root()
+    sys.path.insert(0, str(repo_root))
+    try:
+        from deribit_demo.telegram_alerts import bootstrap_telegram_env
+
+        bootstrap_telegram_env(repo_root)
+    finally:
+        if sys.path and sys.path[0] == str(repo_root):
+            sys.path.pop(0)
+
+    def _notify_live_supervisor(title: str, *, body: str, event_key: str, level: str = "warning") -> None:
+        try:
+            from deribit_demo.telegram_alerts import format_alert_message, send_telegram_alert
+
+            investor_id = args.investor or DEFAULT_INVESTOR_ID
+            message = format_alert_message(
+                title=title,
+                body=body,
+                level=level,
+                investor_id=investor_id if args.investor or not args.env_files else None,
+            )
+            send_telegram_alert(message, event_key=event_key, level=level)
+        except Exception as exc:
+            print(f"telegram alert skipped: {exc}", flush=True)
+
     if args.env_files:
         env_files = _resolve_existing_env_files(repo_root, args.env_files)
     else:
@@ -200,8 +228,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"Missing account env file(s) for investor {investor_id!r}: {joined}")
         else:
             raise SystemExit(
-                f"No enabled accounts for investor {investor_id!r}; "
-                f"check {repo_root / 'config/investors' / investor_id / 'accounts.toml'}"
+                f"No live-enabled accounts for investor {investor_id!r}; "
+                f"check enabled/live_enabled and API creds in "
+                f"{repo_root / 'config/investors' / investor_id / 'accounts.toml'}"
             )
     if args.log_dir:
         log_dir = Path(args.log_dir).expanduser()
@@ -266,6 +295,13 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 del processes[process]
                 print(f"{env_file.name} exited code={code} log={log_file}", flush=True)
+                if code != 0:
+                    _notify_live_supervisor(
+                        "Live bot exited",
+                        body=f"profile={env_file.name}\nexit_code={code}\nlog={log_file}",
+                        event_key=f"bot_exit:{env_file.name}",
+                        level="critical",
+                    )
                 if code != 0 and exit_code == 0:
                     exit_code = code
                 if args.restart_failed and not shutting_down and code not in (0, None):
@@ -286,6 +322,12 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     processes[process] = (env_file, log_file)
                     print(f"restarted {env_file.name} pid={process.pid} log={log_file}", flush=True)
+                    _notify_live_supervisor(
+                        "Live bot restarted",
+                        body=f"profile={env_file.name}\nlog={log_file}",
+                        event_key=f"bot_restart:{env_file.name}",
+                        level="warning",
+                    )
                 elif not args.keep_going:
                     shutting_down = True
 

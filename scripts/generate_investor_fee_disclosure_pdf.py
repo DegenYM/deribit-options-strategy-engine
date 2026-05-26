@@ -158,8 +158,7 @@ def _zh_content() -> FeeDisclosureContent:
         ],
         s5_2_title="5.2 與 NAV_perf 的關係",
         s5_2_body=(
-            "NAV_perf／HWM 僅合併<b>策略</b>子帳權益，不含 Fee 專戶餘額。"
-            "Fee 專戶僅為已結算應付费用的存放與收取管道。"
+            "NAV_perf／HWM 僅合併<b>策略</b>子帳權益，不含 Fee 專戶餘額。Fee 專戶僅為已結算應付费用的存放與收取管道。"
         ),
         s5_3_title="5.3 管理費與績效費",
         s5_3_body=(
@@ -249,7 +248,11 @@ def _en_content() -> FeeDisclosureContent:
         s2_table=[
             ["Basis", "Includes investor collateral spot?", "Used for"],
             ["Performance NAV (NAV_perf)", "No", "Period P&amp;L, HWM, performance fee"],
-            ["Management AUM (AUM_mgmt)", "Yes (authorized collateral spot in sub-accounts)", "Management fee average AUM"],
+            [
+                "Management AUM (AUM_mgmt)",
+                "Yes (authorized collateral spot in sub-accounts)",
+                "Management fee average AUM",
+            ],
         ],
         s2_1_title="2.1 Performance NAV (NAV_perf) — excludes collateral spot",
         s2_1_bullets=[

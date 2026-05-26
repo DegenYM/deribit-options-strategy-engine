@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from deribit_demo.exceptions import ConfigurationError
+from deribit_demo.fee_snapshot_store import FeeSnapshotStore, fee_ledger_db_path
 from deribit_demo.investor_ops import (
     bootstrap_initial_hwm,
     import_handoff,
@@ -12,7 +13,6 @@ from deribit_demo.investor_ops import (
     parse_strategy_slugs,
     validate_investor,
 )
-from deribit_demo.fee_snapshot_store import FeeSnapshotStore, fee_ledger_db_path
 from deribit_demo.investor_registry import load_platform_registry
 
 

@@ -6,10 +6,10 @@ from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
+from conftest import future_expiry
+
 from deribit_demo.models import StrategyState, TradeGroup
 from deribit_demo.state import StrategyStateStore
-
-from conftest import future_expiry
 
 
 def _sample_state() -> StrategyState:
@@ -142,8 +142,11 @@ def test_save_persists_sorted_keys_for_deterministic_diffs(tmp_path: Path) -> No
 
     payload = json.loads(raw)
     # sort_keys=True guarantees alphabetical top-level keys in the rendered JSON.
-    rendered_keys = [line.strip().split(":", 1)[0].strip('"')
-                     for line in raw.splitlines() if line.strip().startswith('"') and ":" in line]
+    rendered_keys = [
+        line.strip().split(":", 1)[0].strip('"')
+        for line in raw.splitlines()
+        if line.strip().startswith('"') and ":" in line
+    ]
     top_level = [k for k in rendered_keys if k in payload]
     assert top_level == sorted(top_level)
 

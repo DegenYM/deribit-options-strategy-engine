@@ -265,10 +265,7 @@ def import_handoff(
 
 
 def is_hwm_bootstrapped(store: FeeSnapshotStore, investor_id: str) -> bool:
-    return (
-        store.load_hwm(investor_id) is not None
-        or store.load_flow_baseline(investor_id) is not None
-    )
+    return store.load_hwm(investor_id) is not None or store.load_flow_baseline(investor_id) is not None
 
 
 def bootstrap_initial_hwm(
@@ -292,9 +289,7 @@ def bootstrap_initial_hwm(
         baseline = store.load_flow_baseline(investor_id)
         hwm = store.load_hwm(investor_id)
         initial = (
-            str(baseline.initial_hwm_nav_perf)
-            if baseline is not None
-            else (str(hwm) if hwm is not None else None)
+            str(baseline.initial_hwm_nav_perf) if baseline is not None else (str(hwm) if hwm is not None else None)
         )
         return {
             "skipped": True,
@@ -353,7 +348,9 @@ def validate_investor(
     try:
         manifest = load_investor_manifest(investor_id, repo_root=cwd_repo)
     except ConfigurationError as exc:
-        return ValidationResult(investor_id=investor_id, ok=False, issues=(ValidationIssue("error", "manifest", str(exc)),), api_checks=())
+        return ValidationResult(
+            investor_id=investor_id, ok=False, issues=(ValidationIssue("error", "manifest", str(exc)),), api_checks=()
+        )
 
     if registry is not None:
         entry = registry.entry_for(investor_id)

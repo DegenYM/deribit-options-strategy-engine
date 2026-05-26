@@ -16,11 +16,7 @@ PHANTOM_RECONCILE_MAX_HOLDING_MS = 300_000
 
 
 def open_short_instrument_names(groups: list[TradeGroup]) -> set[str]:
-    return {
-        g.short_instrument_name
-        for g in groups
-        if g.status != "closed" and g.short_instrument_name
-    }
+    return {g.short_instrument_name for g in groups if g.status != "closed" and g.short_instrument_name}
 
 
 def is_phantom_reconcile_close(group: TradeGroup, *, open_short_names: set[str]) -> bool:
@@ -119,7 +115,7 @@ class OptionInstrument:
     instrument_state: str
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "OptionInstrument":
+    def from_api(cls, payload: dict[str, Any]) -> OptionInstrument:
         parsed = parse_option_name(str(payload.get("instrument_name") or ""))
         base_currency = str(payload.get("base_currency") or (parsed or {}).get("base_currency") or "")
         quote_currency = str(payload.get("quote_currency") or (parsed or {}).get("quote_currency") or "")
@@ -184,7 +180,7 @@ class OrderBookSnapshot:
     open_interest: Decimal
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "OrderBookSnapshot":
+    def from_api(cls, payload: dict[str, Any]) -> OrderBookSnapshot:
         greeks = payload.get("greeks") or {}
         return cls(
             instrument_name=str(payload.get("instrument_name") or ""),
@@ -229,7 +225,7 @@ class AccountSummary:
     total_maintenance_margin_usd: Decimal
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "AccountSummary":
+    def from_api(cls, payload: dict[str, Any]) -> AccountSummary:
         return cls(
             currency=str(payload.get("currency") or "").upper(),
             balance=to_decimal(payload.get("balance")),
@@ -288,7 +284,7 @@ class TransactionEntry:
     info: str
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "TransactionEntry":
+    def from_api(cls, payload: dict[str, Any]) -> TransactionEntry:
         amount_raw = payload.get("change")
         if amount_raw is None:
             amount_raw = payload.get("amount")
@@ -328,7 +324,7 @@ class OpenOrder:
     creation_timestamp_ms: int | None
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "OpenOrder":
+    def from_api(cls, payload: dict[str, Any]) -> OpenOrder:
         return cls(
             order_id=str(payload.get("order_id") or ""),
             instrument_name=str(payload.get("instrument_name") or ""),
@@ -342,7 +338,9 @@ class OpenOrder:
             post_only=bool(payload.get("post_only", False)),
             reduce_only=bool(payload.get("reduce_only", False)),
             label=str(payload.get("label") or ""),
-            creation_timestamp_ms=int(payload["creation_timestamp"]) if payload.get("creation_timestamp") is not None else None,
+            creation_timestamp_ms=int(payload["creation_timestamp"])
+            if payload.get("creation_timestamp") is not None
+            else None,
         )
 
 
@@ -366,7 +364,7 @@ class Position:
     has_floating_profit_loss_usd: bool = False
 
     @classmethod
-    def from_api(cls, payload: dict[str, Any]) -> "Position":
+    def from_api(cls, payload: dict[str, Any]) -> Position:
         raw_floating_profit_loss = payload.get("floating_profit_loss")
         raw_floating_profit_loss_usd = payload.get("floating_profit_loss_usd")
         return cls(
@@ -716,9 +714,7 @@ class TradeGroup:
                     best_close = (rank, price)
         if best_open is not None and self.short_entry_average_price <= 0:
             self.short_entry_average_price = best_open[1]
-        if best_close is not None and (
-            self.short_close_average_price is None or self.short_close_average_price <= 0
-        ):
+        if best_close is not None and (self.short_close_average_price is None or self.short_close_average_price <= 0):
             self.short_close_average_price = best_close[1]
         self.infer_indices_from_fill_prices()
 
@@ -747,9 +743,8 @@ class TradeGroup:
                 if self._premium_price_plausible(px):
                     self.short_entry_average_price = px
         if (
-            (self.short_close_average_price is None or self.short_close_average_price <= 0)
-            and self.realized_close_debit is not None
-        ):
+            self.short_close_average_price is None or self.short_close_average_price <= 0
+        ) and self.realized_close_debit is not None:
             close_fee = self.realized_close_fee or Decimal("0")
             premium_usdc = max(self.realized_close_debit - close_fee, Decimal("0"))
             if premium_usdc > 0:
@@ -1069,20 +1064,17 @@ class TradeGroup:
         return payload
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "TradeGroup":
-        option_type = str(payload.get("option_type") or _infer_option_type(
-            str(payload.get("short_instrument_name") or "")
-        ))
+    def from_dict(cls, payload: dict[str, Any]) -> TradeGroup:
+        option_type = str(
+            payload.get("option_type") or _infer_option_type(str(payload.get("short_instrument_name") or ""))
+        )
         quantity = to_decimal(payload.get("quantity"))
         covered_underlying_quantity = to_decimal(payload.get("covered_underlying_quantity"))
         raw_strategy = normalize_strategy_name(str(payload.get("strategy") or ""), default="")
-        if (
-            (not raw_strategy or raw_strategy == "naked_short")
-            and _looks_like_covered_call_group(
-                payload,
-                option_type=option_type,
-                covered_underlying_quantity=covered_underlying_quantity,
-            )
+        if (not raw_strategy or raw_strategy == "naked_short") and _looks_like_covered_call_group(
+            payload,
+            option_type=option_type,
+            covered_underlying_quantity=covered_underlying_quantity,
         ):
             strategy = "covered_call"
             if covered_underlying_quantity <= 0:
@@ -1098,7 +1090,11 @@ class TradeGroup:
             currency=str(payload.get("currency") or "").upper(),
             collateral_currency=(
                 str(payload.get("collateral_currency") or "").upper()
-                or ("USDC" if "_USDC-" in str(payload.get("short_instrument_name") or "") else str(payload.get("currency") or "").upper())
+                or (
+                    "USDC"
+                    if "_USDC-" in str(payload.get("short_instrument_name") or "")
+                    else str(payload.get("currency") or "").upper()
+                )
             ),
             quantity=quantity,
             entry_timestamp_ms=int(payload.get("entry_timestamp_ms") or 0),
@@ -1127,14 +1123,22 @@ class TradeGroup:
             profit_capture=to_decimal(payload.get("profit_capture")),
             status=str(payload.get("status") or "open"),
             last_action=str(payload.get("last_action") or ""),
-            closed_timestamp_ms=int(payload["closed_timestamp_ms"]) if payload.get("closed_timestamp_ms") is not None else None,
+            closed_timestamp_ms=int(payload["closed_timestamp_ms"])
+            if payload.get("closed_timestamp_ms") is not None
+            else None,
             close_reason=str(payload.get("close_reason") or ""),
-            realized_close_debit=to_decimal(payload.get("realized_close_debit")) if payload.get("realized_close_debit") is not None else None,
-            realized_close_fee=to_decimal(payload.get("realized_close_fee")) if payload.get("realized_close_fee") is not None else None,
+            realized_close_debit=to_decimal(payload.get("realized_close_debit"))
+            if payload.get("realized_close_debit") is not None
+            else None,
+            realized_close_fee=to_decimal(payload.get("realized_close_fee"))
+            if payload.get("realized_close_fee") is not None
+            else None,
             short_close_average_price=to_decimal(payload.get("short_close_average_price"))
             if payload.get("short_close_average_price") is not None
             else None,
-            close_index_usd=to_decimal(payload.get("close_index_usd")) if payload.get("close_index_usd") is not None else None,
+            close_index_usd=to_decimal(payload.get("close_index_usd"))
+            if payload.get("close_index_usd") is not None
+            else None,
             realized_pnl_collateral_native=to_decimal(payload.get("realized_pnl_collateral_native"))
             if payload.get("realized_pnl_collateral_native") is not None
             else None,
@@ -1267,8 +1271,7 @@ class PortfolioSnapshot:
             "halt_entry_reasons": list(self.halt_entry_reasons),
             "regime_detail_by_currency": {key: list(value) for key, value in self.regime_detail_by_currency.items()},
             "margin_ratios_by_currency": {
-                key: {"im_ratio": im, "mm_ratio": mm}
-                for key, (im, mm) in self.margin_ratios_by_currency.items()
+                key: {"im_ratio": im, "mm_ratio": mm} for key, (im, mm) in self.margin_ratios_by_currency.items()
             },
             "equity_by_book": dict(self.equity_by_book),
             "day_start_equity_by_book": dict(self.day_start_equity_by_book),
@@ -1281,9 +1284,7 @@ class PortfolioSnapshot:
             "cooling_down_by_book": dict(self.cooling_down_by_book),
             "hard_derisk_by_book": dict(self.hard_derisk_by_book),
             "halt_entries_by_book": dict(self.halt_entries_by_book),
-            "halt_entry_reasons_by_book": {
-                key: list(value) for key, value in self.halt_entry_reasons_by_book.items()
-            },
+            "halt_entry_reasons_by_book": {key: list(value) for key, value in self.halt_entry_reasons_by_book.items()},
         }
 
 
@@ -1349,40 +1350,36 @@ class StrategyState:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "StrategyState":
+    def from_dict(cls, payload: dict[str, Any]) -> StrategyState:
         return cls(
             version=int(payload.get("version") or 1),
             day_key=str(payload.get("day_key") or ""),
             day_start_equity_usdc=to_decimal(payload.get("day_start_equity_usdc")),
             last_equity_usdc=to_decimal(payload.get("last_equity_usdc")),
-            cooldown_until_ms=int(payload["cooldown_until_ms"]) if payload.get("cooldown_until_ms") is not None else None,
+            cooldown_until_ms=int(payload["cooldown_until_ms"])
+            if payload.get("cooldown_until_ms") is not None
+            else None,
             day_start_equity_by_book={
-                str(k).upper(): to_decimal(v)
-                for k, v in (payload.get("day_start_equity_by_book") or {}).items()
+                str(k).upper(): to_decimal(v) for k, v in (payload.get("day_start_equity_by_book") or {}).items()
             },
             last_equity_by_book={
-                str(k).upper(): to_decimal(v)
-                for k, v in (payload.get("last_equity_by_book") or {}).items()
+                str(k).upper(): to_decimal(v) for k, v in (payload.get("last_equity_by_book") or {}).items()
             },
             day_start_equity_native_by_book={
-                str(k).upper(): to_decimal(v)
-                for k, v in (payload.get("day_start_equity_native_by_book") or {}).items()
+                str(k).upper(): to_decimal(v) for k, v in (payload.get("day_start_equity_native_by_book") or {}).items()
             },
             last_equity_native_by_book={
-                str(k).upper(): to_decimal(v)
-                for k, v in (payload.get("last_equity_native_by_book") or {}).items()
+                str(k).upper(): to_decimal(v) for k, v in (payload.get("last_equity_native_by_book") or {}).items()
             },
             cooldown_until_ms_by_book={
                 str(k).upper(): (int(v) if v is not None else None)
                 for k, v in (payload.get("cooldown_until_ms_by_book") or {}).items()
             },
             day_net_flow_usdc_by_book={
-                str(k).upper(): to_decimal(v)
-                for k, v in (payload.get("day_net_flow_usdc_by_book") or {}).items()
+                str(k).upper(): to_decimal(v) for k, v in (payload.get("day_net_flow_usdc_by_book") or {}).items()
             },
             day_net_flow_native_by_book={
-                str(k).upper(): to_decimal(v)
-                for k, v in (payload.get("day_net_flow_native_by_book") or {}).items()
+                str(k).upper(): to_decimal(v) for k, v in (payload.get("day_net_flow_native_by_book") or {}).items()
             },
             last_flow_query_ms_by_book={
                 str(k).upper(): int(v)
@@ -1395,6 +1392,8 @@ class StrategyState:
                 if v is not None
             },
             next_group_id=int(payload.get("next_group_id") or 1),
-            normal_recovery_counts={str(k).upper(): int(v) for k, v in (payload.get("normal_recovery_counts") or {}).items()},
+            normal_recovery_counts={
+                str(k).upper(): int(v) for k, v in (payload.get("normal_recovery_counts") or {}).items()
+            },
             groups=[TradeGroup.from_dict(item) for item in payload.get("groups") or []],
         )

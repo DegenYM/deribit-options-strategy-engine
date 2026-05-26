@@ -26,7 +26,7 @@ from .client import DeribitClient
 from .config import BotConfig, load_config
 from .env_layout import InvestorAccountSpec, InvestorManifest, load_investor_manifest
 from .models import TransactionEntry
-from .utils import to_decimal, utc_now_ms
+from .utils import utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
 

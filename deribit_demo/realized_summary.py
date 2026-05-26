@@ -71,15 +71,9 @@ def realized_summary_from_closed(
 ) -> dict[str, Any]:
     """Build the same ``summary`` shape as ``bot.report()`` from closed group dicts."""
     realized = [
-        row
-        for row in closed_rows
-        if row.get("realized_pnl") is not None and _closed_timestamp_ms(row) is not None
+        row for row in closed_rows if row.get("realized_pnl") is not None and _closed_timestamp_ms(row) is not None
     ]
-    unresolved = [
-        row
-        for row in closed_rows
-        if row not in realized
-    ]
+    unresolved = [row for row in closed_rows if row not in realized]
     total_realized = sum((to_decimal(row.get("realized_pnl")) for row in realized), Decimal("0"))
     total_holding = sum((_holding_days(row) for row in realized), Decimal("0"))
     wins = sum(1 for row in realized if to_decimal(row.get("realized_pnl")) > 0)

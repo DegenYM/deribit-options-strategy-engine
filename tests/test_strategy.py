@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+from conftest import FakeClient, make_config
+
 from deribit_demo.fees import (
     linear_usdc_short_put_apr_premium_over_strike,
     net_apr_inverse_short_per_contract,
@@ -7,15 +9,17 @@ from deribit_demo.fees import (
 from deribit_demo.models import NakedPutCandidate, OptionInstrument, OrderBookSnapshot, RiskRegime
 from deribit_demo.strategy import StrategySelector
 
-from conftest import FakeClient, make_book, make_config
-
 
 def test_buy_limit_price_uses_tick_size_steps_for_reversed_options(tmp_path):
     config = make_config(tmp_path)
     selector = StrategySelector(config)
     client = FakeClient()
     instrument = OptionInstrument.from_api(
-        next(item for item in client.get_instruments("BTC", kind="option", expired=False) if item["instrument_name"] == "BTC-14APR30-63000-P")
+        next(
+            item
+            for item in client.get_instruments("BTC", kind="option", expired=False)
+            if item["instrument_name"] == "BTC-14APR30-63000-P"
+        )
     )
     payload = client.get_order_book("BTC-14APR30-63000-P")
     payload["best_ask_price"] = "0.006"
@@ -32,7 +36,11 @@ def test_close_sell_price_never_floors_one_tick_bid_to_zero(tmp_path):
     selector = StrategySelector(config)
     client = FakeClient()
     instrument = OptionInstrument.from_api(
-        next(item for item in client.get_instruments("USDC", kind="option", expired=False) if item["instrument_name"] == "ETH_USDC-14APR30-3000-P")
+        next(
+            item
+            for item in client.get_instruments("USDC", kind="option", expired=False)
+            if item["instrument_name"] == "ETH_USDC-14APR30-3000-P"
+        )
     )
     payload = client.get_order_book("ETH_USDC-14APR30-3000-P")
     payload["best_bid_price"] = "0.5"
@@ -69,7 +77,9 @@ def test_build_naked_short_put_candidates_inverse_btc(tmp_path):
     )
     selector = StrategySelector(config)
     client = FakeClient(btc_book_equity="1.0")
-    instruments = [OptionInstrument.from_api(item) for item in client.get_instruments("BTC", kind="option", expired=False)]
+    instruments = [
+        OptionInstrument.from_api(item) for item in client.get_instruments("BTC", kind="option", expired=False)
+    ]
 
     def loader(name):
         return OrderBookSnapshot.from_api(client.get_order_book(name))
@@ -102,7 +112,9 @@ def test_build_bull_put_spread_candidates_adds_long_put(tmp_path):
     )
     selector = StrategySelector(config)
     client = FakeClient(btc_book_equity="1.0")
-    instruments = [OptionInstrument.from_api(item) for item in client.get_instruments("BTC", kind="option", expired=False)]
+    instruments = [
+        OptionInstrument.from_api(item) for item in client.get_instruments("BTC", kind="option", expired=False)
+    ]
 
     def loader(name):
         return OrderBookSnapshot.from_api(client.get_order_book(name))
@@ -212,15 +224,18 @@ def test_build_covered_call_candidates_requires_existing_cover(tmp_path):
         assert name == instrument.instrument_name
         return OrderBookSnapshot.from_api(book_payload)
 
-    assert selector.build_covered_call_candidates(
-        [instrument],
-        loader,
-        regime=RiskRegime.NORMAL,
-        collateral_currency="BTC",
-        currency="BTC",
-        available_cover_quantity=Decimal("0"),
-        summary_equity=Decimal("1"),
-    ) == []
+    assert (
+        selector.build_covered_call_candidates(
+            [instrument],
+            loader,
+            regime=RiskRegime.NORMAL,
+            collateral_currency="BTC",
+            currency="BTC",
+            available_cover_quantity=Decimal("0"),
+            summary_equity=Decimal("1"),
+        )
+        == []
+    )
 
     candidates = selector.build_covered_call_candidates(
         [instrument],
@@ -364,9 +379,7 @@ def test_per_leg_im_cap_call_tighter_than_put(tmp_path):
     )
     assert config.per_leg_im_cap("BTC", option_type="put") == Decimal("0.15")
     assert config.per_leg_im_cap("BTC", option_type="call") == Decimal("0.10")
-    assert config.per_leg_im_cap("BTC", option_type="call") < config.per_leg_im_cap(
-        "BTC", option_type="put"
-    )
+    assert config.per_leg_im_cap("BTC", option_type="call") < config.per_leg_im_cap("BTC", option_type="put")
 
 
 def test_liquidity_gates_split_between_inverse_and_linear(tmp_path):
@@ -437,8 +450,7 @@ def test_scan_for_book_returns_puts_when_available(tmp_path, btc_book):
     selector = StrategySelector(config)
     client = FakeClient(btc_book_equity="1.0")
     instruments = [
-        OptionInstrument.from_api(item)
-        for item in client.get_instruments("BTC", kind="option", expired=False)
+        OptionInstrument.from_api(item) for item in client.get_instruments("BTC", kind="option", expired=False)
     ]
 
     def loader(name):
@@ -504,8 +516,7 @@ def test_scan_for_book_can_return_puts_and_calls_together(tmp_path, btc_book):
     selector = StrategySelector(config)
     client = FakeClient(btc_book_equity="1.0")
     instruments = [
-        OptionInstrument.from_api(item)
-        for item in client.get_instruments("BTC", kind="option", expired=False)
+        OptionInstrument.from_api(item) for item in client.get_instruments("BTC", kind="option", expired=False)
     ]
     inst_payload, book_payload = _make_btc_call_payload(14, 77000, delta="0.11")
     call_instrument = OptionInstrument.from_api(inst_payload)
@@ -547,8 +558,7 @@ def test_take_top_scan_candidates_global_sort_for_naked_short_both(tmp_path):
     selector = StrategySelector(config)
     client = FakeClient(btc_book_equity="1.0")
     instruments = [
-        OptionInstrument.from_api(item)
-        for item in client.get_instruments("BTC", kind="option", expired=False)
+        OptionInstrument.from_api(item) for item in client.get_instruments("BTC", kind="option", expired=False)
     ]
     inst_payload, book_payload = _make_btc_call_payload(14, 77000, delta="0.11")
     instruments.append(OptionInstrument.from_api(inst_payload))
@@ -583,9 +593,7 @@ def test_take_top_scan_candidates_global_sort_for_naked_short_both(tmp_path):
     top = selector.take_top_scan_candidates(merged, limit=5)
     assert len(top) <= 5
     expected = sorted(merged, key=selector.naked_put_sort_key)[:5]
-    assert [c.short_leg.instrument_name for c in top] == [
-        c.short_leg.instrument_name for c in expected
-    ]
+    assert [c.short_leg.instrument_name for c in top] == [c.short_leg.instrument_name for c in expected]
 
 
 def test_scan_for_book_empty_when_calls_disabled(tmp_path, btc_book):

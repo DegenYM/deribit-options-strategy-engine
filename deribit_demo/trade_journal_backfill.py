@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .client import DeribitClient
 from .config import BotConfig, load_config
@@ -278,7 +279,11 @@ def _backfill_apr_for_group(group: TradeGroup) -> bool:
         return False
 
     book = group.collateral_book()
-    idx = group.close_index_usd if group.close_index_usd is not None and group.close_index_usd > 0 else group.entry_index_usd
+    idx = (
+        group.close_index_usd
+        if group.close_index_usd is not None and group.close_index_usd > 0
+        else group.entry_index_usd
+    )
     if group.collateral_book() == "USDC":
         idx = group.underlying_index_usd_for_apr()
 
@@ -389,13 +394,10 @@ def backfill_closed_group_stats_in_state(
                 journal_executions=executions,
             )
             group.infer_indices_from_fill_prices()
-            if (
-                group.realized_pnl_collateral_native is not None
-                and (
-                    group.realized_pnl_collateral_native != before_native
-                    or group.entry_index_usd != before_entry_idx
-                    or group.close_index_usd != before_close_idx
-                )
+            if group.realized_pnl_collateral_native is not None and (
+                group.realized_pnl_collateral_native != before_native
+                or group.entry_index_usd != before_entry_idx
+                or group.close_index_usd != before_close_idx
             ):
                 pnl_updated += 1
                 changed = True

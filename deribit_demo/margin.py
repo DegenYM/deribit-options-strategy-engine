@@ -22,7 +22,9 @@ def short_put_initial_unit(*, index_price: Decimal, strike: Decimal, mark_price:
     return max(inner, mm)
 
 
-def linear_usdc_put_premium_as_btc_fraction(*, mark_usdc: Decimal, index_price: Decimal, contract_size: Decimal) -> Decimal:
+def linear_usdc_put_premium_as_btc_fraction(
+    *, mark_usdc: Decimal, index_price: Decimal, contract_size: Decimal
+) -> Decimal:
     """Map linear option premium (USDC per contract) to BTC-fraction input for standard IM curve (per README proxy)."""
     if index_price <= 0 or contract_size <= 0:
         return Decimal("0")
@@ -37,7 +39,9 @@ def linear_usdc_short_put_initial_per_contract_usdc(
     mark_usdc: Decimal,
     contract_size: Decimal,
 ) -> Decimal:
-    mb = linear_usdc_put_premium_as_btc_fraction(mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size)
+    mb = linear_usdc_put_premium_as_btc_fraction(
+        mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size
+    )
     im_btc = short_put_initial_unit(index_price=index_price, strike=strike, mark_price=mb)
     return im_btc * index_price * contract_size
 
@@ -49,7 +53,9 @@ def linear_usdc_short_put_mm_per_contract_usdc(
     mark_usdc: Decimal,
     contract_size: Decimal,
 ) -> Decimal:
-    mb = linear_usdc_put_premium_as_btc_fraction(mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size)
+    mb = linear_usdc_put_premium_as_btc_fraction(
+        mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size
+    )
     mm_btc = short_put_maintenance_unit(index_price=index_price, strike=strike, mark_price=mb)
     return mm_btc * index_price * contract_size
 
@@ -99,7 +105,9 @@ def linear_usdc_short_call_initial_per_contract_usdc(
     mark_usdc: Decimal,
     contract_size: Decimal,
 ) -> Decimal:
-    mb = linear_usdc_put_premium_as_btc_fraction(mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size)
+    mb = linear_usdc_put_premium_as_btc_fraction(
+        mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size
+    )
     im_btc = short_call_initial_unit(index_price=index_price, strike=strike, mark_price=mb)
     return im_btc * index_price * contract_size
 
@@ -111,6 +119,8 @@ def linear_usdc_short_call_mm_per_contract_usdc(
     mark_usdc: Decimal,
     contract_size: Decimal,
 ) -> Decimal:
-    mb = linear_usdc_put_premium_as_btc_fraction(mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size)
+    mb = linear_usdc_put_premium_as_btc_fraction(
+        mark_usdc=mark_usdc, index_price=index_price, contract_size=contract_size
+    )
     mm_btc = short_call_maintenance_unit(index_price=index_price, strike=strike, mark_price=mb)
     return mm_btc * index_price * contract_size
