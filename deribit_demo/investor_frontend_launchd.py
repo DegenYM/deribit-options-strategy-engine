@@ -22,9 +22,13 @@ from .investor_launchd_common import (
     bootstrap_plist as _bootstrap_plist,
 )
 from .investor_launchd_common import (
+    force_reload_plist as _force_reload_frontend_plist,
+)
+from .investor_launchd_common import (
     install_plist_file,
     is_launchd_loaded,
     launch_agents_dir,
+    terminate_tcp_listeners,
 )
 from .investor_launchd_common import (
     reload_plist as _reload_frontend_plist,
@@ -330,6 +334,9 @@ def manage_frontend_launchd(
                 )
                 continue
             ok, msg = _bootout_plist(installed_plist, label)
+            killed, kill_msg = terminate_tcp_listeners(listen_port)
+            if killed:
+                msg = f"{msg}; {kill_msg}"
             results.append(
                 FrontendLaunchdResult(
                     investor_id=entry.investor_id,
@@ -364,11 +371,13 @@ def manage_frontend_launchd(
                 )
                 continue
             listen_port = resolve_listen_port(entry, plist_path)
-            launchd_ok, msg = _reload_frontend_plist(plist_path, label)
+            launchd_ok, msg = _force_reload_frontend_plist(
+                plist_path,
+                label,
+                listen_port=listen_port,
+            )
             if launchd_ok and not is_frontend_loaded(label):
                 launchd_ok, msg = _bootstrap_plist(plist_path)
-            elif launchd_ok:
-                msg = "reloaded"
             results.append(
                 _finalize_launchd_result(
                     entry=entry,

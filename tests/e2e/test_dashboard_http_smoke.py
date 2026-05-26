@@ -65,9 +65,9 @@ def test_investor_page_loads(dashboard_client: TestClient) -> None:
 
 def test_dashboard_app_js_is_monolithic_bundle(dashboard_client: TestClient) -> None:
     js = dashboard_client.get("/app.js").text
-    assert js.lstrip().startswith("// Local dashboard logic.")
-    assert "bootDashboard" in js
-    assert len(js.splitlines()) > 4000
+    assert js.lstrip().startswith("(()=>{")
+    assert "initDashboard" in js or "DOMContentLoaded" in js
+    assert len(js) > 50_000
 
 
 def test_dashboard_bundle_returns_sections(dashboard_client: TestClient) -> None:

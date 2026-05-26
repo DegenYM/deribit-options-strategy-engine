@@ -1,6 +1,4 @@
-/* Plain CSS so it works without Tailwind's PostCSS pipeline.
-   Tailwind Play CDN does not run @apply for external stylesheets,
-   so any class defined here uses raw rules. */
+/* Custom component CSS (Tailwind utilities come from tailwind.css). */
 
 .app-body {
   background:

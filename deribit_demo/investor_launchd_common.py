@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -81,6 +83,78 @@ def reload_plist(plist_path: Path, label: str) -> tuple[bool, str]:
         if not ok:
             return False, f"reload bootout failed: {msg}"
     return bootstrap_plist(plist_path)
+
+
+def list_pids_listening_on_tcp_port(port: int) -> list[int]:
+    """Return PIDs listening on ``port`` (empty when none or lookup fails)."""
+    if port <= 0:
+        return []
+    result = subprocess.run(
+        ["lsof", "-tiTCP:%s" % port, "-sTCP:LISTEN"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return []
+    pids: list[int] = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pids.append(int(line))
+        except ValueError:
+            continue
+    return sorted(set(pids))
+
+
+def terminate_tcp_listeners(port: int | None, *, grace_sec: float = 1.0) -> tuple[list[int], str]:
+    """Stop orphan listeners on ``port`` after launchd bootout (SIGTERM, then SIGKILL)."""
+    if port is None or port <= 0:
+        return [], "no port"
+    pids = list_pids_listening_on_tcp_port(port)
+    if not pids:
+        return [], "no listeners"
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    time.sleep(max(grace_sec, 0.0))
+    for pid in list_pids_listening_on_tcp_port(port):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    remaining = list_pids_listening_on_tcp_port(port)
+    if remaining:
+        return pids, f"terminated {pids}; still listening: {remaining}"
+    return pids, f"terminated {pids}"
+
+
+def force_reload_plist(
+    plist_path: Path,
+    label: str,
+    *,
+    listen_port: int | None = None,
+) -> tuple[bool, str]:
+    """Boot out launchd job, kill stale listeners on ``listen_port``, then bootstrap."""
+    steps: list[str] = []
+    if is_launchd_loaded(label):
+        ok, msg = bootout_plist(plist_path, label)
+        steps.append(f"bootout: {msg}")
+        if not ok:
+            return False, "; ".join(steps)
+    killed, kill_msg = terminate_tcp_listeners(listen_port)
+    if killed:
+        steps.append(f"kill: {kill_msg}")
+    ok, msg = bootstrap_plist(plist_path)
+    steps.append(f"bootstrap: {msg}")
+    if not ok:
+        return False, "; ".join(steps)
+    prefix = "force reloaded" if killed else "reloaded"
+    return True, f"{prefix} ({'; '.join(steps)})"
 
 
 def kickstart_launchd(label: str) -> tuple[bool, str]:

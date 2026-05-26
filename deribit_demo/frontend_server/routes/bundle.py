@@ -51,6 +51,12 @@ def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
         try:
             payload = copy.deepcopy(ctx.bundle_cache.get_or_set(cache_key, _compute))
         except Exception as exc:  # noqa: BLE001
+            stale = ctx.bundle_cache.get_stale(cache_key)
+            if stale is not None:
+                LOGGER.warning("dashboard /api/dashboard_bundle using stale cache: %s", exc)
+                payload = copy.deepcopy(stale)
+                headers: dict[str, str] = {"X-Cache-Stale": "true"}
+                return JSONResponse(pkg._decimalize(ctx.finalize_dashboard_bundle(payload)), headers=headers)
             LOGGER.warning("dashboard /api/dashboard_bundle failed: %s", exc, exc_info=True)
             raise HTTPException(status_code=502, detail=f"dashboard bundle failed: {exc}") from exc
         headers: dict[str, str] = {}
@@ -66,6 +72,15 @@ def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
         try:
             payload = ctx.status_cache.get_or_set("status", ctx.locked_aggregate_status)
         except Exception as exc:  # noqa: BLE001
+            stale = ctx.status_cache.get_stale("status")
+            if stale is not None:
+                LOGGER.warning("dashboard /api/status using stale cache: %s", exc)
+                payload = stale
+                headers = {"X-Cache-Stale": "true"}
+                age_ms = ctx.status_cache.cache_age_ms("status")
+                if age_ms is not None:
+                    headers["X-Cache-Age-Ms"] = str(age_ms)
+                return JSONResponse(pkg._decimalize(payload), headers=headers)
             LOGGER.warning("dashboard /api/status aggregate failed: %s", exc, exc_info=True)
             raise HTTPException(status_code=502, detail=f"status failed: {exc}") from exc
         headers: dict[str, str] = {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -24,6 +25,16 @@ class _CachedAuthTokens:
 
 _AUTH_TOKEN_CACHE: dict[str, _CachedAuthTokens] = {}
 _AUTH_CACHE_LOCK = threading.Lock()
+_INSTRUMENTS_CACHE: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
+_INSTRUMENTS_CACHE_LOCK = threading.Lock()
+
+
+def _instruments_cache_ttl_seconds() -> float:
+    raw = os.environ.get("DERIBIT_INSTRUMENTS_CACHE_TTL_SEC", "300")
+    try:
+        return max(float(raw), 0.0)
+    except (TypeError, ValueError):
+        return 300.0
 
 
 class DeribitClient:
@@ -118,6 +129,43 @@ class DeribitClient:
             return
         with _AUTH_CACHE_LOCK:
             _AUTH_TOKEN_CACHE.pop(self._auth_cache_key(), None)
+
+    def _clear_auth_tokens(self) -> None:
+        self._access_token = None
+        self._refresh_token = None
+        self._token_expiry_ms = 0
+        self._invalidate_auth_cache()
+
+    def _parse_jsonrpc_payload(
+        self,
+        response: requests.Response,
+        method_name: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Return ``(payload, jsonrpc_error)`` when the body is valid JSON-RPC."""
+        try:
+            payload = self._parse_jsonrpc(response, method_name)
+        except ExchangeError:
+            return None, None
+        error = payload.get("error")
+        json_error = error if isinstance(error, dict) and error else None
+        return payload, json_error
+
+    def _should_retry_private_auth(
+        self,
+        *,
+        private: bool,
+        attempt: int,
+        attempts: int,
+        status: int,
+        json_error: dict[str, Any] | None,
+    ) -> bool:
+        if not private or attempt >= attempts - 1:
+            return False
+        if status == 401:
+            return True
+        if json_error is not None:
+            return isinstance(self._classify_error(method_name="", error=json_error), AuthenticationError)
+        return False
 
     def _ensure_access_token(self) -> str:
         if not self._token_expired():
@@ -265,7 +313,9 @@ class DeribitClient:
         if payload.get("jsonrpc") != "2.0":
             raise ExchangeError(f"{method_name} missing jsonrpc=2.0 field")
         if "id" not in payload:
-            raise ExchangeError(f"{method_name} missing jsonrpc id field")
+            # Deribit HTTP error envelopes (e.g. session_not_found on HTTP 400) omit jsonrpc id.
+            if not isinstance(payload.get("error"), dict):
+                raise ExchangeError(f"{method_name} missing jsonrpc id field")
         return payload
 
     @staticmethod
@@ -321,6 +371,7 @@ class DeribitClient:
                 raise TransientExchangeError(f"{method_name} failed after retries: {exc}") from exc
 
             status = response.status_code
+            payload, json_error = self._parse_jsonrpc_payload(response, method_name)
             if status == self.RATE_LIMIT_STATUS:
                 if attempt < attempts - 1:
                     wait = self._retry_after_seconds(response)
@@ -334,20 +385,25 @@ class DeribitClient:
                     time.sleep(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
                     continue
                 raise TransientExchangeError(f"{method_name} retryable failure: HTTP {status}")
-            if status == 401 and private and attempt < attempts - 1:
-                # Token might have been invalidated server-side; drop cache and retry.
-                self._access_token = None
-                self._refresh_token = None
-                self._token_expiry_ms = 0
-                self._invalidate_auth_cache()
+            if self._should_retry_private_auth(
+                private=private,
+                attempt=attempt,
+                attempts=attempts,
+                status=status,
+                json_error=json_error,
+            ):
+                # Deribit often returns HTTP 400 + JSON-RPC 13009 (session_not_found) for stale tokens.
+                self._clear_auth_tokens()
                 continue
             if status >= 400:
+                if json_error is not None:
+                    raise self._classify_error(method_name, json_error)
                 raise ExchangeError(f"{method_name} failed: HTTP {status} {response.text}")
 
-            payload = self._parse_jsonrpc(response, method_name)
-            error = payload.get("error")
-            if isinstance(error, dict) and error:
-                raise self._classify_error(method_name, error)
+            if payload is None:
+                payload = self._parse_jsonrpc(response, method_name)
+            if json_error is not None:
+                raise self._classify_error(method_name, json_error)
             return payload.get("result")
 
         raise TransientExchangeError(f"{method_name} failed after retries: {last_error}")
@@ -417,11 +473,23 @@ class DeribitClient:
         return self._request("public/test")
 
     def get_instruments(self, currency: str, *, kind: str = "option", expired: bool = False) -> list[dict[str, Any]]:
+        key = (currency.upper(), str(kind), bool(expired))
+        ttl = _instruments_cache_ttl_seconds()
+        if ttl > 0:
+            now = time.monotonic()
+            with _INSTRUMENTS_CACHE_LOCK:
+                cached = _INSTRUMENTS_CACHE.get(key)
+                if cached is not None and (now - cached[0]) < ttl:
+                    return list(cached[1])
         result = self._request(
             "public/get_instruments",
             params={"currency": currency.upper(), "kind": kind, "expired": expired},
         )
-        return result or []
+        rows = result or []
+        if ttl > 0:
+            with _INSTRUMENTS_CACHE_LOCK:
+                _INSTRUMENTS_CACHE[key] = (time.monotonic(), list(rows))
+        return rows
 
     def get_instrument(self, instrument_name: str) -> dict[str, Any]:
         return (

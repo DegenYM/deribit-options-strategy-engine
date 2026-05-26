@@ -264,6 +264,14 @@ class _TtlCache:
                 return cached[1]
         return None
 
+    def get_stale(self, key: Any) -> Any | None:
+        """Return last stored value for ``key`` even when TTL expired."""
+        with self._lock:
+            cached = self._store.get(key)
+            if cached is not None:
+                return cached[1]
+        return None
+
     def cache_age_ms(self, key: Any) -> int | None:
         """Milliseconds since ``key`` was last stored (including fresh computes)."""
         now = time.monotonic()

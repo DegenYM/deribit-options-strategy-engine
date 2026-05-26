@@ -1,0 +1,618 @@
+import { INVESTOR, INVESTOR_ZH, i18n, resolveApiUrl } from "../shared/context.js";
+import {
+  ACTIVITY_PAGE_SIZE,
+  BOOK_COLORS,
+  CORE_BOOKS,
+  FETCH_JSON_MAX_RETRIES,
+  FETCH_JSON_RETRYABLE_STATUS,
+  FETCH_JSON_RETRY_BASE_MS,
+  FRONTEND_API_CONCURRENCY,
+  FRONTEND_REFRESH_INTERVAL_MS,
+  INVESTOR_OVERLAY_MAX_MS,
+  INVESTOR_STATUS_TIMEOUT_MS,
+  STRATEGIES,
+  STRATEGY_BY_ID,
+  USE_DASHBOARD_BUNDLE,
+  fmt,
+} from "../shared/config.js";
+import { STATE } from "../shared/state.js";
+import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num, promisePool, realizedSummaryUrl, setInvestorProgressBar, setText, showToast, updateUnderlyingIndexCache } from "./domain.js";
+import { aprSeriesUrl, renderAprChart, renderBookEquityChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
+import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress, renderTopBar } from "./render.js";
+export function updateHeaderSpotDom() {
+  const elBtc = document.getElementById("header-spot-btc");
+  const elEth = document.getElementById("header-spot-eth");
+  const b = STATE.lastSpotUsd.BTC;
+  const e = STATE.lastSpotUsd.ETH;
+  if (elBtc) elBtc.textContent = b !== null && b > 0 ? `BTC ${fmt.usd2.format(b)}` : "BTC —";
+  if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
+}
+
+export function renderPerformanceCharts() {
+  const chartFns = [
+    ["risk-capital", renderBookEquityChart],
+    ["cum-pnl", renderCumulativePnlChart],
+    ["daily-pnl", renderDailyPnlChart],
+    ["apr", renderAprChart],
+  ];
+  for (const [name, fn] of chartFns) {
+    try {
+      fn();
+    } catch (err) {
+      console.error(`${name} chart render failed`, err);
+    }
+  }
+  scheduleChartResizeAll();
+}
+
+const INVESTOR_LOAD_STEPS = {
+  spot: {
+    en: "Fetching BTC / ETH market prices…",
+    zh: "正在取得 BTC / ETH 即時報價…",
+  },
+  snapshot: {
+    en: "Loading last equity snapshot…",
+    zh: "正在讀取最近權益快照…",
+  },
+  health: {
+    en: "Checking account connection…",
+    zh: "正在確認帳戶連線…",
+  },
+  groups: {
+    en: "Loading open positions and spreads…",
+    zh: "正在讀取持倉與價差部位…",
+  },
+  cumulative: {
+    en: "Loading realized P&L history…",
+    zh: "正在載入已實現損益歷史…",
+  },
+  apr: {
+    en: "Calculating rolling performance (APR)…",
+    zh: "正在計算滾動年化報酬…",
+  },
+  status: {
+    en: "Syncing live equity and margin…",
+    zh: "正在同步即時權益與保證金…",
+  },
+  summary: {
+    en: "Loading performance summary from local records…",
+    zh: "正在從本地紀錄載入績效摘要…",
+  },
+  render: {
+    en: "Preparing your dashboard…",
+    zh: "正在整理儀表板顯示…",
+  },
+  done: {
+    en: "Done",
+    zh: "完成",
+  },
+};
+
+export function investorLoadLabel(stepKey) {
+  const s = INVESTOR_LOAD_STEPS[stepKey];
+  return s ? i18n(s.en, s.zh) : "";
+}
+
+export function investorLoadStepCount(hasPrivateCreds, { includeCharts = true } = {}) {
+  let steps = 2 + 1 + (hasPrivateCreds ? 2 : 0) + 1;
+  if (includeCharts) steps += 2;
+  return steps;
+}
+
+export function setInvestorLoadProgress(ratio, stepKey) {
+  const pct = Math.min(100, Math.max(0, Math.round(ratio * 100)));
+  const fill = document.getElementById("investor-load-bar-fill");
+  if (fill) fill.style.width = `${pct}%`;
+  const pctEl = document.querySelector("[data-investor-load-pct]");
+  if (pctEl) pctEl.textContent = `${pct}%`;
+  const stepEl = document.querySelector("[data-investor-load-step]");
+  if (stepEl && stepKey) stepEl.textContent = investorLoadLabel(stepKey);
+}
+
+export function applyInvestorLoadCopy() {
+  if (!INVESTOR) return;
+  const set = (attr, en, zh) => {
+    const el = document.querySelector(`[data-investor-load-${attr}]`);
+    if (el) el.textContent = i18n(en, zh);
+  };
+  set("eyebrow", "Please wait", "請稍候");
+  set("title", "Loading your portfolio", "正在載入您的投資組合");
+  set(
+    "hint",
+    "Showing snapshot first; live positions and P&L sync in the background.",
+    "先顯示最近快照；持倉與損益於背景同步中。"
+  );
+}
+
+export function beginInvestorLoad({ blocking = true } = {}) {
+  if (!INVESTOR) return;
+  STATE.investorLoadDone = 0;
+  STATE.investorLoadTotal = investorLoadStepCount(false);
+  document.body.classList.toggle("investor-blocking-load", blocking);
+  const overlay = document.getElementById("investor-load-overlay");
+  if (overlay) {
+    overlay.classList.remove("hidden");
+    overlay.classList.toggle("investor-load-overlay--refresh", !blocking);
+    overlay.setAttribute("aria-busy", "true");
+  }
+  const refreshBtn = document.getElementById("refresh-now");
+  if (refreshBtn) refreshBtn.disabled = true;
+  setInvestorLoadProgress(0, "spot");
+}
+
+export function advanceInvestorLoad(stepKey) {
+  if (!INVESTOR) return;
+  STATE.investorLoadDone = Math.min(
+    STATE.investorLoadTotal || 1,
+    STATE.investorLoadDone + 1
+  );
+  const ratio =
+    STATE.investorLoadTotal > 0 ? STATE.investorLoadDone / STATE.investorLoadTotal : 0;
+  setInvestorLoadProgress(ratio, stepKey);
+}
+
+export function setInvestorPageReady(ready) {
+  if (!INVESTOR) return;
+  if (!ready) {
+    beginInvestorLoad({ blocking: !STATE.investorReady });
+    return;
+  }
+  setInvestorLoadProgress(1, "done");
+  STATE.investorReady = true;
+  document.body.classList.remove("investor-blocking-load");
+  document.body.classList.add("investor-ready");
+  const overlay = document.getElementById("investor-load-overlay");
+  if (overlay) {
+    overlay.classList.add("hidden");
+    overlay.classList.remove("investor-load-overlay--refresh");
+    overlay.setAttribute("aria-busy", "false");
+  }
+  const refreshBtn = document.getElementById("refresh-now");
+  if (refreshBtn) refreshBtn.disabled = false;
+  scheduleChartResizeAll();
+}
+
+export async function tickHeaderSpot({ renderDependentViews = true, updateDom = true } = {}) {
+  try {
+    const d = await fetchJson("/api/spot");
+    STATE.lastSpotUsd.BTC = num(d.BTC);
+    STATE.lastSpotUsd.ETH = num(d.ETH);
+    if (updateDom) {
+      updateHeaderSpotDom();
+      if (renderDependentViews) {
+        renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
+        renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+      }
+    }
+  } catch (_) {
+    /* ignore */
+  }
+}
+
+export function chartsSectionOpen() {
+  const el = document.getElementById("charts-section");
+  return Boolean(el?.open);
+}
+
+export async function fetchPortfolioSnapshot() {
+  try {
+    const d = await fetchJson("/api/portfolio/snapshot");
+    STATE.portfolioSnapshot = d;
+    if (d?.source === "ledger") {
+      STATE.dataFreshness.source = "snapshot";
+      STATE.dataFreshness.snapshotMs = num(d.freshness_ms);
+      STATE.dataFreshness.live = false;
+    }
+  } catch (_) {
+    /* snapshot is optional for first paint */
+  }
+}
+
+export async function fetchStatusWithTimeout() {
+  const timeoutMs = INVESTOR_STATUS_TIMEOUT_MS;
+  let timedOut = false;
+  const timeoutPromise = delay(timeoutMs).then(() => {
+    timedOut = true;
+    throw new Error("status timeout");
+  });
+  try {
+    const d = await Promise.race([fetchJson("/api/status"), timeoutPromise]);
+    STATE.status = d;
+    STATE.statusErrorOnce = false;
+    STATE.dataFreshness.source = "live";
+    STATE.dataFreshness.live = true;
+    STATE.dataFreshness.statusMs = 0;
+    return d;
+  } catch (err) {
+    if (timedOut && STATE.portfolioSnapshot?.portfolio) {
+      if (!STATE.statusErrorOnce) {
+        showToast(
+          i18n(
+            "Live sync is slow; showing last snapshot.",
+            "即時同步較慢，先顯示最近快照。"
+          )
+        );
+        STATE.statusErrorOnce = true;
+      }
+      fetchJson("/api/status")
+        .then((d) => {
+          STATE.status = d;
+          STATE.dataFreshness.source = "live";
+          STATE.dataFreshness.live = true;
+          renderDashboardFn?.();
+        })
+        .catch(() => {});
+      return null;
+    }
+    STATE.status = null;
+    if (!STATE.statusErrorOnce) {
+      showToast(`status: ${err.message}`);
+      STATE.statusErrorOnce = true;
+    }
+    return null;
+  }
+}
+
+export async function fetchDashboardBundle({ backgroundOnTimeout = false } = {}) {
+  const timeoutMs = INVESTOR_STATUS_TIMEOUT_MS;
+  let timedOut = false;
+  const bundleRequest = fetchJson(dashboardBundleUrl(30));
+  const raced = INVESTOR
+    ? Promise.race([
+        bundleRequest,
+        delay(timeoutMs).then(() => {
+          timedOut = true;
+          throw new Error("dashboard bundle timeout");
+        }),
+      ])
+    : bundleRequest;
+  try {
+    applyDashboardBundlePayload(await raced);
+    return true;
+  } catch (err) {
+    if (INVESTOR && timedOut && STATE.portfolioSnapshot?.portfolio) {
+      if (!STATE.statusErrorOnce) {
+        showToast(
+          i18n(
+            "Live sync is slow; showing last snapshot.",
+            "即時同步較慢，先顯示最近快照。"
+          )
+        );
+        STATE.statusErrorOnce = true;
+      }
+      if (backgroundOnTimeout) {
+        fetchJson(dashboardBundleUrl(30))
+          .then((d) => {
+            applyDashboardBundlePayload(d);
+            renderDashboardFn?.();
+          })
+          .catch(() => {});
+      }
+      return false;
+    }
+    if (!INVESTOR || !timedOut) {
+      showToast(`dashboard bundle: ${err.message}`);
+    }
+    return false;
+  }
+}
+
+export async function loadChartDataIfNeeded({ force = false, investorFetchWrap = null } = {}) {
+  if (!force && STATE.chartsDataLoaded) {
+    renderPerformanceCharts();
+    return;
+  }
+  if (STATE.chartsLoadInFlight) return;
+  STATE.chartsLoadInFlight = true;
+  try {
+    const fetchCumulative = () =>
+      fetchJson("/api/cumulative_pnl_series")
+        .then((d) => {
+          STATE.cumulativePnl = d;
+        })
+        .catch((err) => showToast(`cumulative pnl: ${err.message}`));
+
+    const fetchApr = () =>
+      fetchJson(aprSeriesUrl())
+        .then((d) => {
+          STATE.aprSeries = d;
+        })
+        .catch((err) => showToast(`apr series: ${err.message}`));
+
+    if (investorFetchWrap) {
+      await Promise.all([
+        investorFetchWrap("cumulative", fetchCumulative),
+        investorFetchWrap("apr", fetchApr),
+      ]);
+    } else {
+      await Promise.all([fetchCumulative(), fetchApr()]);
+    }
+    STATE.chartsDataLoaded = true;
+    renderPerformanceCharts();
+  } finally {
+    STATE.chartsLoadInFlight = false;
+  }
+}
+
+export function refreshWaitMs() {
+  if (!STATE.lastRefreshStartedMs) return 0;
+  return Math.max(0, FRONTEND_REFRESH_INTERVAL_MS - (Date.now() - STATE.lastRefreshStartedMs));
+}
+
+export async function refreshAll({ force = false, silentIfLimited = false, renderDashboard: renderDashboardFn } = {}) {
+  if (STATE.refreshInFlight) {
+    if (!silentIfLimited) showToast(i18n("refresh already running", "已有更新正在進行"));
+    return;
+  }
+  const waitMs = refreshWaitMs();
+  if (!force && waitMs > 0) {
+    if (!silentIfLimited)
+      showToast(
+        i18n(
+          `refresh rate limited; wait ${Math.ceil(waitMs / 1000)}s`,
+          `請稍候 ${Math.ceil(waitMs / 1000)} 秒後再試`
+        )
+      );
+    return;
+  }
+
+  STATE.refreshInFlight = true;
+  STATE.lastRefreshStartedMs = Date.now();
+  const investorFirstLoad = INVESTOR && !STATE.investorReady;
+  if (investorFirstLoad) {
+    beginInvestorLoad({ blocking: true });
+  } else if (INVESTOR) {
+    setInvestorProgressBar(true, { indeterminate: true });
+  }
+  try {
+    let renderScheduled = false;
+    function scheduleRender() {
+      if (renderScheduled) return;
+      renderScheduled = true;
+      requestAnimationFrame(() => {
+        renderScheduled = false;
+        renderDashboardFn?.();
+      });
+    }
+
+    function investorFetch(stepKey, run) {
+      if (!investorFirstLoad) return run();
+      return run().finally(() => advanceInvestorLoad(stepKey));
+    }
+
+    try {
+      const spotPromise = investorFetch("spot", () =>
+        tickHeaderSpot({
+          renderDependentViews: !INVESTOR,
+          updateDom: true,
+        })
+      );
+      const healthPromise = investorFetch("health", () =>
+        fetchJson("/api/health").then((d) => {
+          STATE.health = d;
+        })
+      );
+      await Promise.all([spotPromise, healthPromise]);
+      renderTopBar(STATE.health);
+    } catch (err) {
+      showToast(`health failed: ${err.message}`);
+    }
+
+    const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
+    let snapshotFetchedThisRefresh = false;
+
+    // Investor first paint: race snapshot vs overlay cap, then unlock the page.
+    if (INVESTOR && investorFirstLoad) {
+      try {
+        await Promise.race([
+          investorFetch("snapshot", fetchPortfolioSnapshot),
+          delay(INVESTOR_OVERLAY_MAX_MS),
+        ]);
+      } catch (_) {
+        /* snapshot optional; always dismiss blocking overlay */
+      }
+      snapshotFetchedThisRefresh = true;
+      setInvestorPageReady(true);
+      setInvestorProgressBar(true, { indeterminate: true });
+      scheduleRender();
+    }
+
+    const investorFetchWrap = investorFirstLoad
+      ? (stepKey, run) => investorFetch(stepKey, run)
+      : null;
+    const wrapStep = (stepKey, run) =>
+      investorFetchWrap ? investorFetchWrap(stepKey, run) : run();
+
+    function fetchGroups() {
+      return fetchJson("/api/groups")
+        .then((d) => {
+          STATE.groups = d;
+          scheduleRender();
+        })
+        .catch((err) => {
+          showToast(`groups: ${err.message}`);
+        });
+    }
+
+    function fetchSummary() {
+      return fetchJson(realizedSummaryUrl(30))
+        .then((d) => {
+          STATE.report = d;
+          scheduleRender();
+        })
+        .catch((err) => showToast(`realized summary: ${err.message}`));
+    }
+
+    function fetchStatusOp() {
+      return fetchJson("/api/status")
+        .then((d) => {
+          STATE.status = d;
+          STATE.statusErrorOnce = false;
+          scheduleRender();
+        })
+        .catch((err) => {
+          STATE.status = null;
+          if (!STATE.statusErrorOnce) {
+            showToast(`status: ${err.message}`);
+            STATE.statusErrorOnce = true;
+          }
+        });
+    }
+
+    function fetchStress() {
+      return fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
+        .then((d) => {
+          STATE.stress = d;
+          scheduleRender();
+        })
+        .catch((err) => showToast(`stress: ${err.message}`));
+    }
+
+    async function fetchPortfolioDataIndividual() {
+      await wrapStep("groups", fetchGroups);
+      if (INVESTOR) {
+        await wrapStep("status", () => fetchStatusWithTimeout().then(() => scheduleRender()));
+        await wrapStep("summary", fetchSummary);
+      } else {
+        await fetchStatusOp();
+        await fetchSummary();
+      }
+    }
+
+    async function fetchPortfolioData() {
+      if (!hasPrivateCreds) {
+        await wrapStep("groups", fetchGroups);
+        STATE.status = null;
+        STATE.report = null;
+        STATE.stress = null;
+        return;
+      }
+      if (USE_DASHBOARD_BUNDLE) {
+        const ok = await fetchDashboardBundle({ backgroundOnTimeout: INVESTOR });
+        if (ok) {
+          if (investorFirstLoad) {
+            advanceInvestorLoad("groups");
+            advanceInvestorLoad("status");
+            advanceInvestorLoad("summary");
+          }
+          scheduleRender();
+          return;
+        }
+      }
+      await fetchPortfolioDataIndividual();
+    }
+
+    const wave = [() => fetchPortfolioData()];
+
+    if (hasPrivateCreds && !INVESTOR) {
+      wave.push(() => fetchStress());
+    }
+
+    if (INVESTOR && !snapshotFetchedThisRefresh) {
+      wave.push(() => wrapStep("snapshot", fetchPortfolioSnapshot));
+    }
+
+    const chartsNeeded = !INVESTOR || chartsSectionOpen();
+    if (chartsNeeded) {
+      wave.push(() =>
+        loadChartDataIfNeeded({
+          force: !INVESTOR,
+          investorFetchWrap,
+        })
+      );
+    }
+
+    await promisePool(wave, FRONTEND_API_CONCURRENCY);
+
+    if (INVESTOR) {
+      STATE.stress = null;
+    }
+
+    if (!chartsNeeded) {
+      renderBookEquityChart();
+    }
+
+    if (!INVESTOR || STATE.investorReady) {
+      renderDashboardFn?.();
+    }
+
+    setInvestorProgressBar(false);
+    setText(
+      "last-refresh",
+      `${i18n("last refresh:", "上次更新：")} ${luxon.DateTime.now().toFormat("HH:mm:ss")}`
+    );
+  } finally {
+    STATE.refreshInFlight = false;
+    setInvestorProgressBar(false);
+  }
+}
+
+export function setBookFilter(book) {
+  STATE.bookFilter = book;
+  const filterRoot = document.querySelector("#book-filter");
+  if (filterRoot) {
+    filterRoot.querySelectorAll("button[data-book]").forEach((btn) => {
+      btn.classList.toggle("filter-active", btn.dataset.book === book);
+    });
+  }
+  renderBookEquityChart();
+  renderCumulativePnlChart();
+  renderDailyPnlChart();
+}
+
+export function attachAutoRefresh() {
+  const checkbox = document.getElementById("auto-refresh");
+  if (!checkbox) return;
+  function reset() {
+    if (STATE.autoRefreshHandle) {
+      clearInterval(STATE.autoRefreshHandle);
+      STATE.autoRefreshHandle = null;
+    }
+    if (checkbox.checked) {
+      STATE.autoRefreshHandle = setInterval(
+        () => refreshAll({ silentIfLimited: true }),
+        FRONTEND_REFRESH_INTERVAL_MS
+      );
+    }
+  }
+  checkbox.addEventListener("change", reset);
+  reset();
+}
+
+export function attachControls() {
+  document.getElementById("refresh-now")?.addEventListener("click", () => refreshAll());
+  document.getElementById("book-filter")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-book]");
+    if (btn) setBookFilter(btn.dataset.book);
+  });
+  document.getElementById("activity-section")?.addEventListener("click", (e) => {
+    const btn = e.target.closest("button.activity-page-btn");
+    if (!btn || btn.disabled) return;
+    const section = btn.dataset.activitySection;
+    const dir = btn.dataset.direction === "next" ? 1 : -1;
+    if (section === "open") STATE.activityOpenPage += dir;
+    else if (section === "closed") STATE.activityClosedPage += dir;
+    renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+  });
+  document.getElementById("apr-window")?.addEventListener("change", async (e) => {
+    STATE.aprWindow = parseInt(e.target.value, 10) || 30;
+    try {
+      STATE.aprSeries = await fetchJson(aprSeriesUrl());
+    } catch (err) {
+      showToast(`apr series: ${err.message}`);
+    }
+    renderAprChart();
+  });
+}
+
+export function attachExpandableSections() {
+  document.querySelectorAll("details.collapsible-section").forEach((details) => {
+    details.addEventListener("toggle", () => {
+      if (!details.open) return;
+      scheduleChartResizeAll();
+      if (INVESTOR && details.id === "charts-section") {
+        loadChartDataIfNeeded();
+      }
+    });
+  });
+}

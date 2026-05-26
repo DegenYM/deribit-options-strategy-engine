@@ -394,7 +394,17 @@ def _aggregate_groups(
 
     import deribit_demo.frontend_server as pkg
 
-    prefetches = pkg._prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
+    try:
+        prefetches = pkg._prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
+    except Exception as exc:  # noqa: BLE001 — closed groups from disk should still load.
+        LOGGER.warning("groups exchange prefetch failed; continuing without live marks: %s", exc)
+        prefetches = {}
+        for account in accounts:
+            if not _has_private_creds(account.config):
+                continue
+            key = _live_api_identity(account)
+            if key not in prefetches:
+                prefetches[key] = None
 
     def _fetch(account: DashboardAccount) -> tuple[DashboardAccount, dict[str, Any]]:
         return account, _groups_payload_for_account(

@@ -24,9 +24,14 @@ def register_groups_routes(app: Any, ctx: RouteContext) -> None:
         try:
             payload = copy.deepcopy(ctx.groups_cache.get_or_set(cache_key, _compute))
         except Exception as exc:  # noqa: BLE001
-            from fastapi import HTTPException
+            stale = ctx.groups_cache.get_stale(cache_key)
+            if stale is not None:
+                LOGGER.warning("dashboard /api/groups using stale cache: %s", exc)
+                payload = copy.deepcopy(stale)
+            else:
+                from fastapi import HTTPException
 
-            raise HTTPException(status_code=500, detail=f"groups failed: {exc}") from exc
+                raise HTTPException(status_code=500, detail=f"groups failed: {exc}") from exc
         try:
             spot_idx = pkg._spot_index_decimals(ctx.spot_cache.get_or_set("spot", ctx.fetch_spot))
             pkg._apply_spot_native_backfill(payload, spot_idx)

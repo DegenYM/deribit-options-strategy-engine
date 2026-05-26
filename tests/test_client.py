@@ -439,6 +439,56 @@ def test_invalid_access_token_forces_reauth_on_idempotent_path(tmp_path):
     assert positions_calls[-1]["headers"].get("Authorization") == "Bearer token-2"
 
 
+def _deribit_http_error_body(*, code, message, data=None):
+    """Deribit HTTP 4xx envelopes omit jsonrpc ``id`` (matches live API)."""
+    return {
+        "jsonrpc": "2.0",
+        "error": {"code": code, "message": message, "data": data},
+        "testnet": False,
+    }
+
+
+def test_session_not_found_on_http_400_forces_reauth(tmp_path):
+    session_not_found = _deribit_http_error_body(
+        code=13009,
+        message="unauthorized",
+        data={"reason": "session_not_found"},
+    )
+    session = FakeSession(
+        [
+            FakeResponse(_auth_result(access_token="token-stale")),
+            FakeResponse(session_not_found, status_code=400, text="session_not_found"),
+            FakeResponse(_auth_result(access_token="token-fresh")),
+            FakeResponse(_ok_body({"summaries": [{"currency": "BTC"}]})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    result = client.get_account_summaries()
+
+    assert result == [{"currency": "BTC"}]
+    auth_calls = [c for c in session.calls if c["json"]["method"] == "public/auth"]
+    assert len(auth_calls) == 2
+    summary_calls = [c for c in session.calls if c["json"]["method"] == "private/get_account_summaries"]
+    assert summary_calls[-1]["headers"].get("Authorization") == "Bearer token-fresh"
+
+
+def test_deribit_http_error_without_jsonrpc_id_raises_classified_error(tmp_path):
+    session = FakeSession(
+        [
+            FakeResponse(
+                _deribit_http_error_body(code=11044, message="not_enough_funds"),
+                status_code=400,
+                text="not_enough_funds",
+            )
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    with pytest.raises(ExchangeError, match="not_enough_funds"):
+        client.get_order_book("BTC-PERPETUAL")
+
+
 def test_get_user_trades_by_currency_jsonrpc_params(tmp_path):
     session = FakeSession(
         [
@@ -495,3 +545,22 @@ def test_get_user_trades_by_instrument_jsonrpc_params(tmp_path):
     assert p["sorting"] == "asc"
     assert p["historical"] is False
     assert p["subaccount_id"] == 7
+
+
+def test_get_instruments_uses_process_cache(tmp_path, monkeypatch):
+    from deribit_demo.client import _INSTRUMENTS_CACHE, _INSTRUMENTS_CACHE_LOCK
+
+    with _INSTRUMENTS_CACHE_LOCK:
+        _INSTRUMENTS_CACHE.clear()
+    monkeypatch.setenv("DERIBIT_INSTRUMENTS_CACHE_TTL_SEC", "300")
+    rows = [{"instrument_name": "BTC-1"}]
+    session = FakeSession([FakeResponse(_ok_body(rows)), FakeResponse(_ok_body([{"instrument_name": "BTC-2"}]))])
+    client = _make_client(tmp_path, session)
+
+    first = client.get_instruments("BTC", kind="option", expired=False)
+    second = client.get_instruments("BTC", kind="option", expired=False)
+
+    assert first == rows
+    assert second == rows
+    instrument_calls = [c for c in session.calls if c["json"]["method"] == "public/get_instruments"]
+    assert len(instrument_calls) == 1
