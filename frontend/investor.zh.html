@@ -7,6 +7,22 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/tailwind.css?v=20260526" />
     <link rel="stylesheet" href="/styles.css?v=inv-layout-6" />
+    <script>
+      (function () {
+        var m = document.querySelector('meta[name="dashboard-api-base"]');
+        var base = m && m.getAttribute("content");
+        if (!base) return;
+        try {
+          var u = new URL(base, location.href);
+          if (u.origin === location.origin) return;
+          var link = document.createElement("link");
+          link.rel = "preconnect";
+          link.href = u.origin;
+          link.crossOrigin = "";
+          document.head.appendChild(link);
+        } catch (_) {}
+      })();
+    </script>
   </head>
   <body class="app-body investor-portal investor-blocking-load text-slate-100 min-h-screen font-sans">
     <script>

@@ -78,6 +78,7 @@ def create_app(
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
         from fastapi.staticfiles import StaticFiles
+        from starlette.middleware.gzip import GZipMiddleware
     except ImportError as exc:  # pragma: no cover — surfaces a clear hint.
         raise RuntimeError("fastapi/uvicorn not installed; run `pip install -r requirements.txt`") from exc
 
@@ -173,6 +174,15 @@ def create_app(
         allow_methods=["GET"],
         allow_headers=["*"],
     )
+    app.add_middleware(GZipMiddleware, minimum_size=500)
+
+    @app.middleware("http")
+    async def _static_long_cache_headers(request: Any, call_next: Any) -> Any:
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/vendor/") or (path.endswith(".css") and request.query_params.get("v")):
+            response.headers.setdefault("Cache-Control", "public, max-age=86400, immutable")
+        return response
 
     # ------------------------------------------------------------------
     # Endpoints

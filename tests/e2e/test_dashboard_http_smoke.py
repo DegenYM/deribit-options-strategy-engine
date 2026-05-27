@@ -84,3 +84,23 @@ def test_portfolio_snapshot_handles_missing_ledger(dashboard_client: TestClient)
     assert response.status_code == 200
     payload = response.json()
     assert payload.get("source") == "none"
+
+
+def test_vendor_static_has_long_cache(dashboard_client: TestClient) -> None:
+    response = dashboard_client.get("/vendor/luxon.min.js")
+    assert response.status_code == 200
+    cache_control = response.headers.get("cache-control", "")
+    assert "immutable" in cache_control
+    assert "max-age=" in cache_control
+
+
+def test_app_js_stays_no_cache(dashboard_client: TestClient) -> None:
+    response = dashboard_client.get("/app.js")
+    assert response.status_code == 200
+    assert "no-cache" in response.headers.get("cache-control", "")
+
+
+def test_app_js_supports_gzip(dashboard_client: TestClient) -> None:
+    response = dashboard_client.get("/app.js", headers={"Accept-Encoding": "gzip"})
+    assert response.status_code == 200
+    assert response.headers.get("content-encoding") == "gzip"

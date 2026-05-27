@@ -20,7 +20,7 @@ import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num,
 import { loadChartJs } from "./chart-vendor.js";
 import { formatTimeHms } from "./date-time.js";
 import { aprSeriesUrl, renderAprChart, renderBookEquityChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
-import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress, renderTopBar } from "./render.js";
+import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress } from "./render.js";
 
 /** Set for the duration of refreshAll; used by background status/bundle retries. */
 let activeRenderDashboard = null;
@@ -446,12 +446,17 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         })
       );
       await Promise.all([spotPromise, healthPromise]);
-      renderTopBar(STATE.health);
     } catch (err) {
       showToast(`health failed: ${err.message}`);
     }
 
     const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
+    if (investorFirstLoad) {
+      STATE.investorLoadTotal = investorLoadStepCount(hasPrivateCreds, {
+        includeCharts: chartsSectionOpen(),
+      });
+    }
+
     let snapshotFetchedThisRefresh = false;
 
     // Investor first paint: race snapshot vs overlay cap, then unlock the page.
@@ -579,12 +584,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     }
 
     if (!INVESTOR || STATE.investorReady) {
-      try {
-        renderDashboardFn?.();
-      } catch (err) {
-        console.error("renderDashboard failed", err);
-        showToast(`render failed: ${err.message}`);
-      }
+      scheduleRender();
     }
 
     setInvestorProgressBar(false);

@@ -12,15 +12,19 @@ export function renderDashboard() {
   render.renderRegime(STATE.status);
   render.renderTopBar(STATE.health);
   refresh.updateHeaderSpotDom();
-  render.renderAccountCards(STATE.health, STATE.status);
-  render.renderBookCards(STATE.status);
+  if (!INVESTOR) {
+    render.renderAccountCards(STATE.health, STATE.status);
+    render.renderBookCards(STATE.status);
+  }
   render.renderAggregate(STATE.status, STATE.report);
   render.renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
   refresh.renderPerformanceCharts().catch((err) => {
     console.error("performance charts failed", err);
   });
   render.renderRecentActivity(STATE.status, STATE.report, STATE.groups);
-  render.renderStress(STATE.stress);
+  if (!INVESTOR) {
+    render.renderStress(STATE.stress);
+  }
 }
 
 function setBookFilter(book) {
