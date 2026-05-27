@@ -88,6 +88,19 @@ function attachControls() {
   });
 }
 
+function attachChartHoverPrefetch() {
+  const chartsSection = document.getElementById("charts-section");
+  const summary = chartsSection?.querySelector("summary");
+  if (!summary) return;
+  summary.addEventListener(
+    "mouseenter",
+    () => {
+      loadChartJs().catch(() => {});
+    },
+    { once: true }
+  );
+}
+
 function attachExpandableSections() {
   document.querySelectorAll("details.collapsible-section").forEach((details) => {
     details.addEventListener("toggle", () => {
@@ -115,6 +128,7 @@ export function initDashboard() {
     charts.attachChartResizeObservers();
     attachControls();
     attachExpandableSections();
+    attachChartHoverPrefetch();
     attachAutoRefresh();
     refresh.refreshAll({ force: true, renderDashboard });
   };

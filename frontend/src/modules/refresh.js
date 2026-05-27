@@ -542,15 +542,19 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         return;
       }
       if (USE_DASHBOARD_BUNDLE) {
-        if (INVESTOR && investorFirstLoad) {
+        const useStagedBundle =
+          hasPrivateCreds && ((INVESTOR && investorFirstLoad) || (!INVESTOR && force));
+        if (useStagedBundle) {
           const liveOk = await fetchDashboardBundle({ sections: "status,groups" });
           if (liveOk) {
-            advanceInvestorLoad("groups");
-            advanceInvestorLoad("status");
+            if (investorFirstLoad) {
+              advanceInvestorLoad("groups");
+              advanceInvestorLoad("status");
+            }
             scheduleRender();
             fetchDashboardBundle({ sections: "realized_summary" })
               .then((summaryOk) => {
-                if (summaryOk) advanceInvestorLoad("summary");
+                if (summaryOk && investorFirstLoad) advanceInvestorLoad("summary");
                 invokeRenderDashboard();
               })
               .catch(() => {});
