@@ -10,6 +10,8 @@ from deribit_engine.env_layout import (
     investor_live_log_dir,
     investor_metrics_db_path,
     load_investor_manifest,
+    resolve_account_env_path,
+    resolve_investor_env_path,
     resolve_investor_scope,
 )
 from deribit_engine.exceptions import ConfigurationError
@@ -207,3 +209,45 @@ def test_fee_env_layers_skip_strategy_profile(tmp_path: Path):
     assert not any(".env.naked_short" in str(path) for path in layers)
     config = load_config(fee_env, require_private=False)
     assert config.min_net_apr == Decimal("0.12")
+
+
+def test_legacy_account_env_path_emits_deprecation_warning(tmp_path: Path):
+    investor = tmp_path / "config" / "investors" / "alpha"
+    (investor / "accounts").mkdir(parents=True)
+    legacy = investor / "accounts" / "naked.env"
+    legacy.write_text("OPTION_STRATEGY=naked_short\n", encoding="utf-8")
+    with pytest.warns(DeprecationWarning, match="Legacy account env"):
+        assert resolve_account_env_path(investor, "naked") == legacy.resolve()
+
+
+def test_legacy_investor_env_path_emits_deprecation_warning(tmp_path: Path):
+    investor = tmp_path / "config" / "investors" / "alpha"
+    investor.mkdir(parents=True)
+    legacy = investor / "investor.env"
+    legacy.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    with pytest.warns(DeprecationWarning, match="Legacy investor env"):
+        assert resolve_investor_env_path(investor) == legacy.resolve()
+
+
+def test_legacy_defaults_env_emits_deprecation_warning(tmp_path: Path):
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
+    (tmp_path / "config" / "shared" / ".env.defaults").write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    investor = tmp_path / "config" / "investors" / "alpha"
+    (investor / "accounts").mkdir(parents=True)
+    account = investor / "accounts" / ".env.naked"
+    account.write_text("OPTION_STRATEGY=naked_short\n", encoding="utf-8")
+    with pytest.warns(DeprecationWarning, match=".env.defaults"):
+        layers = env_layer_paths(account, "naked_short")
+    assert layers[0].name == ".env.defaults"
+
+
+def test_legacy_root_strategy_profile_emits_deprecation_warning(tmp_path: Path):
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
+    (tmp_path / ".env.naked_short").write_text("MIN_NET_APR=0.99\n", encoding="utf-8")
+    account = tmp_path / ".env"
+    account.write_text("OPTION_STRATEGY=naked_short\n", encoding="utf-8")
+    with pytest.warns(DeprecationWarning, match="Legacy strategy profile"):
+        layers = env_layer_paths(account, "naked_short")
+    assert tmp_path / ".env.naked_short" in layers

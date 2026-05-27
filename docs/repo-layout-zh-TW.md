@@ -43,7 +43,7 @@ deribit-options-strategy-engine/
 
 | 層級 | 路徑 | 用途 |
 |------|------|------|
-| 1 | `config/shared/defaults.env` | 可選共用 fallback |
+| 1 | `config/shared/defaults.env` | 可選共用 fallback（`config/shared/.env.defaults` 為 legacy 別名，載入時會提示） |
 | 2 | `config/investors/<id>/.env.investor` | 投資人層級（費率、備兌現貨等） |
 | 3 | `config/shared/strategies/.env.<strategy>` | 策略參數 |
 | 4 | `config/investors/<id>/accounts/.env.<slug>` | 子帳憑證、資金規模、覆寫 |
@@ -101,6 +101,22 @@ deribit-options-strategy-engine/
 ./scripts/cleanup_legacy_layout.sh
 ```
 
+### 投資人設定正規化（P2 checklist）
+
+新部署或遷移後，確認每位 `<investor_id>`：
+
+| 檢查項 | Canonical |
+|--------|-----------|
+| 投資人 env | `config/investors/<id>/.env.investor`（非 `investor.env`） |
+| 子帳 env | `accounts/.env.<slug>`（非 `accounts/<slug>.env`） |
+| `STATE_FILE` | `.state/investors/<id>/<slug>.json` |
+| manifest slug | 與 `.state/investors/<id>/` 檔名一致 |
+| 多子帳 ledger | `data/frontend_ledger/<id>/<slug>/equity_*.jsonl` |
+
+```bash
+./bot investor validate <investor_id>
+```
+
 ## 納版 vs 本機
 
 | 納版（git） | 本機專用（gitignore） |
@@ -110,6 +126,13 @@ deribit-options-strategy-engine/
 | `config/platform/registry.toml.example` | `config/platform/registry.toml` |
 | `config/handoff/handoff.template.toml` | `config/handoff/<id>.toml` |
 | `docs/`、`tests/`、`deribit_engine/` | `.state/`、`data/`、`logs/` |
+
+## 腳本分類
+
+| 目錄 | 用途 |
+|------|------|
+| `scripts/` | Production / ops：live 監督、fee 快照、PDF、E2E、legacy 清理 |
+| `scripts/dev/` | 一次性或開發輔助：dashboard 模組化、state 回填、手動 boot 測試 |
 
 ## 相關文件
 

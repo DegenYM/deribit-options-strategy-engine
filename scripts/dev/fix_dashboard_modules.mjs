@@ -1,6 +1,6 @@
 /**
  * Adds cross-module imports to dashboard split files.
- * Run: node scripts/fix_dashboard_modules.mjs
+ * Run: node scripts/dev/fix_dashboard_modules.mjs
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const modulesDir = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
+  "..",
   "..",
   "frontend",
   "src",

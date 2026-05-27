@@ -1,6 +1,6 @@
 /**
  * Boot dashboard modules with mocked DOM/API (investor mode).
- * Usage: node scripts/test_dashboard_investor_boot.mjs
+ * Usage: node scripts/dev/test_dashboard_investor_boot.mjs
  */
 process.env.DASHBOARD_TEST_INVESTOR = "1";
 
@@ -157,7 +157,7 @@ globalThis.fetch = async (url) => {
   return { ok: true, status: 200, json: async () => body };
 };
 
-const { initDashboard } = await import("../frontend/src/modules/../dashboard.js");
+const { initDashboard } = await import("../../frontend/src/modules/../dashboard.js");
 initDashboard();
 await new Promise((r) => setTimeout(r, 2000));
 

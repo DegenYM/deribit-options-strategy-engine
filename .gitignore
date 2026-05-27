@@ -17,6 +17,7 @@ config/handoff/*
 .venv/
 .pip_packages/
 .pytest_cache/
+.coverage
 __pycache__/
 *.pyc
 .state/

@@ -1,10 +1,10 @@
 /**
  * Boot dashboard modules with mocked DOM/API and run renderDashboard once.
- * Usage: node scripts/test_dashboard_boot.mjs
+ * Usage: node scripts/dev/test_dashboard_boot.mjs
  */
-import { STATE } from "../frontend/src/shared/state.js";
-import { renderDashboard } from "../frontend/src/dashboard.js";
-import * as domain from "../frontend/src/modules/domain.js";
+import { STATE } from "../../frontend/src/shared/state.js";
+import { renderDashboard } from "../../frontend/src/dashboard.js";
+import * as domain from "../../frontend/src/modules/domain.js";
 
 const els = new Map();
 globalThis.window = globalThis;

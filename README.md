@@ -114,10 +114,10 @@ logs/live/<investor_id>/<slug>.log
 
 設定載入順序（低 → 高；**子帳 env 最後**，可覆蓋 shared 策略檔）：
 
-1. `config/shared/defaults.env`（可選）
-2. `config/investors/<id>/.env.investor`（可選）
-3. `config/shared/strategies/.env.<OPTION_STRATEGY>`（或相容的 legacy 路徑）
-4. `accounts/.env.<slug>`（策略子帳）
+1. `config/shared/defaults.env`（可選；`config/shared/.env.defaults` 為 legacy 別名，載入時會提示）
+2. `config/investors/<id>/.env.investor`（可選；`investor.env` 為 legacy 別名）
+3. `config/shared/strategies/.env.<OPTION_STRATEGY>`（或相容的 legacy 路徑，如 repo 根 `.env.<strategy>`）
+4. `accounts/.env.<slug>`（策略子帳；`accounts/<slug>.env` 為 legacy 別名）
 
 **Fee 專戶**（`accounts/.env.fee`）只載入 defaults + `.env.investor` + 自身 env，**不**合併策略 profile；亦**不在** `accounts.toml`，因此不會被 live 監督或 frontend 聚合。誤用 `./bot run --env-file .../.env.fee` 會被 CLI 拒絕。
 
@@ -291,18 +291,20 @@ POLL_SECONDS_NORMAL=15
 POLL_SECONDS_STRESS=5
 ORDER_LABEL_PREFIX=naked_short
 REQUEST_TIMEOUT_SECONDS=20
-STATE_FILE=.state/naked_short.json
+STATE_FILE=.state/investors/<investor_id>/naked.json
 ```
 
 策略專屬值請放在對應 profile 檔；切換策略時改 account env 的 `OPTION_STRATEGY`，並同步使用該策略自己的 `STATE_FILE`。
 
-建議的 state 分流：
+建議的 state 分流（多投資人 layout；`<slug>` 對應 `accounts.toml` 的 slug，如 `naked`、`covered_call`、`bull_put`）：
 
 ```text
-covered_call:     STATE_FILE=.state/covered_call.json      ORDER_LABEL_PREFIX=covered_call
-naked_short:      STATE_FILE=.state/naked_short.json       ORDER_LABEL_PREFIX=naked_short
-bull_put_spread:  STATE_FILE=.state/bull_put_spread.json   ORDER_LABEL_PREFIX=bull_put_spread
+covered_call:     STATE_FILE=.state/investors/<investor_id>/covered_call.json      ORDER_LABEL_PREFIX=covered_call
+naked_short:      STATE_FILE=.state/investors/<investor_id>/naked.json             ORDER_LABEL_PREFIX=naked_short
+bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json          ORDER_LABEL_PREFIX=bull_put_spread
 ```
+
+> **Legacy**：單一 `.env` 工作流曾用 `.state/<strategy>.json`（如 `.state/naked_short.json`）；新部署請勿使用，詳見 [`docs/repo-layout-zh-TW.md`](docs/repo-layout-zh-TW.md)。
 
 下列三組策略參數在 `config/shared/strategies/`（`.env.naked_short`、`.env.bull_put_spread`、`.env.covered_call`）。
 
@@ -537,6 +539,17 @@ python scripts/run_live_profiles.py \
 （也可用為除錯路徑單獨指定：`./bot --env-file ./.env scan --json`。）
 
 `scan --strategy` 可在不修改 `.env` 的情況下覆蓋本次掃描策略，並會套用同目錄對應的 `.env.<strategy>` profile。可用值為 `naked_short`、`bull_put_spread`、`covered_call`（舊名 `naked_short_put` / `naked_short_call` 仍會被接受並對應到 `naked_short`）。
+
+### 歷史回測（research only）
+
+使用 Deribit 公開行情做離線回測；報告預設寫入 `docs/backtest/`（不影響 live state）。
+
+```bash
+./bot --env-file config/investors/_example/accounts/.env.naked.example backtest \
+  --start 2024-01-01 --end today --json
+```
+
+更多報告範例見 [`docs/backtest/`](docs/backtest/)。
 
 ### `close-position`（子帳精準平倉）
 

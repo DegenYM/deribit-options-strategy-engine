@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const modulesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "frontend", "src", "modules");
+const modulesDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "frontend", "src", "modules");
 const files = ["domain.js", "charts.js", "render.js", "refresh.js"];
 const exportsByFile = {};
 for (const f of files) {

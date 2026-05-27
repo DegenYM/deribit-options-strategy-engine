@@ -18,12 +18,15 @@ npm run build    # tailwind.css + minified app.js (verify in browser before comm
 
 ```text
 src/
-  main.js              # entry
+  main.js              # entry (operator + investor bundle via __BUILD_INVESTOR__)
   dashboard.js         # init, controls, render orchestration
   modules/
     domain.js          # formatters, trade groups, fetch, PnL helpers
     render.js          # DOM render (topbar, cards, activity, stress)
+    sections.js        # dashboard section layout helpers
     charts.js          # Chart.js panels
+    chart-vendor.js    # Chart.js / luxon vendor bootstrap
+    date-time.js       # timezone / date formatting
     refresh.js         # data refresh + investor load UX
   shared/
     config.js          # constants, formatters, strategies
@@ -32,6 +35,8 @@ src/
   tailwind-input.css   # @tailwind source (→ ../tailwind.css)
 tailwind.config.js
 styles.css             # custom component CSS (non-Tailwind)
+app.js                 # operator bundle (npm run build)
+app-investor.js        # investor portal bundle
 ```
 
 ## E2E smoke tests (Playwright)

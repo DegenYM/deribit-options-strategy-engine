@@ -16,10 +16,38 @@ keep strategy-after-base precedence.
 from __future__ import annotations
 
 import tomllib
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
 from .exceptions import ConfigurationError
+
+_LEGACY_WARNED: set[str] = set()
+
+
+def _warn_legacy_path(key: str, message: str) -> None:
+    if key in _LEGACY_WARNED:
+        return
+    _LEGACY_WARNED.add(key)
+    warnings.warn(message, DeprecationWarning, stacklevel=3)
+
+
+def _is_canonical_strategy_profile(profile: Path, repo_root: Path) -> bool:
+    profile = profile.resolve()
+    strategies_dir = (Path(repo_root).resolve() / CONFIG_STRATEGIES).resolve()
+    if profile.parent != strategies_dir:
+        return False
+    return profile.name.startswith(".env.") and not profile.name.endswith(".example")
+
+
+def _warn_legacy_strategy_profile(profile: Path, repo_root: Path | None) -> None:
+    if repo_root is None or _is_canonical_strategy_profile(profile, repo_root):
+        return
+    _warn_legacy_path(
+        f"strategy_profile:{profile}",
+        f"Legacy strategy profile {profile} is deprecated; use config/shared/strategies/.env.<strategy> instead.",
+    )
+
 
 CONFIG_SHARED = Path("config/shared")
 CONFIG_STRATEGIES = CONFIG_SHARED / "strategies"
@@ -137,6 +165,10 @@ def resolve_account_env_path(investor_dir: Path, slug: str) -> Path:
     if preferred.is_file():
         return preferred
     if legacy.is_file():
+        _warn_legacy_path(
+            f"account_env:{legacy}",
+            f"Legacy account env {legacy.name!r} is deprecated; rename to {preferred.name!r}.",
+        )
         return legacy
     return preferred
 
@@ -148,6 +180,10 @@ def resolve_investor_env_path(investor_dir: Path) -> Path | None:
     if preferred.is_file():
         return preferred
     if legacy.is_file():
+        _warn_legacy_path(
+            f"investor_env:{legacy}",
+            f"Legacy investor env {legacy.name!r} is deprecated; rename to {preferred.name!r}.",
+        )
         return legacy
     return None
 
@@ -353,6 +389,11 @@ def _fee_account_layer_paths(account_env: Path) -> tuple[Path, ...]:
         for name in (".env.defaults", "defaults.env"):
             defaults = root / CONFIG_SHARED / name
             if defaults.is_file():
+                if name == ".env.defaults":
+                    _warn_legacy_path(
+                        "defaults:.env.defaults",
+                        "config/shared/.env.defaults is deprecated; rename to config/shared/defaults.env.",
+                    )
                 layers.append(defaults)
                 break
     investor_dir = investor_dir_for_account(account_env)
@@ -383,6 +424,11 @@ def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
         for name in (".env.defaults", "defaults.env"):
             defaults = root / CONFIG_SHARED / name
             if defaults.is_file():
+                if name == ".env.defaults":
+                    _warn_legacy_path(
+                        "defaults:.env.defaults",
+                        "config/shared/.env.defaults is deprecated; rename to config/shared/defaults.env.",
+                    )
                 layers.append(defaults)
                 break
     investor_dir = investor_dir_for_account(account_env)
@@ -394,6 +440,8 @@ def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
         (path for path in strategy_profile_search_paths(account_env, base_strategy, repo_root=root) if path.is_file()),
         None,
     )
+    if profile is not None:
+        _warn_legacy_strategy_profile(profile, root)
     sub_account_layout = investor_dir is not None
     if sub_account_layout:
         if profile is not None:
