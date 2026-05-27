@@ -50,10 +50,11 @@ def dashboard_client(tmp_path, monkeypatch) -> TestClient:
     return TestClient(app)
 
 
-def test_dashboard_index_loads(dashboard_client: TestClient) -> None:
+def test_dashboard_index_has_no_sync_luxon(dashboard_client: TestClient) -> None:
     response = dashboard_client.get("/")
     assert response.status_code == 200
     assert "Deribit Strategy Dashboard" in response.text
+    assert "luxon.min.js" not in response.text
     assert "app.js" in response.text
 
 

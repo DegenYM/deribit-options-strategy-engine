@@ -16,6 +16,12 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
+import {
+  daysUntilUtc,
+  formatDateLocal,
+  formatTimeLocal,
+  parseIsoUtcMs,
+} from "./date-time.js";
 export function num(value) {
   if (value === null || value === undefined || value === "") return null;
   const n = typeof value === "number" ? value : Number(value);
@@ -471,8 +477,8 @@ export function parseExpiryMsUtc(g) {
     }
   }
   if (g.expiry) {
-    const dt = luxon.DateTime.fromISO(String(g.expiry), { zone: "utc" });
-    if (dt.isValid) return dt.toMillis();
+    const ms = parseIsoUtcMs(String(g.expiry));
+    if (ms !== null) return ms;
   }
   return null;
 }
@@ -482,9 +488,7 @@ export function openRowDteDays(g) {
   if (fromApi !== null) return fromApi;
   const ms = parseExpiryMsUtc(g);
   if (ms === null) return null;
-  const exp = luxon.DateTime.fromMillis(ms, { zone: "utc" });
-  if (!exp.isValid) return null;
-  return exp.diff(luxon.DateTime.utc(), "days").days;
+  return daysUntilUtc(ms);
 }
 
 export function optionPutCallLabel(g) {
@@ -869,21 +873,11 @@ export function pnlClass(value) {
 }
 
 export function fmtTime(msOrIso) {
-  if (msOrIso === null || msOrIso === undefined) return "—";
-  let dt;
-  if (typeof msOrIso === "number") dt = luxon.DateTime.fromMillis(msOrIso, { zone: "utc" });
-  else dt = luxon.DateTime.fromISO(String(msOrIso), { zone: "utc" });
-  if (!dt.isValid) return "—";
-  return dt.toLocal().toFormat("yyyy-LL-dd HH:mm");
+  return formatTimeLocal(msOrIso);
 }
 
 export function fmtDate(msOrIso) {
-  if (msOrIso === null || msOrIso === undefined) return "—";
-  let dt;
-  if (typeof msOrIso === "number") dt = luxon.DateTime.fromMillis(msOrIso, { zone: "utc" });
-  else dt = luxon.DateTime.fromISO(String(msOrIso), { zone: "utc" });
-  if (!dt.isValid) return "—";
-  return dt.toLocal().toFormat("yyyy-LL-dd");
+  return formatDateLocal(msOrIso);
 }
 
 /** Report window: rolling close filter + fixed N-day APR denominator (see realized_summary). */
@@ -920,8 +914,8 @@ export function closedTimestampMs(g) {
   const ms = num(g.closed_timestamp_ms);
   if (ms !== null) return ms;
   if (g.closed_timestamp) {
-    const dt = luxon.DateTime.fromISO(String(g.closed_timestamp), { zone: "utc" });
-    if (dt.isValid) return dt.toMillis();
+    const ms = parseIsoUtcMs(String(g.closed_timestamp));
+    if (ms !== null) return ms;
   }
   return null;
 }
@@ -1335,8 +1329,8 @@ export function entryTimestampMs(g) {
   const ms = num(g?.entry_timestamp_ms);
   if (ms !== null) return ms;
   if (g?.entry_timestamp) {
-    const dt = luxon.DateTime.fromISO(String(g.entry_timestamp), { zone: "utc" });
-    if (dt.isValid) return dt.toMillis();
+    const ms = parseIsoUtcMs(String(g.entry_timestamp));
+    if (ms !== null) return ms;
   }
   return null;
 }

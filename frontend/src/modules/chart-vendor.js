@@ -1,4 +1,5 @@
 const CHART_SCRIPTS = [
+  "/vendor/luxon.min.js",
   "/vendor/chart.umd.min.js",
   "/vendor/chartjs-adapter-luxon.umd.min.js",
 ];
@@ -31,16 +32,16 @@ function loadScript(src) {
   });
 }
 
-/** Load Chart.js + luxon adapter on demand (luxon must already be on window). */
+/** Load luxon + Chart.js + adapter on demand when charts section opens. */
 export function loadChartJs() {
-  if (globalThis.Chart) return Promise.resolve();
+  if (globalThis.Chart && globalThis.luxon) return Promise.resolve();
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
     for (const src of CHART_SCRIPTS) {
       await loadScript(src);
     }
-    if (!globalThis.Chart) {
-      throw new Error("Chart.js failed to initialize");
+    if (!globalThis.Chart || !globalThis.luxon) {
+      throw new Error("Chart.js vendor failed to initialize");
     }
   })().catch((err) => {
     loadPromise = null;
