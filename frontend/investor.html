@@ -7,7 +7,7 @@
     <!-- <meta name="dashboard-api-base" content="https://your-dashboard.example.com" /> -->
     <title>Investor summary · Deribit options</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=perf-lazy-20260527" as="script" />
+    <link rel="preload" href="/app-investor.js?v=inv-reload-fix-20260527" as="script" />
     <link rel="stylesheet" href="/tailwind.css?v=20260526" />
     <link rel="stylesheet" href="/styles.css?v=inv-layout-6" />
     <script>
@@ -62,7 +62,7 @@
         </div>
         <div class="investor-header-actions ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-400">
           <span id="data-freshness-slot"></span>
-          <span id="last-refresh">Last refresh: —</span>
+          <span id="last-refresh">Last refresh (local time): —</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
             <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
             Auto refresh
@@ -107,7 +107,7 @@
         </div>
       </section>
 
-      <details class="section-card collapsible-section" open>
+      <details id="strategies-section" class="section-card collapsible-section" open>
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Strategies &amp; positions</p>
@@ -273,6 +273,6 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script defer src="/app-investor.js?v=perf-lazy-20260527"></script>
+    <script defer src="/app-investor.js?v=inv-reload-fix-20260527"></script>
   </body>
 </html>

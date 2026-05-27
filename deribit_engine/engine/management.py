@@ -223,7 +223,12 @@ class ManagementMixin:
             return self._load_runtime_from_exchange(self.fetch_exchange_prefetch())
         return self._load_runtime_from_exchange(None)
 
-    def _load_runtime_from_exchange(self, prefetch: ExchangePrefetch | None) -> RuntimeContext:
+    def _load_runtime_from_exchange(
+        self,
+        prefetch: ExchangePrefetch | None,
+        *,
+        dashboard_display: bool = False,
+    ) -> RuntimeContext:
         state = self.state_store.load()
         if prefetch is not None:
             summaries = prefetch.summaries
@@ -243,10 +248,11 @@ class ManagementMixin:
             markets_by_currency = {currency: [] for currency in self.config.managed_currencies}
         orderbook_cache: dict[str, OrderBookSnapshot] = {}
         state = self._reset_daily_state(state, summaries)
-        # Refresh external cash-flow (deposit / withdrawal / transfer) tallies
-        # from Deribit's transaction log so drawdown is measured against
-        # trading P&L only, not user-initiated balance changes.
-        self._refresh_cash_flows_by_book(state, orderbook_cache)
+        if not dashboard_display:
+            # Refresh external cash-flow (deposit / withdrawal / transfer) tallies
+            # from Deribit's transaction log so drawdown is measured against
+            # trading P&L only, not user-initiated balance changes.
+            self._refresh_cash_flows_by_book(state, orderbook_cache)
         state = self._reconcile_state(
             state,
             option_positions=option_positions,
@@ -256,11 +262,14 @@ class ManagementMixin:
         regime_by_currency: dict[str, RiskRegime] = {}
         regime_detail_by_currency: dict[str, tuple[str, ...]] = {}
         for currency in self.config.managed_currencies:
-            regime, detail = self._determine_regime_with_detail(
-                currency,
-                markets=markets_by_currency[currency],
-                orderbook_cache=orderbook_cache,
-            )
+            if dashboard_display:
+                regime, detail = self._determine_regime_for_dashboard(currency)
+            else:
+                regime, detail = self._determine_regime_with_detail(
+                    currency,
+                    markets=markets_by_currency[currency],
+                    orderbook_cache=orderbook_cache,
+                )
             regime_by_currency[currency] = regime
             regime_detail_by_currency[currency] = tuple(detail)
         self._update_recovery_counts(state, regime_by_currency)
@@ -1073,26 +1082,27 @@ class ManagementMixin:
             halt_entry_reasons_by_book={book: tuple(reasons) for book, reasons in halt_reasons_by_book.items()},
         )
 
-    def _determine_regime_with_detail(
+    def _determine_regime_for_dashboard(self, currency: str) -> tuple[RiskRegime, list[str]]:
+        """Dashboard-only regime: macro feeds + cache, no option-book liquidity scan."""
+        drawdown = self._index_drawdown_24h(currency)
+        dvol_ratio = self._dvol_ratio(currency)
+        return self._regime_from_macro_feeds(
+            currency,
+            drawdown=drawdown,
+            dvol_ratio=dvol_ratio,
+            unavailable_default=RiskRegime.NORMAL,
+            unavailable_note="dashboard:data_unavailable",
+        )
+
+    def _regime_from_macro_feeds(
         self,
         currency: str,
         *,
-        markets: list[OptionInstrument],
-        orderbook_cache: dict[str, OrderBookSnapshot],
+        drawdown: Decimal | None,
+        dvol_ratio: Decimal | None,
+        unavailable_default: RiskRegime,
+        unavailable_note: str,
     ) -> tuple[RiskRegime, list[str]]:
-        if not markets:
-            return RiskRegime.CRISIS, ["no_option_markets_loaded_for_currency"]
-        loader = lambda instrument_name: self._get_orderbook(instrument_name, orderbook_cache)
-        ok, liq_notes = self.strategy.core_regime_liquidity_detail(currency, markets, loader)
-        if not ok:
-            return RiskRegime.CRISIS, ["core_entry_liquidity_check_failed", *liq_notes]
-
-        drawdown = self._index_drawdown_24h(currency)
-        dvol_ratio = self._dvol_ratio(currency)
-
-        # If any of the macro feeds is unavailable, do NOT flip to crisis. Instead,
-        # fall back to the last cached regime (if any), otherwise hold at elevated
-        # so that new entries are halted but open positions are not force-derisked.
         if drawdown is None or dvol_ratio is None:
             missing = []
             if drawdown is None:
@@ -1103,10 +1113,10 @@ class ManagementMixin:
             if cached is not None:
                 cached_regime, _ = cached
                 return cached_regime, [
-                    f"data_unavailable({','.join(missing)}); using cached regime={cached_regime.value}",
+                    f"{unavailable_note}({','.join(missing)}); using cached regime={cached_regime.value}",
                 ]
-            return RiskRegime.ELEVATED, [
-                f"data_unavailable({','.join(missing)}); defaulting to elevated (halt new entries)",
+            return unavailable_default, [
+                f"{unavailable_note}({','.join(missing)}); defaulting to {unavailable_default.value}",
             ]
 
         if drawdown <= -self.config.index_drawdown_crisis_pct:
@@ -1134,6 +1144,30 @@ class ManagementMixin:
 
         self._last_regime_cache[currency] = (regime, utc_now_ms())
         return regime, detail
+
+    def _determine_regime_with_detail(
+        self,
+        currency: str,
+        *,
+        markets: list[OptionInstrument],
+        orderbook_cache: dict[str, OrderBookSnapshot],
+    ) -> tuple[RiskRegime, list[str]]:
+        if not markets:
+            return RiskRegime.CRISIS, ["no_option_markets_loaded_for_currency"]
+        loader = lambda instrument_name: self._get_orderbook(instrument_name, orderbook_cache)
+        ok, liq_notes = self.strategy.core_regime_liquidity_detail(currency, markets, loader)
+        if not ok:
+            return RiskRegime.CRISIS, ["core_entry_liquidity_check_failed", *liq_notes]
+
+        drawdown = self._index_drawdown_24h(currency)
+        dvol_ratio = self._dvol_ratio(currency)
+        return self._regime_from_macro_feeds(
+            currency,
+            drawdown=drawdown,
+            dvol_ratio=dvol_ratio,
+            unavailable_default=RiskRegime.ELEVATED,
+            unavailable_note="data_unavailable",
+        )
 
     def _determine_regime(
         self,

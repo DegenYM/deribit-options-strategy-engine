@@ -14,6 +14,7 @@ FEE_COMMANDS = frozenset(
         "fee-settle",
         "fee-settle-period",
         "fee-status",
+        "fee-balance",
         "fee-flow-report",
         "fee-report",
     }
@@ -119,6 +120,13 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     add_env_file_after_subcommand(fee_status_parser)
     fee_status_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    fee_balance_parser = subparsers.add_parser(
+        "fee-balance",
+        help="Show live wallet balance for the investor fee-collection sub-account",
+    )
+    add_env_file_after_subcommand(fee_balance_parser)
+    fee_balance_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     fee_flow_parser = subparsers.add_parser(
         "fee-flow-report",
@@ -281,6 +289,20 @@ def dispatch(args: argparse.Namespace) -> int | None:
         if repo_root is None:
             raise SystemExit("Cannot locate repository root")
         render({"action": "fee-status", **fee_status(args.investor, repo_root=repo_root)}, args.json)
+        return 0
+
+    if args.command == "fee-balance":
+        from ..fee_account import fetch_fee_account_balance
+
+        if not args.investor:
+            raise SystemExit("fee-balance requires --investor <ID>")
+        repo_root = find_repo_root(Path.cwd())
+        if repo_root is None:
+            raise SystemExit("Cannot locate repository root")
+        render(
+            {"action": "fee-balance", **fetch_fee_account_balance(args.investor, repo_root=repo_root)},
+            args.json,
+        )
         return 0
 
     if args.command == "fee-flow-report":

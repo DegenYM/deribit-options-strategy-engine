@@ -7,7 +7,7 @@ from deribit_engine import exchange_throttle
 
 def test_pace_exchange_request_spaces_calls(monkeypatch):
     monkeypatch.setenv("DERIBIT_MIN_REQUEST_INTERVAL_SEC", "0.05")
-    exchange_throttle._last_request_monotonic = 0.0
+    exchange_throttle._global_last_request_monotonic = 0.0
     sleeps: list[float] = []
     monotonic = iter([0.05, 0.06, 0.07, 0.08])
     monkeypatch.setattr(

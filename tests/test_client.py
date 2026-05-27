@@ -14,7 +14,7 @@ def _disable_exchange_throttle(monkeypatch):
 
     with _AUTH_CACHE_LOCK:
         _AUTH_TOKEN_CACHE.clear()
-    monkeypatch.setattr("deribit_engine.client.pace_exchange_request", lambda: None)
+    monkeypatch.setattr("deribit_engine.client.pace_exchange_request", lambda identity=None: None)
     monkeypatch.setenv("DERIBIT_MIN_REQUEST_INTERVAL_SEC", "0")
     yield
     with _AUTH_CACHE_LOCK:

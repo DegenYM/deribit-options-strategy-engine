@@ -295,7 +295,7 @@ class DeribitClient:
         *,
         headers: dict[str, str],
     ) -> requests.Response:
-        pace_exchange_request()
+        pace_exchange_request(self.config.client_id or None)
         return self.session.post(
             url,
             json=payload,

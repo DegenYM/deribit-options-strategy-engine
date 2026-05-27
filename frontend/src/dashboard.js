@@ -6,6 +6,14 @@ import * as charts from "./modules/charts.js";
 import * as render from "./modules/render.js";
 import * as refresh from "./modules/refresh.js";
 import { loadChartJs } from "./modules/chart-vendor.js";
+import { aggregateSkeletonHtml } from "./modules/domain.js";
+
+function ensureAggregateSkeleton() {
+  const root = document.getElementById("aggregate-card");
+  if (!root) return;
+  if (root.querySelector(".overview-metrics-grid, .inv-dashboard, .overview-metric-cell")) return;
+  root.innerHTML = aggregateSkeletonHtml();
+}
 
 export function renderDashboard() {
   domain.updateUnderlyingIndexCache(STATE.status, STATE.groups);
@@ -88,17 +96,22 @@ function attachControls() {
   });
 }
 
-function attachChartHoverPrefetch() {
-  const chartsSection = document.getElementById("charts-section");
-  const summary = chartsSection?.querySelector("summary");
+function attachSectionHoverPrefetch(id, onPrefetch) {
+  const summary = document.getElementById(id)?.querySelector("summary");
   if (!summary) return;
-  summary.addEventListener(
-    "mouseenter",
-    () => {
-      loadChartJs().catch(() => {});
-    },
-    { once: true }
-  );
+  summary.addEventListener("mouseenter", onPrefetch, { once: true });
+}
+
+function attachChartHoverPrefetch() {
+  attachSectionHoverPrefetch("charts-section", () => {
+    loadChartJs().catch(() => {});
+  });
+}
+
+function attachStressHoverPrefetch() {
+  attachSectionHoverPrefetch("stress-section", () => {
+    refresh.loadStressIfNeeded().catch(() => {});
+  });
 }
 
 function attachExpandableSections() {
@@ -117,18 +130,33 @@ function attachExpandableSections() {
         });
         return;
       }
+      if (details.id === "strategies-section") {
+        render.renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
+        return;
+      }
+      if (details.id === "account-section") {
+        render.renderAccountCards(STATE.health, STATE.status);
+        return;
+      }
+      if (details.id === "books-section") {
+        render.renderBookCards(STATE.status);
+        return;
+      }
       charts.scheduleChartResizeAll();
     });
   });
 }
 
 export function initDashboard() {
+  refresh.registerRenderDashboard(renderDashboard);
   const boot = () => {
+    ensureAggregateSkeleton();
     refresh.applyInvestorLoadCopy();
     charts.attachChartResizeObservers();
     attachControls();
     attachExpandableSections();
     attachChartHoverPrefetch();
+    attachStressHoverPrefetch();
     attachAutoRefresh();
     refresh.refreshAll({ force: true, renderDashboard });
   };

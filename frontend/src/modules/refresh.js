@@ -16,7 +16,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num, promisePool, realizedSummaryUrl, setInvestorProgressBar, setText, showToast, updateUnderlyingIndexCache } from "./domain.js";
+import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, updateUnderlyingIndexCache } from "./domain.js";
 import { loadChartJs } from "./chart-vendor.js";
 import { formatTimeHms } from "./date-time.js";
 import { aprSeriesUrl, renderAprChart, renderBookEquityChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
@@ -24,9 +24,16 @@ import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActiv
 
 /** Set for the duration of refreshAll; used by background status/bundle retries. */
 let activeRenderDashboard = null;
+/** Registered once at init; survives after refreshAll for late async updates. */
+let persistentRenderDashboard = null;
+
+export function registerRenderDashboard(fn) {
+  persistentRenderDashboard = fn;
+  STATE.dashboardRenderHook = () => invokeRenderDashboard();
+}
 
 function invokeRenderDashboard() {
-  activeRenderDashboard?.();
+  (activeRenderDashboard ?? persistentRenderDashboard)?.();
 }
 
 export function updateHeaderSpotDom() {
@@ -197,7 +204,7 @@ export async function tickHeaderSpot({ renderDependentViews = true, updateDom = 
     STATE.lastSpotUsd.ETH = num(d.ETH);
     if (updateDom) {
       updateHeaderSpotDom();
-      if (renderDependentViews) {
+      if (renderDependentViews && !STATE.refreshInFlight) {
         renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
         renderRecentActivity(STATE.status, STATE.report, STATE.groups);
       }
@@ -221,6 +228,11 @@ export async function fetchPortfolioSnapshot() {
   try {
     const d = await fetchJson("/api/portfolio/snapshot");
     STATE.portfolioSnapshot = d;
+    if (d?.realized_summary) {
+      STATE.report = d.realized_summary;
+      STATE.summaryLoadPending = false;
+      STATE.summaryLoadInFlight = false;
+    }
     if (d?.source === "ledger") {
       STATE.dataFreshness.source = "snapshot";
       STATE.dataFreshness.snapshotMs = num(d.freshness_ms);
@@ -228,6 +240,8 @@ export async function fetchPortfolioSnapshot() {
     }
   } catch (_) {
     /* snapshot is optional for first paint */
+  } finally {
+    invokeRenderDashboard();
   }
 }
 
@@ -409,8 +423,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
   const investorFirstLoad = INVESTOR && !STATE.investorReady;
   if (investorFirstLoad) {
     beginInvestorLoad({ blocking: true });
-  } else if (INVESTOR) {
-    setInvestorProgressBar(true, { indeterminate: true });
+  } else {
+    setRefreshProgressBar(true, { indeterminate: true });
+    setRefreshControlsDisabled(true);
   }
   try {
     let renderScheduled = false;
@@ -433,53 +448,140 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       return run().finally(() => advanceInvestorLoad(stepKey));
     }
 
-    try {
-      const spotPromise = investorFetch("spot", () =>
-        tickHeaderSpot({
-          renderDependentViews: !INVESTOR,
-          updateDom: true,
-        })
-      );
-      const healthPromise = investorFetch("health", () =>
-        fetchJson("/api/health").then((d) => {
-          STATE.health = d;
-        })
-      );
-      await Promise.all([spotPromise, healthPromise]);
-    } catch (err) {
-      showToast(`health failed: ${err.message}`);
-    }
-
-    const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
-    if (investorFirstLoad) {
-      STATE.investorLoadTotal = investorLoadStepCount(hasPrivateCreds, {
-        includeCharts: chartsSectionOpen(),
-      });
-    }
-
     let snapshotFetchedThisRefresh = false;
-
-    // Investor first paint: race snapshot vs overlay cap, then unlock the page.
-    if (INVESTOR && investorFirstLoad) {
-      try {
-        await Promise.race([
-          investorFetch("snapshot", fetchPortfolioSnapshot),
-          delay(INVESTOR_OVERLAY_MAX_MS),
-        ]);
-      } catch (_) {
-        /* snapshot optional; always dismiss blocking overlay */
-      }
-      snapshotFetchedThisRefresh = true;
-      setInvestorPageReady(true);
-      setInvestorProgressBar(true, { indeterminate: true });
-      scheduleRender();
-    }
+    let snapshotPromise = null;
+    let summaryLoadPromise = null;
 
     const investorFetchWrap = investorFirstLoad
       ? (stepKey, run) => investorFetch(stepKey, run)
       : null;
     const wrapStep = (stepKey, run) =>
       investorFetchWrap ? investorFetchWrap(stepKey, run) : run();
+
+    function maybeDismissInvestorOverlay() {
+      if (!investorFirstLoad) return;
+      const snap = STATE.portfolioSnapshot;
+      const hasPortfolio = snap?.source === "ledger" && snap?.portfolio;
+      const hasSummary = Boolean(STATE.report?.summary);
+      if (!hasPortfolio && !hasSummary) return;
+      if (!STATE.investorReady) {
+        setInvestorPageReady(true);
+        setRefreshProgressBar(true, { indeterminate: true });
+      }
+      scheduleRender();
+    }
+
+    function getSnapshotLoad() {
+      if (!snapshotPromise) {
+        const run = () =>
+          fetchPortfolioSnapshot().then(() => {
+            maybeDismissInvestorOverlay();
+            scheduleRender();
+          });
+        snapshotPromise = investorFirstLoad ? investorFetch("snapshot", run) : run();
+      }
+      return snapshotPromise;
+    }
+
+    function ensureSummaryLoad() {
+      if (!Boolean(STATE.health?.has_private_creds)) return Promise.resolve(false);
+      if (STATE.report?.summary) {
+        STATE.summaryLoadPending = false;
+        STATE.summaryLoadInFlight = false;
+        return Promise.resolve(true);
+      }
+      if (summaryLoadPromise) return summaryLoadPromise;
+      STATE.summaryLoadPending = true;
+      STATE.summaryLoadInFlight = true;
+      const load = () =>
+        fetchJson(realizedSummaryUrl(30))
+          .then((d) => {
+            STATE.report = d;
+            scheduleRender();
+            return true;
+          })
+          .catch((err) => {
+            showToast(`realized summary: ${err.message}`);
+            return false;
+          });
+      const tracked = wrapStep("summary", load);
+      summaryLoadPromise = tracked
+        .then((ok) => {
+          if (ok) maybeDismissInvestorOverlay();
+          return ok;
+        })
+        .finally(() => {
+          STATE.summaryLoadPending = false;
+          STATE.summaryLoadInFlight = false;
+          scheduleRender();
+        });
+      return summaryLoadPromise;
+    }
+
+    const healthCore = fetchJson("/api/health").then((d) => {
+      STATE.health = d;
+      if (investorFirstLoad) {
+        STATE.investorLoadTotal = investorLoadStepCount(Boolean(d?.has_private_creds), {
+          includeCharts: chartsSectionOpen(),
+        });
+      }
+      if (d?.has_private_creds) {
+        if (INVESTOR && investorFirstLoad) getSnapshotLoad();
+        ensureSummaryLoad()?.then(() => maybeDismissInvestorOverlay());
+      }
+      return d;
+    });
+
+    try {
+      await Promise.all([
+        investorFetch("health", () => healthCore),
+        investorFetch("spot", () =>
+          tickHeaderSpot({
+            renderDependentViews: false,
+            updateDom: true,
+          })
+        ),
+      ]);
+    } catch (err) {
+      showToast(`health failed: ${err.message}`);
+    }
+
+    const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
+
+    if (!INVESTOR && hasPrivateCreds) {
+      ensureSummaryLoad();
+    }
+
+    if (INVESTOR && investorFirstLoad) {
+      try {
+        await Promise.race([
+          Promise.all([
+            getSnapshotLoad(),
+            hasPrivateCreds ? ensureSummaryLoad() : Promise.resolve(),
+          ]),
+          delay(INVESTOR_OVERLAY_MAX_MS),
+        ]);
+      } catch (_) {
+        /* snapshot optional; always dismiss blocking overlay on timeout */
+      }
+      maybeDismissInvestorOverlay();
+      if (!STATE.investorReady) {
+        setInvestorPageReady(true);
+        setRefreshProgressBar(true, { indeterminate: true });
+        scheduleRender();
+      }
+      snapshotFetchedThisRefresh = true;
+    }
+
+    if (!INVESTOR && force && hasPrivateCreds && !snapshotFetchedThisRefresh) {
+      try {
+        await fetchPortfolioSnapshot();
+        scheduleRender();
+      } catch (_) {
+        /* snapshot optional; live bundle follows */
+      }
+      snapshotFetchedThisRefresh = true;
+    }
 
     function fetchGroups() {
       return fetchJson("/api/groups")
@@ -493,12 +595,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     }
 
     function fetchSummary() {
-      return fetchJson(realizedSummaryUrl(30))
-        .then((d) => {
-          STATE.report = d;
-          scheduleRender();
-        })
-        .catch((err) => showToast(`realized summary: ${err.message}`));
+      return ensureSummaryLoad();
     }
 
     function fetchStatusOp() {
@@ -525,10 +622,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       await wrapStep("groups", fetchGroups);
       if (INVESTOR) {
         await wrapStep("status", () => fetchStatusWithTimeout().then(() => scheduleRender()));
-        await wrapStep("summary", fetchSummary);
+        await ensureSummaryLoad();
       } else {
-        await fetchStatusOp();
-        await fetchSummary();
+        await Promise.all([fetchStatusOp(), ensureSummaryLoad()]);
       }
     }
 
@@ -545,6 +641,18 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         const useStagedBundle =
           hasPrivateCreds && ((INVESTOR && investorFirstLoad) || (!INVESTOR && force));
         if (useStagedBundle) {
+          if (INVESTOR && investorFirstLoad) {
+            fetchDashboardBundle({ sections: "status,groups", backgroundOnTimeout: true })
+              .then((liveOk) => {
+                if (liveOk) {
+                  advanceInvestorLoad("groups");
+                  advanceInvestorLoad("status");
+                }
+                invokeRenderDashboard();
+              })
+              .catch(() => {});
+            return;
+          }
           const liveOk = await fetchDashboardBundle({ sections: "status,groups" });
           if (liveOk) {
             if (investorFirstLoad) {
@@ -552,12 +660,6 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
               advanceInvestorLoad("status");
             }
             scheduleRender();
-            fetchDashboardBundle({ sections: "realized_summary" })
-              .then((summaryOk) => {
-                if (summaryOk && investorFirstLoad) advanceInvestorLoad("summary");
-                invokeRenderDashboard();
-              })
-              .catch(() => {});
             return;
           }
         }
@@ -566,7 +668,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
           if (investorFirstLoad) {
             advanceInvestorLoad("groups");
             advanceInvestorLoad("status");
-            advanceInvestorLoad("summary");
+            if (STATE.report?.summary) advanceInvestorLoad("summary");
           }
           scheduleRender();
           return;
@@ -583,7 +685,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     }
 
     if (INVESTOR && !snapshotFetchedThisRefresh) {
-      wave.push(() => wrapStep("snapshot", fetchPortfolioSnapshot));
+      wave.push(() =>
+        wrapStep("snapshot", () => fetchPortfolioSnapshot().then(() => scheduleRender()))
+      );
     }
 
     const chartsNeeded = chartsSectionOpen();
@@ -606,14 +710,16 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       scheduleRender();
     }
 
-    setInvestorProgressBar(false);
+    setRefreshProgressBar(false);
+    setRefreshControlsDisabled(false);
     setText(
       "last-refresh",
-      `${i18n("last refresh:", "上次更新：")} ${formatTimeHms()}`
+      `${i18n("last refresh (local time):", "上次更新（本地時間）：")} ${formatTimeHms()}`
     );
   } finally {
     STATE.refreshInFlight = false;
-    setInvestorProgressBar(false);
+    setRefreshProgressBar(false);
+    setRefreshControlsDisabled(false);
     activeRenderDashboard = null;
   }
 }

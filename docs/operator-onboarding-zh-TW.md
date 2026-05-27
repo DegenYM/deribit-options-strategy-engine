@@ -33,12 +33,22 @@ cp config/platform/registry.toml.example config/platform/registry.toml
 | Deribit 子帳名稱 | 建議 `fee` |
 | 本機 env | `accounts/.env.fee`（`ACCOUNT_ROLE=fee`） |
 | 是否在 `accounts.toml` | **否** — 不參與策略 live / frontend 聚合 |
-| API 權限 | Account=read、Wallet=read_write、**Trade=none** |
+| API 權限 | Account=read、**Wallet=none**、**Trade=none** |
 | 憑證匯入 | `handoff.toml` 的 `[fee]` 區塊（見下節） |
-| 用途 | 投資人季結算後將帳單 USDC 劃轉至此；管理方收取管理費／績效費 |
+| 用途 | 季結算後管理方將應付費用對應的 USDC/USDT 劃轉至 Fee 專戶供對帳；投資人確認後自**主帳**提至管理方指定地址 |
 | 禁止 | `./bot run --env-file .../.env.fee`（CLI 會拒絕） |
 
+**策略子帳 API**（`accounts.toml` 內各策略）：Account=read、Trade=read_write、**Wallet=read_write**（季末 API 劃轉 USDC/USDT 至 Fee 專戶）。
+
 `investor init` 會自動建立空白 `.env.fee`；`import-handoff` 寫入 `[fee].client_id/secret`。
+
+### 季結算收取流程（管理方）
+
+1. 出具帳單（`fee-settle` / 報表 PDF）。  
+2. 若有獲利現貨需兌付：在策略子帳將對應部分 **TRADE 成 USDC 或 USDT**（策略 API：`trade:read_write`）。  
+3. 以**策略子帳** API（`wallet:read_write`）**Internal transfer** 至該投資人的 `fee` 子帳（可用 `./bot --investor <id> fee-balance` 查 Fee 專戶餘額）。  
+4. 與投資人對帳，確認 Fee 專戶餘額與帳單一致。  
+5. 投資人確認後，自**主帳** **Withdraw** 至你指定的鏈上地址（幣別、鏈、金額以帳單為準）。
 
 ## 2. 投資人交接
 

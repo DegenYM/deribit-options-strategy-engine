@@ -62,5 +62,5 @@ def _status_payload_for_account(
     else:
         prefetch = _exchange_prefetch_for_account(account, cache=exchange_prefetch_cache)
     if prefetch is not None:
-        return bot.status_with_exchange_prefetch(prefetch)
+        return bot.status_with_exchange_prefetch(prefetch, dashboard_display=True)
     return bot.status()

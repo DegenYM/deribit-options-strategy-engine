@@ -99,6 +99,7 @@ def apply_investor_cli_args(args: argparse.Namespace) -> None:
             "fee-settle",
             "fee-settle-period",
             "fee-status",
+            "fee-balance",
             "fee-flow-report",
             "fee-report",
         }:

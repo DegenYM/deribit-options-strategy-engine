@@ -18,6 +18,7 @@ import {
 import { STATE } from "../shared/state.js";
 import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { bookEquityNativeByBook, sumLifetimeRealizedPnlNativeByBook, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook } from "./charts.js";
+import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
   if (!INVESTOR || !health) return;
   const name = String(health.investor_display_name || health.investor_id || "").trim();
@@ -249,6 +250,7 @@ export function bookCardHtml(book, status) {
 export function renderBookCards(status) {
   const root = document.getElementById("book-cards");
   if (!root) return;
+  if (!document.getElementById("books-section")?.open) return;
   if (!status) {
     root.innerHTML = `
       <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 text-slate-400 text-sm md:col-span-3">
@@ -270,6 +272,7 @@ export function renderBookCards(status) {
 export function renderAccountCards(health, status) {
   const root = document.getElementById("account-cards");
   if (!root) return;
+  if (!document.getElementById("account-section")?.open) return;
   const configured = health?.accounts || status?.dashboard_accounts || [];
   const byName = new Map((status?.account_statuses || []).map((row) => [String(row.name || ""), row]));
   const accounts = configured.length ? configured : (status?.account_statuses || []);
@@ -342,7 +345,7 @@ export function renderAggregate(status, report) {
   const summary = report?.summary;
 
   if (!portfolio && !summary) {
-    if (INVESTOR && !STATE.investorReady) {
+    if (INVESTOR && (STATE.refreshInFlight || !STATE.investorReady)) {
       root.innerHTML = aggregateSkeletonHtml();
     } else {
       root.innerHTML = `<p class="text-sm text-slate-400">${i18n(
@@ -372,15 +375,14 @@ export function renderAggregate(status, report) {
   const windowDays = num(summary?.window_days_used);
   const windowPnl = num(summary?.window_realized_pnl_usdc);
   const windowApr = num(summary?.window_realized_apr);
-  const lifetimeStartMs = lifetimePerformanceStartMs(report, STATE.groups);
-  const lifetimeNativeByBook = sumLifetimeRealizedPnlNativeByBook(report, STATE.groups, status);
+  const lifetimeStartMs = summary ? lifetimePerformanceStartMs(report, STATE.groups) : null;
+  const lifetimeNativeByBook = summary
+    ? sumLifetimeRealizedPnlNativeByBook(report, STATE.groups, status)
+    : null;
   const windowLabelDays = windowDays ?? 30;
-  const windowNativeByBook = sumWindowRealizedPnlNativeByBook(
-    report,
-    STATE.groups,
-    status,
-    windowLabelDays
-  );
+  const windowNativeByBook = summary
+    ? sumWindowRealizedPnlNativeByBook(report, STATE.groups, status, windowLabelDays)
+    : null;
   const equityNativeByBook = bookEquityNativeByBook(status);
   const equityUsdByBook = bookEquityUsdByBook(status);
   const sinceLine =
@@ -388,13 +390,24 @@ export function renderAggregate(status, report) {
       ? `${i18n("since", "自")} ${fmtDate(lifetimeStartMs)}`
       : i18n("no realized history yet", "尚無已實現紀錄");
   const freshnessNote =
-    source === "snapshot" && INVESTOR
+    source === "snapshot"
       ? `<p class="text-xs text-amber-200/80 mt-3">${i18n(
-          "Equity from last snapshot; live sync continues in background.",
-          "權益來自最近快照；即時同步於背景進行中。"
+          INVESTOR
+            ? "Equity from last snapshot; live sync continues in background."
+            : "Equity from last snapshot; live Deribit sync in progress.",
+          INVESTOR
+            ? "權益來自最近快照；即時同步於背景進行中。"
+            : "權益來自最近快照；Deribit 即時同步進行中。"
         )}</p>`
       : source === "live" && INVESTOR
       ? `<p class="text-xs text-emerald-200/70 mt-3">${i18n("Live Deribit sync", "已同步 Deribit 即時資料")}</p>`
+      : source === "live" && STATE.summaryLoadPending
+      ? `<p class="text-xs text-amber-200/80 mt-3">${i18n(
+          "Performance summary still syncing…",
+          "績效摘要背景同步中…"
+        )}</p>`
+      : source === "live" && !INVESTOR && STATE.refreshInFlight
+      ? `<p class="text-xs text-slate-500 mt-3">${i18n("Refreshing…", "更新中…")}</p>`
       : "";
 
   const overviewCtx = {
@@ -900,30 +913,51 @@ export function strategyOpenGroupHtml(id, rows, status, groups) {
     </div>`;
 }
 
+function countActiveStrategyIds(openRows, report, groups) {
+  const ids = new Set();
+  for (const g of openRows) {
+    const id = strategyId(g);
+    if (STRATEGY_BY_ID[id]) ids.add(id);
+  }
+  const noteClosed = (g) => {
+    const id = strategyId(g);
+    if (STRATEGY_BY_ID[id]) ids.add(id);
+  };
+  for (const g of groups?.closed || []) noteClosed(g);
+  for (const g of report?.recent_closed_trades || []) noteClosed(g);
+  return ids.size;
+}
+
+export function updateStrategyMeta(status, report, groups, { openRows = null } = {}) {
+  const meta = document.getElementById("strategy-meta");
+  if (!meta) return;
+  const rows = openRows ?? currentOpenRows(status, groups);
+  const totalOpen = rows.length;
+  const summaryClosed = num(report?.summary?.realized_closed_group_count);
+  const totalClosed =
+    summaryClosed !== null ? summaryClosed : closedRowsForStrategyStats(report, groups).length;
+  const activeStrategies = countActiveStrategyIds(rows, report, groups);
+  meta.textContent = INVESTOR
+    ? i18n(
+        `${totalOpen} open · ${totalClosed} closed · ${activeStrategies || 0} active strategy groups`,
+        `${totalOpen} 筆持倉 · ${totalClosed} 筆已平 · ${activeStrategies || 0} 類策略`
+      )
+    : `${totalOpen} open · ${totalClosed} closed · ${activeStrategies || 0} active strategy groups`;
+}
+
 export function renderStrategyGroups(status, report, groups) {
+  const openRows = currentOpenRows(status, groups);
+  updateStrategyMeta(status, report, groups, { openRows });
+  if (!strategiesSectionOpen()) return;
+
   const cardsRoot = document.getElementById("strategy-cards");
   const openRoot = document.getElementById("strategy-open-groups");
   if (!cardsRoot && !openRoot) return;
 
   const summaries = buildStrategySummaries(status, report, groups);
-  const openRows = currentOpenRows(status, groups);
-  const totalOpen = openRows.length;
-  const totalClosed = closedRowsForStrategyStats(report, groups).length;
-  const activeStrategies = summaries.filter((s) => s.openCount || s.closedCount).length;
-  setText(
-    "strategy-meta",
-    INVESTOR
-      ? i18n(
-          `${totalOpen} open · ${totalClosed} closed · ${activeStrategies || 0} active strategy groups`,
-          `${totalOpen} 筆持倉 · ${totalClosed} 筆已平 · ${activeStrategies || 0} 類策略`
-        )
-      : `${totalOpen} open · ${totalClosed} closed · ${activeStrategies || 0} active strategy groups`
-  );
-
   if (cardsRoot) {
     cardsRoot.innerHTML = summaries.map(strategySummaryCardHtml).join("");
   }
-
   if (!openRoot) return;
   if (!openRows.length) {
     openRoot.innerHTML = `

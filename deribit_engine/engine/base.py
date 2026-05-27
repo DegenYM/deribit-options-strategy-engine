@@ -529,8 +529,13 @@ class EngineBase:
         self.state_store.save(context.state)
         return self._status_payload(context)
 
-    def status_with_exchange_prefetch(self, prefetch: ExchangePrefetch) -> dict[str, Any]:
-        context = self._load_runtime_from_exchange(prefetch)
+    def status_with_exchange_prefetch(
+        self,
+        prefetch: ExchangePrefetch,
+        *,
+        dashboard_display: bool = False,
+    ) -> dict[str, Any]:
+        context = self._load_runtime_from_exchange(prefetch, dashboard_display=dashboard_display)
         self.state_store.save(context.state)
         return self._status_payload(context)
 

@@ -788,7 +788,7 @@ def _write_fee_env(accounts_dir: Path, *, investor_id: str, deribit_env: str) ->
         [
             "# Operator fee-collection sub-account (Deribit sub-account name: fee).",
             "# Not listed in accounts.toml — excluded from live supervisor and frontend aggregation.",
-            "# API: Account=read, Wallet=read_write, Trade=none. Investor transfers USDC here after billing.",
+            "# API: Account=read, Wallet=none, Trade=none. Read-only reconciliation sub-account.",
             "# Do NOT: ./bot run --env-file .../.env.fee",
             "ACCOUNT_ROLE=fee",
             f"DERIBIT_ENV={deribit_env}",

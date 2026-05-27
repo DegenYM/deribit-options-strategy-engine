@@ -149,7 +149,7 @@ cp -R config/investors/_example config/investors/youming
 
 ### 績效費 NAV 快照（Performance fee）
 
-計費口徑見 [`docs/investor-fee-disclosure-zh-TW.md`](docs/investor-fee-disclosure-zh-TW.md)：`NAV_perf`（扣備兌現貨）、`AUM_mgmt`（含現貨）、HWM、10% 績效費。收取方式：投資人季末將帳單金額劃轉至獨立 **Fee 子帳**，管理方以該專戶 API（Wallet 讀寫）收取；策略子帳 API 不開 Wallet（見 [`docs/investor-onboarding-zh-TW.md`](docs/investor-onboarding-zh-TW.md) 第六節）。
+計費口徑見 [`docs/investor-fee-disclosure-zh-TW.md`](docs/investor-fee-disclosure-zh-TW.md)：`NAV_perf`（扣備兌現貨）、`AUM_mgmt`（含現貨）、HWM、10% 績效費。收取方式：季末管理方以策略子帳 API（`wallet:read_write`）將 USDC/USDT 劃至 **Fee 子帳**供對帳，投資人確認後自**主帳**提至管理方指定地址（見 [`docs/investor-onboarding-zh-TW.md`](docs/investor-onboarding-zh-TW.md) 第五、六節）。
 
 1. 在 `config/investors/<id>/.env.investor` 設定備兌現貨數量與費率（範本：[`config/investors/_example/.env.investor.example`](config/investors/_example/.env.investor.example)）。
 2. **首次** `./bot --investor <id> fee-snapshot` 會從 **accounts.toml 內所有已設 API 的子帳**加總 `deposit` + `withdrawal` + `transfer`（BTC/ETH/USDC 各帳本，再換算 USDC）。**子帳互轉**在加總時會互相抵銷；**主帳入金再轉入子帳**時，即使沒有主帳 API，也會算在子帳的 inbound `transfer` 上。若首次結果有誤可 `./bot --investor <id> fee-flow-report` 核對，再以 `--force-bootstrap` 重跑。
@@ -164,6 +164,7 @@ cp -R config/investors/_example config/investors/youming
 ```bash
 ./bot --investor an fee-snapshot          # 立即快照
 ./bot --investor an fee-status            # 查看 HWM / 最近快照 / 歷史結算
+./bot --investor an fee-balance           # 查看 Fee 專戶即時餘額
 ./bot --investor an fee-settle --period 2026-Q1 --net-flow-usdc 0
 
 # 自訂區間結算 + 報表（PDF/MD/CSV）；淨申赎預設自 Deribit 流水計算

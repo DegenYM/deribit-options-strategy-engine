@@ -275,7 +275,9 @@ def create_app(
         }
 
     @app.get("/api/portfolio/snapshot")
-    def api_portfolio_snapshot() -> Any:
+    def api_portfolio_snapshot(
+        days: int = Query(default=30, ge=0, le=3650),
+    ) -> Any:
         """Last on-disk equity snapshot (no Deribit); for fast investor first paint."""
         import deribit_engine.frontend_server as pkg
 
@@ -288,6 +290,33 @@ def create_app(
             payload = {"source": "none"}
         if payload.get("source") == "none":
             return JSONResponse(_decimalize(payload), status_code=200)
+        try:
+            status_payload = status_cache.try_get("status")
+            override = None
+            capital = _resolve_apr_effective_capital_usdc(
+                accounts,
+                override=override,
+                status_payload=status_payload,
+            )
+            cache_key = (
+                "realized_summary",
+                days,
+                str(capital),
+                _ledger_equity_cache_key(accounts),
+                _closed_groups_cache_key(accounts),
+            )
+            summary = series_cache.try_get(cache_key)
+            if summary is None:
+                summary = pkg._aggregate_realized_summary(
+                    accounts,
+                    days=days,
+                    status_payload=status_payload,
+                    effective_capital_override=override,
+                )
+                series_cache.seed(cache_key, summary)
+            payload["realized_summary"] = copy.deepcopy(summary)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("snapshot realized_summary attach skipped: %s", exc)
         return JSONResponse(_decimalize(payload))
 
     def _locked_aggregate_status() -> dict[str, Any]:
@@ -318,19 +347,17 @@ def create_app(
 
         with _heavy_portfolio_lock:
             status: dict[str, Any] | None = None
-            if need_status or need_summary:
+            if need_status:
                 status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
-                if need_status:
-                    payload["status"] = status
+                payload["status"] = status
             if need_groups:
                 payload["groups"] = pkg._aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
             if need_summary:
-                if status is None:
-                    status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+                status_for_summary = status if status is not None else status_cache.try_get("status")
                 payload["realized_summary"] = pkg._aggregate_realized_summary(
                     accounts,
                     days=days,
-                    status_payload=status,
+                    status_payload=status_for_summary,
                     effective_capital_override=override,
                 )
         return payload

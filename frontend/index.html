@@ -47,7 +47,8 @@
           class="text-xs font-mono text-emerald-200/90 tabular-nums"
         >ETH —</span>
         <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
-          <span id="last-refresh">last refresh: —</span>
+          <span id="data-freshness-slot"></span>
+          <span id="last-refresh">last refresh (local time): —</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
             <input
               id="auto-refresh"
@@ -67,6 +68,15 @@
       </div>
     </header>
 
+    <div
+      id="dashboard-progress-bar"
+      class="investor-progress-bar hidden"
+      role="progressbar"
+      aria-hidden="true"
+    >
+      <div class="investor-progress-bar-fill"></div>
+    </div>
+
     <main class="dashboard-shell dashboard-main">
       <section class="section-card priority-section">
         <div class="section-heading">
@@ -79,11 +89,20 @@
           </p>
         </div>
         <div id="aggregate-card" class="overview-panel">
-          <!-- populated by app.js -->
+          <div class="overview-metrics-grid">
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+            <div class="skeleton-block h-16 rounded-lg"></div>
+          </div>
         </div>
       </section>
 
-      <details class="section-card collapsible-section">
+      <details id="account-section" class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Account layer</p>
@@ -101,7 +120,7 @@
         </div>
       </details>
 
-      <details class="section-card collapsible-section">
+      <details id="books-section" class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Collateral view</p>
@@ -119,7 +138,7 @@
         </div>
       </details>
 
-      <details class="section-card collapsible-section" open>
+      <details id="strategies-section" class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Live risk board</p>

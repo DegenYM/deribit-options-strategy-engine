@@ -40,16 +40,38 @@ export function fmtPct(value, decimals = 2) {
   return decimals === 1 ? fmt.pct1.format(n) : fmt.pct2.format(n);
 }
 
+function portfolioHasEquity(portfolio) {
+  return num(portfolio?.total_equity_usdc) !== null;
+}
+
 export function resolvedPortfolio() {
-  if (STATE.status?.portfolio) {
+  const live = STATE.status?.portfolio;
+  const snap = STATE.portfolioSnapshot?.portfolio;
+  const snapUsable = snap && Object.keys(snap).length > 0;
+  const liveUsable = live && Object.keys(live).length > 0;
+
+  if (liveUsable && portfolioHasEquity(live)) {
     return {
-      portfolio: STATE.status.portfolio,
+      portfolio: live,
       source: "live",
       freshnessMs: STATE.dataFreshness.statusMs ?? 0,
     };
   }
-  const snap = STATE.portfolioSnapshot?.portfolio;
-  if (snap && Object.keys(snap).length > 0) {
+  if (snapUsable && portfolioHasEquity(snap)) {
+    return {
+      portfolio: snap,
+      source: "snapshot",
+      freshnessMs: num(STATE.portfolioSnapshot?.freshness_ms),
+    };
+  }
+  if (liveUsable) {
+    return {
+      portfolio: live,
+      source: "live",
+      freshnessMs: STATE.dataFreshness.statusMs ?? 0,
+    };
+  }
+  if (snapUsable) {
     return {
       portfolio: snap,
       source: "snapshot",
@@ -82,21 +104,37 @@ export function dataFreshnessBadgeHtml() {
         : i18n("Snapshot", "快照");
     return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-200">${label}</span>`;
   }
-  return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-800/60 text-slate-400">${i18n("Loading…", "載入中…")}</span>`;
+  if (STATE.summaryLoadPending) {
+    return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-200">${i18n("Syncing summary…", "摘要同步中…")}</span>`;
+  }
+  if (STATE.refreshInFlight) {
+    return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-800/60 text-slate-400">${i18n("Loading…", "載入中…")}</span>`;
+  }
+  return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-800/60 text-slate-400">${i18n("—", "—")}</span>`;
 }
 
 export function renderDataFreshnessBadge() {
-  if (!INVESTOR) return;
   const host = document.getElementById("data-freshness-slot");
   if (!host) return;
   host.innerHTML = dataFreshnessBadgeHtml();
 }
 
-export function setInvestorProgressBar(active, { indeterminate = false } = {}) {
-  const bar = document.getElementById("investor-progress-bar");
-  if (!bar) return;
-  bar.classList.toggle("hidden", !active);
-  bar.classList.toggle("investor-progress-bar--indeterminate", active && indeterminate);
+export function setRefreshProgressBar(active, { indeterminate = false } = {}) {
+  for (const id of ["investor-progress-bar", "dashboard-progress-bar"]) {
+    const bar = document.getElementById(id);
+    if (!bar) continue;
+    bar.classList.toggle("hidden", !active);
+    bar.classList.toggle("investor-progress-bar--indeterminate", active && indeterminate);
+  }
+}
+
+export function setInvestorProgressBar(active, options = {}) {
+  setRefreshProgressBar(active, options);
+}
+
+export function setRefreshControlsDisabled(disabled) {
+  const refreshBtn = document.getElementById("refresh-now");
+  if (refreshBtn) refreshBtn.disabled = disabled;
 }
 
 export function aggregateSkeletonHtml() {
@@ -381,24 +419,42 @@ export function openRowLegGroupSignedSize(g, role) {
 }
 
 /** Open groups on the same account sharing one exchange instrument (aggregated position). */
-export function countOpenGroupsSharingLeg(status, groups, g, role) {
-  const instrument = openRowLegInstrumentName(g, role);
-  if (!instrument) return 0;
-  const account = String(g?.account_name || "");
+let _sharedLegCounts = null;
+let _sharedLegCountsStatus = null;
+let _sharedLegCountsGroups = null;
+
+function sharedLegCounts(status, groups) {
+  if (_sharedLegCounts && _sharedLegCountsStatus === status && _sharedLegCountsGroups === groups) {
+    return _sharedLegCounts;
+  }
+  const counts = new Map();
   const seen = new Set();
-  let count = 0;
   for (const src of [status?.trade_groups || [], groups?.open || []]) {
     for (const row of src) {
       if (!isOpenTradeGroup(row)) continue;
       const key = tradeGroupKey(row);
       if (seen.has(key)) continue;
       seen.add(key);
-      if (openRowLegInstrumentName(row, role) !== instrument) continue;
-      if (account && String(row?.account_name || "") !== account) continue;
-      count++;
+      const account = String(row?.account_name || "");
+      for (const legRole of ["short", "long"]) {
+        const instrument = openRowLegInstrumentName(row, legRole);
+        if (!instrument) continue;
+        const mapKey = `${account}|${legRole}|${instrument}`;
+        counts.set(mapKey, (counts.get(mapKey) || 0) + 1);
+      }
     }
   }
-  return count;
+  _sharedLegCounts = counts;
+  _sharedLegCountsStatus = status;
+  _sharedLegCountsGroups = groups;
+  return counts;
+}
+
+export function countOpenGroupsSharingLeg(status, groups, g, role) {
+  const instrument = openRowLegInstrumentName(g, role);
+  if (!instrument) return 0;
+  const account = String(g?.account_name || "");
+  return sharedLegCounts(status, groups).get(`${account}|${role}|${instrument}`) || 0;
 }
 
 export function openRowLegPosition(status, g, role) {
@@ -1016,15 +1072,26 @@ export function dashboardBundleUrl(days = 30, { sections = null } = {}) {
 }
 
 export function applyDashboardBundlePayload(d) {
-  if (d?.groups) STATE.groups = d.groups;
+  let changed = false;
+  if (d?.groups) {
+    STATE.groups = d.groups;
+    changed = true;
+  }
   if (d?.status) {
     STATE.status = d.status;
     STATE.statusErrorOnce = false;
     STATE.dataFreshness.source = "live";
     STATE.dataFreshness.live = true;
     STATE.dataFreshness.statusMs = 0;
+    changed = true;
   }
-  if (d?.realized_summary) STATE.report = d.realized_summary;
+  if (d?.realized_summary) {
+    STATE.report = d.realized_summary;
+    STATE.summaryLoadPending = false;
+    STATE.summaryLoadInFlight = false;
+    changed = true;
+  }
+  if (changed) STATE.dashboardRenderHook?.();
 }
 
 /** Earliest entry among realized closed groups (lifetime APR sample start). */

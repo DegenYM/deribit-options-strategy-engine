@@ -5,7 +5,7 @@ function pad2(n) {
 }
 
 export function formatTimeHms(date = new Date()) {
-  return `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}:${pad2(date.getUTCSeconds())}`;
+  return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
 }
 
 export function parseIsoUtcMs(value) {

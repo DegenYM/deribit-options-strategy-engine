@@ -17,6 +17,8 @@ export const STATE = {
   charts: {},
   autoRefreshHandle: null,
   refreshInFlight: false,
+  summaryLoadPending: false,
+  summaryLoadInFlight: false,
   investorReady: false,
   investorLoadTotal: 0,
   investorLoadDone: 0,
@@ -26,4 +28,6 @@ export const STATE = {
   lastSpotUsd: { BTC: null, ETH: null },
   activityOpenPage: 1,
   activityClosedPage: 1,
+  /** Set by refresh.registerRenderDashboard for late async API completions. */
+  dashboardRenderHook: null,
 };

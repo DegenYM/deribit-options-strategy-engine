@@ -417,7 +417,7 @@ def test_aggregate_status_prefetch_once_per_api_identity(tmp_path, monkeypatch):
             prefetch_calls += 1
             return prefetch
 
-        def status_with_exchange_prefetch(self, _prefetch: ExchangePrefetch) -> dict:
+        def status_with_exchange_prefetch(self, _prefetch: ExchangePrefetch, **_kwargs) -> dict:
             return {
                 "env": "testnet",
                 "portfolio": {"total_equity_usdc": Decimal("1000"), "equity_by_book": {"USDC": Decimal("1000")}},
@@ -888,7 +888,7 @@ def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
         def fetch_exchange_prefetch(self) -> ExchangePrefetch:
             return prefetch
 
-        def status_with_exchange_prefetch(self, _prefetch: ExchangePrefetch) -> dict:
+        def status_with_exchange_prefetch(self, _prefetch: ExchangePrefetch, **_kwargs) -> dict:
             nonlocal in_flight, max_in_flight
             with lock:
                 in_flight += 1
