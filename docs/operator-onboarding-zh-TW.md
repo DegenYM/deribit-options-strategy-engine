@@ -50,6 +50,31 @@ cp config/platform/registry.toml.example config/platform/registry.toml
 4. 與投資人對帳，確認 Fee 專戶餘額與帳單一致。  
 5. 投資人確認後，自**主帳** **Withdraw** 至你指定的鏈上地址（幣別、鏈、金額以帳單為準）。
 
+**CLI 範例**（預設 dry-run；加 `--live` 才送單／劃轉）：
+
+```bash
+# 1) 賣現貨兌 USDC（covered_call 子帳最常見）
+./bot --investor youming --account covered_call trade-spot \
+  --from-currency BTC --amount 0.05 --to USDC --json
+./bot --investor youming --account covered_call trade-spot \
+  --from-currency BTC --amount 0.05 --to USDC --live --json
+
+# 賣出全部可用 BTC（對齊交易所最小單位）
+./bot --investor youming --account covered_call trade-spot \
+  --from-currency BTC --all --to USDC --live --json
+
+# 2) 劃轉 USDC 至 fee_acc（需 --investor 以解析 Fee 子帳 id）
+./bot --investor youming --account covered_call internal-transfer \
+  --currency USDC --amount 500 --json
+./bot --investor youming --account naked internal-transfer \
+  --currency USDC --amount 1500 --live --json
+
+# 若自動解析失敗，在 .env.investor 設 FEE_SUBACCOUNT_ID=<Deribit id>
+# 或 ./bot ... internal-transfer --destination-id <id> ...
+```
+
+Fee 子帳 id 解析順序：`--destination-id` → `.env.investor` 的 `FEE_SUBACCOUNT_ID` → `private/get_subaccounts` 比對 `FEE_SUBACCOUNT_NAME`（預設 `fee_acc`）。
+
 ## 2. 投資人交接
 
 複製 [`config/handoff/handoff.template.toml`](../config/handoff/handoff.template.toml) 給投資人填寫（經安全管道交回，勿用聊天明文 Secret）。

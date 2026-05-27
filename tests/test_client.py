@@ -564,3 +564,48 @@ def test_get_instruments_uses_process_cache(tmp_path, monkeypatch):
     assert second == rows
     instrument_calls = [c for c in session.calls if c["json"]["method"] == "public/get_instruments"]
     assert len(instrument_calls) == 1
+
+
+def test_get_subaccounts_jsonrpc_params(tmp_path):
+    session = FakeSession(
+        [
+            FakeResponse(_auth_result()),
+            FakeResponse(_ok_body([{"id": 7, "type": "subaccount", "username": "fee_acc"}])),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    rows = client.get_subaccounts(with_portfolio=True)
+
+    assert rows == [{"id": 7, "type": "subaccount", "username": "fee_acc"}]
+    data_calls = [c for c in session.calls if c["json"]["method"] == "private/get_subaccounts"]
+    assert len(data_calls) == 1
+    assert data_calls[0]["json"]["params"]["with_portfolio"] is True
+
+
+def test_submit_transfer_between_subaccounts_jsonrpc_params(tmp_path):
+    session = FakeSession(
+        [
+            FakeResponse(_auth_result()),
+            FakeResponse(_ok_body({"id": 3, "state": "confirmed", "currency": "USDC", "amount": 100})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    out = client.submit_transfer_between_subaccounts(
+        currency="USDC",
+        amount="100",
+        destination=42,
+        source=10,
+        nonce="abc12345",
+    )
+
+    assert out["id"] == 3
+    data_calls = [c for c in session.calls if c["json"]["method"] == "private/submit_transfer_between_subaccounts"]
+    assert len(data_calls) == 1
+    p = data_calls[0]["json"]["params"]
+    assert p["currency"] == "USDC"
+    assert p["amount"] == "100"
+    assert p["destination"] == 42
+    assert p["source"] == 10
+    assert p["nonce"] == "abc12345"

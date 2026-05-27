@@ -270,7 +270,10 @@ gantt
 
 | 文件 | 用途 |
 |------|------|
-| [`README.md`](../README.md) | Quick start、常用指令 |
+| [`README.md`](../README.md) | 專案概覽與文件索引 |
+| [`getting-started-zh-TW.md`](getting-started-zh-TW.md) | 安裝、測試 |
+| [`cli-zh-TW.md`](cli-zh-TW.md) | 常用 CLI 指令 |
+| [`configuration-zh-TW.md`](configuration-zh-TW.md) | 設定與 env |
 | [`repo-layout-zh-TW.md`](repo-layout-zh-TW.md) | 目錄與 legacy 遷移 |
 | [`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md) | 新增投資人 |
 | [`live-profiles-launchd-zh-TW.md`](live-profiles-launchd-zh-TW.md) | Live bot 常駐（macOS）、heartbeat |

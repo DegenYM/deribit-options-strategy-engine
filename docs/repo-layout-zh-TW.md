@@ -136,7 +136,7 @@ deribit-options-strategy-engine/
 
 ## 相關文件
 
-- 投資人設定：[`README.md`](../README.md) → Investor / Sub-account Layout
+- 投資人設定：[`configuration-zh-TW.md`](configuration-zh-TW.md) → Investor / Sub-account Layout
 - 管理方 onboarding：[`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md)
 - Live launchd：[`live-profiles-launchd-zh-TW.md`](live-profiles-launchd-zh-TW.md)
 - Live systemd（Linux）：[`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md)

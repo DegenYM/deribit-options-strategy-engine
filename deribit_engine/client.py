@@ -908,3 +908,33 @@ class DeribitClient:
 
     def cancel_all(self, *, kind: str = "any") -> Any:
         return self._request("private/cancel_all", params={"kind": kind}) or {}
+
+    def get_subaccounts(self, *, with_portfolio: bool = False) -> list[dict[str, Any]]:
+        result = self._request(
+            "private/get_subaccounts",
+            params={"with_portfolio": bool(with_portfolio)},
+            private=True,
+        )
+        if isinstance(result, list):
+            return [item for item in result if isinstance(item, dict)]
+        return []
+
+    def submit_transfer_between_subaccounts(
+        self,
+        *,
+        currency: str,
+        amount: Decimal | str,
+        destination: int,
+        source: int | None = None,
+        nonce: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "currency": currency.upper(),
+            "amount": amount,
+            "destination": int(destination),
+        }
+        if source is not None:
+            params["source"] = int(source)
+        if nonce is not None and str(nonce).strip():
+            params["nonce"] = str(nonce).strip()
+        return self._request("private/submit_transfer_between_subaccounts", params=params, private=True) or {}

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from . import fee, frontend, investor, strategy
+from . import fee, frontend, investor, strategy, wallet
 from .common import apply_investor_cli_args, configure_logging
 
 __all__ = [
@@ -40,6 +40,7 @@ def _build_parser() -> argparse.ArgumentParser:
     frontend.register_parsers(subparsers)
     fee.register_parsers(subparsers)
     investor.register_parsers(subparsers)
+    wallet.register_parsers(subparsers)
 
     return parser
 
@@ -52,7 +53,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_investor_cli_args(args)
     configure_logging(args.verbose)
 
-    for module in (investor, fee, frontend, strategy):
+    for module in (investor, fee, frontend, strategy, wallet):
         code = module.dispatch(args)
         if code is not None:
             return code

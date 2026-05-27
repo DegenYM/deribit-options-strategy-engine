@@ -19,7 +19,17 @@ def configure_logging(verbose: bool = False) -> None:
 
 
 def build_bot(args) -> DeribitOptionTrialBot:
-    private_commands = {"status", "enter-best", "manage", "run", "panic-close", "close-position", "cancel"}
+    private_commands = {
+        "status",
+        "enter-best",
+        "manage",
+        "run",
+        "panic-close",
+        "close-position",
+        "cancel",
+        "trade-spot",
+        "internal-transfer",
+    }
     require_private = args.command in private_commands or (args.command == "scan" and getattr(args, "live", False))
     config = load_config(
         args.env_file,
