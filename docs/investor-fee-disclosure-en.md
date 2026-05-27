@@ -61,7 +61,7 @@ Management and performance fees are **not** deducted directly from strategy sub-
 
 ### 5.1 What is the Fee sub-account?
 
-- A separate Deribit **sub-account** (suggested name: `fee`) used as a **reconciliation rail** after quarterly settlement.  
+- A separate Deribit **sub-account** (suggested name: `fee_acc`; at least 5 characters—`fee` is rejected) used as a **reconciliation rail** after quarterly settlement.  
 - **Strategy bots connect only to strategy sub-accounts**; they do **not** trade on the Fee sub-account.  
 - Fee sub-account balance is excluded from NAV_perf / HWM.
 

@@ -150,7 +150,7 @@ def _zh_content() -> FeeDisclosureContent:
         ),
         s5_1_title="5.1 投資人義務",
         s5_1_items=[
-            "建立獨立 Fee 子帳（建議名稱 fee），與策略子帳分開；",
+            "建立獨立 Fee 子帳（建議名稱 fee_acc；至少 5 字元，勿用 fee），與策略子帳分開；",
             "為 Fee 專戶建立專用 API Key（Account=read，Wallet／Trade 均 none）並安全交付管理人；",
             "策略子帳 API 開 Account=read、Trade=read_write、Wallet=read_write（供季末 API 劃轉至 Fee 專戶）；",
             "收到帳單後與管理人對帳並確認；",
@@ -312,7 +312,7 @@ def _en_content() -> FeeDisclosureContent:
         ),
         s5_1_title="5.1 Investor obligations",
         s5_1_items=[
-            "Create a dedicated Fee sub-account (e.g. name: fee), separate from strategy subs;",
+            "Create a dedicated Fee sub-account (suggested name: fee_acc; at least 5 characters—do not use fee), separate from strategy subs;",
             "Create a Fee-only API key (Account=read, Wallet/Trade off) and deliver securely to the manager;",
             "Strategy sub-account API: Read + Trade + Wallet read/write (for API transfer to Fee sub);",
             "After invoice, reconcile with the manager and confirm;",

@@ -20,6 +20,7 @@ reference_capital_usdc = 50000
 # client_secret = "..."
 
 [fee]
+# Deribit sub-account name: fee_acc (≥5 chars; do not use "fee"). Maps to accounts/.env.fee locally.
 client_id = "FEE_CLIENT_ID"
 client_secret = "FEE_CLIENT_SECRET"
 

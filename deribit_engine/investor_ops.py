@@ -786,7 +786,7 @@ def _write_fee_env(accounts_dir: Path, *, investor_id: str, deribit_env: str) ->
     path = accounts_dir / account_env_basename("fee")
     body = "\n".join(
         [
-            "# Operator fee-collection sub-account (Deribit sub-account name: fee).",
+            "# Operator fee-collection sub-account (Deribit sub-account name: fee_acc; at least 5 chars).",
             "# Not listed in accounts.toml — excluded from live supervisor and frontend aggregation.",
             "# API: Account=read, Wallet=none, Trade=none. Read-only reconciliation sub-account.",
             "# Do NOT: ./bot run --env-file .../.env.fee",
