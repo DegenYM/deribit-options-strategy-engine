@@ -276,10 +276,10 @@ export async function fetchStatusWithTimeout() {
   }
 }
 
-export async function fetchDashboardBundle({ backgroundOnTimeout = false } = {}) {
+export async function fetchDashboardBundle({ backgroundOnTimeout = false, sections = null } = {}) {
   const timeoutMs = INVESTOR_STATUS_TIMEOUT_MS;
   let timedOut = false;
-  const bundleRequest = fetchJson(dashboardBundleUrl(30));
+  const bundleRequest = fetchJson(dashboardBundleUrl(30, { sections }));
   const raced = INVESTOR
     ? Promise.race([
         bundleRequest,
@@ -304,7 +304,7 @@ export async function fetchDashboardBundle({ backgroundOnTimeout = false } = {})
         STATE.statusErrorOnce = true;
       }
       if (backgroundOnTimeout) {
-        fetchJson(dashboardBundleUrl(30))
+        fetchJson(dashboardBundleUrl(30, { sections }))
           .then((d) => {
             applyDashboardBundlePayload(d);
             invokeRenderDashboard();
@@ -542,6 +542,21 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         return;
       }
       if (USE_DASHBOARD_BUNDLE) {
+        if (INVESTOR && investorFirstLoad) {
+          const liveOk = await fetchDashboardBundle({ sections: "status,groups" });
+          if (liveOk) {
+            advanceInvestorLoad("groups");
+            advanceInvestorLoad("status");
+            scheduleRender();
+            fetchDashboardBundle({ sections: "realized_summary" })
+              .then((summaryOk) => {
+                if (summaryOk) advanceInvestorLoad("summary");
+                invokeRenderDashboard();
+              })
+              .catch(() => {});
+            return;
+          }
+        }
         const ok = await fetchDashboardBundle({ backgroundOnTimeout: INVESTOR });
         if (ok) {
           if (investorFirstLoad) {

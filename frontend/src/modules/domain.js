@@ -1009,8 +1009,11 @@ export function realizedSummaryUrl(days = 30) {
   return url;
 }
 
-export function dashboardBundleUrl(days = 30) {
+export function dashboardBundleUrl(days = 30, { sections = null } = {}) {
   let url = `/api/dashboard_bundle?days=${days}`;
+  if (sections) {
+    url += `&sections=${encodeURIComponent(sections)}`;
+  }
   const cap = aprEffectiveCapitalUsdc();
   if (cap !== null) {
     url += `&effective_capital_usdc=${encodeURIComponent(String(cap))}`;

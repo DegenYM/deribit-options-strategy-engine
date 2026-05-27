@@ -61,6 +61,8 @@ def test_investor_page_loads(dashboard_client: TestClient) -> None:
     response = dashboard_client.get("/investor.html")
     assert response.status_code == 200
     assert "aggregate-card" in response.text
+    assert "app-investor.js" in response.text
+    assert 'src="/app.js"' not in response.text
 
 
 def test_dashboard_app_js_is_monolithic_bundle(dashboard_client: TestClient) -> None:
@@ -68,6 +70,15 @@ def test_dashboard_app_js_is_monolithic_bundle(dashboard_client: TestClient) -> 
     assert js.lstrip().startswith("(()=>{")
     assert "initDashboard" in js or "DOMContentLoaded" in js
     assert len(js) > 50_000
+
+
+def test_investor_app_js_uses_investor_mode(dashboard_client: TestClient) -> None:
+    ops = dashboard_client.get("/app.js").text
+    investor = dashboard_client.get("/app-investor.js").text
+    assert investor.lstrip().startswith("(()=>{")
+    assert '="investor"' in investor
+    assert '="ops"' in ops
+    assert investor != ops
 
 
 def test_dashboard_bundle_returns_sections(dashboard_client: TestClient) -> None:
@@ -95,9 +106,10 @@ def test_vendor_static_has_long_cache(dashboard_client: TestClient) -> None:
 
 
 def test_app_js_stays_no_cache(dashboard_client: TestClient) -> None:
-    response = dashboard_client.get("/app.js")
-    assert response.status_code == 200
-    assert "no-cache" in response.headers.get("cache-control", "")
+    for path in ("/app.js", "/app-investor.js"):
+        response = dashboard_client.get(path)
+        assert response.status_code == 200
+        assert "no-cache" in response.headers.get("cache-control", "")
 
 
 def test_app_js_supports_gzip(dashboard_client: TestClient) -> None:

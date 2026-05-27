@@ -13,6 +13,7 @@ test.describe("dashboard smoke", () => {
     const response = await page.goto("/investor.html");
     expect(response?.ok()).toBeTruthy();
     await expect(page.locator("#aggregate-card")).toBeVisible();
+    await expect(page.locator('script[src*="app-investor.js"]')).toHaveCount(1);
   });
 
   test("health endpoint responds", async ({ request }) => {

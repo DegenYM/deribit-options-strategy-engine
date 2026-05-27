@@ -306,49 +306,63 @@ def create_app(
         *,
         days: int,
         override: Decimal | None,
+        sections: frozenset[str] | None = None,
     ) -> dict[str, Any]:
         import deribit_engine.frontend_server as pkg
 
+        selected = sections or frozenset({"status", "groups", "realized_summary"})
+        need_status = "status" in selected
+        need_groups = "groups" in selected
+        need_summary = "realized_summary" in selected
+        payload: dict[str, Any] = {}
+
         with _heavy_portfolio_lock:
-            status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
-            groups = pkg._aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
-            summary = pkg._aggregate_realized_summary(
-                accounts,
-                days=days,
-                status_payload=status,
-                effective_capital_override=override,
-            )
-        return {
-            "status": status,
-            "groups": groups,
-            "realized_summary": summary,
-        }
+            status: dict[str, Any] | None = None
+            if need_status or need_summary:
+                status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+                if need_status:
+                    payload["status"] = status
+            if need_groups:
+                payload["groups"] = pkg._aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+            if need_summary:
+                if status is None:
+                    status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+                payload["realized_summary"] = pkg._aggregate_realized_summary(
+                    accounts,
+                    days=days,
+                    status_payload=status,
+                    effective_capital_override=override,
+                )
+        return payload
 
     def _seed_bundle_component_caches(
         *,
-        status: dict[str, Any],
-        groups: dict[str, Any],
-        summary: dict[str, Any],
+        status: dict[str, Any] | None,
+        groups: dict[str, Any] | None,
+        summary: dict[str, Any] | None,
         days: int,
         override: Decimal | None,
     ) -> None:
-        status_cache.seed("status", status)
-        groups_cache.seed(("groups", _closed_groups_cache_key(accounts)), groups)
-        capital = _resolve_apr_effective_capital_usdc(
-            accounts,
-            override=override,
-            status_payload=status,
-        )
-        series_cache.seed(
-            (
-                "realized_summary",
-                days,
-                str(capital),
-                _ledger_equity_cache_key(accounts),
-                _closed_groups_cache_key(accounts),
-            ),
-            summary,
-        )
+        if status is not None:
+            status_cache.seed("status", status)
+        if groups is not None:
+            groups_cache.seed(("groups", _closed_groups_cache_key(accounts)), groups)
+        if summary is not None:
+            capital = _resolve_apr_effective_capital_usdc(
+                accounts,
+                override=override,
+                status_payload=status or {},
+            )
+            series_cache.seed(
+                (
+                    "realized_summary",
+                    days,
+                    str(capital),
+                    _ledger_equity_cache_key(accounts),
+                    _closed_groups_cache_key(accounts),
+                ),
+                summary,
+            )
 
     def _finalize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         out = copy.deepcopy(payload)
@@ -580,6 +594,17 @@ def create_app(
             path = frontend_dir / "app.js"
             if not path.is_file():
                 raise HTTPException(status_code=404, detail="app.js not found")
+            return FileResponse(
+                path,
+                media_type="application/javascript",
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
+
+        @app.get("/app-investor.js", include_in_schema=False)
+        def app_investor_js() -> Any:
+            path = frontend_dir / "app-investor.js"
+            if not path.is_file():
+                raise HTTPException(status_code=404, detail="app-investor.js not found")
             return FileResponse(
                 path,
                 media_type="application/javascript",

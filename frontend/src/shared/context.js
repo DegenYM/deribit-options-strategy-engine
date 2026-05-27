@@ -1,5 +1,15 @@
+/** Set at build time via esbuild `define`; falls back to runtime window flag in dev. */
+const buildInvestor =
+  typeof __BUILD_INVESTOR__ !== "undefined" ? __BUILD_INVESTOR__ : undefined;
+
 export const DASHBOARD_MODE =
-  typeof window !== "undefined" && window.__DASHBOARD_MODE__ === "investor" ? "investor" : "ops";
+  buildInvestor !== undefined
+    ? buildInvestor
+      ? "investor"
+      : "ops"
+    : typeof window !== "undefined" && window.__DASHBOARD_MODE__ === "investor"
+      ? "investor"
+      : "ops";
 export const INVESTOR = DASHBOARD_MODE === "investor";
 
 export const INVESTOR_LOCALE = (() => {
