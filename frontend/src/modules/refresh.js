@@ -17,6 +17,8 @@ import {
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
 import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num, promisePool, realizedSummaryUrl, setInvestorProgressBar, setText, showToast, updateUnderlyingIndexCache } from "./domain.js";
+import { loadChartJs } from "./chart-vendor.js";
+import { formatTimeHms } from "./date-time.js";
 import { aprSeriesUrl, renderAprChart, renderBookEquityChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
 import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress, renderTopBar } from "./render.js";
 
@@ -36,7 +38,15 @@ export function updateHeaderSpotDom() {
   if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
 }
 
-export function renderPerformanceCharts() {
+export async function renderPerformanceCharts() {
+  if (!chartsSectionOpen()) return;
+  try {
+    await loadChartJs();
+  } catch (err) {
+    console.error("chart vendor load failed", err);
+    showToast(`charts: ${err.message}`);
+    return;
+  }
   const chartFns = [
     ["risk-capital", renderBookEquityChart],
     ["cum-pnl", renderCumulativePnlChart],
@@ -202,6 +212,11 @@ export function chartsSectionOpen() {
   return Boolean(el?.open);
 }
 
+export function stressSectionOpen() {
+  const el = document.getElementById("stress-section");
+  return Boolean(el?.open);
+}
+
 export async function fetchPortfolioSnapshot() {
   try {
     const d = await fetchJson("/api/portfolio/snapshot");
@@ -306,13 +321,15 @@ export async function fetchDashboardBundle({ backgroundOnTimeout = false } = {})
 }
 
 export async function loadChartDataIfNeeded({ force = false, investorFetchWrap = null } = {}) {
+  if (!force && !chartsSectionOpen()) return;
   if (!force && STATE.chartsDataLoaded) {
-    renderPerformanceCharts();
+    await renderPerformanceCharts();
     return;
   }
   if (STATE.chartsLoadInFlight) return;
   STATE.chartsLoadInFlight = true;
   try {
+    await loadChartJs();
     const fetchCumulative = () =>
       fetchJson("/api/cumulative_pnl_series")
         .then((d) => {
@@ -336,9 +353,31 @@ export async function loadChartDataIfNeeded({ force = false, investorFetchWrap =
       await Promise.all([fetchCumulative(), fetchApr()]);
     }
     STATE.chartsDataLoaded = true;
-    renderPerformanceCharts();
+    await renderPerformanceCharts();
   } finally {
     STATE.chartsLoadInFlight = false;
+  }
+}
+
+export async function loadStressIfNeeded({ force = false } = {}) {
+  if (INVESTOR) return;
+  if (!force && !stressSectionOpen()) return;
+  if (!force && STATE.stressDataLoaded) {
+    renderStress(STATE.stress);
+    return;
+  }
+  if (STATE.stressLoadInFlight) return;
+  if (!STATE.health?.has_private_creds) return;
+  STATE.stressLoadInFlight = true;
+  try {
+    const d = await fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5");
+    STATE.stress = d;
+    STATE.stressDataLoaded = true;
+    renderStress(STATE.stress);
+  } catch (err) {
+    showToast(`stress: ${err.message}`);
+  } finally {
+    STATE.stressLoadInFlight = false;
   }
 }
 
@@ -474,12 +513,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     }
 
     function fetchStress() {
-      return fetchJson("/api/stress?shocks=0.1,0.2,0.3,0.4,0.5")
-        .then((d) => {
-          STATE.stress = d;
-          scheduleRender();
-        })
-        .catch((err) => showToast(`stress: ${err.message}`));
+      return loadStressIfNeeded({ force: true });
     }
 
     async function fetchPortfolioDataIndividual() {
@@ -499,6 +533,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         STATE.status = null;
         STATE.report = null;
         STATE.stress = null;
+        STATE.stressDataLoaded = false;
         return;
       }
       if (USE_DASHBOARD_BUNDLE) {
@@ -518,7 +553,8 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
 
     const wave = [() => fetchPortfolioData()];
 
-    if (hasPrivateCreds && !INVESTOR) {
+    const stressNeeded = !INVESTOR && hasPrivateCreds && stressSectionOpen();
+    if (stressNeeded) {
       wave.push(() => fetchStress());
     }
 
@@ -526,11 +562,11 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       wave.push(() => wrapStep("snapshot", fetchPortfolioSnapshot));
     }
 
-    const chartsNeeded = !INVESTOR || chartsSectionOpen();
+    const chartsNeeded = chartsSectionOpen();
     if (chartsNeeded) {
       wave.push(() =>
         loadChartDataIfNeeded({
-          force: !INVESTOR,
+          force: false,
           investorFetchWrap,
         })
       );
@@ -540,10 +576,6 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
 
     if (INVESTOR) {
       STATE.stress = null;
-    }
-
-    if (!chartsNeeded) {
-      renderBookEquityChart();
     }
 
     if (!INVESTOR || STATE.investorReady) {
@@ -558,7 +590,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     setInvestorProgressBar(false);
     setText(
       "last-refresh",
-      `${i18n("last refresh:", "上次更新：")} ${luxon.DateTime.now().toFormat("HH:mm:ss")}`
+      `${i18n("last refresh:", "上次更新：")} ${formatTimeHms()}`
     );
   } finally {
     STATE.refreshInFlight = false;

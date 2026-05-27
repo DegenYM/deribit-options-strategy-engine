@@ -6,9 +6,6 @@
     <title>Deribit Strategy Dashboard</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/tailwind.css?v=20260526" />
-    <script src="/vendor/chart.umd.min.js"></script>
-    <script src="/vendor/luxon.min.js"></script>
-    <script src="/vendor/chartjs-adapter-luxon.umd.min.js"></script>
     <link rel="stylesheet" href="/styles.css?v=20260522f" />
   </head>
   <body class="app-body text-slate-100 min-h-screen font-sans">
@@ -174,7 +171,7 @@
         </div>
       </section>
 
-      <details class="section-card collapsible-section">
+      <details id="charts-section" class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Visual analytics</p>
@@ -251,7 +248,7 @@
         </div>
       </details>
 
-      <details class="section-card collapsible-section">
+      <details id="stress-section" class="section-card collapsible-section">
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Tail risk</p>
@@ -287,6 +284,7 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script src="/app.js?v=position-size-inline-20260523" defer></script>
+    <script defer src="/vendor/luxon.min.js"></script>
+    <script defer src="/app.js?v=perf-lazy-20260527"></script>
   </body>
 </html>

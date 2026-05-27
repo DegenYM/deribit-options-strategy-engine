@@ -1131,8 +1131,14 @@ export function renderStress(stress) {
   if (INVESTOR) return;
   const root = document.getElementById("stress-card");
   if (!root) return;
+  const stressOpen = Boolean(document.getElementById("stress-section")?.open);
+  if (!stress && !STATE.stressDataLoaded && !stressOpen) return;
   if (!stress) {
-    root.innerHTML = `<p class="text-sm text-slate-400">Set DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET to load live stress data.</p>`;
+    if (STATE.stressLoadInFlight || STATE.health?.has_private_creds) {
+      root.innerHTML = `<p class="text-slate-500 text-sm">Loading…</p>`;
+    } else {
+      root.innerHTML = `<p class="text-sm text-slate-400">Set DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET to load live stress data.</p>`;
+    }
     setText("stress-meta", "—");
     return;
   }

@@ -10,6 +10,8 @@ export const STATE = {
   dataFreshness: { source: null, snapshotMs: null, statusMs: null, live: false },
   chartsDataLoaded: false,
   chartsLoadInFlight: false,
+  stressDataLoaded: false,
+  stressLoadInFlight: false,
   bookFilter: "ALL",
   aprWindow: 30,
   charts: {},

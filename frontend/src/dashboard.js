@@ -5,6 +5,7 @@ import * as domain from "./modules/domain.js";
 import * as charts from "./modules/charts.js";
 import * as render from "./modules/render.js";
 import * as refresh from "./modules/refresh.js";
+import { loadChartJs } from "./modules/chart-vendor.js";
 
 export function renderDashboard() {
   domain.updateUnderlyingIndexCache(STATE.status, STATE.groups);
@@ -15,7 +16,9 @@ export function renderDashboard() {
   render.renderBookCards(STATE.status);
   render.renderAggregate(STATE.status, STATE.report);
   render.renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
-  refresh.renderPerformanceCharts();
+  refresh.renderPerformanceCharts().catch((err) => {
+    console.error("performance charts failed", err);
+  });
   render.renderRecentActivity(STATE.status, STATE.report, STATE.groups);
   render.renderStress(STATE.stress);
 }
@@ -72,6 +75,7 @@ function attachControls() {
   document.getElementById("apr-window")?.addEventListener("change", async (e) => {
     STATE.aprWindow = parseInt(e.target.value, 10) || 30;
     try {
+      await loadChartJs();
       STATE.aprSeries = await domain.fetchJson(charts.aprSeriesUrl());
     } catch (err) {
       domain.showToast(`apr series: ${err.message}`);
@@ -84,10 +88,19 @@ function attachExpandableSections() {
   document.querySelectorAll("details.collapsible-section").forEach((details) => {
     details.addEventListener("toggle", () => {
       if (!details.open) return;
-      charts.scheduleChartResizeAll();
-      if (INVESTOR && details.id === "charts-section") {
-        refresh.loadChartDataIfNeeded({ renderDashboard });
+      if (details.id === "charts-section") {
+        refresh.loadChartDataIfNeeded().catch((err) => {
+          console.error("chart data load failed", err);
+        });
+        return;
       }
+      if (details.id === "stress-section") {
+        refresh.loadStressIfNeeded().catch((err) => {
+          console.error("stress load failed", err);
+        });
+        return;
+      }
+      charts.scheduleChartResizeAll();
     });
   });
 }
