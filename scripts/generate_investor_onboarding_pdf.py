@@ -25,10 +25,13 @@ _IMAGES: dict[str, tuple[str, str]] = {
     "s2_deposit": ("03-wallet-deposit-menu.png", "Wallet → Deposit"),
     "s5_api_perm": (
         "10-api-strategy-permissions.png",
-        "策略子帳 API 權限（Account=read、Trade=read_write、Wallet=read_write）",
+        "策略子帳 Change API Key Scope（Account=read、Trade=read_write、Wallet=read_write）",
     ),
     "s5_api_done": ("11-api-key-created.png", "API Key 建立成功（請妥善保存 Secret）"),
-    "s6_fee_api": ("13-api-fee-permissions.png", "Fee 專戶 API（Account=read、Wallet=none、Trade=none）"),
+    "s6_fee_api": (
+        "13-api-fee-permissions.png",
+        "Fee 專戶 Change API Key Scope（Account=read、Wallet=none、Trade=none）",
+    ),
     "s7_dashboard": ("14-cloudflare-access-login.png", "Cloudflare Access 登入"),
     "s3_margin": ("15.margin-selection.png", "Change Margin → Segregated Portfolio Margin"),
 }
@@ -714,7 +717,8 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
             _h3("5.2 建立 API Key"),
             Paragraph(
                 _p(
-                    "路徑：Account → API → Add new key。先選 <b>Deribit-generated key</b>，再設定權限。",
+                    "路徑：Account → API → Add new key。先選 <b>Deribit-generated key</b>，"
+                    "再於 <b>Change API Key Scope</b> 視窗設定權限（Name／IP 若另顯示再填）。",
                     allow_markup=True,
                 ),
                 styles["Body"],
@@ -723,7 +727,7 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
             _table(
                 [
                     ["欄位", "策略子帳請選"],
-                    ["Block Trade / Block RFQ / Custody", "none"],
+                    ["Block Trade / Block RFQ / Custody / Features", "none 或留空"],
                     ["Account", "read"],
                     ["Trade", "read_write（期權 + 季末賣現貨兌 USDC／USDT）"],
                     ["Wallet", "read_write（劃轉至 fee_acc）"],
@@ -780,10 +784,19 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
                 "管理方在策略子帳<b>先 Trade 賣現貨、再 Wallet 劃轉</b>至 fee_acc，你確認後自主帳提幣付費。"
             ),
             _h3("6.2 Fee 專戶 API Key"),
+            Paragraph(
+                _p(
+                    "切換到 fee_acc → Account → API → Add new key → Deribit-generated key → "
+                    "<b>Change API Key Scope</b> 設為下表，按 Confirm。",
+                    allow_markup=True,
+                ),
+                styles["Body"],
+            ),
+            Spacer(1, 2),
             _table(
                 [
                     ["欄位", "Fee 專戶請選"],
-                    ["Block Trade / Block RFQ / Custody", "none"],
+                    ["Block Trade / Block RFQ / Custody / Features", "none 或留空"],
                     ["Account", "read"],
                     ["Trade", "none"],
                     ["Wallet", "none"],
