@@ -367,6 +367,17 @@ export function fmtDeribitPriceCell(value, collateralCurrency) {
   return fmtNum(n, 4);
 }
 
+/** Plain-text premium for activity meta lines (no inline HTML). */
+export function fmtDeribitPricePlain(value, collateralCurrency) {
+  const n = num(value);
+  if (n === null) return "—";
+  const c = String(collateralCurrency || "").toUpperCase();
+  if (c === "USDC") return `($) ${fmtNum(n, 4)}`;
+  if (c === "BTC") return `₿ ${fmtNum(n, 5)}`;
+  if (c === "ETH") return `♦ ${fmtNum(n, 5)}`;
+  return fmtNum(n, 4);
+}
+
 /**
  * Deribit：選擇權用 ``size``（標的幣名目）；``size_currency`` 僅文件上給期貨用。
  * 若對選擇權誤用 ``size_currency``，MTM 會縮錯數量級。
@@ -1358,6 +1369,68 @@ export function bullPutSpreadWidth(g) {
   return shortStrike - longStrike;
 }
 
+/** Closed spread: per-leg entry premium (coin/USDC per Deribit quote). */
+export function closedRowLegEntryPremium(g, role) {
+  const raw = role === "short" ? g?.short_entry_average_price : g?.long_entry_average_price;
+  const px = num(raw);
+  return px !== null && px > 0 ? px : null;
+}
+
+/** Closed spread: per-leg exit premium; settlement intrinsic when reconcile left no fill price. */
+export function closedRowLegExitPremium(g, role) {
+  const raw = role === "short" ? g?.short_close_average_price : g?.long_close_average_price;
+  let px = num(raw);
+  if (px !== null && px > 0) return px;
+  const reason = String(g?.close_reason || "").toLowerCase();
+  if (reason !== "reconciled_expiry" && reason !== "reconciled_external") return null;
+  const idx = num(g?.close_index_usd) ?? num(g?.entry_index_usd);
+  const strike = openRowLegStrike(g, role);
+  if (idx === null || strike === null || idx < 100) return null;
+  return Math.max(strike - idx, 0);
+}
+
+export function closedRowLegExitIsSettlementEstimate(g, role) {
+  const raw = role === "short" ? g?.short_close_average_price : g?.long_close_average_price;
+  const px = num(raw);
+  if (px !== null && px > 0) return false;
+  return closedRowLegExitPremium(g, role) !== null;
+}
+
+export function closedRowLegPriceGap(g, phase) {
+  const shortPx =
+    phase === "entry" ? closedRowLegEntryPremium(g, "short") : closedRowLegExitPremium(g, "short");
+  const longPx =
+    phase === "entry" ? closedRowLegEntryPremium(g, "long") : closedRowLegExitPremium(g, "long");
+  if (shortPx === null || longPx === null) return null;
+  return shortPx - longPx;
+}
+
+export function bullPutSpreadClosedTitle(g) {
+  const ccy = String(g?.currency || "").toUpperCase() || "Option";
+  const shortStrike = openRowLegStrike(g, "short");
+  const longStrike = openRowLegStrike(g, "long");
+  if (shortStrike !== null && longStrike !== null) {
+    const pair = `${fmtStrike(shortStrike)}/${fmtStrike(longStrike)}`;
+    return INVESTOR_ZH ? `${ccy} ${pair} 賣權價差` : `${ccy} ${pair} bull put`;
+  }
+  return openPositionTitle(g);
+}
+
+/** One-line leg premium for activity meta (matches naked card footer style). */
+export function closedSpreadLegMetaValue(g, role, phase) {
+  const coll = tradeGroupAprBook(g) || String(g?.collateral_currency || "USDC").toUpperCase();
+  const strike = openRowLegStrike(g, role);
+  const premium =
+    phase === "entry" ? closedRowLegEntryPremium(g, role) : closedRowLegExitPremium(g, role);
+  const settle = phase === "exit" && closedRowLegExitIsSettlementEstimate(g, role);
+  const strikePart = strike === null ? "—" : fmtStrike(strike);
+  const pxPart = fmtDeribitPricePlain(premium, coll);
+  if (settle) {
+    return `${strikePart} · ${pxPart} (${i18n("settle", "結算")})`;
+  }
+  return `${strikePart} · ${pxPart}`;
+}
+
 export function openRowLegPriceGap(g, status, fieldName) {
   const shortPrice = num(openRowLegFieldValue(g, status, "short", fieldName));
   const longPrice = num(openRowLegFieldValue(g, status, "long", fieldName));
@@ -1889,6 +1962,7 @@ export function activityDetailLine(parts) {
 
 export function activityLifecycleCardHtml(g, status, groups) {
   const id = strategyId(g);
+  const isBullPutClosed = id === "bull_put_spread" && isClosedTradeGroup(g);
   const book = tradeGroupAprBook(g) || "—";
   const entryApr = groupEntryNetApr(g, status);
   const entryFee = groupEntryFeeUsd(g);
@@ -1903,12 +1977,19 @@ export function activityLifecycleCardHtml(g, status, groups) {
   const holding = groupHoldingDays(g);
   const realizedApr = closed ? groupRealizedApr(g, status) : null;
   const amountLabel = activityAmountDisplay(g, status, groups);
-  const title = tradeGroupActivityTitle(g);
+  const title = isBullPutClosed ? bullPutSpreadClosedTitle(g) : tradeGroupActivityTitle(g);
   const entryCreditDisplay = credit === null ? "—" : fmtUsdWithNativeBookAmount(credit, creditNative, book);
   const entryAprDisplay = entryApr === null ? "—" : fmtPct(entryApr, 1);
   const entryFeeDisplay = entryFee === null ? null : fmtUsdWithNativeBookAmount(entryFee, entryFeeNative, book);
+  const spreadLegEntryMeta = isBullPutClosed
+    ? [
+        [i18n("Short entry", "短腿進場"), closedSpreadLegMetaValue(g, "short", "entry")],
+        [i18n("Long entry", "長腿進場"), closedSpreadLegMetaValue(g, "long", "entry")],
+      ]
+    : [];
   const entryMetaSecondary = [
     [i18n("Opened", "開倉"), fmtTime(entryMs)],
+    ...spreadLegEntryMeta,
     amountLabel !== null ? [i18n("Amount", "數量"), amountLabel] : null,
     entryFeeDisplay ? [i18n("Entry fee", "進場手續費"), entryFeeDisplay] : null,
   ].filter(Boolean);
@@ -1927,8 +2008,15 @@ export function activityLifecycleCardHtml(g, status, groups) {
     </div>`;
   let exitInner = "";
   if (closed) {
+    const spreadLegExitMeta = isBullPutClosed
+      ? [
+          [i18n("Short exit", "短腿出場"), closedSpreadLegMetaValue(g, "short", "exit")],
+          [i18n("Long exit", "長腿出場"), closedSpreadLegMetaValue(g, "long", "exit")],
+        ]
+      : [];
     const exitMetaSecondary = [
       [i18n("Closed", "平倉"), fmtTime(closedTimestampMs(g))],
+      ...spreadLegExitMeta,
       closeFee !== null
         ? [i18n("Close fee", "平倉手續費"), fmtUsdWithNativeBookAmount(closeFee, closeFeeNative, book)]
         : null,
@@ -1973,6 +2061,11 @@ export function activityLifecycleCardHtml(g, status, groups) {
       </div>`;
   }
   const acct = !INVESTOR && accountHint(g) ? accountHint(g) : "";
+  const longInst = openRowLegInstrumentName(g, "long");
+  const instrumentBlock =
+    isBullPutClosed && longInst
+      ? `${escapeHtml(g.short_instrument_name || "")}<br>${escapeHtml(longInst)}`
+      : escapeHtml(g.short_instrument_name || "");
   return `
     <li class="activity-card">
       <div class="activity-card-head">
@@ -1981,7 +2074,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
         <span class="text-[11px] text-slate-500">${escapeHtml(book)}</span>
         ${acct ? `<span class="text-[11px] text-slate-500">${escapeHtml(acct)}</span>` : ""}
       </div>
-      <div class="activity-card-instrument">${escapeHtml(g.short_instrument_name || "")}</div>
+      <div class="activity-card-instrument">${instrumentBlock}</div>
       <div class="activity-lifecycle">
         <div class="activity-phase activity-phase-entry">
           <div class="activity-phase-label">${i18n("Entry", "進場")}</div>

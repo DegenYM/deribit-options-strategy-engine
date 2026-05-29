@@ -11,6 +11,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .bull_put_settlement import (
+    repair_bull_put_expiry_reconcile_pnl,
+    restore_long_leg_from_journal_executions,
+    settlement_index_usd_for_group,
+)
 from .client import DeribitClient
 from .config import BotConfig, load_config
 from .metrics_store import MetricsStore, performance_scope_key
@@ -394,6 +399,25 @@ def backfill_closed_group_stats_in_state(
         if group.entry_timestamp_ms <= 0:
             continue
         closed_groups += 1
+
+        if journal is not None:
+            executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
+            restore_long_leg_from_journal_executions(group, executions)
+        idx = settlement_index_usd_for_group(group, spot_by_book=spot_by_book)
+        if idx is not None:
+            before_spread_pnl = group.realized_pnl
+            if (
+                repair_bull_put_expiry_reconcile_pnl(
+                    group,
+                    index_price_usd=idx,
+                    fee_rate=fee_rate,
+                    fee_cap_rate=fee_cap_rate,
+                    markets={},
+                )
+                and group.realized_pnl != before_spread_pnl
+            ):
+                pnl_updated += 1
+                changed = True
 
         if group.is_coin_collateral():
             executions: list[dict[str, Any]] = []

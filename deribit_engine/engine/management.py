@@ -4,7 +4,15 @@ from collections import Counter
 from decimal import Decimal
 from typing import Any
 
+from ..bull_put_settlement import (
+    group_uses_spread_settlement_pricing,
+    in_spread_expiry_settlement_window,
+    is_bull_put_spread_group,
+    long_instrument_for_spread_reconcile,
+    spread_expiry_close_debit_usdc,
+)
 from ..exceptions import TransientExchangeError
+from ..investor_cash_flow import sum_external_flow_native_in_window
 from ..margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
     linear_usdc_short_put_initial_per_contract_usdc,
@@ -21,15 +29,12 @@ from ..models import (
     RiskRegime,
     StrategyState,
     TradeGroup,
-    normalize_strategy_name,
 )
-from ..investor_cash_flow import sum_external_flow_native_in_window
 from ..stress import _intrinsic_settlement
 from ..utils import (
     align_option_order_amount,
     format_decimal,
     safe_div,
-    to_decimal,
     utc_now,
     utc_now_ms,
 )
@@ -1670,13 +1675,17 @@ class ManagementMixin:
         """
         if self.config.option_strategy != "bull_put_spread":
             return
-        open_long_names = {
-            p.instrument_name for p in option_positions if self._long_option_open_size(p) is not None
-        }
+        open_long_names = {p.instrument_name for p in option_positions if self._long_option_open_size(p) is not None}
         for group in self._open_groups(state):
             if not group.long_instrument_name:
                 continue
             if group.long_instrument_name in open_long_names:
+                continue
+            if group_uses_spread_settlement_pricing(group):
+                LOGGER.debug(
+                    "skip demote spread→naked group=%s (expiry settlement window)",
+                    group.group_id,
+                )
                 continue
             short_still_open = any(
                 p.instrument_name == group.short_instrument_name and self._short_option_open_size(p) is not None
@@ -1981,8 +1990,7 @@ class ManagementMixin:
         return now >= exp - 60_000
 
     def _is_bull_put_spread_group(self, group: TradeGroup) -> bool:
-        strategy = normalize_strategy_name(group.strategy, default=self.config.option_strategy)
-        return strategy == "bull_put_spread" or bool(group.long_instrument_name)
+        return is_bull_put_spread_group(group, default_strategy=self.config.option_strategy)
 
     def _resolve_reconcile_index_price(
         self,
@@ -2043,28 +2051,12 @@ class ManagementMixin:
         *,
         short_instrument: OptionInstrument,
     ) -> OptionInstrument | None:
-        if group.long_instrument_name:
-            try:
+        try:
+            if group.long_instrument_name:
                 return self._find_or_fetch_instrument(markets, group.long_instrument_name)
-            except Exception:
-                pass
-        if group.long_strike <= 0:
-            return None
-        return OptionInstrument(
-            instrument_name=group.long_instrument_name or f"{short_instrument.instrument_name}-long-synth",
-            base_currency=short_instrument.base_currency,
-            quote_currency=short_instrument.quote_currency,
-            settlement_currency=short_instrument.settlement_currency,
-            instrument_type=short_instrument.instrument_type,
-            tick_size=short_instrument.tick_size,
-            tick_size_steps=short_instrument.tick_size_steps,
-            min_trade_amount=short_instrument.min_trade_amount,
-            contract_size=short_instrument.contract_size,
-            option_type="put",
-            expiration_timestamp_ms=group.expiration_timestamp_ms or short_instrument.expiration_timestamp_ms,
-            strike=group.long_strike,
-            instrument_state="closed",
-        )
+        except Exception:
+            pass
+        return long_instrument_for_spread_reconcile(group, short_instrument, markets)
 
     def _spread_reconcile_close_debit_at_index(
         self,
@@ -2074,41 +2066,14 @@ class ManagementMixin:
         long_instrument: OptionInstrument | None,
         index_price: Decimal,
     ) -> Decimal:
-        option_type = (group.option_type or "put").lower()
-        short_settle = _intrinsic_settlement(short_instrument, shocked_spot=index_price, option_type=option_type)
-        short_debit = self._premium_value_usdc(
-            premium=short_settle,
-            quantity=group.quantity,
+        return spread_expiry_close_debit_usdc(
+            group,
+            short_instrument=short_instrument,
+            long_instrument=long_instrument,
             index_price=index_price,
-            instrument=short_instrument,
+            fee_rate=self.config.option_fee_rate,
+            fee_cap_rate=self.config.option_fee_cap_rate,
         )
-        short_fee = self._option_fee_usdc(
-            premium=short_settle,
-            quantity=group.quantity,
-            index_price=index_price,
-            base_currency=short_instrument.base_currency,
-            quote_currency=short_instrument.quote_currency,
-            settlement_currency=short_instrument.settlement_currency,
-        )
-        close_debit = short_debit + short_fee
-        if long_instrument is not None and group.long_strike > 0:
-            long_settle = _intrinsic_settlement(long_instrument, shocked_spot=index_price, option_type=option_type)
-            long_credit = self._premium_value_usdc(
-                premium=long_settle,
-                quantity=group.quantity,
-                index_price=index_price,
-                instrument=long_instrument,
-            )
-            long_fee = self._option_fee_usdc(
-                premium=long_settle,
-                quantity=group.quantity,
-                index_price=index_price,
-                base_currency=long_instrument.base_currency,
-                quote_currency=long_instrument.quote_currency,
-                settlement_currency=long_instrument.settlement_currency,
-            )
-            close_debit = max(close_debit - max(long_credit - long_fee, Decimal("0")), Decimal("0"))
-        return self._cap_spread_reconcile_close_debit(group, close_debit)
 
     def _estimate_reconcile_close_debit(
         self,
@@ -2117,13 +2082,14 @@ class ManagementMixin:
         *,
         markets_by_currency: dict[str, list[OptionInstrument]] | None = None,
     ) -> Decimal | None:
-        if group.current_debit > 0:
-            debit = group.current_debit
-            if self._is_bull_put_spread_group(group):
-                return self._cap_spread_reconcile_close_debit(group, debit)
-            return debit
         markets = markets_by_currency or {}
         is_spread = self._is_bull_put_spread_group(group)
+        spread_settlement = is_spread and group_uses_spread_settlement_pricing(group)
+        if group.current_debit > 0 and not spread_settlement:
+            debit = group.current_debit
+            if is_spread:
+                return self._cap_spread_reconcile_close_debit(group, debit)
+            return debit
         try:
             short_book = self._get_orderbook(group.short_instrument_name, orderbook_cache)
             short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
@@ -2131,7 +2097,7 @@ class ManagementMixin:
             if index_price <= 0:
                 index_price = group.close_index_usd or group.entry_index_usd or Decimal("0")
             expired = self._group_is_expired(group)
-            if is_spread and expired and index_price > 0:
+            if spread_settlement and index_price > 0:
                 long_instrument = self._long_instrument_for_spread_reconcile(
                     group, markets, short_instrument=short_instrument
                 )
@@ -2175,12 +2141,10 @@ class ManagementMixin:
                         long_index = long_book.index_price if long_book.index_price > 0 else index_price
                         if long_instrument is not None:
                             long_premium = (
-                                long_book.best_bid_price
-                                if long_book.best_bid_price > 0
-                                else long_book.mark_price
+                                long_book.best_bid_price if long_book.best_bid_price > 0 else long_book.mark_price
                             )
                     except Exception:
-                        if expired and index_price > 0 and long_instrument is not None:
+                        if spread_settlement and index_price > 0 and long_instrument is not None:
                             return self._spread_reconcile_close_debit_at_index(
                                 group,
                                 short_instrument=short_instrument,
@@ -2203,7 +2167,7 @@ class ManagementMixin:
                         settlement_currency=long_instrument.settlement_currency,
                     )
                     mark_debit = max(mark_debit - max(long_credit - long_fee, Decimal("0")), Decimal("0"))
-                elif expired and index_price > 0 and long_instrument is not None:
+                elif spread_settlement and index_price > 0 and long_instrument is not None:
                     return self._spread_reconcile_close_debit_at_index(
                         group,
                         short_instrument=short_instrument,
@@ -2214,7 +2178,10 @@ class ManagementMixin:
                 return self._cap_spread_reconcile_close_debit(group, max(mark_debit, Decimal("0")))
             return max(mark_debit, Decimal("0"))
         except Exception:
-            if self._group_is_expired(group):
+            expired = self._group_is_expired(group) or (
+                is_spread and in_spread_expiry_settlement_window(int(group.expiration_timestamp_ms or 0))
+            )
+            if expired:
                 idx = self._resolve_reconcile_index_price(
                     group,
                     short_book=None,

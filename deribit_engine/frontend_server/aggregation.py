@@ -396,6 +396,18 @@ def _aggregate_status(
     }
 
 
+def _all_closed_group_rows(
+    accounts: list[DashboardAccount],
+    *,
+    spot_index: dict[str, Decimal] | None = None,
+) -> list[dict[str, Any]]:
+    closed: list[dict[str, Any]] = []
+    for account in accounts:
+        payload = _closed_groups_payload(account.state_path, spot_index=spot_index)
+        closed.extend(payload.get("closed") or [])
+    return _dedupe_trade_group_rows(closed)
+
+
 def _aggregate_realized_summary(
     accounts: list[DashboardAccount],
     *,
@@ -433,6 +445,7 @@ def _aggregate_realized_summary(
         effective_capital_usdc=capital,
         target_portfolio_apr=target_apr,
         window_days=days,
+        spot_index=spot_index,
     )
     summary["open_group_count"] = str(open_count)
     summary["performance_excluded_closed_group_count"] = str(excluded)

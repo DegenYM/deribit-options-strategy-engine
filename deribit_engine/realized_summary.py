@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from .models import TradeGroup
 from .utils import format_decimal, safe_div, to_decimal, utc_now_ms
 
 
@@ -62,25 +63,63 @@ def _annualize_apr(pnl: Decimal, sample_days: Decimal, capital: Decimal) -> Deci
     return safe_div(pnl, capital) * (Decimal("365") / sample_days)
 
 
+def realized_pnl_usdc_at_spot(
+    row: dict[str, Any],
+    spot_index: dict[str, Decimal] | None,
+) -> Decimal | None:
+    """USDC-linear uses stored USDC PnL; coin collateral uses native × live index."""
+    if row.get("realized_pnl") is None:
+        return None
+    group = TradeGroup.from_dict(row)
+    book = group.collateral_book()
+    if book == "USDC":
+        return group.realized_pnl
+    if not spot_index:
+        return to_decimal(row.get("realized_pnl"))
+    spot = spot_index.get(book)
+    if spot is None or spot <= 0:
+        return to_decimal(row.get("realized_pnl"))
+    native_raw = row.get("realized_pnl_collateral_native")
+    native = to_decimal(native_raw) if native_raw is not None else group.realized_pnl_collateral_native
+    if native is None:
+        group.backfill_realized_pnl_collateral_native(spot_index_usd=spot)
+        native = group.realized_pnl_collateral_native
+    if native is not None:
+        return native * spot
+    return to_decimal(row.get("realized_pnl"))
+
+
+def _row_realized_pnl_usdc(
+    row: dict[str, Any],
+    spot_index: dict[str, Decimal] | None,
+) -> Decimal:
+    if spot_index:
+        at_spot = realized_pnl_usdc_at_spot(row, spot_index)
+        if at_spot is not None:
+            return at_spot
+    return to_decimal(row.get("realized_pnl"))
+
+
 def realized_summary_from_closed(
     closed_rows: list[dict[str, Any]],
     *,
     effective_capital_usdc: Decimal,
     target_portfolio_apr: Decimal,
     window_days: int = 30,
+    spot_index: dict[str, Decimal] | None = None,
 ) -> dict[str, Any]:
     """Build the same ``summary`` shape as ``bot.report()`` from closed group dicts."""
     realized = [
         row for row in closed_rows if row.get("realized_pnl") is not None and _closed_timestamp_ms(row) is not None
     ]
     unresolved = [row for row in closed_rows if row not in realized]
-    total_realized = sum((to_decimal(row.get("realized_pnl")) for row in realized), Decimal("0"))
+    total_realized = sum((_row_realized_pnl_usdc(row, spot_index) for row in realized), Decimal("0"))
     total_holding = sum((_holding_days(row) for row in realized), Decimal("0"))
-    wins = sum(1 for row in realized if to_decimal(row.get("realized_pnl")) > 0)
+    wins = sum(1 for row in realized if _row_realized_pnl_usdc(row, spot_index) > 0)
     realized_count = Decimal(str(len(realized)))
     lifetime_days = _realized_sample_days(realized)
     window_rows, window_days_used = _window_rows(realized, window_days)
-    window_pnl = sum((to_decimal(row.get("realized_pnl")) for row in window_rows), Decimal("0"))
+    window_pnl = sum((_row_realized_pnl_usdc(row, spot_index) for row in window_rows), Decimal("0"))
 
     capital = effective_capital_usdc if effective_capital_usdc > 0 else Decimal("0")
 
@@ -108,3 +147,42 @@ def realized_summary_from_closed(
             8,
         ),
     }
+
+
+_SPOT_PATCHED_SUMMARY_KEYS = (
+    "realized_pnl_usdc",
+    "avg_realized_pnl_usdc",
+    "realized_win_rate",
+    "lifetime_realized_apr",
+    "window_realized_pnl_usdc",
+    "window_realized_apr",
+    "window_realized_closed_group_count",
+    "window_days_used",
+)
+
+
+def patch_realized_report_spot_pnl(
+    report_payload: dict[str, Any],
+    closed_rows: list[dict[str, Any]],
+    *,
+    spot_index: dict[str, Decimal] | None,
+    window_days: int,
+) -> None:
+    """Refresh lifetime/window USD PnL and APR on a cached report using live index."""
+    if not spot_index:
+        return
+    summary = report_payload.get("summary")
+    if not isinstance(summary, dict):
+        return
+    capital = to_decimal(summary.get("effective_capital_usdc"))
+    target = to_decimal(summary.get("target_portfolio_apr"))
+    patched = realized_summary_from_closed(
+        closed_rows,
+        effective_capital_usdc=capital,
+        target_portfolio_apr=target,
+        window_days=window_days,
+        spot_index=spot_index,
+    )
+    for key in _SPOT_PATCHED_SUMMARY_KEYS:
+        if key in patched:
+            summary[key] = patched[key]

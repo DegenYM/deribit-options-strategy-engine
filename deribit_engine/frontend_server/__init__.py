@@ -7,6 +7,7 @@ from .aggregation import (
     _aggregate_realized_summary,
     _aggregate_report,
     _aggregate_status,
+    _all_closed_group_rows,
     _dedupe_statuses_for_equity_aggregate,
     _resolve_apr_effective_capital_usdc,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "_aggregate_groups",
     "_aggregate_portfolios",
     "_aggregate_realized_summary",
+    "_all_closed_group_rows",
     "_aggregate_report",
     "_aggregate_status",
     "_aggregate_stress",

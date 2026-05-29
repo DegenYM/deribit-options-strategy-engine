@@ -17,7 +17,7 @@ import {
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
 import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
-import { bookEquityNativeByBook, sumLifetimeRealizedPnlNativeByBook, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook } from "./charts.js";
+import { bookEquityNativeByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
   if (!INVESTOR || !health) return;
@@ -367,13 +367,21 @@ export function renderAggregate(status, report) {
   );
   const creditByStrategy = sumOpenCreditByStrategy(openRows, status, STATE.groups);
 
-  const lifetimePnl = num(summary?.realized_pnl_usdc);
+  const lifetimePnlAtSpot = sumLifetimeRealizedPnlUsdcAtSpot(report, STATE.groups, status);
+  const lifetimePnl = lifetimePnlAtSpot ?? num(summary?.realized_pnl_usdc);
   const lifetimeApr = num(summary?.lifetime_realized_apr);
   const winRate = num(summary?.realized_win_rate);
   const avgHolding = num(summary?.avg_holding_days);
   const closedCount = num(summary?.realized_closed_group_count);
   const windowDays = num(summary?.window_days_used);
-  const windowPnl = num(summary?.window_realized_pnl_usdc);
+  const windowLabelDaysForPnl = windowDays ?? 30;
+  const windowPnlAtSpot = sumWindowRealizedPnlUsdcAtSpot(
+    report,
+    STATE.groups,
+    status,
+    windowLabelDaysForPnl
+  );
+  const windowPnl = windowPnlAtSpot ?? num(summary?.window_realized_pnl_usdc);
   const windowApr = num(summary?.window_realized_apr);
   const lifetimeStartMs = summary ? lifetimePerformanceStartMs(report, STATE.groups) : null;
   const lifetimeNativeByBook = summary

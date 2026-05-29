@@ -16,7 +16,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { bookEquityNative, bookEquityUsdForDisplay, dedupeTradeGroups, fmtNum, fmtPct, fmtUsd, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { bookEquityNative, bookEquityUsdForDisplay, dedupeTradeGroups, fmtNum, fmtPct, fmtUsd, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -290,6 +290,35 @@ export function sumLifetimeRealizedPnlNativeByBook(report, groups, status) {
     out[book] += native;
   }
   return out;
+}
+
+/** Lifetime Total profit in USDC using live index for coin-collateral rows. */
+export function sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status) {
+  let sum = 0;
+  let any = false;
+  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
+    const pnl = realizedPnlDisplayUsdc(g, status);
+    if (pnl === null) continue;
+    sum += pnl;
+    any = true;
+  }
+  return any ? sum : null;
+}
+
+export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDays) {
+  const days = windowDays ?? 30;
+  const cutoffMs = Date.now() - days * 24 * 3600 * 1000;
+  let sum = 0;
+  let any = false;
+  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
+    const closedMs = closedTimestampMs(g);
+    if (closedMs === null || closedMs < cutoffMs) continue;
+    const pnl = realizedPnlDisplayUsdc(g, status);
+    if (pnl === null) continue;
+    sum += pnl;
+    any = true;
+  }
+  return any ? sum : null;
 }
 
 export function sumWindowRealizedPnlNativeByBook(report, groups, status, windowDays) {

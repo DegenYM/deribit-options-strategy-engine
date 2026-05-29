@@ -1658,6 +1658,57 @@ def test_reconcile_adopts_untracked_bull_put_spread_with_long_leg(tmp_path, fake
     assert open_groups[0].long_label == "bull_put_spread-spread-btc-0001-long"
 
 
+def test_demote_skipped_during_expiry_settlement_when_long_gone_first(tmp_path, fake_client, monkeypatch):
+    """At expiry the long leg may leave the book before the short; do not demote to naked."""
+    config = make_config(
+        tmp_path,
+        option_strategy="bull_put_spread",
+        option_markets_profile="linear_usdc",
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    short = "ETH_USDC-29MAY26-1900-P"
+    long = "ETH_USDC-29MAY26-1850-P"
+    exp_ms = utc_now_ms() - 3_600_000
+    group = _build_group(short_instrument_name=short, currency="ETH", quantity=Decimal("1.8"))
+    group.strategy = "bull_put_spread"
+    group.long_instrument_name = long
+    group.long_strike = Decimal("1850")
+    group.expiration_timestamp_ms = exp_ms
+    group.entry_timestamp_ms = exp_ms - 20 * 86_400_000
+    state.groups.append(group)
+    monkeypatch.setattr(
+        "deribit_engine.engine.management.utc_now_ms",
+        lambda: exp_ms + 60_000,
+    )
+    positions = [
+        Position.from_api(
+            {
+                "instrument_name": short,
+                "direction": "sell",
+                "kind": "option",
+                "size": "1.8",
+                "size_currency": "1.8",
+                "mark_price": "50",
+                "average_price": "6",
+                "floating_profit_loss": "0",
+                "delta": "-0.2",
+            }
+        ),
+    ]
+    markets = engine._load_supported_option_markets()
+    engine._reconcile_state(
+        state,
+        option_positions=positions,
+        orderbook_cache={},
+        markets_by_currency=markets,
+    )
+    open_groups = [g for g in state.groups if g.status == "open"]
+    assert len(open_groups) == 1
+    assert open_groups[0].strategy == "bull_put_spread"
+    assert open_groups[0].long_instrument_name == long
+
+
 def test_demote_unwound_bull_put_when_long_closed_externally(tmp_path, fake_client):
     config = make_config(
         tmp_path,
@@ -1711,10 +1762,7 @@ def test_refresh_cash_flow_includes_transfer_after_many_log_rows(tmp_path, fake_
         cash_flow_query_interval_seconds=0,
     )
     now = utc_now_ms()
-    trades = [
-        {"type": "trade", "change": "1", "timestamp": now - 120_000 + i}
-        for i in range(120)
-    ]
+    trades = [{"type": "trade", "change": "1", "timestamp": now - 120_000 + i} for i in range(120)]
     transfer = {"type": "transfer", "change": "-4500", "timestamp": now - 60_000}
     fake_client.transaction_log = {"USDC": trades + [transfer]}
     engine = DeribitOptionTrialBot(config, fake_client)

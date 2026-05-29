@@ -9,6 +9,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from ..bull_put_settlement import (
+    repair_bull_put_expiry_reconcile_pnl,
+    restore_long_leg_from_journal_executions,
+    settlement_index_usd_for_group,
+)
 from ..config import BotConfig
 from ..engine import DeribitOptionTrialBot, ExchangePrefetch
 from ..models import (
@@ -122,24 +127,54 @@ def _load_closed_groups_payload(
         return {"open": [], "closed": [], "performance_excluded_closed_group_count": 0, "next_group_id": None}
     store = StrategyStateStore(state_path)
     state = store.load()
+    fee_rate, fee_cap_rate = Decimal("0.0003"), Decimal("0.125")
+    try:
+        from ..trade_journal_backfill import _fee_rates_for_state
+
+        fee_rate, fee_cap_rate = _fee_rates_for_state(state_path)
+    except Exception:  # noqa: BLE001
+        pass
     excluded_group_ids = load_performance_exclusion_group_ids(state_path)
     open_short_names = open_short_instrument_names(state.groups)
     open_groups = [g.to_dict() for g in state.groups if g.status != "closed"]
     all_closed_groups = [g for g in state.groups if g.status == "closed"]
     closed_groups = []
+    state_repaired = False
     for g in all_closed_groups:
         if g.group_id in excluded_group_ids:
             continue
         if is_phantom_reconcile_close(g, open_short_names=open_short_names):
             continue
         book = (g.collateral_currency or g.currency or "").upper()
-        spot = (spot_index or {}).get(book)
-        journal_rows = _journal_executions_for_group(state_path, g.group_id) if g.is_coin_collateral() else None
-        g.backfill_realized_pnl_collateral_native(
-            spot_index_usd=spot if spot is not None and spot > 0 else None,
-            journal_executions=journal_rows,
-        )
+        spot = settlement_index_usd_for_group(g, spot_by_book=spot_index)
+        journal_rows = _journal_executions_for_group(state_path, g.group_id)
+        if spot is not None:
+            before_pnl = g.realized_pnl
+            restore_long_leg_from_journal_executions(g, journal_rows)
+            if (
+                repair_bull_put_expiry_reconcile_pnl(
+                    g,
+                    index_price_usd=spot,
+                    fee_rate=fee_rate,
+                    fee_cap_rate=fee_cap_rate,
+                    markets={},
+                )
+                and g.realized_pnl != before_pnl
+            ):
+                state_repaired = True
+        if g.is_coin_collateral():
+            g.backfill_realized_pnl_collateral_native(
+                spot_index_usd=spot if spot is not None and spot > 0 else None,
+                journal_executions=journal_rows,
+            )
         closed_groups.append(g.to_dict())
+    if state_repaired:
+        try:
+            store.save(state)
+            with _closed_groups_payload_cache_lock:
+                _closed_groups_payload_cache.pop(str(state_path.resolve()), None)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("persist spread expiry repair failed for %s: %s", state_path.name, exc)
     payload = {
         "open": _decimalize(open_groups),
         "closed": _decimalize(closed_groups),

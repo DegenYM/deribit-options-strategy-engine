@@ -314,7 +314,21 @@ def create_app(
                     effective_capital_override=override,
                 )
                 series_cache.seed(cache_key, summary)
-            payload["realized_summary"] = copy.deepcopy(summary)
+            report_payload = copy.deepcopy(summary)
+            try:
+                from ..realized_summary import patch_realized_report_spot_pnl
+
+                spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+                closed_rows = pkg._all_closed_group_rows(accounts, spot_index=spot_idx)
+                patch_realized_report_spot_pnl(
+                    report_payload,
+                    closed_rows,
+                    spot_index=spot_idx,
+                    window_days=days,
+                )
+            except Exception as spot_exc:  # noqa: BLE001
+                LOGGER.debug("snapshot realized_summary spot patch skipped: %s", spot_exc)
+            payload["realized_summary"] = report_payload
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("snapshot realized_summary attach skipped: %s", exc)
         return JSONResponse(_decimalize(payload))
@@ -354,9 +368,15 @@ def create_app(
                 payload["groups"] = pkg._aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
             if need_summary:
                 status_for_summary = status if status is not None else status_cache.try_get("status")
+                spot_idx: dict[str, Decimal] = {}
+                try:
+                    spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.debug("dashboard bundle spot fetch skipped: %s", exc)
                 payload["realized_summary"] = pkg._aggregate_realized_summary(
                     accounts,
                     days=days,
+                    spot_index=spot_idx or None,
                     status_payload=status_for_summary,
                     effective_capital_override=override,
                 )
@@ -394,9 +414,23 @@ def create_app(
     def _finalize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         out = copy.deepcopy(payload)
         try:
+            from ..realized_summary import patch_realized_report_spot_pnl
+
             spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
             _apply_spot_native_backfill(out.get("groups") or {}, spot_idx)
-            for row in (out.get("realized_summary") or {}).get("recent_closed_trades") or []:
+            groups = out.get("groups") or {}
+            closed_rows = [row for row in (groups.get("closed") or []) if isinstance(row, dict)]
+            report_payload = out.get("realized_summary")
+            if report_payload and closed_rows and spot_idx:
+                summary = report_payload.get("summary") or {}
+                window_days = int(to_decimal(summary.get("window_days_requested") or 30))
+                patch_realized_report_spot_pnl(
+                    report_payload,
+                    closed_rows,
+                    spot_index=spot_idx,
+                    window_days=window_days,
+                )
+            for row in (report_payload or {}).get("recent_closed_trades") or []:
                 if isinstance(row, dict):
                     _backfill_row_collateral_native(row, spot_idx)
         except Exception as exc:  # noqa: BLE001
@@ -501,7 +535,18 @@ def create_app(
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"realized summary failed: {exc}") from exc
         try:
+            import deribit_engine.frontend_server as pkg
+
+            from ..realized_summary import patch_realized_report_spot_pnl
+
             spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+            closed_rows = pkg._all_closed_group_rows(accounts, spot_index=spot_idx)
+            patch_realized_report_spot_pnl(
+                payload,
+                closed_rows,
+                spot_index=spot_idx,
+                window_days=days,
+            )
             for row in payload.get("recent_closed_trades") or []:
                 if isinstance(row, dict):
                     _backfill_row_collateral_native(row, spot_idx)
