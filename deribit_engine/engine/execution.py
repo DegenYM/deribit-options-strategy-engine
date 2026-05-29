@@ -13,7 +13,10 @@ from ..models import (
 )
 from ..utils import (
     align_option_order_amount,
+    ceil_to_step,
+    floor_to_step,
     format_decimal,
+    parse_exchange_price_band_limit,
     safe_div,
     to_decimal,
     utc_now_ms,
@@ -625,14 +628,14 @@ class ExecutionMixin:
                 "unfilled": requested_total,
             }
 
-        response = place_fn(
+        response = self._submit_option_close_limit(
+            place_fn,
+            instrument=inst,
             instrument_name=instrument_name,
             amount=first_amount,
             label=label,
-            order_type="limit",
             price=initial_price,
-            time_in_force="immediate_or_cancel",
-            reduce_only=True,
+            direction=direction,
         )
         responses.append(response)
         filled = self._response_filled_amount(response)
@@ -677,14 +680,14 @@ class ExecutionMixin:
             else:
                 retry_price = self.strategy.close_sell_price(instrument, retry_book)
             retry_price = self._positive_option_limit_price(instrument, retry_price)
-            response = place_fn(
+            response = self._submit_option_close_limit(
+                place_fn,
+                instrument=instrument,
                 instrument_name=instrument_name,
                 amount=retry_amount,
                 label=label,
-                order_type="limit",
                 price=retry_price,
-                time_in_force="immediate_or_cancel",
-                reduce_only=True,
+                direction=direction,
             )
             responses.append(response)
             filled = self._response_filled_amount(response)
@@ -709,6 +712,64 @@ class ExecutionMixin:
         if tick > 0:
             return tick
         return Decimal("0.0001")
+
+    def _submit_option_close_limit(
+        self,
+        place_fn: Any,
+        *,
+        instrument: OptionInstrument,
+        instrument_name: str,
+        amount: Decimal,
+        label: str,
+        price: Decimal,
+        direction: str,
+    ) -> dict[str, Any]:
+        order_kwargs = {
+            "instrument_name": instrument_name,
+            "amount": amount,
+            "label": label,
+            "order_type": "limit",
+            "price": price,
+            "time_in_force": "immediate_or_cancel",
+            "reduce_only": True,
+        }
+        try:
+            return place_fn(**order_kwargs)
+        except ExchangeError as exc:
+            limit = parse_exchange_price_band_limit(str(exc))
+            if limit is None:
+                return self._fallback_close_position_market(instrument_name, original_error=exc)
+            if direction == "buy":
+                clamped = floor_to_step(limit, instrument.tick_size_for_price(limit))
+            else:
+                clamped = ceil_to_step(limit, instrument.tick_size_for_price(limit))
+            if clamped <= 0 or clamped == price:
+                return self._fallback_close_position_market(instrument_name, original_error=exc)
+            LOGGER.warning(
+                "option close %s on %s clamped from %s to exchange limit %s (%s)",
+                direction,
+                instrument_name,
+                price,
+                clamped,
+                exc,
+            )
+            try:
+                return place_fn(**{**order_kwargs, "price": clamped})
+            except ExchangeError as retry_exc:
+                return self._fallback_close_position_market(instrument_name, original_error=retry_exc)
+
+    def _fallback_close_position_market(
+        self,
+        instrument_name: str,
+        *,
+        original_error: Exception,
+    ) -> dict[str, Any]:
+        LOGGER.warning(
+            "option close limit rejected for %s; falling back to close_position market (%s)",
+            instrument_name,
+            original_error,
+        )
+        return self.client.close_position(instrument_name, order_type="market")
 
     def _option_reduce_only_capacity(
         self,

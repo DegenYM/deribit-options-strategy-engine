@@ -202,6 +202,43 @@ class OrderBookSnapshot:
             return Decimal("1")
         return (self.best_ask_price - self.best_bid_price) / midpoint
 
+    def quote_sane_for_close(self, *, max_spread_ratio: Decimal) -> bool:
+        """True when bid/ask are usable for management exits (not stale outliers)."""
+        mark = self.mark_price
+        bid = self.best_bid_price
+        ask = self.best_ask_price
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return False
+        if self.spread_ratio > max_spread_ratio:
+            return False
+        if mark <= 0:
+            return True
+        upper = mark * (Decimal("1") + max_spread_ratio)
+        lower = mark * (Decimal("1") - max_spread_ratio)
+        return ask <= upper and bid >= lower
+
+    def buy_close_premium(self, *, max_spread_ratio: Decimal) -> Decimal:
+        """Per-contract premium for buy-to-close; falls back to mark when quotes are insane."""
+        mark = self.mark_price if self.mark_price > 0 else Decimal("0")
+        ask = self.best_ask_price
+        if self.quote_sane_for_close(max_spread_ratio=max_spread_ratio):
+            if ask <= 0:
+                return mark
+            return max(ask, mark) if mark > 0 else ask
+        return mark if mark > 0 else max(ask, Decimal("0"))
+
+    def sell_close_premium(self, *, max_spread_ratio: Decimal) -> Decimal:
+        """Per-contract premium for sell-to-close; falls back to mark when quotes are insane."""
+        mark = self.mark_price if self.mark_price > 0 else Decimal("0")
+        bid = self.best_bid_price
+        if self.quote_sane_for_close(max_spread_ratio=max_spread_ratio):
+            if bid <= 0:
+                return mark
+            if mark > 0:
+                return min(bid, mark)
+            return bid
+        return mark if mark > 0 else max(bid, Decimal("0"))
+
     @property
     def book_notional_usdc(self) -> Decimal:
         return self.index_price * self.best_bid_amount

@@ -159,21 +159,24 @@ class StrategySelector:
         return ask
 
     def close_buy_price(self, instrument: OptionInstrument, book: OrderBookSnapshot) -> Decimal:
-        ask = book.best_ask_price
-        if ask <= 0:
+        premium = book.buy_close_premium(max_spread_ratio=self.config.early_exit_max_spread_ratio)
+        if premium <= 0:
             return instrument.tick_size
-        return max(ask, self._ceil_price(ask * (Decimal("1") + self.config.exit_buffer_ratio), instrument))
+        return max(
+            premium,
+            self._ceil_price(premium * (Decimal("1") + self.config.exit_buffer_ratio), instrument),
+        )
 
     def close_sell_price(self, instrument: OptionInstrument, book: OrderBookSnapshot) -> Decimal:
-        bid = book.best_bid_price
-        minimum_price = instrument.tick_size_for_price(bid if bid > 0 else instrument.tick_size)
+        premium = book.sell_close_premium(max_spread_ratio=self.config.early_exit_max_spread_ratio)
+        minimum_price = instrument.tick_size_for_price(premium if premium > 0 else instrument.tick_size)
         if minimum_price <= 0:
             minimum_price = instrument.tick_size
-        if bid <= 0:
+        if premium <= 0:
             return minimum_price
         return max(
             minimum_price,
-            self._floor_price(bid * (Decimal("1") - self.config.exit_buffer_ratio), instrument),
+            self._floor_price(premium * (Decimal("1") - self.config.exit_buffer_ratio), instrument),
         )
 
     @staticmethod

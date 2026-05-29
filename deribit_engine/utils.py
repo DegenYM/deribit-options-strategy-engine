@@ -42,6 +42,21 @@ def ceil_to_step(value: Decimal, step: Decimal) -> Decimal:
     return units * step
 
 
+_PRICE_BAND_LIMIT_RE = re.compile(
+    r"price_too_(?:high|low)(?:4idx)?\s+([0-9]+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
+
+
+def parse_exchange_price_band_limit(message: str) -> Decimal | None:
+    """Extract Deribit price band limit from errors like ``price_too_high 2180.0``."""
+    match = _PRICE_BAND_LIMIT_RE.search(message)
+    if not match:
+        return None
+    limit = to_decimal(match.group(1))
+    return limit if limit > 0 else None
+
+
 def decimal_gcd(a: Decimal, b: Decimal) -> Decimal:
     a, b = abs(a), abs(b)
     if a == 0:

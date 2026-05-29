@@ -45,11 +45,68 @@ def test_close_sell_price_never_floors_one_tick_bid_to_zero(tmp_path):
     payload = client.get_order_book("ETH_USDC-14APR30-3000-P")
     payload["best_bid_price"] = "0.5"
     payload["best_ask_price"] = "1.0"
+    payload["mark_price"] = "0.75"
     book = OrderBookSnapshot.from_api(payload)
 
     price = selector.close_sell_price(instrument, book)
 
     assert price == Decimal("0.5")
+
+
+def test_orderbook_buy_close_premium_ignores_outlier_ask():
+    book = OrderBookSnapshot(
+        instrument_name="BTC_USDC-26JUN26-66000-P",
+        best_bid_price=Decimal("630"),
+        best_bid_amount=Decimal("1"),
+        best_ask_price=Decimal("2117"),
+        best_ask_amount=Decimal("0.01"),
+        mark_price=Decimal("640"),
+        index_price=Decimal("95000"),
+        delta=Decimal("0.14"),
+        iv=Decimal("0.5"),
+        open_interest=Decimal("100"),
+    )
+
+    assert book.quote_sane_for_close(max_spread_ratio=Decimal("0.08")) is False
+    assert book.buy_close_premium(max_spread_ratio=Decimal("0.08")) == Decimal("640")
+
+
+def test_close_buy_price_uses_mark_when_ask_is_outlier(tmp_path):
+    config = make_config(tmp_path, early_exit_max_spread_ratio=Decimal("0.08"))
+    selector = StrategySelector(config)
+    instrument = OptionInstrument.from_api(
+        {
+            "instrument_name": "BTC_USDC-26JUN26-66000-P",
+            "base_currency": "BTC",
+            "quote_currency": "USDC",
+            "settlement_currency": "USDC",
+            "instrument_type": "linear",
+            "tick_size": "5",
+            "tick_size_steps": [],
+            "min_trade_amount": "0.01",
+            "contract_size": "1",
+            "option_type": "put",
+            "expiration_timestamp": 1782460800000,
+            "strike": "66000",
+            "instrument_state": "open",
+        }
+    )
+    book = OrderBookSnapshot(
+        instrument_name="BTC_USDC-26JUN26-66000-P",
+        best_bid_price=Decimal("630"),
+        best_bid_amount=Decimal("1"),
+        best_ask_price=Decimal("2117"),
+        best_ask_amount=Decimal("0.01"),
+        mark_price=Decimal("640"),
+        index_price=Decimal("95000"),
+        delta=Decimal("0.14"),
+        iv=Decimal("0.5"),
+        open_interest=Decimal("100"),
+    )
+
+    price = selector.close_buy_price(instrument, book)
+
+    assert price < Decimal("700")
 
 
 def test_linear_usdc_apr_matches_premium_over_strike_times_365_over_dte():

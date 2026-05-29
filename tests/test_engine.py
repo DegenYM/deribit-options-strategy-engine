@@ -7,6 +7,7 @@ from conftest import FakeClient, future_expiry, make_config
 from deribit_engine.engine import DeribitOptionTrialBot
 from deribit_engine.models import (
     AccountSummary,
+    OptionInstrument,
     OrderBookSnapshot,
     Position,
     RiskRegime,
@@ -1255,6 +1256,76 @@ def test_refresh_group_fetches_profile_filtered_linear_metadata(tmp_path, fake_c
     assert group.current_debit > 0
     assert group.current_close_fee > 0
     assert group.short_delta == Decimal("0.11")
+
+
+def test_refresh_group_ignores_outlier_ask_for_loss_pct(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        early_exit_max_spread_ratio=Decimal("0.08"),
+        hard_stop_loss_pct=Decimal("0.60"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    short = "BTC_USDC-14APR30-63000-P"
+    group = _build_group(
+        short_instrument_name=short,
+        entry_credit=Decimal("26"),
+        max_loss=Decimal("415"),
+        quantity=Decimal("0.05"),
+    )
+    insane_book = OrderBookSnapshot(
+        instrument_name=short,
+        best_bid_price=Decimal("630"),
+        best_bid_amount=Decimal("1"),
+        best_ask_price=Decimal("2117"),
+        best_ask_amount=Decimal("0.01"),
+        mark_price=Decimal("640"),
+        index_price=Decimal("95000"),
+        delta=Decimal("0.14"),
+        iv=Decimal("0.5"),
+        open_interest=Decimal("100"),
+    )
+    markets = engine._load_supported_option_markets()
+
+    engine._refresh_group(context_markets=markets, group=group, orderbook_cache={short: insane_book})
+
+    assert group.loss_pct_of_max_loss < Decimal("0.60")
+    soft_delta, hard_delta = engine._defense_delta_thresholds(group)
+    assert group.short_delta < hard_delta
+
+
+def test_submit_option_close_limit_clamps_price_too_high(tmp_path, fake_client):
+    from deribit_engine.exceptions import ExchangeError
+
+    short = "BTC_USDC-14APR30-63000-P"
+
+    class PriceTooHighClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.prices: list[Decimal] = []
+
+        def place_buy_order(self, **kwargs):
+            price = Decimal(str(kwargs.get("price")))
+            self.prices.append(price)
+            if len(self.prices) == 1:
+                raise ExchangeError('private/buy failed: HTTP 400 {"message":"price_too_high 2180.0"}')
+            return super().place_buy_order(**kwargs)
+
+    client = PriceTooHighClient()
+    engine = DeribitOptionTrialBot(make_config(tmp_path, option_markets_profile="linear_usdc"), client)
+    instrument = OptionInstrument.from_api(client.get_instrument(short))
+    response = engine._submit_option_close_limit(
+        client.place_buy_order,
+        instrument=instrument,
+        instrument_name=short,
+        amount=Decimal("0.05"),
+        label="test-close",
+        price=Decimal("2200"),
+        direction="buy",
+    )
+
+    assert client.prices == [Decimal("2200"), Decimal("2180")]
+    assert response.get("order") is not None
 
 
 def test_close_group_preview_fetches_profile_filtered_spread_metadata(tmp_path, fake_client):

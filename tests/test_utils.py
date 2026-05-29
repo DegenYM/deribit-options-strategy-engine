@@ -13,3 +13,11 @@ def test_dumps_json_preserves_unicode_text():
 
     assert "目前是 crisis 風控狀態" in rendered
     assert "\\u76ee" not in rendered
+
+
+def test_parse_exchange_price_band_limit():
+    from deribit_engine.utils import parse_exchange_price_band_limit
+
+    assert parse_exchange_price_band_limit("price_too_high 2180.0") == Decimal("2180.0")
+    assert parse_exchange_price_band_limit('private/buy failed: ... "message":"price_too_low 5.0"') == Decimal("5.0")
+    assert parse_exchange_price_band_limit("insufficient_funds") is None

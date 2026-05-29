@@ -1940,12 +1940,12 @@ class ManagementMixin:
     ) -> None:
         short_book = self._get_orderbook(group.short_instrument_name, orderbook_cache)
         short_instrument = self._find_or_fetch_instrument(context_markets, group.short_instrument_name)
-        # Estimate close-cost premium. We prefer best_ask (what we'd actually
-        # pay to cross) but fall back to mark when the ask side is empty /
-        # stale, otherwise current_debit collapses to zero and profit_capture
-        # falsely hits 100% -> spurious take_profit. Use max(ask, mark) so a
-        # wide-spread book where ask > mark still reflects realistic cost.
-        close_premium = max(short_book.best_ask_price, short_book.mark_price)
+        # Estimate close-cost premium. Prefer a tight best_ask, but ignore outlier
+        # quotes that sit far from mark (stale/fat-finger orders) so loss_pct and
+        # defense stops are not spuriously triggered.
+        close_premium = short_book.buy_close_premium(max_spread_ratio=self.config.early_exit_max_spread_ratio)
+        if close_premium <= 0:
+            close_premium = max(short_book.best_ask_price, short_book.mark_price)
         if close_premium <= 0:
             close_premium = Decimal("0")
         group.current_debit = max(
@@ -1970,7 +1970,13 @@ class ManagementMixin:
             try:
                 long_book = self._get_orderbook(group.long_instrument_name, orderbook_cache)
                 long_instrument = self._find_or_fetch_instrument(context_markets, group.long_instrument_name)
-                long_close_premium = long_book.best_bid_price if long_book.best_bid_price > 0 else long_book.mark_price
+                long_close_premium = long_book.sell_close_premium(
+                    max_spread_ratio=self.config.early_exit_max_spread_ratio
+                )
+                if long_close_premium <= 0:
+                    long_close_premium = (
+                        long_book.best_bid_price if long_book.best_bid_price > 0 else long_book.mark_price
+                    )
                 long_credit = self._premium_value_usdc(
                     premium=max(long_close_premium, Decimal("0")),
                     quantity=group.quantity,
