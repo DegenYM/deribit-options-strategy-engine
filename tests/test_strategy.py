@@ -71,6 +71,48 @@ def test_orderbook_buy_close_premium_ignores_outlier_ask():
     assert book.buy_close_premium(max_spread_ratio=Decimal("0.08")) == Decimal("640")
 
 
+def test_income_exit_close_buy_price_uses_ask_on_wide_but_sane_spread(tmp_path):
+    config = make_config(
+        tmp_path,
+        early_exit_max_spread_ratio=Decimal("0.08"),
+        income_exit_max_spread_ratio=Decimal("0.50"),
+    )
+    selector = StrategySelector(config)
+    instrument = OptionInstrument.from_api(
+        {
+            "instrument_name": "ETH_USDC-5JUN26-2250-C",
+            "base_currency": "ETH",
+            "quote_currency": "USDC",
+            "settlement_currency": "USDC",
+            "instrument_type": "linear",
+            "tick_size": "0.2",
+            "tick_size_steps": [{"above_price": 50, "tick_size": 1}],
+            "min_trade_amount": "0.1",
+            "contract_size": "1",
+            "option_type": "call",
+            "expiration_timestamp": 1780646400000,
+            "strike": "2250",
+            "instrument_state": "open",
+        }
+    )
+    book = OrderBookSnapshot(
+        instrument_name="ETH_USDC-5JUN26-2250-C",
+        best_bid_price=Decimal("1.6"),
+        best_bid_amount=Decimal("1"),
+        best_ask_price=Decimal("2.6"),
+        best_ask_amount=Decimal("1"),
+        mark_price=Decimal("2.01"),
+        index_price=Decimal("2100"),
+        delta=Decimal("0.04"),
+        iv=Decimal("0.5"),
+        open_interest=Decimal("100"),
+    )
+    price = selector.close_buy_price_for_exit(instrument, book, reason="take_profit", incomplete_streak=0)
+    assert price >= Decimal("2.6")
+    taker = selector.close_buy_price_for_exit(instrument, book, reason="take_profit", incomplete_streak=1)
+    assert taker >= Decimal("2.6")
+
+
 def test_close_buy_price_uses_mark_when_ask_is_outlier(tmp_path):
     config = make_config(tmp_path, early_exit_max_spread_ratio=Decimal("0.08"))
     selector = StrategySelector(config)

@@ -176,6 +176,11 @@ class BotConfig:
     cash_flow_query_interval_seconds: int = 300
     # Covered-call spot exit controls. Disabled by default so covered_call keeps
     # the existing option-only behavior unless the profile explicitly opts in.
+    income_exit_max_spread_ratio: Decimal = Decimal("0.50")
+    income_exit_escalate_taker: bool = True
+    income_exit_market_after_attempts: int = 3
+    income_exit_time_in_force: str = "good_til_cancelled"
+    income_exit_order_ttl_minutes: int = 3
     covered_call_spot_exit_enabled: bool = False
     covered_call_robust_exit_enabled: bool = False
     covered_call_robust_exit_dte: Decimal = Decimal("0.5")
@@ -643,6 +648,13 @@ def load_config(
         early_exit_remaining_apr=to_decimal(_optional(values, "EARLY_EXIT_REMAINING_APR", "0.08")),
         early_exit_min_profit_capture=to_decimal(_optional(values, "EARLY_EXIT_MIN_PROFIT_CAPTURE", "0.25")),
         early_exit_max_spread_ratio=to_decimal(_optional(values, "EARLY_EXIT_MAX_SPREAD_RATIO", "0.05")),
+        income_exit_max_spread_ratio=to_decimal(_optional(values, "INCOME_EXIT_MAX_SPREAD_RATIO", "0.50")),
+        income_exit_escalate_taker=_to_bool(_optional(values, "INCOME_EXIT_ESCALATE_TO_TAKER", "true"), default=True),
+        income_exit_market_after_attempts=max(0, int(_optional(values, "INCOME_EXIT_MARKET_AFTER_ATTEMPTS", "3"))),
+        income_exit_time_in_force=str(_optional(values, "INCOME_EXIT_TIME_IN_FORCE", "good_til_cancelled"))
+        .strip()
+        .lower(),
+        income_exit_order_ttl_minutes=max(1, int(_optional(values, "INCOME_EXIT_ORDER_TTL_MINUTES", "3"))),
         time_exit_dte=int(_optional(values, "TIME_EXIT_DTE", "5")),
         soft_defense_delta=to_decimal(_optional(values, "SOFT_DEFENSE_DELTA", "0.25")),
         hard_defense_delta=to_decimal(_optional(values, "HARD_DEFENSE_DELTA", "0.35")),

@@ -158,8 +158,15 @@ class StrategySelector:
             return Decimal("0")
         return ask
 
-    def close_buy_price(self, instrument: OptionInstrument, book: OrderBookSnapshot) -> Decimal:
-        premium = book.buy_close_premium(max_spread_ratio=self.config.early_exit_max_spread_ratio)
+    def close_buy_price(
+        self,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        *,
+        max_spread_ratio: Decimal | None = None,
+    ) -> Decimal:
+        ratio = max_spread_ratio if max_spread_ratio is not None else self.config.early_exit_max_spread_ratio
+        premium = book.buy_close_premium(max_spread_ratio=ratio)
         if premium <= 0:
             return instrument.tick_size
         return max(
@@ -167,8 +174,56 @@ class StrategySelector:
             self._ceil_price(premium * (Decimal("1") + self.config.exit_buffer_ratio), instrument),
         )
 
-    def close_sell_price(self, instrument: OptionInstrument, book: OrderBookSnapshot) -> Decimal:
-        premium = book.sell_close_premium(max_spread_ratio=self.config.early_exit_max_spread_ratio)
+    def close_buy_price_for_exit(
+        self,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        *,
+        reason: str,
+        incomplete_streak: int = 0,
+    ) -> Decimal:
+        """Buy-to-close limit for management exits (TP / time / defense).
+
+        Income exits (TP, time exit, early exit) use a wider spread band so wide
+        books can price off the ask instead of mark-only. After a failed close,
+        optionally escalate to taker (ask + buffer). Defense exits always taker.
+        """
+        from .exit_reasons import DEFENSE_EXIT_REASONS, INCOME_EXIT_REASONS
+
+        if reason in DEFENSE_EXIT_REASONS:
+            return self._close_buy_taker_price(instrument, book)
+        if reason in INCOME_EXIT_REASONS:
+            if self.config.income_exit_escalate_taker and incomplete_streak > 0:
+                return self._close_buy_taker_price(instrument, book)
+            return self.close_buy_price(
+                instrument,
+                book,
+                max_spread_ratio=self.config.income_exit_max_spread_ratio,
+            )
+        return self.close_buy_price(instrument, book)
+
+    def _close_buy_taker_price(self, instrument: OptionInstrument, book: OrderBookSnapshot) -> Decimal:
+        ask = self.buy_taker_price(instrument, book)
+        if ask <= 0:
+            return self.close_buy_price(
+                instrument,
+                book,
+                max_spread_ratio=self.config.income_exit_max_spread_ratio,
+            )
+        return max(
+            ask,
+            self._ceil_price(ask * (Decimal("1") + self.config.exit_buffer_ratio), instrument),
+        )
+
+    def close_sell_price(
+        self,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        *,
+        max_spread_ratio: Decimal | None = None,
+    ) -> Decimal:
+        ratio = max_spread_ratio if max_spread_ratio is not None else self.config.early_exit_max_spread_ratio
+        premium = book.sell_close_premium(max_spread_ratio=ratio)
         minimum_price = instrument.tick_size_for_price(premium if premium > 0 else instrument.tick_size)
         if minimum_price <= 0:
             minimum_price = instrument.tick_size

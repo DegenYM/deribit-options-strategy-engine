@@ -1076,6 +1076,7 @@ class EngineBase:
     ) -> None:
         group.status = "closed"
         group.last_action = reason
+        group.close_incomplete_streak = 0
         group.close_reason = reason
         group.closed_timestamp_ms = closed_timestamp_ms
         group.realized_close_debit = realized_close_debit

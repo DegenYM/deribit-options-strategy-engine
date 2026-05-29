@@ -574,6 +574,7 @@ class TradeGroup:
     profit_capture: Decimal = Decimal("0")
     status: str = "open"
     last_action: str = ""
+    close_incomplete_streak: int = 0
     closed_timestamp_ms: int | None = None
     close_reason: str = ""
     realized_close_debit: Decimal | None = None
@@ -1065,6 +1066,7 @@ class TradeGroup:
             "profit_capture": self.profit_capture,
             "status": self.status,
             "last_action": self.last_action,
+            "close_incomplete_streak": self.close_incomplete_streak,
             "closed_timestamp_ms": self.closed_timestamp_ms,
             "close_reason": self.close_reason,
             "realized_close_debit": self.realized_close_debit,
@@ -1160,6 +1162,7 @@ class TradeGroup:
             profit_capture=to_decimal(payload.get("profit_capture")),
             status=str(payload.get("status") or "open"),
             last_action=str(payload.get("last_action") or ""),
+            close_incomplete_streak=int(payload.get("close_incomplete_streak") or 0),
             closed_timestamp_ms=int(payload["closed_timestamp_ms"])
             if payload.get("closed_timestamp_ms") is not None
             else None,

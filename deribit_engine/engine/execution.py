@@ -4,8 +4,10 @@ from decimal import Decimal
 from typing import Any
 
 from ..exceptions import AuthenticationError, ExchangeError
+from ..exit_reasons import INCOME_EXIT_REASONS
 from ..models import (
     HedgePlan,
+    OpenOrder,
     OptionInstrument,
     OrderBookSnapshot,
     Position,
@@ -398,13 +400,17 @@ class ExecutionMixin:
         self, context: RuntimeContext, group: TradeGroup, *, reason: str, live: bool
     ) -> list[dict[str, Any]]:
         short_book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
+        short_instrument = self._find_instrument(context, group.short_instrument_name)
+        close_buy_price = self.strategy.close_buy_price_for_exit(
+            short_instrument,
+            short_book,
+            reason=reason,
+            incomplete_streak=group.close_incomplete_streak,
+        )
         close_short = {
             "instrument_name": group.short_instrument_name,
             "amount": format_decimal(group.quantity, 8),
-            "price": format_decimal(
-                self.strategy.close_buy_price(self._find_instrument(context, group.short_instrument_name), short_book),
-                8,
-            ),
+            "price": format_decimal(close_buy_price, 8),
             "label": f"{group.short_label or self._spread_labels(group.currency, group.group_id)['short']}-close",
             "direction": "buy",
         }
@@ -434,15 +440,23 @@ class ExecutionMixin:
             quantity=group.quantity,
             direction="buy",
             label=close_short["label"],
-            initial_price=to_decimal(close_short["price"]),
+            initial_price=close_buy_price,
+            reason=reason,
+            incomplete_streak=group.close_incomplete_streak,
         )
         short_response = short_result["last_response"]
         if short_result["unfilled"] > 0:
             LOGGER.warning("close_group %s: short leg unfilled=%s", group.group_id, short_result["unfilled"])
-            group.last_action = f"{reason}_incomplete"
+            if short_result.get("resting_pending"):
+                group.last_action = f"{reason}_pending"
+            else:
+                group.last_action = f"{reason}_incomplete"
+                if short_result.get("streak_bump") or not self._income_exit_uses_resting_limit(reason):
+                    group.close_incomplete_streak += 1
+            action_type = "close_group_pending" if short_result.get("resting_pending") else "close_group_incomplete"
             return [
                 {
-                    "action": "close_group_incomplete",
+                    "action": action_type,
                     "reason": reason,
                     "group_id": group.group_id,
                     "short_filled": short_result["filled"],
@@ -452,7 +466,6 @@ class ExecutionMixin:
             ]
         closed_timestamp_ms = utc_now_ms()
         short_close_price = short_result["average_price"]
-        short_instrument = self._find_instrument(context, group.short_instrument_name)
         realized_close_debit = self._premium_value_usdc(
             premium=short_close_price,
             quantity=group.quantity,
@@ -472,6 +485,8 @@ class ExecutionMixin:
         long_close_price_for_native: Decimal | None = None
         long_instrument_for_native: OptionInstrument | None = None
         if group.long_instrument_name:
+            long_book = self._get_orderbook(group.long_instrument_name, context.orderbook_cache)
+            long_inst = self._find_instrument(context, group.long_instrument_name)
             long_result = self._close_leg_with_retry(
                 context,
                 instrument_name=group.long_instrument_name,
@@ -479,9 +494,14 @@ class ExecutionMixin:
                 direction="sell",
                 label=f"{group.long_label or self._spread_labels(group.currency, group.group_id)['long']}-close",
                 initial_price=self.strategy.close_sell_price(
-                    self._find_instrument(context, group.long_instrument_name),
-                    self._get_orderbook(group.long_instrument_name, context.orderbook_cache),
+                    long_inst,
+                    long_book,
+                    max_spread_ratio=self.config.income_exit_max_spread_ratio
+                    if reason in INCOME_EXIT_REASONS
+                    else None,
                 ),
+                reason=reason,
+                incomplete_streak=group.close_incomplete_streak,
             )
             long_response = long_result["last_response"]
             if long_result["unfilled"] > 0:
@@ -581,6 +601,62 @@ class ExecutionMixin:
                 trades["long_leg"] = long_trades
         return trades
 
+    def _income_exit_uses_resting_limit(self, reason: str) -> bool:
+        return reason in INCOME_EXIT_REASONS and self.config.income_exit_time_in_force == "good_til_cancelled"
+
+    def _close_time_in_force(self, reason: str) -> str:
+        if self._income_exit_uses_resting_limit(reason):
+            return "good_til_cancelled"
+        return "immediate_or_cancel"
+
+    def _find_resting_close_order(
+        self,
+        context: RuntimeContext,
+        *,
+        label: str,
+        instrument_name: str,
+        direction: str,
+    ) -> OpenOrder | None:
+        want = direction.lower()
+        for order in context.open_orders:
+            if order.label != label:
+                continue
+            if order.instrument_name != instrument_name:
+                continue
+            if order.direction != want:
+                continue
+            if not order.reduce_only:
+                continue
+            if order.order_state not in {"open", "untriggered"}:
+                continue
+            return order
+        return None
+
+    def _await_resting_close_order(
+        self,
+        initial_response: dict[str, Any],
+        *,
+        max_wait_seconds: int,
+    ) -> dict[str, Any]:
+        order = self._response_order(initial_response)
+        order_id = str(order.get("order_id") or "")
+        state = initial_response
+        if not order_id:
+            return state
+        waited = 0
+        while waited < max_wait_seconds:
+            order = self._response_order(state)
+            order_state = str(order.get("order_state") or "").lower()
+            if order_state in {"filled", "cancelled", "rejected"}:
+                break
+            step = min(self.config.order_poll_seconds, max_wait_seconds - waited)
+            if step <= 0:
+                break
+            self.sleep_fn(step)
+            waited += step
+            state = self.client.get_order_state(order_id)
+        return state
+
     def _close_leg_with_retry(
         self,
         context: RuntimeContext,
@@ -590,6 +666,8 @@ class ExecutionMixin:
         direction: str,
         label: str,
         initial_price: Decimal,
+        reason: str = "",
+        incomplete_streak: int = 0,
     ) -> dict[str, Any]:
         responses: list[dict[str, Any]] = []
         total_filled = Decimal("0")
@@ -603,14 +681,110 @@ class ExecutionMixin:
                 f"requested quantity is below exchange minimum/step"
             )
         initial_price = self._positive_option_limit_price(inst, initial_price)
+        use_resting = self._income_exit_uses_resting_limit(reason)
+        close_tif = self._close_time_in_force(reason)
+        ttl_ms = self.config.income_exit_order_ttl_minutes * 60 * 1000
+        streak_bump = False
 
+        if use_resting:
+            resting = self._find_resting_close_order(
+                context,
+                label=label,
+                instrument_name=instrument_name,
+                direction=direction,
+            )
+            if resting is not None:
+                state = self.client.get_order_state(resting.order_id)
+                responses.append(state)
+                filled = self._response_filled_amount(state)
+                avg = self._response_average_price(state)
+                order = self._response_order(state)
+                order_state = str(order.get("order_state") or "").lower()
+                if filled > 0:
+                    weighted_price += avg * filled
+                    total_filled += filled
+                if total_filled >= requested_total:
+                    average_price = weighted_price / total_filled if total_filled > 0 else Decimal("0")
+                    return {
+                        "responses": responses,
+                        "last_response": responses[-1],
+                        "average_price": average_price,
+                        "filled": total_filled,
+                        "unfilled": Decimal("0"),
+                    }
+                if order_state in {"open", "untriggered"}:
+                    created = resting.creation_timestamp_ms or 0
+                    if created <= 0 or utc_now_ms() - created < ttl_ms:
+                        average_price = weighted_price / total_filled if total_filled > 0 else Decimal("0")
+                        return {
+                            "responses": responses,
+                            "last_response": responses[-1],
+                            "average_price": average_price,
+                            "filled": total_filled,
+                            "unfilled": requested_total - total_filled,
+                            "resting_pending": True,
+                        }
+                    LOGGER.info(
+                        "close_leg_with_retry: cancel stale resting %s on %s (label=%s)",
+                        direction,
+                        instrument_name,
+                        label,
+                    )
+                    self.client.cancel_order(resting.order_id)
+                    streak_bump = True
+                    state = self.client.get_order_state(resting.order_id)
+                    responses.append(state)
+                    filled = self._response_filled_amount(state)
+                    avg = self._response_average_price(state)
+                    if filled > total_filled:
+                        extra = filled - total_filled
+                        weighted_price += avg * extra
+                        total_filled = filled
+
+        market_after = self.config.income_exit_market_after_attempts
+        if (
+            direction == "buy"
+            and reason in INCOME_EXIT_REASONS
+            and market_after > 0
+            and incomplete_streak >= market_after
+        ):
+            LOGGER.warning(
+                "close_leg_with_retry: income exit %s on %s escalating to market (streak=%s)",
+                reason,
+                instrument_name,
+                incomplete_streak,
+            )
+            response = self._fallback_close_position_market(
+                instrument_name,
+                original_error=ExchangeError("income_exit_market_escalation"),
+            )
+            filled = self._response_filled_amount(response)
+            avg = self._response_average_price(response)
+            return {
+                "responses": [response],
+                "last_response": response,
+                "average_price": avg,
+                "filled": filled,
+                "unfilled": max(requested_total - filled, Decimal("0")),
+            }
+
+        remaining_total = requested_total - total_filled
         capacity = self._option_reduce_only_capacity(
             instrument_name, direction, option_positions=context.option_positions
         )
         first_amount = align_option_order_amount(
-            min(requested_total, capacity), inst.contract_size, inst.min_trade_amount
+            min(remaining_total, capacity), inst.contract_size, inst.min_trade_amount
         )
         if first_amount <= 0:
+            if total_filled > 0:
+                average_price = weighted_price / total_filled
+                return {
+                    "responses": responses,
+                    "last_response": responses[-1] if responses else self._noop_option_order_response(),
+                    "average_price": average_price,
+                    "filled": total_filled,
+                    "unfilled": remaining_total,
+                }
             LOGGER.warning(
                 "close_leg_with_retry: skip reduce_only %s on %s (label=%s requested=%s exchange_capacity=%s)",
                 direction,
@@ -636,8 +810,15 @@ class ExecutionMixin:
             label=label,
             price=initial_price,
             direction=direction,
+            time_in_force=close_tif,
         )
         responses.append(response)
+        if use_resting:
+            response = self._await_resting_close_order(
+                response,
+                max_wait_seconds=self.config.order_poll_seconds,
+            )
+            responses[-1] = response
         filled = self._response_filled_amount(response)
         avg = self._response_average_price(response)
         if filled > 0:
@@ -676,9 +857,19 @@ class ExecutionMixin:
                     "unfilled": requested_total - total_filled,
                 }
             if direction == "buy":
-                retry_price = self.strategy.close_buy_price(instrument, retry_book)
+                retry_price = (
+                    self.strategy.close_buy_price_for_exit(
+                        instrument,
+                        retry_book,
+                        reason=reason,
+                        incomplete_streak=max(incomplete_streak, 1),
+                    )
+                    if reason
+                    else self.strategy.close_buy_price(instrument, retry_book)
+                )
             else:
-                retry_price = self.strategy.close_sell_price(instrument, retry_book)
+                spread_ratio = self.config.income_exit_max_spread_ratio if reason in INCOME_EXIT_REASONS else None
+                retry_price = self.strategy.close_sell_price(instrument, retry_book, max_spread_ratio=spread_ratio)
             retry_price = self._positive_option_limit_price(instrument, retry_price)
             response = self._submit_option_close_limit(
                 place_fn,
@@ -688,6 +879,7 @@ class ExecutionMixin:
                 label=label,
                 price=retry_price,
                 direction=direction,
+                time_in_force=close_tif,
             )
             responses.append(response)
             filled = self._response_filled_amount(response)
@@ -697,13 +889,22 @@ class ExecutionMixin:
                 total_filled += filled
 
         average_price = weighted_price / total_filled if total_filled > 0 else Decimal("0")
-        return {
+        unfilled = requested_total - total_filled
+        result: dict[str, Any] = {
             "responses": responses,
             "last_response": responses[-1],
             "average_price": average_price,
             "filled": total_filled,
-            "unfilled": requested_total - total_filled,
+            "unfilled": unfilled,
         }
+        if use_resting and unfilled > 0:
+            order = self._response_order(responses[-1])
+            order_state = str(order.get("order_state") or "").lower()
+            if order_state in {"open", "untriggered"}:
+                result["resting_pending"] = True
+        if streak_bump and unfilled > 0:
+            result["streak_bump"] = True
+        return result
 
     def _positive_option_limit_price(self, instrument: OptionInstrument, price: Decimal) -> Decimal:
         if price > 0:
@@ -723,6 +924,7 @@ class ExecutionMixin:
         label: str,
         price: Decimal,
         direction: str,
+        time_in_force: str = "immediate_or_cancel",
     ) -> dict[str, Any]:
         order_kwargs = {
             "instrument_name": instrument_name,
@@ -730,7 +932,7 @@ class ExecutionMixin:
             "label": label,
             "order_type": "limit",
             "price": price,
-            "time_in_force": "immediate_or_cancel",
+            "time_in_force": time_in_force,
             "reduce_only": True,
         }
         try:
