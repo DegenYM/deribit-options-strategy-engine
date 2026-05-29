@@ -511,6 +511,22 @@ class FakeClient:
             },
         ]
 
+    def _filter_transaction_log_rows(
+        self,
+        *,
+        currency: str,
+        start_timestamp: int,
+        end_timestamp: int,
+    ) -> list[dict]:
+        entries = getattr(self, "transaction_log", {})
+        rows = entries.get(currency.upper(), []) if isinstance(entries, dict) else []
+        return [
+            row
+            for row in rows
+            if int(row.get("timestamp", 0)) >= int(start_timestamp)
+            and int(row.get("timestamp", 0)) <= int(end_timestamp)
+        ]
+
     def get_transaction_log(
         self,
         *,
@@ -522,14 +538,36 @@ class FakeClient:
         query=None,
         continuation=None,
     ):
-        entries = getattr(self, "transaction_log", {})
-        rows = entries.get(currency.upper(), []) if isinstance(entries, dict) else []
-        return [
-            row
-            for row in rows
-            if int(row.get("timestamp", 0)) >= int(start_timestamp)
-            and int(row.get("timestamp", 0)) <= int(end_timestamp)
-        ]
+        rows = self._filter_transaction_log_rows(
+            currency=currency,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        start = 0 if continuation in (None, "", 0) else int(continuation)
+        return rows[start : start + int(count)]
+
+    def iter_transaction_log(
+        self,
+        *,
+        currency,
+        start_timestamp,
+        end_timestamp,
+        count=100,
+        subaccount_id=None,
+        query=None,
+    ):
+        rows = self._filter_transaction_log_rows(
+            currency=currency,
+            start_timestamp=start_timestamp,
+            end_timestamp=end_timestamp,
+        )
+        start = 0
+        while start < len(rows):
+            chunk = rows[start : start + int(count)]
+            if not chunk:
+                break
+            yield from chunk
+            start += len(chunk)
 
     def get_open_orders(self, *, kind="any"):
         return self.open_orders

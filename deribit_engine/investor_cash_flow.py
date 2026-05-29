@@ -25,10 +25,51 @@ from typing import Any
 from .client import DeribitClient
 from .config import BotConfig, load_config
 from .env_layout import InvestorAccountSpec, InvestorManifest, load_investor_manifest
-from .models import TransactionEntry
-from .utils import utc_now_ms
+from .models import EXTERNAL_FLOW_TRANSACTION_TYPES, TransactionEntry
+from .utils import to_decimal, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
+
+
+def sum_external_flow_native_in_window(
+    client: DeribitClient,
+    *,
+    currency: str,
+    start_timestamp_ms: int,
+    end_timestamp_ms: int,
+) -> Decimal:
+    """Sum signed deposit / withdrawal / transfer in ``[start, end]`` (paginated).
+
+    Uses ``iter_transaction_log`` so sub-account UI transfers are not dropped
+    when the day log has many trade/settlement rows before the transfer line.
+    """
+    net = Decimal("0")
+    ccy = currency.upper()
+    if hasattr(client, "iter_transaction_log"):
+        rows = client.iter_transaction_log(
+            currency=ccy,
+            start_timestamp=start_timestamp_ms,
+            end_timestamp=end_timestamp_ms,
+            count=100,
+        )
+    else:
+        rows = client.get_transaction_log(
+            currency=ccy,
+            start_timestamp=start_timestamp_ms,
+            end_timestamp=end_timestamp_ms,
+            count=100,
+        )
+    for payload in rows:
+        if not isinstance(payload, dict):
+            continue
+        entry_type = str(payload.get("type") or "").lower()
+        if entry_type not in EXTERNAL_FLOW_TRANSACTION_TYPES:
+            continue
+        amount_raw = payload.get("change")
+        if amount_raw is None:
+            amount_raw = payload.get("amount")
+        net += to_decimal(amount_raw)
+    return net
 
 
 @dataclass(frozen=True)

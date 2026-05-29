@@ -1658,6 +1658,215 @@ def test_reconcile_adopts_untracked_bull_put_spread_with_long_leg(tmp_path, fake
     assert open_groups[0].long_label == "bull_put_spread-spread-btc-0001-long"
 
 
+def test_demote_unwound_bull_put_when_long_closed_externally(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_strategy="bull_put_spread",
+        option_markets_profile="linear_usdc",
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    short = "ETH_USDC-29MAY26-1900-P"
+    long = "ETH_USDC-29MAY26-1850-P"
+    group = _build_group(short_instrument_name=short, currency="ETH", quantity=Decimal("1.8"))
+    group.strategy = "bull_put_spread"
+    group.long_instrument_name = long
+    group.long_strike = Decimal("1850")
+    group.entry_timestamp_ms = 1
+    state.groups.append(group)
+    positions = [
+        Position.from_api(
+            {
+                "instrument_name": short,
+                "direction": "sell",
+                "kind": "option",
+                "size": "1.8",
+                "size_currency": "1.8",
+                "mark_price": "50",
+                "average_price": "6",
+                "floating_profit_loss": "0",
+                "delta": "-0.2",
+            }
+        ),
+    ]
+    markets = engine._load_supported_option_markets()
+    engine._reconcile_state(
+        state,
+        option_positions=positions,
+        orderbook_cache={},
+        markets_by_currency=markets,
+    )
+    open_groups = [g for g in state.groups if g.status == "open"]
+    assert len(open_groups) == 1
+    assert open_groups[0].strategy == "naked_short"
+    assert open_groups[0].long_instrument_name == ""
+
+
+def test_refresh_cash_flow_includes_transfer_after_many_log_rows(tmp_path, fake_client):
+    """Paginated transaction log must not drop late transfer rows (UI sub-account moves)."""
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        traded_collaterals=("USDC",),
+        cash_flow_query_interval_seconds=0,
+    )
+    now = utc_now_ms()
+    trades = [
+        {"type": "trade", "change": "1", "timestamp": now - 120_000 + i}
+        for i in range(120)
+    ]
+    transfer = {"type": "transfer", "change": "-4500", "timestamp": now - 60_000}
+    fake_client.transaction_log = {"USDC": trades + [transfer]}
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    state.day_key = utc_now().strftime("%Y-%m-%d")
+    state.day_start_equity_by_book = {"USDC": Decimal("5000")}
+    summaries = {
+        "USDC": _make_summary("USDC", equity="500", initial_margin="0", maintenance_margin="0"),
+        "BTC": _make_summary("BTC", equity="0", initial_margin="0", maintenance_margin="0"),
+        "ETH": _make_summary("ETH", equity="0", initial_margin="0", maintenance_margin="0"),
+    }
+    engine._refresh_cash_flows_by_book(state, {}, summaries=summaries)
+    assert state.day_net_flow_native_by_book["USDC"] == Decimal("-4500")
+    snapshot = engine._build_portfolio_snapshot(
+        state=state,
+        summaries=summaries,
+        regime_by_currency={"BTC": RiskRegime.NORMAL, "ETH": RiskRegime.NORMAL},
+        regime_detail_by_currency={
+            "BTC": ("market_conditions_normal",),
+            "ETH": ("market_conditions_normal",),
+        },
+        future_positions=[],
+        orderbook_cache={},
+    )
+    assert snapshot.day_pnl_usdc_ex_flow == Decimal("0")
+
+
+def test_reconcile_naked_expiry_uses_intrinsic_and_expiry_reason(tmp_path, fake_client, monkeypatch):
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        option_markets_profile="linear_usdc",
+    )
+    short = "BTC_USDC-14APR30-63000-P"
+    exp_ms = utc_now_ms() - 3_600_000
+    monkeypatch.setattr(
+        "deribit_engine.engine.management.utc_now_ms",
+        lambda: exp_ms + 120_000,
+    )
+
+    class ExpiredNakedClient(FakeClient):
+        def get_orderbook(self, instrument_name, depth=1):
+            if instrument_name == short:
+                return OrderBookSnapshot(
+                    instrument_name=short,
+                    best_bid_price=Decimal("2500"),
+                    best_bid_amount=Decimal("1"),
+                    best_ask_price=Decimal("2600"),
+                    best_ask_amount=Decimal("1"),
+                    mark_price=Decimal("2500"),
+                    index_price=Decimal("60000"),
+                    delta=Decimal("-0.8"),
+                    iv=Decimal("0.5"),
+                    open_interest=Decimal("100"),
+                )
+            return super().get_orderbook(instrument_name, depth=depth)
+
+    engine = DeribitOptionTrialBot(config, ExpiredNakedClient())
+    state = StrategyState()
+    group = _build_group(
+        short_instrument_name=short,
+        quantity=Decimal("0.1"),
+        entry_credit=Decimal("36.3"),
+        max_loss=Decimal("500"),
+    )
+    group.strategy = "naked_short"
+    group.expiration_timestamp_ms = exp_ms
+    group.entry_timestamp_ms = exp_ms - 20 * 86_400_000
+    group.entry_index_usd = Decimal("68000")
+    state.groups.append(group)
+    markets = engine._load_supported_option_markets()
+    engine._reconcile_state(
+        state,
+        option_positions=[],
+        orderbook_cache={short: engine.client.get_orderbook(short)},
+        markets_by_currency=markets,
+    )
+    closed = [g for g in state.groups if g.status == "closed"]
+    assert len(closed) == 1
+    assert closed[0].close_reason == "reconciled_expiry"
+    assert closed[0].closed_timestamp_ms == exp_ms
+    assert closed[0].realized_pnl is not None
+    assert closed[0].realized_pnl < Decimal("0")
+
+
+def test_reconcile_spread_expiry_uses_intrinsic_not_naked_assignment(tmp_path, fake_client, monkeypatch):
+    """Expired spread with long leg gone must not book > max_loss (naked-style) PnL."""
+    config = make_config(
+        tmp_path,
+        option_strategy="bull_put_spread",
+        option_markets_profile="linear_usdc",
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    short = "ETH_USDC-29MAY26-1900-P"
+    long = "ETH_USDC-29MAY26-1850-P"
+    exp_ms = utc_now_ms() - 3_600_000
+    group = _build_group(
+        short_instrument_name=short,
+        currency="ETH",
+        quantity=Decimal("1.8"),
+        entry_credit=Decimal("10.87"),
+        max_loss=Decimal("90"),
+    )
+    group.strategy = "bull_put_spread"
+    group.long_instrument_name = long
+    group.long_strike = Decimal("1850")
+    group.expiration_timestamp_ms = exp_ms
+    group.entry_timestamp_ms = exp_ms - 20 * 86_400_000
+    group.entry_index_usd = Decimal("1700")
+    state.groups.append(group)
+
+    monkeypatch.setattr(
+        "deribit_engine.engine.management.utc_now_ms",
+        lambda: exp_ms + 60_000,
+    )
+
+    class ExpiredSpreadClient(FakeClient):
+        def get_orderbook(self, instrument_name, depth=1):
+            idx = Decimal("1700")
+            if instrument_name == short:
+                return OrderBookSnapshot(
+                    instrument_name=short,
+                    best_bid_price=Decimal("200"),
+                    best_bid_amount=Decimal("1"),
+                    best_ask_price=Decimal("210"),
+                    best_ask_amount=Decimal("1"),
+                    mark_price=Decimal("200"),
+                    index_price=idx,
+                    delta=Decimal("-0.8"),
+                    iv=Decimal("0.5"),
+                    open_interest=Decimal("100"),
+                )
+            raise KeyError(instrument_name)
+
+    engine = DeribitOptionTrialBot(config, ExpiredSpreadClient())
+    markets = engine._load_supported_option_markets()
+    orderbook_cache = {short: engine.client.get_orderbook(short)}
+    engine._reconcile_state(
+        state,
+        option_positions=[],
+        orderbook_cache=orderbook_cache,
+        markets_by_currency=markets,
+    )
+    closed = [g for g in state.groups if g.status == "closed"]
+    assert len(closed) == 1
+    assert closed[0].close_reason == "reconciled_expiry"
+    assert closed[0].realized_pnl is not None
+    assert closed[0].realized_pnl >= -group.max_loss - Decimal("1")
+    assert closed[0].realized_pnl > Decimal("-150")
+
+
 def test_reconcile_adopts_sell_short_with_negative_size(tmp_path, fake_client):
     config = make_config(tmp_path, option_markets_profile="linear_usdc")
     engine = DeribitOptionTrialBot(config, fake_client)

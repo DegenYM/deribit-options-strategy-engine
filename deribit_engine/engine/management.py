@@ -12,7 +12,6 @@ from ..margin import (
     short_put_initial_unit,
 )
 from ..models import (
-    EXTERNAL_FLOW_TRANSACTION_TYPES,
     AccountSummary,
     HedgePlan,
     OptionInstrument,
@@ -22,7 +21,10 @@ from ..models import (
     RiskRegime,
     StrategyState,
     TradeGroup,
+    normalize_strategy_name,
 )
+from ..investor_cash_flow import sum_external_flow_native_in_window
+from ..stress import _intrinsic_settlement
 from ..utils import (
     align_option_order_amount,
     format_decimal,
@@ -252,7 +254,7 @@ class ManagementMixin:
             # Refresh external cash-flow (deposit / withdrawal / transfer) tallies
             # from Deribit's transaction log so drawdown is measured against
             # trading P&L only, not user-initiated balance changes.
-            self._refresh_cash_flows_by_book(state, orderbook_cache)
+            self._refresh_cash_flows_by_book(state, orderbook_cache, summaries=summaries)
         state = self._reconcile_state(
             state,
             option_positions=option_positions,
@@ -1253,14 +1255,16 @@ class ManagementMixin:
         self,
         state: StrategyState,
         orderbook_cache: dict[str, OrderBookSnapshot],
+        *,
+        summaries: dict[str, AccountSummary] | None = None,
+        force: bool = False,
     ) -> None:
         """Refresh the net external cash-flow tally for each traded book.
 
-        Queries Deribit's ``private/get_transaction_log`` for every currency
-        in ``traded_collaterals``, filters to external-flow types (deposit,
-        withdrawal, transfer), and sums the signed amounts in native and
-        USDC-equivalent terms. Drawdown uses the native tally; the USDC tally is
-        retained for reporting and backward-compatible state.
+        Queries Deribit's ``private/get_transaction_log`` (paginated) for every
+        currency in ``traded_collaterals``, filters to external-flow types
+        (deposit, withdrawal, transfer), and sums signed amounts. Sub-account
+        transfers from the Deribit UI appear as ``transfer`` on each API login.
 
         The query window starts at ``max(UTC midnight, day_equity_anchor_ms)`` so
         deposits already baked into day-start equity are not counted twice.
@@ -1282,15 +1286,15 @@ class ManagementMixin:
             if flow_start_ms <= 0:
                 continue
             last_query = state.last_flow_query_ms_by_book.get(collateral, 0)
-            if last_query and (now_ms - last_query) < interval_ms:
+            if not force and last_query and (now_ms - last_query) < interval_ms:
                 continue
 
             try:
-                payloads = self.client.get_transaction_log(
+                net_native = sum_external_flow_native_in_window(
+                    self.client,
                     currency=collateral,
-                    start_timestamp=flow_start_ms,
-                    end_timestamp=now_ms,
-                    count=100,
+                    start_timestamp_ms=flow_start_ms,
+                    end_timestamp_ms=now_ms,
                 )
             except Exception as exc:
                 LOGGER.warning(
@@ -1300,24 +1304,69 @@ class ManagementMixin:
                 )
                 continue
 
-            net_native = Decimal("0")
-            for payload in payloads:
-                if not isinstance(payload, dict):
-                    continue
-                entry_type = str(payload.get("type") or "").lower()
-                if entry_type not in EXTERNAL_FLOW_TRANSACTION_TYPES:
-                    continue
-                amount_raw = payload.get("change")
-                if amount_raw is None:
-                    amount_raw = payload.get("amount")
-                net_native += to_decimal(amount_raw)
-
             if collateral == "USDC":
                 net_usdc = net_native
             else:
                 index_price = self._currency_index_price(collateral, orderbook_cache)
                 net_usdc = net_native * index_price
 
+            state.day_net_flow_usdc_by_book[collateral] = net_usdc
+            state.day_net_flow_native_by_book[collateral] = net_native
+            state.last_flow_query_ms_by_book[collateral] = now_ms
+
+        if summaries:
+            self._heal_cash_flow_after_large_equity_move(
+                state,
+                summaries=summaries,
+                orderbook_cache=orderbook_cache,
+                now_ms=now_ms,
+            )
+
+    def _heal_cash_flow_after_large_equity_move(
+        self,
+        state: StrategyState,
+        *,
+        summaries: dict[str, AccountSummary],
+        orderbook_cache: dict[str, OrderBookSnapshot],
+        now_ms: int,
+    ) -> None:
+        """Re-fetch flows when equity moved a lot but transfer rows were likely truncated."""
+        total_equity = self._total_equity_usdc(summaries, orderbook_cache)
+        if state.day_start_equity_by_book:
+            day_start = sum(state.day_start_equity_by_book.values(), Decimal("0"))
+        else:
+            day_start = state.day_start_equity_usdc
+        equity_delta = total_equity - day_start
+        if abs(equity_delta) < Decimal("200"):
+            return
+        flow_usdc = sum(state.day_net_flow_usdc_by_book.values(), Decimal("0"))
+        if abs(flow_usdc) >= abs(equity_delta) * Decimal("0.35"):
+            return
+        LOGGER.info(
+            "cash_flow_heal: equity_delta=%s flow_usdc=%s — re-fetching paginated transaction log",
+            equity_delta,
+            flow_usdc,
+        )
+        for collateral_raw in self.config.traded_collaterals:
+            collateral = collateral_raw.upper()
+            flow_start_ms = self._flow_query_start_ms(state, collateral)
+            if flow_start_ms <= 0:
+                continue
+            try:
+                net_native = sum_external_flow_native_in_window(
+                    self.client,
+                    currency=collateral,
+                    start_timestamp_ms=flow_start_ms,
+                    end_timestamp_ms=now_ms,
+                )
+            except Exception as exc:
+                LOGGER.warning("cash_flow_heal_failed currency=%s err=%s", collateral, exc)
+                continue
+            if collateral == "USDC":
+                net_usdc = net_native
+            else:
+                index_price = self._currency_index_price(collateral, orderbook_cache)
+                net_usdc = net_native * index_price
             state.day_net_flow_usdc_by_book[collateral] = net_usdc
             state.day_net_flow_native_by_book[collateral] = net_native
             state.last_flow_query_ms_by_book[collateral] = now_ms
@@ -1607,6 +1656,47 @@ class ManagementMixin:
             )
             used_long_names.add(long_instrument.instrument_name)
 
+    def _demote_unwound_bull_put_groups(
+        self,
+        state: StrategyState,
+        *,
+        option_positions: list[Position],
+    ) -> None:
+        """When the long protection leg is gone but the short remains, treat as naked.
+
+        Manual \"convert spread to naked\" (close long only) leaves the short on
+        this sub-account; keeping ``bull_put_spread`` would mis-label closes and
+        break reconcile PnL when the short later expires or moves.
+        """
+        if self.config.option_strategy != "bull_put_spread":
+            return
+        open_long_names = {
+            p.instrument_name for p in option_positions if self._long_option_open_size(p) is not None
+        }
+        for group in self._open_groups(state):
+            if not group.long_instrument_name:
+                continue
+            if group.long_instrument_name in open_long_names:
+                continue
+            short_still_open = any(
+                p.instrument_name == group.short_instrument_name and self._short_option_open_size(p) is not None
+                for p in option_positions
+            )
+            if not short_still_open:
+                continue
+            LOGGER.info(
+                "demote spread→naked group=%s short=%s (long %s no longer on book)",
+                group.group_id,
+                group.short_instrument_name,
+                group.long_instrument_name,
+            )
+            group.strategy = "naked_short"
+            group.long_instrument_name = ""
+            group.long_strike = Decimal("0")
+            group.long_label = ""
+            group.long_entry_average_price = Decimal("0")
+            group.last_action = "demoted_to_naked_after_long_unwound"
+
     def _adopt_untracked_naked_short_positions(
         self,
         state: StrategyState,
@@ -1800,6 +1890,7 @@ class ManagementMixin:
             orderbook_cache=orderbook_cache,
             markets_by_currency=markets_by_currency,
         )
+        self._demote_unwound_bull_put_groups(state, option_positions=option_positions)
         self._adopt_untracked_naked_short_positions(
             state,
             option_positions=option_positions,
@@ -1824,7 +1915,12 @@ class ManagementMixin:
                     age_ms,
                 )
                 continue
-            closed_timestamp_ms = utc_now_ms()
+            expired = self._group_is_expired(group)
+            closed_timestamp_ms = (
+                max(int(group.expiration_timestamp_ms or 0), int(group.entry_timestamp_ms or 0))
+                if expired and group.expiration_timestamp_ms > 0
+                else utc_now_ms()
+            )
             estimated_close_debit = self._estimate_reconcile_close_debit(
                 group,
                 orderbook_cache,
@@ -1863,7 +1959,7 @@ class ManagementMixin:
             group.backfill_realized_pnl_usdc()
             self._mark_group_closed(
                 group,
-                reason="reconciled_external",
+                reason="reconciled_expiry" if expired else "reconciled_external",
                 closed_timestamp_ms=closed_timestamp_ms,
                 realized_close_debit=estimated_close_debit,
                 realized_pnl=group.realized_pnl or realized_pnl,
@@ -1877,6 +1973,143 @@ class ManagementMixin:
                 LOGGER.warning("reconcile group=%s could not estimate PnL", group.group_id)
         return state
 
+    def _group_is_expired(self, group: TradeGroup, *, now_ms: int | None = None) -> bool:
+        exp = int(group.expiration_timestamp_ms or 0)
+        if exp <= 0:
+            return False
+        now = utc_now_ms() if now_ms is None else now_ms
+        return now >= exp - 60_000
+
+    def _is_bull_put_spread_group(self, group: TradeGroup) -> bool:
+        strategy = normalize_strategy_name(group.strategy, default=self.config.option_strategy)
+        return strategy == "bull_put_spread" or bool(group.long_instrument_name)
+
+    def _resolve_reconcile_index_price(
+        self,
+        group: TradeGroup,
+        *,
+        short_book: OrderBookSnapshot | None,
+        orderbook_cache: dict[str, OrderBookSnapshot],
+        markets: dict[str, list[OptionInstrument]],
+    ) -> Decimal:
+        if short_book is not None and short_book.index_price > 0:
+            return short_book.index_price
+        if group.close_index_usd and group.close_index_usd > 0:
+            return group.close_index_usd
+        if group.entry_index_usd > 0:
+            return group.entry_index_usd
+        try:
+            short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
+            return self._currency_index_price(short_instrument.base_currency, orderbook_cache)
+        except Exception:
+            return Decimal("0")
+
+    def _naked_reconcile_close_debit_at_index(
+        self,
+        group: TradeGroup,
+        *,
+        short_instrument: OptionInstrument,
+        index_price: Decimal,
+    ) -> Decimal:
+        option_type = (group.option_type or "put").lower()
+        settle = _intrinsic_settlement(short_instrument, shocked_spot=index_price, option_type=option_type)
+        close_debit = self._premium_value_usdc(
+            premium=settle,
+            quantity=group.quantity,
+            index_price=index_price,
+            instrument=short_instrument,
+        )
+        close_debit += self._option_fee_usdc(
+            premium=settle,
+            quantity=group.quantity,
+            index_price=index_price,
+            base_currency=short_instrument.base_currency,
+            quote_currency=short_instrument.quote_currency,
+            settlement_currency=short_instrument.settlement_currency,
+        )
+        return max(close_debit, Decimal("0"))
+
+    def _cap_spread_reconcile_close_debit(self, group: TradeGroup, close_debit: Decimal) -> Decimal:
+        """Bull put max loss is bounded; reconcile must not book naked-style assignment."""
+        if group.max_loss <= 0:
+            return close_debit
+        ceiling = group.entry_credit_net_usdc() + group.max_loss
+        return min(close_debit, ceiling)
+
+    def _long_instrument_for_spread_reconcile(
+        self,
+        group: TradeGroup,
+        markets: dict[str, list[OptionInstrument]],
+        *,
+        short_instrument: OptionInstrument,
+    ) -> OptionInstrument | None:
+        if group.long_instrument_name:
+            try:
+                return self._find_or_fetch_instrument(markets, group.long_instrument_name)
+            except Exception:
+                pass
+        if group.long_strike <= 0:
+            return None
+        return OptionInstrument(
+            instrument_name=group.long_instrument_name or f"{short_instrument.instrument_name}-long-synth",
+            base_currency=short_instrument.base_currency,
+            quote_currency=short_instrument.quote_currency,
+            settlement_currency=short_instrument.settlement_currency,
+            instrument_type=short_instrument.instrument_type,
+            tick_size=short_instrument.tick_size,
+            tick_size_steps=short_instrument.tick_size_steps,
+            min_trade_amount=short_instrument.min_trade_amount,
+            contract_size=short_instrument.contract_size,
+            option_type="put",
+            expiration_timestamp_ms=group.expiration_timestamp_ms or short_instrument.expiration_timestamp_ms,
+            strike=group.long_strike,
+            instrument_state="closed",
+        )
+
+    def _spread_reconcile_close_debit_at_index(
+        self,
+        group: TradeGroup,
+        *,
+        short_instrument: OptionInstrument,
+        long_instrument: OptionInstrument | None,
+        index_price: Decimal,
+    ) -> Decimal:
+        option_type = (group.option_type or "put").lower()
+        short_settle = _intrinsic_settlement(short_instrument, shocked_spot=index_price, option_type=option_type)
+        short_debit = self._premium_value_usdc(
+            premium=short_settle,
+            quantity=group.quantity,
+            index_price=index_price,
+            instrument=short_instrument,
+        )
+        short_fee = self._option_fee_usdc(
+            premium=short_settle,
+            quantity=group.quantity,
+            index_price=index_price,
+            base_currency=short_instrument.base_currency,
+            quote_currency=short_instrument.quote_currency,
+            settlement_currency=short_instrument.settlement_currency,
+        )
+        close_debit = short_debit + short_fee
+        if long_instrument is not None and group.long_strike > 0:
+            long_settle = _intrinsic_settlement(long_instrument, shocked_spot=index_price, option_type=option_type)
+            long_credit = self._premium_value_usdc(
+                premium=long_settle,
+                quantity=group.quantity,
+                index_price=index_price,
+                instrument=long_instrument,
+            )
+            long_fee = self._option_fee_usdc(
+                premium=long_settle,
+                quantity=group.quantity,
+                index_price=index_price,
+                base_currency=long_instrument.base_currency,
+                quote_currency=long_instrument.quote_currency,
+                settlement_currency=long_instrument.settlement_currency,
+            )
+            close_debit = max(close_debit - max(long_credit - long_fee, Decimal("0")), Decimal("0"))
+        return self._cap_spread_reconcile_close_debit(group, close_debit)
+
     def _estimate_reconcile_close_debit(
         self,
         group: TradeGroup,
@@ -1885,11 +2118,35 @@ class ManagementMixin:
         markets_by_currency: dict[str, list[OptionInstrument]] | None = None,
     ) -> Decimal | None:
         if group.current_debit > 0:
-            return group.current_debit
+            debit = group.current_debit
+            if self._is_bull_put_spread_group(group):
+                return self._cap_spread_reconcile_close_debit(group, debit)
+            return debit
         markets = markets_by_currency or {}
+        is_spread = self._is_bull_put_spread_group(group)
         try:
             short_book = self._get_orderbook(group.short_instrument_name, orderbook_cache)
             short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
+            index_price = short_book.index_price
+            if index_price <= 0:
+                index_price = group.close_index_usd or group.entry_index_usd or Decimal("0")
+            expired = self._group_is_expired(group)
+            if is_spread and expired and index_price > 0:
+                long_instrument = self._long_instrument_for_spread_reconcile(
+                    group, markets, short_instrument=short_instrument
+                )
+                return self._spread_reconcile_close_debit_at_index(
+                    group,
+                    short_instrument=short_instrument,
+                    long_instrument=long_instrument,
+                    index_price=index_price,
+                )
+            if expired and index_price > 0:
+                return self._naked_reconcile_close_debit_at_index(
+                    group,
+                    short_instrument=short_instrument,
+                    index_price=index_price,
+                )
             mark_premium = short_book.mark_price if short_book.mark_price > 0 else short_book.best_ask_price
             mark_debit = self._premium_value_usdc(
                 premium=max(mark_premium, Decimal("0")),
@@ -1906,29 +2163,89 @@ class ManagementMixin:
                 settlement_currency=short_instrument.settlement_currency,
             )
             mark_debit += close_fee
-            if group.long_instrument_name:
-                long_book = self._get_orderbook(group.long_instrument_name, orderbook_cache)
-                long_instrument = self._find_or_fetch_instrument(markets, group.long_instrument_name)
-                long_premium = long_book.best_bid_price if long_book.best_bid_price > 0 else long_book.mark_price
-                long_credit = self._premium_value_usdc(
-                    premium=max(long_premium, Decimal("0")),
-                    quantity=group.quantity,
-                    index_price=long_book.index_price,
-                    instrument=long_instrument,
+            if is_spread and group.long_strike > 0:
+                long_instrument = self._long_instrument_for_spread_reconcile(
+                    group, markets, short_instrument=short_instrument
                 )
-                long_fee = self._option_fee_usdc(
-                    premium=max(long_premium, Decimal("0")),
-                    quantity=group.quantity,
-                    index_price=long_book.index_price,
-                    base_currency=long_instrument.base_currency,
-                    quote_currency=long_instrument.quote_currency,
-                    settlement_currency=long_instrument.settlement_currency,
-                )
-                mark_debit = max(mark_debit - max(long_credit - long_fee, Decimal("0")), Decimal("0"))
+                long_premium = Decimal("0")
+                long_index = index_price
+                if group.long_instrument_name:
+                    try:
+                        long_book = self._get_orderbook(group.long_instrument_name, orderbook_cache)
+                        long_index = long_book.index_price if long_book.index_price > 0 else index_price
+                        if long_instrument is not None:
+                            long_premium = (
+                                long_book.best_bid_price
+                                if long_book.best_bid_price > 0
+                                else long_book.mark_price
+                            )
+                    except Exception:
+                        if expired and index_price > 0 and long_instrument is not None:
+                            return self._spread_reconcile_close_debit_at_index(
+                                group,
+                                short_instrument=short_instrument,
+                                long_instrument=long_instrument,
+                                index_price=index_price,
+                            )
+                if long_instrument is not None and long_premium > 0:
+                    long_credit = self._premium_value_usdc(
+                        premium=long_premium,
+                        quantity=group.quantity,
+                        index_price=long_index,
+                        instrument=long_instrument,
+                    )
+                    long_fee = self._option_fee_usdc(
+                        premium=long_premium,
+                        quantity=group.quantity,
+                        index_price=long_index,
+                        base_currency=long_instrument.base_currency,
+                        quote_currency=long_instrument.quote_currency,
+                        settlement_currency=long_instrument.settlement_currency,
+                    )
+                    mark_debit = max(mark_debit - max(long_credit - long_fee, Decimal("0")), Decimal("0"))
+                elif expired and index_price > 0 and long_instrument is not None:
+                    return self._spread_reconcile_close_debit_at_index(
+                        group,
+                        short_instrument=short_instrument,
+                        long_instrument=long_instrument,
+                        index_price=index_price,
+                    )
+            if is_spread:
+                return self._cap_spread_reconcile_close_debit(group, max(mark_debit, Decimal("0")))
             return max(mark_debit, Decimal("0"))
         except Exception:
+            if self._group_is_expired(group):
+                idx = self._resolve_reconcile_index_price(
+                    group,
+                    short_book=None,
+                    orderbook_cache=orderbook_cache,
+                    markets=markets,
+                )
+                if idx > 0:
+                    try:
+                        short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
+                        if is_spread:
+                            long_instrument = self._long_instrument_for_spread_reconcile(
+                                group, markets, short_instrument=short_instrument
+                            )
+                            return self._spread_reconcile_close_debit_at_index(
+                                group,
+                                short_instrument=short_instrument,
+                                long_instrument=long_instrument,
+                                index_price=idx,
+                            )
+                        return self._naked_reconcile_close_debit_at_index(
+                            group,
+                            short_instrument=short_instrument,
+                            index_price=idx,
+                        )
+                    except Exception:
+                        pass
             if group.current_debit >= 0:
-                return group.current_debit
+                debit = group.current_debit
+                if is_spread:
+                    return self._cap_spread_reconcile_close_debit(group, debit)
+                return debit
             return None
 
     def _refresh_group(
