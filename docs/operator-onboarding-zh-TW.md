@@ -46,7 +46,7 @@ cp config/platform/registry.toml.example config/platform/registry.toml
 
 1. 出具帳單（`fee-settle` / 報表 PDF）。  
 2. 若有獲利現貨需兌付：在策略子帳將對應部分 **TRADE 成 USDC 或 USDT**（策略 API：`trade:read_write`）。  
-3. 以**策略子帳** API（`wallet:read_write`）**Internal transfer** 至該投資人的 `fee_acc` 子帳（可用 `./bot --investor <id> fee-balance` 查 Fee 專戶餘額）。  
+3. 以**主帳** API（`accounts/.env.main`，`wallet:read_write`）執行 **Internal transfer**（策略子帳 → `fee_acc`）。Deribit 子帳互轉**必須**用主帳 API 授權；僅策略子帳金鑰會回 `12100 transfer_not_allowed`。  
 4. 與投資人對帳，確認 Fee 專戶餘額與帳單一致。  
 5. 投資人確認後，自**主帳** **Withdraw** 至你指定的鏈上地址（幣別、鏈、金額以帳單為準）。
 
@@ -73,7 +73,18 @@ cp config/platform/registry.toml.example config/platform/registry.toml
 # 或 ./bot ... internal-transfer --destination-id <id> ...
 ```
 
-Fee 子帳 id 解析順序：`--destination-id` → `.env.investor` 的 `FEE_SUBACCOUNT_ID` → `private/get_subaccounts` 比對 `FEE_SUBACCOUNT_NAME`（預設 `fee_acc`）。
+Fee 子帳 id 解析：`--destination-id` → `.env.investor` 的 `FEE_SUBACCOUNT_ID` → `accounts/.env.fee` API。
+
+**主帳 API 設定**（`config/investors/<id>/accounts/.env.main`）：
+
+```bash
+ACCOUNT_ROLE=main
+DERIBIT_ENV=mainnet
+DERIBIT_CLIENT_ID=<主帳 Client ID>
+DERIBIT_CLIENT_SECRET=<主帳 Secret>
+```
+
+在 Deribit **主帳**（非子帳）建立 API Key：`Account=read` + `Wallet=read_write`。
 
 ## 2. 投資人交接
 

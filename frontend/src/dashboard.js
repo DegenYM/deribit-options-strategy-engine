@@ -43,9 +43,14 @@ function setBookFilter(book) {
       btn.classList.toggle("filter-active", btn.dataset.book === book);
     });
   }
-  charts.renderBookEquityChart();
-  charts.renderCumulativePnlChart();
-  charts.renderDailyPnlChart();
+  loadChartJs()
+    .then(() => {
+      charts.renderBookEquityChart();
+      charts.renderCumulativePnlChart();
+      charts.renderDailyPnlChart();
+      charts.scheduleChartResizeAll();
+    })
+    .catch((err) => domain.showToast(`charts: ${err.message}`));
 }
 
 function attachAutoRefresh() {
@@ -119,9 +124,12 @@ function attachExpandableSections() {
     details.addEventListener("toggle", () => {
       if (!details.open) return;
       if (details.id === "charts-section") {
-        refresh.loadChartDataIfNeeded().catch((err) => {
-          console.error("chart data load failed", err);
-        });
+        refresh
+          .loadChartDataIfNeeded()
+          .then(() => charts.scheduleChartResizeAll())
+          .catch((err) => {
+            console.error("chart data load failed", err);
+          });
         return;
       }
       if (details.id === "stress-section") {

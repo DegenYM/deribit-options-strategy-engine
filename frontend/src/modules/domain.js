@@ -1659,8 +1659,10 @@ export function nativeFromUsdAtIndex(usd, indexUsd) {
 export function entryIndexUsdForGroup(g, status) {
   const book = tradeGroupAprBook(g);
   if (book === "USDC") return null;
+  const stored = num(g?.entry_index_usd);
+  const persisted = stored !== null && stored > 0 ? stored : null;
   return (
-    num(g?.entry_index_usd) ??
+    persisted ??
     num(status?.underlying_index_usd?.[book]) ??
     num(STATE.groups?.underlying_index_usd?.[book]) ??
     num(STATE.lastSpotUsd?.[book])

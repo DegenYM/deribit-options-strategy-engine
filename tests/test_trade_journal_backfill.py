@@ -178,3 +178,79 @@ def test_backfill_entry_net_apr_fractional_covered_call(tmp_path: Path):
     updated = StrategyStateStore(state_file).load().groups[0]
     assert updated.entry_net_apr < Decimal("0.25")
     assert updated.entry_net_apr > Decimal("0.15")
+
+
+def test_backfill_entry_net_apr_borrows_peer_instrument_fill(tmp_path: Path):
+    """Legacy synthetic rows may store USDC/qty; borrow a plausible open fill for same instrument."""
+    state_file = tmp_path / "covered_call.json"
+    journal = TradeJournalStore(state_file.with_name("covered_call.trade_journal.db"))
+    scope = scope_key_for_state(state_file)
+    instrument = "BTC-22MAY26-85000-C"
+    entry_ms = 1_700_000_000_000
+
+    journal.record_fill(
+        scope_key=scope,
+        event_type="open",
+        source_action="deribit_api",
+        instrument_name=instrument,
+        direction="sell",
+        amount=Decimal("0.1"),
+        price=Decimal("0.011"),
+        fee_usdc=Decimal("2.43"),
+        group_id="0028",
+        trade_id="peer-open",
+        ts_ms=entry_ms - 60_000,
+        extra={"source": "deribit_api"},
+    )
+    journal.record_fill(
+        scope_key=scope,
+        event_type="open",
+        source_action="backfill_state",
+        instrument_name=instrument,
+        direction="sell",
+        amount=Decimal("0.1"),
+        price=Decimal("891.071170"),
+        fee_usdc=Decimal("2.43"),
+        group_id="0031",
+        trade_id="bad-open",
+        ts_ms=entry_ms,
+        extra={"synthetic": True, "source": "strategy_state"},
+    )
+
+    group = TradeGroup(
+        group_id="0031",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.1"),
+        covered_underlying_quantity=Decimal("0.1"),
+        entry_timestamp_ms=entry_ms,
+        expiration_timestamp_ms=entry_ms + 15 * 86_400_000,
+        short_instrument_name=instrument,
+        short_strike=Decimal("85000"),
+        entry_credit=Decimal("86.6769229"),
+        original_entry_credit=Decimal("86.6769229"),
+        max_loss=Decimal("1000"),
+        regime_at_entry="normal",
+        entry_fee=Decimal("2.4301941"),
+        strategy="covered_call",
+        option_type="call",
+        status="closed",
+        closed_timestamp_ms=entry_ms + 8 * 86_400_000,
+        close_reason="reconciled_external",
+        realized_close_debit=Decimal("46.8618134"),
+        realized_pnl=Decimal("39.8151095"),
+    )
+
+    from deribit_engine.models import StrategyState
+    from deribit_engine.state import StrategyStateStore
+
+    StrategyStateStore(state_file).save(StrategyState(groups=[group]))
+
+    summary = backfill_closed_group_stats_in_state(state_file)
+    assert summary.entry_apr_updated == 1
+    assert summary.saved is True
+
+    updated = StrategyStateStore(state_file).load().groups[0]
+    assert updated.entry_index_usd > Decimal("80000")
+    assert updated.short_entry_average_price == Decimal("0.011")
+    assert updated.entry_net_apr > Decimal("0.15")

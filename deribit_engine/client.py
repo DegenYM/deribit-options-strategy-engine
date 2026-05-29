@@ -67,6 +67,7 @@ class DeribitClient:
             "private/edit",
             "private/edit_by_label",
             "private/create_combo",
+            "private/submit_transfer_between_subaccounts",
         }
     )
 

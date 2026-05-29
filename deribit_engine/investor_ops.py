@@ -136,6 +136,7 @@ def investor_init(
         _copy_env_example_if_present(example_dir, accounts_dir, slug)
 
     _write_fee_env(accounts_dir, investor_id=investor_id, deribit_env=deribit_env)
+    _write_main_env(accounts_dir, investor_id=investor_id, deribit_env=deribit_env)
 
     frontend_port: int | None = None
     if register:
@@ -800,6 +801,27 @@ def _write_fee_env(accounts_dir: Path, *, investor_id: str, deribit_env: str) ->
     )
     path.write_text(body, encoding="utf-8")
     shutil.copy2(path, accounts_dir / ".env.fee.example")
+
+
+def _write_main_env(accounts_dir: Path, *, investor_id: str, deribit_env: str) -> None:
+    path = accounts_dir / account_env_basename("main")
+    body = "\n".join(
+        [
+            "# Deribit MAIN account API (not a subaccount). Required for internal-transfer.",
+            "# Create on main account: Account=read + Wallet=read_write.",
+            "# Do NOT: ./bot run --env-file .../.env.main",
+            "ACCOUNT_ROLE=main",
+            f"DERIBIT_ENV={deribit_env}",
+            "DERIBIT_CLIENT_ID=",
+            "DERIBIT_CLIENT_SECRET=",
+            f"ORDER_LABEL_PREFIX={investor_id}_main",
+            "",
+        ]
+    )
+    path.write_text(body, encoding="utf-8")
+    example = accounts_dir / ".env.main.example"
+    if not example.is_file():
+        shutil.copy2(path, example)
 
 
 def _update_env_file(path: Path, updates: dict[str, str]) -> None:

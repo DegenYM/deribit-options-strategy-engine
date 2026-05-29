@@ -6,9 +6,17 @@ const CHART_SCRIPTS = [
 
 let loadPromise = null;
 
+function findScript(src) {
+  const path = src.split("?")[0];
+  return [...document.querySelectorAll("script[src]")].find((el) => {
+    const attr = el.getAttribute("src") || "";
+    return attr === src || attr.endsWith(path);
+  });
+}
+
 function loadScript(src) {
   return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[src="${src}"]`);
+    const existing = findScript(src);
     if (existing) {
       if (existing.dataset.loaded === "true") {
         resolve();

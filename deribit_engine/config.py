@@ -8,8 +8,11 @@ from dotenv import dotenv_values
 
 from .env_layout import (
     ACCOUNT_ROLE_FEE,
+    ACCOUNT_ROLE_MAIN,
     _fee_account_layer_paths,
     _is_fee_account_env_file,
+    _is_main_account_env_file,
+    _main_account_layer_paths,
     env_layer_paths,
 )
 from .exceptions import ConfigurationError
@@ -184,6 +187,10 @@ class BotConfig:
     @property
     def is_fee_collection_account(self) -> bool:
         return self.account_role == ACCOUNT_ROLE_FEE
+
+    @property
+    def is_main_account(self) -> bool:
+        return self.account_role == ACCOUNT_ROLE_MAIN
 
     @property
     def rest_base_url(self) -> str:
@@ -468,6 +475,11 @@ def assert_trading_account(config: BotConfig) -> None:
             "Fee collection account (ACCOUNT_ROLE=fee) cannot run trading commands. "
             "Use a strategy sub-account from accounts.toml."
         )
+    if config.is_main_account:
+        raise ConfigurationError(
+            "Main account (ACCOUNT_ROLE=main) cannot run strategy commands. "
+            "Use accounts/.env.main only for internal-transfer orchestration."
+        )
 
 
 def _load_env_values_with_strategy_profile(
@@ -487,6 +499,12 @@ def _load_env_values_with_strategy_profile(
         for layer_path in _fee_account_layer_paths(env_path):
             values.update(_env_values(layer_path))
         values["ACCOUNT_ROLE"] = ACCOUNT_ROLE_FEE
+        return values
+    if _optional(seed, "ACCOUNT_ROLE", "").lower() == ACCOUNT_ROLE_MAIN or _is_main_account_env_file(env_path):
+        values = {}
+        for layer_path in _main_account_layer_paths(env_path):
+            values.update(_env_values(layer_path))
+        values["ACCOUNT_ROLE"] = ACCOUNT_ROLE_MAIN
         return values
 
     base_strategy = _option_strategy(strategy_override or _optional(seed, "OPTION_STRATEGY", "naked_short"))
@@ -542,8 +560,8 @@ def load_config(
         env = "mainnet"
 
     account_role = _optional(values, "ACCOUNT_ROLE", "strategy").strip().lower()
-    if account_role not in {"strategy", ACCOUNT_ROLE_FEE}:
-        raise ConfigurationError("ACCOUNT_ROLE must be one of: strategy, fee")
+    if account_role not in {"strategy", ACCOUNT_ROLE_FEE, ACCOUNT_ROLE_MAIN}:
+        raise ConfigurationError("ACCOUNT_ROLE must be one of: strategy, fee, main")
 
     client_id = _optional(values, "DERIBIT_CLIENT_ID")
     client_secret = _optional(values, "DERIBIT_CLIENT_SECRET")

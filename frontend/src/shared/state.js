@@ -10,6 +10,8 @@ export const STATE = {
   dataFreshness: { source: null, snapshotMs: null, statusMs: null, live: false },
   chartsDataLoaded: false,
   chartsLoadInFlight: false,
+  /** Shared promise while chart APIs / vendor load; coalesces toggle + refresh callers. */
+  chartsLoadPromise: null,
   stressDataLoaded: false,
   stressLoadInFlight: false,
   bookFilter: "ALL",

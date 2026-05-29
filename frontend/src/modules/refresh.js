@@ -45,8 +45,15 @@ export function updateHeaderSpotDom() {
   if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
 }
 
+function waitForChartPanelLayout() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
 export async function renderPerformanceCharts() {
   if (!chartsSectionOpen()) return;
+  await waitForChartPanelLayout();
   try {
     await loadChartJs();
   } catch (err) {
@@ -334,42 +341,56 @@ export async function fetchDashboardBundle({ backgroundOnTimeout = false, sectio
   }
 }
 
+async function fetchChartSeries(investorFetchWrap = null) {
+  const fetchCumulative = () =>
+    fetchJson("/api/cumulative_pnl_series")
+      .then((d) => {
+        STATE.cumulativePnl = d;
+      })
+      .catch((err) => showToast(`cumulative pnl: ${err.message}`));
+
+  const fetchApr = () =>
+    fetchJson(aprSeriesUrl())
+      .then((d) => {
+        STATE.aprSeries = d;
+      })
+      .catch((err) => showToast(`apr series: ${err.message}`));
+
+  if (investorFetchWrap) {
+    await Promise.all([
+      investorFetchWrap("cumulative", fetchCumulative),
+      investorFetchWrap("apr", fetchApr),
+    ]);
+  } else {
+    await Promise.all([fetchCumulative(), fetchApr()]);
+  }
+}
+
 export async function loadChartDataIfNeeded({ force = false, investorFetchWrap = null } = {}) {
   if (!force && !chartsSectionOpen()) return;
   if (!force && STATE.chartsDataLoaded) {
     await renderPerformanceCharts();
     return;
   }
-  if (STATE.chartsLoadInFlight) return;
+  if (STATE.chartsLoadPromise) {
+    await STATE.chartsLoadPromise;
+    if (chartsSectionOpen()) await renderPerformanceCharts();
+    return;
+  }
+
   STATE.chartsLoadInFlight = true;
-  try {
+  STATE.chartsLoadPromise = (async () => {
     await loadChartJs();
-    const fetchCumulative = () =>
-      fetchJson("/api/cumulative_pnl_series")
-        .then((d) => {
-          STATE.cumulativePnl = d;
-        })
-        .catch((err) => showToast(`cumulative pnl: ${err.message}`));
-
-    const fetchApr = () =>
-      fetchJson(aprSeriesUrl())
-        .then((d) => {
-          STATE.aprSeries = d;
-        })
-        .catch((err) => showToast(`apr series: ${err.message}`));
-
-    if (investorFetchWrap) {
-      await Promise.all([
-        investorFetchWrap("cumulative", fetchCumulative),
-        investorFetchWrap("apr", fetchApr),
-      ]);
-    } else {
-      await Promise.all([fetchCumulative(), fetchApr()]);
-    }
+    await fetchChartSeries(investorFetchWrap);
     STATE.chartsDataLoaded = true;
     await renderPerformanceCharts();
+  })();
+
+  try {
+    await STATE.chartsLoadPromise;
   } finally {
     STATE.chartsLoadInFlight = false;
+    STATE.chartsLoadPromise = null;
   }
 }
 

@@ -62,6 +62,15 @@ def test_spot_instrument_name() -> None:
     assert spot_instrument_name("ETH", "USDT") == "ETH_USDT"
 
 
+def test_resolve_spot_trade_side() -> None:
+    from deribit_engine.wallet_ops import resolve_spot_trade_side
+
+    assert resolve_spot_trade_side("BTC", "USDC") == ("sell", "BTC", "USDC")
+    assert resolve_spot_trade_side("USDC", "BTC") == ("buy", "BTC", "USDC")
+    with pytest.raises(ConfigurationError):
+        resolve_spot_trade_side("USDC", "USDT")
+
+
 def test_resolve_fee_subaccount_id_from_config() -> None:
     class FakeClient:
         def get_subaccounts(self, *, with_portfolio=False):
@@ -93,6 +102,58 @@ def test_resolve_fee_subaccount_id_by_name() -> None:
     )
     assert fee_id == 42
     assert label == "fee_acc"
+
+
+def test_resolve_fee_subaccount_id_via_fee_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from deribit_engine.config import load_config
+    from deribit_engine.wallet_ops import FeeSubaccountConfig, _resolve_fee_subaccount_id_via_fee_env
+
+    repo = _bootstrap_repo(tmp_path)
+    investor_init("eve", strategies=("naked",), repo_root=repo)
+    investor_dir = repo / "config/investors/eve"
+    fee_env = investor_dir / "accounts/.env.fee"
+    fee_env.write_text(
+        "\n".join(
+            [
+                "ACCOUNT_ROLE=fee",
+                "DERIBIT_ENV=testnet",
+                "DERIBIT_CLIENT_ID=fee_cid",
+                "DERIBIT_CLIENT_SECRET=fee_sec",
+                "ORDER_LABEL_PREFIX=eve_fee",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    strategy_env = investor_dir / "accounts/.env.naked"
+    strategy_env.write_text(
+        strategy_env.read_text(encoding="utf-8") + "\nDERIBIT_CLIENT_ID=cid\nDERIBIT_CLIENT_SECRET=sec\n",
+        encoding="utf-8",
+    )
+    strategy_client = DeribitClient(load_config(strategy_env, require_private=True))
+
+    def _fake_get_subaccounts(self, *, with_portfolio=False):
+        if self.config.client_id == "fee_cid":
+            return [
+                {"id": 1, "type": "main", "username": "main_user"},
+                {"id": 99, "type": "subaccount", "username": "fee_acc", "system_name": "fee_acc"},
+            ]
+        return [{"id": 5, "type": "subaccount", "username": "naked_short"}]
+
+    monkeypatch.setattr(DeribitClient, "get_subaccounts", _fake_get_subaccounts)
+
+    fee_id, label = resolve_fee_subaccount_id(
+        strategy_client,
+        fee_config=FeeSubaccountConfig(subaccount_id=None, subaccount_name="fee_acc"),
+        investor_dir=investor_dir,
+    )
+    assert fee_id == 99
+    assert label == "fee_acc"
+
+    via_fee = _resolve_fee_subaccount_id_via_fee_env(
+        investor_dir,
+        fee_config=FeeSubaccountConfig(subaccount_id=None, subaccount_name="fee_acc"),
+    )
+    assert via_fee == (99, "fee_acc")
 
 
 def test_trade_spot_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,6 +206,19 @@ def test_trade_spot_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             }
         ],
     )
+    monkeypatch.setattr(
+        client,
+        "get_order_book",
+        lambda instrument_name, depth=1: {
+            "instrument_name": instrument_name,
+            "best_bid_price": 95000,
+            "best_bid_amount": 2,
+            "best_ask_price": 95010,
+            "best_ask_amount": 1.5,
+            "mark_price": 95005,
+            "index_price": 95000,
+        },
+    )
 
     out = trade_spot(
         config,
@@ -158,6 +232,169 @@ def test_trade_spot_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert out["instrument_name"] == "BTC_USDC"
     assert out["amount"] == "0.05"
     assert out["live"] is False
+    assert out["trade_price"] == "95000"
+    assert out["trade_price_source"] == "best_bid"
+    assert out["estimated_quote_proceeds"] == "4750"
+    assert out["best_bid_price"] == "95000"
+    assert out["best_ask_price"] == "95010"
+
+
+def test_trade_spot_limit_preview_uses_best_ask(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from deribit_engine.config import load_config
+
+    repo = _bootstrap_repo(tmp_path)
+    investor_init("limit", strategies=("covered_call",), repo_root=repo)
+    env = repo / "config/investors/limit/accounts/.env.covered_call"
+    env.write_text(
+        env.read_text(encoding="utf-8") + "\nDERIBIT_CLIENT_ID=cid\nDERIBIT_CLIENT_SECRET=sec\n",
+        encoding="utf-8",
+    )
+    config = load_config(env, require_private=True)
+    client = DeribitClient(config)
+    spot_row = {
+        "instrument_name": "BTC_USDC",
+        "base_currency": "BTC",
+        "quote_currency": "USDC",
+        "settlement_currency": "USDC",
+        "instrument_type": "linear",
+        "contract_size": 0.0001,
+        "min_trade_amount": 0.0001,
+        "tick_size": 0.5,
+        "tick_size_steps": [],
+    }
+    monkeypatch.setattr(
+        client, "get_instruments", lambda currency, kind="option", expired=False: [spot_row] if kind == "spot" else []
+    )
+    monkeypatch.setattr(
+        client,
+        "get_account_summaries",
+        lambda *, extended=False: [
+            {
+                "currency": "BTC",
+                "balance": 1,
+                "equity": 1,
+                "available_funds": 0.5,
+                "available_withdrawal_funds": 0.5,
+                "initial_margin": 0,
+                "maintenance_margin": 0,
+                "delta_total": 0,
+                "options_delta": 0,
+                "options_gamma": 0,
+                "options_theta": 0,
+                "total_equity_usd": 50000,
+                "total_initial_margin_usd": 0,
+                "total_maintenance_margin_usd": 0,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        client,
+        "get_order_book",
+        lambda instrument_name, depth=1: {
+            "instrument_name": instrument_name,
+            "best_bid_price": 74925,
+            "best_bid_amount": 2,
+            "best_ask_price": 74952,
+            "best_ask_amount": 1.5,
+            "mark_price": 74918.85,
+            "index_price": 74900,
+        },
+    )
+
+    out = trade_spot(
+        config,
+        client,
+        from_currency="BTC",
+        amount="0.01",
+        to_currency="USDC",
+        order_type="limit",
+        live=False,
+    )
+    assert out["trade_price"] == "74952"
+    assert out["trade_price_source"] == "best_ask"
+    assert out["limit_price"] == "74952"
+    assert out["estimated_quote_proceeds"] == "749.52"
+
+
+def test_trade_spot_buy_limit_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from deribit_engine.config import load_config
+
+    repo = _bootstrap_repo(tmp_path)
+    investor_init("buyer", strategies=("bull_put",), repo_root=repo)
+    env = repo / "config/investors/buyer/accounts/.env.bull_put"
+    env.write_text(
+        env.read_text(encoding="utf-8") + "\nDERIBIT_CLIENT_ID=cid\nDERIBIT_CLIENT_SECRET=sec\n",
+        encoding="utf-8",
+    )
+    config = load_config(env, require_private=True)
+    client = DeribitClient(config)
+    spot_row = {
+        "instrument_name": "BTC_USDC",
+        "base_currency": "BTC",
+        "quote_currency": "USDC",
+        "settlement_currency": "USDC",
+        "instrument_type": "linear",
+        "contract_size": 0.0001,
+        "min_trade_amount": 0.0001,
+        "tick_size": 0.5,
+        "tick_size_steps": [],
+    }
+    monkeypatch.setattr(
+        client, "get_instruments", lambda currency, kind="option", expired=False: [spot_row] if kind == "spot" else []
+    )
+    monkeypatch.setattr(
+        client,
+        "get_account_summaries",
+        lambda *, extended=False: [
+            {
+                "currency": "USDC",
+                "balance": 1000,
+                "equity": 1000,
+                "available_funds": 1000,
+                "available_withdrawal_funds": 1000,
+                "initial_margin": 0,
+                "maintenance_margin": 0,
+                "delta_total": 0,
+                "options_delta": 0,
+                "options_gamma": 0,
+                "options_theta": 0,
+                "total_equity_usd": 1000,
+                "total_initial_margin_usd": 0,
+                "total_maintenance_margin_usd": 0,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        client,
+        "get_order_book",
+        lambda instrument_name, depth=1: {
+            "instrument_name": instrument_name,
+            "best_bid_price": 74925,
+            "best_bid_amount": 2,
+            "best_ask_price": 74952,
+            "best_ask_amount": 1.5,
+            "mark_price": 74918.85,
+            "index_price": 74900,
+        },
+    )
+
+    out = trade_spot(
+        config,
+        client,
+        from_currency="USDC",
+        amount="50",
+        to_currency="BTC",
+        order_type="limit",
+        live=False,
+    )
+    assert out["direction"] == "buy"
+    assert out["from_amount"] == "50"
+    assert out["amount"] == "0.0006"
+    assert out["trade_price"] == "74925"
+    assert out["trade_price_source"] == "best_bid"
+    assert out["limit_price"] == "74925"
+    assert out["estimated_to_amount"] == "0.0006"
+    assert out["estimated_spend"] == "44.955"
 
 
 def test_internal_transfer_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,17 +433,26 @@ def test_internal_transfer_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             }
         ],
     )
+    monkeypatch.setattr(
+        client,
+        "get_subaccounts",
+        lambda *, with_portfolio=False: [{"id": 5, "type": "subaccount", "username": "naked_short"}],
+    )
 
     out = internal_transfer(
         config,
         client,
         investor_dir=investor_dir,
+        strategy_env=env,
         currency="USDC",
         amount="500",
         live=False,
     )
     assert out["action"] == "internal_transfer_preview"
     assert out["destination_subaccount_id"] == 777
+    assert out["source_subaccount_id"] == 5
+    assert out["transfer_via"] == "strategy_subaccount_api"
+    assert "transfer_note" in out
     assert out["amount"] == "500"
 
 
@@ -246,6 +492,11 @@ def test_internal_transfer_live_calls_api(tmp_path: Path, monkeypatch: pytest.Mo
             }
         ],
     )
+    monkeypatch.setattr(
+        client,
+        "get_subaccounts",
+        lambda *, with_portfolio=False: [{"id": 5, "type": "subaccount", "username": "naked_short"}],
+    )
     captured: dict[str, object] = {}
 
     def _fake_transfer(**kwargs):
@@ -258,6 +509,7 @@ def test_internal_transfer_live_calls_api(tmp_path: Path, monkeypatch: pytest.Mo
         config,
         client,
         investor_dir=investor_dir,
+        strategy_env=env,
         currency="USDC",
         amount="250",
         live=True,
@@ -268,6 +520,89 @@ def test_internal_transfer_live_calls_api(tmp_path: Path, monkeypatch: pytest.Mo
     assert captured["destination"] == 888
     assert captured["amount"] == Decimal("250")
     assert captured["nonce"] == "test-nonce-1"
+    assert "source" not in captured
+
+
+def test_internal_transfer_live_uses_main_account_api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from deribit_engine.config import load_config
+
+    repo = _bootstrap_repo(tmp_path)
+    investor_init("mainxfer", strategies=("naked",), repo_root=repo)
+    investor_dir = repo / "config/investors/mainxfer"
+    (investor_dir / ".env.investor").write_text("FEE_SUBACCOUNT_ID=888\n", encoding="utf-8")
+    env = investor_dir / "accounts/.env.naked"
+    env.write_text(
+        env.read_text(encoding="utf-8") + "\nDERIBIT_CLIENT_ID=cid\nDERIBIT_CLIENT_SECRET=sec\n",
+        encoding="utf-8",
+    )
+    main_env = investor_dir / "accounts/.env.main"
+    main_env.write_text(
+        "\n".join(
+            [
+                "ACCOUNT_ROLE=main",
+                "DERIBIT_ENV=testnet",
+                "DERIBIT_CLIENT_ID=main_cid",
+                "DERIBIT_CLIENT_SECRET=main_sec",
+                "ORDER_LABEL_PREFIX=mainxfer_main",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(env, require_private=True)
+    client = DeribitClient(config)
+    monkeypatch.setattr(
+        client,
+        "get_account_summaries",
+        lambda *, extended=False: [
+            {
+                "currency": "USDC",
+                "balance": 1000,
+                "equity": 1000,
+                "available_funds": 1000,
+                "available_withdrawal_funds": 1000,
+                "initial_margin": 0,
+                "maintenance_margin": 0,
+                "delta_total": 0,
+                "options_delta": 0,
+                "options_gamma": 0,
+                "options_theta": 0,
+                "total_equity_usd": 1000,
+                "total_initial_margin_usd": 0,
+                "total_maintenance_margin_usd": 0,
+            }
+        ],
+    )
+
+    def _fake_get_subaccounts(self, *, with_portfolio=False):
+        if self.config.client_id == "main_cid":
+            return [
+                {"id": 1, "type": "main", "username": "main_user"},
+                {"id": 5, "type": "subaccount", "username": "naked_short"},
+                {"id": 888, "type": "subaccount", "username": "fee_acc"},
+            ]
+        return [{"id": 5, "type": "subaccount", "username": "naked_short"}]
+
+    captured: dict[str, object] = {}
+
+    def _fake_transfer(self, **kwargs):
+        captured.update(kwargs)
+        return {"id": 1, "state": "confirmed", "other_side": "fee_acc"}
+
+    monkeypatch.setattr(DeribitClient, "get_subaccounts", _fake_get_subaccounts)
+    monkeypatch.setattr(DeribitClient, "submit_transfer_between_subaccounts", _fake_transfer)
+
+    out = internal_transfer(
+        config,
+        client,
+        investor_dir=investor_dir,
+        strategy_env=env,
+        currency="USDC",
+        amount="250",
+        live=True,
+    )
+    assert out["transfer_via"] == "main_account_api"
+    assert captured["source"] == 5
+    assert captured["destination"] == 888
 
 
 def test_trade_spot_rejects_insufficient_balance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -229,6 +229,25 @@ def _prepare_group_for_apr_backfill(
     if executions:
         group.enrich_fill_prices_from_journal(executions)
     group.infer_indices_from_fill_prices()
+    if group.short_entry_average_price <= 0 and journal is not None and group.short_instrument_name:
+        # Legacy synthetic rows stored USDC/qty instead of coin premium; borrow a plausible
+        # open fill for the same instrument from another group in this journal.
+        target = group.short_instrument_name
+        peer_open: tuple[int, Decimal] | None = None
+        for row in journal.list_executions(scope, limit=500):
+            if str(row.get("instrument_name") or "") != target:
+                continue
+            if str(row.get("event_type") or "").lower() != "open":
+                continue
+            price = to_decimal(row.get("price"))
+            if not group._premium_price_plausible(price):
+                continue
+            rank = group._journal_row_priority(row)
+            if peer_open is None or rank < peer_open[0]:
+                peer_open = (rank, price)
+        if peer_open is not None:
+            group.short_entry_average_price = peer_open[1]
+            group.infer_indices_from_fill_prices()
     if group.short_entry_average_price <= 0:
         idx = group.entry_index_usd
         if idx <= 0 and group.close_index_usd is not None and group.close_index_usd > 0:

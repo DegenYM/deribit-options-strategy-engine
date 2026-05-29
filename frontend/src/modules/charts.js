@@ -111,7 +111,7 @@ export function aprSeriesUrl() {
 }
 
 export function defaultEmptyChartTimeBounds() {
-  const end = luxon.DateTime.now().toUTC().startOf("day");
+  const end = globalThis.luxon.DateTime.now().toUTC().startOf("day");
   const start = end.minus({ days: Math.max(STATE.aprWindow, 30) });
   return { min: start.toMillis(), max: end.toMillis() };
 }
@@ -214,7 +214,7 @@ export function mountEmptyTimeSeriesChart(
     { x: xBounds.max, y: 0 },
   ];
   // Skeleton uses a line at y=0 so axes/grid render reliably (bar placeholders are invisible).
-  STATE.charts[key] = new Chart(ctx, {
+  STATE.charts[key] = new globalThis.Chart(ctx, {
     type: "line",
     data: {
       datasets: [
@@ -409,7 +409,7 @@ export function renderBookEquityChart() {
   const baseOpts = riskBarChartBaseOptions();
   setChartPanelEmpty("chart-risk-capital", { empty: false });
 
-  STATE.charts.riskCapital = new Chart(ctx, {
+  STATE.charts.riskCapital = new globalThis.Chart(ctx, {
     type: "bar",
     data: {
       labels: books,
@@ -451,7 +451,7 @@ export function renderBookEquityChart() {
 const MS_PER_DAY = 86400000;
 
 export function dateToMs(dateStr) {
-  const dt = luxon.DateTime.fromISO(String(dateStr || "").trim(), { zone: "utc" });
+  const dt = globalThis.luxon.DateTime.fromISO(String(dateStr || "").trim(), { zone: "utc" });
   if (!dt.isValid) return NaN;
   return dt.toMillis();
 }
@@ -567,7 +567,7 @@ export function renderCumulativePnlChart() {
     return;
   }
   setChartPanelEmpty("chart-cum-pnl", { empty: false });
-  STATE.charts.cumPnl = new Chart(ctx, {
+  STATE.charts.cumPnl = new globalThis.Chart(ctx, {
     type: "line",
     data: { datasets },
     options: chartCommonOptions(),
@@ -690,7 +690,7 @@ export function renderDailyPnlChart() {
   const flatPoints = datasets.flatMap((d) => d.data || []);
   const xBounds = suggestTimeScaleMinMax(flatPoints);
   const base = chartCommonOptions();
-  STATE.charts.dailyPnl = new Chart(ctx, {
+  STATE.charts.dailyPnl = new globalThis.Chart(ctx, {
     type: "bar",
     data: { datasets },
     options: {
@@ -729,7 +729,7 @@ export function renderAprChart() {
   setChartPanelEmpty("chart-apr", { empty: false });
   const xBounds = suggestTimeScaleMinMax(data);
   const base = chartCommonOptions();
-  STATE.charts.apr = new Chart(ctx, {
+  STATE.charts.apr = new globalThis.Chart(ctx, {
     type: "line",
     data: {
       datasets: [

@@ -55,7 +55,9 @@ CONFIG_INVESTORS = Path("config/investors")
 ACCOUNTS_MANIFEST = "accounts.toml"
 EXAMPLE_INVESTOR_ID = "_example"
 FEE_ACCOUNT_SLUG = "fee"
+MAIN_ACCOUNT_SLUG = "main"
 ACCOUNT_ROLE_FEE = "fee"
+ACCOUNT_ROLE_MAIN = "main"
 
 
 @dataclass(frozen=True)
@@ -150,6 +152,16 @@ def account_env_basename(slug: str) -> str:
 def fee_account_env_path(investor_dir: Path) -> Path:
     """Operator fee-collection sub-account env (not in ``accounts.toml``)."""
     return (investor_dir / "accounts" / account_env_basename(FEE_ACCOUNT_SLUG)).resolve()
+
+
+def main_account_env_path(investor_dir: Path) -> Path:
+    """Main-account env for Deribit subaccount transfers (not in ``accounts.toml``)."""
+    return (investor_dir / "accounts" / account_env_basename(MAIN_ACCOUNT_SLUG)).resolve()
+
+
+def is_main_account_env_path(account_env: Path) -> bool:
+    """True when ``account_env`` is the standard main-account env file."""
+    return account_env.resolve().name == account_env_basename(MAIN_ACCOUNT_SLUG)
 
 
 def is_fee_account_env_path(account_env: Path) -> bool:
@@ -380,6 +392,14 @@ def _is_fee_account_env_file(account_env: Path) -> bool:
     return _read_account_role(account_env) == ACCOUNT_ROLE_FEE
 
 
+def _is_main_account_env_file(account_env: Path) -> bool:
+    account_env = account_env.resolve()
+    if is_main_account_env_path(account_env):
+        role = _read_account_role(account_env)
+        return role == "" or role == ACCOUNT_ROLE_MAIN
+    return _read_account_role(account_env) == ACCOUNT_ROLE_MAIN
+
+
 def _fee_account_layer_paths(account_env: Path) -> tuple[Path, ...]:
     """Shared defaults + investor env + fee wallet env; no strategy profile."""
     account_env = account_env.resolve()
@@ -406,6 +426,11 @@ def _fee_account_layer_paths(account_env: Path) -> tuple[Path, ...]:
     return tuple(layers)
 
 
+def _main_account_layer_paths(account_env: Path) -> tuple[Path, ...]:
+    """Shared defaults + investor env + main account env; no strategy profile."""
+    return _fee_account_layer_paths(account_env)
+
+
 def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
     """Env files to merge in order; later paths override earlier keys.
 
@@ -414,10 +439,13 @@ def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
     the entry file), matching legacy single-``.env`` workflows.
 
     Fee collection envs (``ACCOUNT_ROLE=fee``) skip strategy profiles entirely.
+    Main account envs (``ACCOUNT_ROLE=main``) skip strategy profiles entirely.
     """
     account_env = account_env.resolve()
     if _is_fee_account_env_file(account_env):
         return _fee_account_layer_paths(account_env)
+    if _is_main_account_env_file(account_env):
+        return _main_account_layer_paths(account_env)
     root = find_repo_root(account_env)
     layers: list[Path] = []
     if root is not None:

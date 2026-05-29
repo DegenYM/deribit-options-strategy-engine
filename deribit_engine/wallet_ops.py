@@ -10,14 +10,21 @@ from typing import Any
 from dotenv import dotenv_values
 
 from .client import DeribitClient
-from .config import BotConfig, load_config
-from .env_layout import find_repo_root, load_investor_manifest, resolve_investor_env_path
+from .config import BotConfig, has_private_creds_for_env, load_config
+from .env_layout import (
+    fee_account_env_path,
+    find_repo_root,
+    load_investor_manifest,
+    main_account_env_path,
+    resolve_investor_env_path,
+)
 from .exceptions import ConfigurationError, ExchangeError
-from .models import AccountSummary, OptionInstrument
-from .utils import align_option_order_amount, format_decimal, to_decimal
+from .models import AccountSummary, OptionInstrument, OrderBookSnapshot
+from .utils import align_option_order_amount, floor_to_step, format_decimal, to_decimal
 
 DEFAULT_FEE_SUBACCOUNT_NAME = "fee_acc"
 SPOT_BASE_CURRENCIES = frozenset({"BTC", "ETH"})
+SPOT_QUOTE_CURRENCIES = frozenset({"USDC", "USDT"})
 TRANSFER_CURRENCIES = frozenset({"BTC", "ETH", "USDC", "USDT"})
 
 
@@ -34,11 +41,59 @@ def load_fee_subaccount_config(investor_dir: Path) -> FeeSubaccountConfig:
     subaccount_id = None
     if raw_id is not None and str(raw_id).strip():
         subaccount_id = int(str(raw_id).strip())
+    elif subaccount_id is None:
+        fee_env = fee_account_env_path(investor_dir)
+        if fee_env.is_file():
+            fee_values = dotenv_values(fee_env)
+            fee_raw_id = fee_values.get("FEE_SUBACCOUNT_ID")
+            if fee_raw_id is not None and str(fee_raw_id).strip():
+                subaccount_id = int(str(fee_raw_id).strip())
     raw_name = values.get("FEE_SUBACCOUNT_NAME")
+    if raw_name is None or not str(raw_name).strip():
+        fee_env = fee_account_env_path(investor_dir)
+        if fee_env.is_file():
+            raw_name = dotenv_values(fee_env).get("FEE_SUBACCOUNT_NAME")
     subaccount_name = (
         str(raw_name).strip() if raw_name is not None and str(raw_name).strip() else DEFAULT_FEE_SUBACCOUNT_NAME
     )
     return FeeSubaccountConfig(subaccount_id=subaccount_id, subaccount_name=subaccount_name)
+
+
+def _subaccount_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if str(row.get("type") or "").lower() == "subaccount"]
+
+
+def _resolve_fee_subaccount_id_via_fee_env(
+    investor_dir: Path,
+    *,
+    fee_config: FeeSubaccountConfig,
+) -> tuple[int, str] | None:
+    """Resolve destination id using the fee sub-account's own API key.
+
+    Strategy sub-account keys often cannot see other sub-accounts in
+    ``private/get_subaccounts``; the fee wallet key can read its own id.
+    """
+    fee_env = fee_account_env_path(investor_dir)
+    if not fee_env.is_file() or not has_private_creds_for_env(fee_env):
+        return None
+    fee_cfg = load_config(fee_env, require_private=True)
+    if not fee_cfg.is_fee_collection_account:
+        return None
+    try:
+        rows = DeribitClient(fee_cfg).get_subaccounts(with_portfolio=False)
+    except ExchangeError:
+        return None
+
+    matches = [row for row in _subaccount_rows(rows) if _match_subaccount_row(row, name=fee_config.subaccount_name)]
+    if len(matches) == 1:
+        row = matches[0]
+        return int(row["id"]), str(row.get("username") or row.get("system_name") or fee_config.subaccount_name)
+
+    subs = _subaccount_rows(rows)
+    if len(subs) == 1:
+        row = subs[0]
+        return int(row["id"]), str(row.get("username") or row.get("system_name") or fee_config.subaccount_name)
+    return None
 
 
 def spot_instrument_name(base_currency: str, quote_currency: str) -> str:
@@ -46,9 +101,23 @@ def spot_instrument_name(base_currency: str, quote_currency: str) -> str:
     quote = quote_currency.upper()
     if base not in SPOT_BASE_CURRENCIES:
         raise ConfigurationError(f"Unsupported spot base currency {base!r}; expected one of: BTC, ETH")
-    if quote not in {"USDC", "USDT"}:
+    if quote not in SPOT_QUOTE_CURRENCIES:
         raise ConfigurationError(f"Unsupported spot quote currency {quote!r}; expected USDC or USDT")
     return f"{base}_{quote}"
+
+
+def resolve_spot_trade_side(from_currency: str, to_currency: str) -> tuple[str, str, str]:
+    """Return ``(direction, base_currency, quote_currency)`` for a spot pair."""
+    source = from_currency.upper()
+    target = to_currency.upper()
+    if source in SPOT_BASE_CURRENCIES and target in SPOT_QUOTE_CURRENCIES:
+        return "sell", source, target
+    if source in SPOT_QUOTE_CURRENCIES and target in SPOT_BASE_CURRENCIES:
+        return "buy", target, source
+    raise ConfigurationError(
+        "trade-spot requires a BTC/ETH ↔ USDC/USDT pair, e.g. "
+        "--from-currency BTC --to USDC (sell) or --from-currency USDC --to BTC (buy)"
+    )
 
 
 def _lookup_spot_instrument(client: DeribitClient, instrument_name: str, base_currency: str) -> OptionInstrument:
@@ -72,20 +141,20 @@ def _summary_for_currency(client: DeribitClient, currency: str) -> AccountSummar
     return None
 
 
-def _resolve_amount(
+def _resolve_sell_base_amount(
     *,
     amount_raw: str | None,
     available: Decimal,
     contract_size: Decimal,
     min_trade_amount: Decimal,
+    use_all: bool,
 ) -> Decimal:
     if amount_raw is None or not str(amount_raw).strip():
-        raise ConfigurationError("--amount is required (or use --all to sell available balance)")
+        if not use_all:
+            raise ConfigurationError("--amount is required (or use --all to trade full available balance)")
+        amount_raw = "all"
     token = str(amount_raw).strip().lower()
-    if token == "all":
-        target = available
-    else:
-        target = to_decimal(amount_raw)
+    target = available if token == "all" else to_decimal(amount_raw)
     if target <= 0:
         raise ConfigurationError("Amount must be positive")
     aligned = align_option_order_amount(target, contract_size, min_trade_amount)
@@ -101,6 +170,125 @@ def _resolve_amount(
     return aligned
 
 
+def _resolve_buy_base_amount(
+    *,
+    quote_spend_raw: str | None,
+    available_quote: Decimal,
+    trade_price: Decimal,
+    contract_size: Decimal,
+    min_trade_amount: Decimal,
+    use_all: bool,
+) -> tuple[Decimal, Decimal]:
+    if quote_spend_raw is None or not str(quote_spend_raw).strip():
+        if not use_all:
+            raise ConfigurationError("--amount is required (or use --all to trade full available balance)")
+        quote_spend_raw = "all"
+    token = str(quote_spend_raw).strip().lower()
+    quote_spend = available_quote if token == "all" else to_decimal(quote_spend_raw)
+    if quote_spend <= 0:
+        raise ConfigurationError("Amount must be positive")
+    if quote_spend > available_quote:
+        raise ConfigurationError(
+            f"Requested spend {format_decimal(quote_spend, 8)} exceeds available {format_decimal(available_quote, 8)}"
+        )
+    if trade_price <= 0:
+        raise ConfigurationError("Cannot size spot buy without a valid trade price (empty order book?)")
+    raw_base = quote_spend / trade_price
+    aligned_base = align_option_order_amount(raw_base, contract_size, min_trade_amount)
+    if aligned_base <= 0:
+        raise ConfigurationError(
+            f"Spend {format_decimal(quote_spend, 8)} below minimum notional at price "
+            f"{format_decimal(trade_price, 4)} "
+            f"(min base={format_decimal(min_trade_amount, 8)})"
+        )
+    actual_spend = aligned_base * trade_price
+    if actual_spend > available_quote:
+        raise ConfigurationError(
+            f"Aligned buy size {format_decimal(aligned_base, 8)} requires "
+            f"{format_decimal(actual_spend, 8)} quote, exceeds available "
+            f"{format_decimal(available_quote, 8)}"
+        )
+    return aligned_base, actual_spend
+
+
+def _align_spot_limit_price(price: Decimal, instrument: OptionInstrument) -> Decimal:
+    tick = instrument.tick_size
+    if tick <= 0:
+        return price
+    return floor_to_step(price, tick)
+
+
+def _spot_trade_price_quote(
+    client: DeribitClient,
+    instrument_name: str,
+    *,
+    direction: str,
+    order_type: str,
+    instrument: OptionInstrument,
+    limit_price: Decimal | None = None,
+) -> tuple[Decimal, str, OrderBookSnapshot]:
+    book = OrderBookSnapshot.from_api(client.get_order_book(instrument_name, depth=1))
+    is_buy = direction == "buy"
+
+    if order_type == "market":
+        if is_buy and book.best_ask_price > 0:
+            return book.best_ask_price, "best_ask", book
+        if not is_buy and book.best_bid_price > 0:
+            return book.best_bid_price, "best_bid", book
+        if book.mark_price > 0:
+            return book.mark_price, "mark", book
+        if book.index_price > 0:
+            return book.index_price, "index", book
+        return Decimal("0"), "unavailable", book
+
+    if limit_price is not None and limit_price > 0:
+        return _align_spot_limit_price(limit_price, instrument), "explicit", book
+    if is_buy and book.best_bid_price > 0:
+        return _align_spot_limit_price(book.best_bid_price, instrument), "best_bid", book
+    if not is_buy and book.best_ask_price > 0:
+        return _align_spot_limit_price(book.best_ask_price, instrument), "best_ask", book
+    if book.mark_price > 0:
+        return _align_spot_limit_price(book.mark_price, instrument), "mark", book
+    if book.index_price > 0:
+        return _align_spot_limit_price(book.index_price, instrument), "index", book
+    return Decimal("0"), "unavailable", book
+
+
+def _attach_trade_price_fields(
+    payload: dict[str, Any],
+    *,
+    direction: str,
+    trade_price: Decimal,
+    price_source: str,
+    quote_currency: str,
+    base_amount: Decimal,
+    from_amount: Decimal | None = None,
+    book: OrderBookSnapshot | None = None,
+) -> None:
+    if trade_price <= 0:
+        payload["trade_price"] = None
+        payload["trade_price_source"] = price_source
+        return
+    payload["trade_price"] = format_decimal(trade_price, 4)
+    payload["trade_price_source"] = price_source
+    payload["quote_currency"] = quote_currency
+    if direction == "sell":
+        payload["estimated_quote_proceeds"] = format_decimal(base_amount * trade_price, 4)
+        payload["estimated_to_amount"] = format_decimal(base_amount * trade_price, 8)
+    else:
+        spend = from_amount if from_amount is not None else base_amount * trade_price
+        payload["estimated_spend"] = format_decimal(spend, 4)
+        payload["estimated_to_amount"] = format_decimal(base_amount, 8)
+        payload["estimated_quote_proceeds"] = format_decimal(spend, 4)
+    if book is not None:
+        if book.best_bid_price > 0:
+            payload["best_bid_price"] = format_decimal(book.best_bid_price, 4)
+        if book.best_ask_price > 0:
+            payload["best_ask_price"] = format_decimal(book.best_ask_price, 4)
+        if book.mark_price > 0:
+            payload["mark_price"] = format_decimal(book.mark_price, 4)
+
+
 def _match_subaccount_row(row: dict[str, Any], *, name: str) -> bool:
     needle = name.strip().lower()
     if not needle:
@@ -112,11 +300,69 @@ def _match_subaccount_row(row: dict[str, Any], *, name: str) -> bool:
     return False
 
 
+def resolve_source_subaccount_id(
+    client: DeribitClient,
+    *,
+    strategy_env: Path | None = None,
+) -> tuple[int, str]:
+    if strategy_env is not None and strategy_env.is_file():
+        raw_id = dotenv_values(strategy_env).get("SUBACCOUNT_ID")
+        if raw_id is not None and str(raw_id).strip():
+            sub_id = int(str(raw_id).strip())
+            return sub_id, f"id:{sub_id}"
+
+    try:
+        rows = client.get_subaccounts(with_portfolio=False)
+    except ExchangeError as exc:
+        raise ConfigurationError(
+            "Cannot resolve strategy subaccount id via private/get_subaccounts. "
+            "Set SUBACCOUNT_ID in the strategy account env, or ensure account:read scope. "
+            f"API error: {exc}"
+        ) from exc
+
+    subs = _subaccount_rows(rows)
+    if len(subs) == 1:
+        row = subs[0]
+        return int(row["id"]), str(row.get("username") or row.get("system_name") or row["id"])
+    if len(subs) > 1:
+        names = ", ".join(str(row.get("username") or row.get("system_name") or row.get("id")) for row in subs)
+        raise ConfigurationError(
+            f"Multiple strategy subaccounts visible ({names}). Set SUBACCOUNT_ID in the strategy account env file."
+        )
+    raise ConfigurationError(
+        "Cannot resolve strategy subaccount id (no subaccount visible on this API key). "
+        "Set SUBACCOUNT_ID in the strategy account env file."
+    )
+
+
+def _main_transfer_client(investor_dir: Path) -> DeribitClient | None:
+    main_env = main_account_env_path(investor_dir)
+    if not main_env.is_file() or not has_private_creds_for_env(main_env):
+        return None
+    main_cfg = load_config(main_env, require_private=True)
+    if not main_cfg.is_main_account:
+        raise ConfigurationError(f"Main transfer env must set ACCOUNT_ROLE=main: {main_env}")
+    return DeribitClient(main_cfg)
+
+
+def _transfer_not_allowed_help(exc: ExchangeError) -> ConfigurationError:
+    return ConfigurationError(
+        "Deribit rejected the transfer (12100 transfer_not_allowed). "
+        "Subaccount-to-subaccount transfers must use a **main account** API key with "
+        "wallet:read_write at config/investors/<id>/accounts/.env.main "
+        "(create the key on the Deribit main account, not on a subaccount). "
+        "The bot will call submit_transfer_between_subaccounts with explicit source and "
+        "destination subaccount ids. "
+        f"Original error: {exc}"
+    )
+
+
 def resolve_fee_subaccount_id(
     client: DeribitClient,
     *,
     fee_config: FeeSubaccountConfig,
     destination_id: int | None = None,
+    investor_dir: Path | None = None,
 ) -> tuple[int, str]:
     if destination_id is not None:
         return int(destination_id), f"id:{destination_id}"
@@ -126,12 +372,10 @@ def resolve_fee_subaccount_id(
     try:
         rows = client.get_subaccounts(with_portfolio=False)
     except ExchangeError as exc:
-        raise ConfigurationError(
-            "Cannot resolve fee subaccount id via private/get_subaccounts. "
-            "Set FEE_SUBACCOUNT_ID in config/investors/<id>/.env.investor "
-            f"(Deribit subaccount name default: {DEFAULT_FEE_SUBACCOUNT_NAME!r}). "
-            f"API error: {exc}"
-        ) from exc
+        rows = []
+        strategy_api_error = exc
+    else:
+        strategy_api_error = None
 
     matches = [row for row in rows if _match_subaccount_row(row, name=fee_config.subaccount_name)]
     if len(matches) == 1:
@@ -143,21 +387,34 @@ def resolve_fee_subaccount_id(
             f"Multiple subaccounts match FEE_SUBACCOUNT_NAME={fee_config.subaccount_name!r}: {names}. "
             "Set FEE_SUBACCOUNT_ID explicitly."
         )
+
+    if investor_dir is not None:
+        via_fee = _resolve_fee_subaccount_id_via_fee_env(investor_dir, fee_config=fee_config)
+        if via_fee is not None:
+            return via_fee
+
+    if strategy_api_error is not None:
+        raise ConfigurationError(
+            "Cannot resolve fee subaccount id via private/get_subaccounts. "
+            "Set FEE_SUBACCOUNT_ID in config/investors/<id>/.env.investor "
+            f"(Deribit subaccount name default: {DEFAULT_FEE_SUBACCOUNT_NAME!r}), "
+            "or ensure accounts/.env.fee has valid API credentials. "
+            f"API error: {strategy_api_error}"
+        ) from strategy_api_error
+
     known = (
         ", ".join(
             sorted(
-                {
-                    str(row.get("username") or row.get("system_name") or row.get("id"))
-                    for row in rows
-                    if str(row.get("type") or "").lower() == "subaccount"
-                }
+                {str(row.get("username") or row.get("system_name") or row.get("id")) for row in _subaccount_rows(rows)}
             )
         )
-        or "(none visible)"
+        or "(none visible from strategy sub-account API)"
     )
     raise ConfigurationError(
-        f"Fee subaccount {fee_config.subaccount_name!r} not found via get_subaccounts. "
-        f"Visible subaccounts: {known}. Set FEE_SUBACCOUNT_ID in .env.investor."
+        f"Fee subaccount {fee_config.subaccount_name!r} not visible from strategy sub-account API "
+        f"(visible: {known}). "
+        "Fix: set FEE_SUBACCOUNT_ID in .env.investor, pass --destination-id, "
+        "or configure accounts/.env.fee so the bot can read the fee wallet id."
     )
 
 
@@ -170,6 +427,7 @@ def trade_spot(
     to_currency: str = "USDC",
     instrument_name: str | None = None,
     order_type: str = "market",
+    limit_price: str | None = None,
     sell_all: bool = False,
     live: bool = False,
     label: str | None = None,
@@ -177,50 +435,116 @@ def trade_spot(
     if config.is_fee_collection_account:
         raise ConfigurationError("trade-spot must run on a strategy sub-account, not ACCOUNT_ROLE=fee")
 
-    base = from_currency.upper()
-    quote = to_currency.upper()
+    direction, base, quote = resolve_spot_trade_side(from_currency, to_currency)
     resolved_instrument = (instrument_name or spot_instrument_name(base, quote)).strip()
     instrument = _lookup_spot_instrument(client, resolved_instrument, base)
-    summary = _summary_for_currency(client, base)
-    available = Decimal("0")
-    if summary is not None:
-        available = max(summary.available_funds, summary.available_withdrawal_funds, summary.balance)
+    explicit_limit = to_decimal(limit_price) if limit_price is not None and str(limit_price).strip() else None
 
-    amount_token = "all" if sell_all else amount
-    aligned_amount = _resolve_amount(
-        amount_raw=amount_token,
-        available=available,
-        contract_size=instrument.contract_size,
-        min_trade_amount=instrument.min_trade_amount,
+    trade_price, price_source, book = _spot_trade_price_quote(
+        client,
+        resolved_instrument,
+        direction=direction,
+        order_type=order_type,
+        instrument=instrument,
+        limit_price=explicit_limit,
     )
+
+    from_ccy = from_currency.upper()
+    to_ccy = to_currency.upper()
+    from_summary = _summary_for_currency(client, from_ccy)
+    from_available = Decimal("0")
+    if from_summary is not None:
+        from_available = max(
+            from_summary.available_funds,
+            from_summary.available_withdrawal_funds,
+            from_summary.balance,
+        )
+
+    from_amount: Decimal | None = None
+    requested_from_amount: Decimal | None = None
+    if direction == "sell":
+        order_amount = _resolve_sell_base_amount(
+            amount_raw=amount,
+            available=from_available,
+            contract_size=instrument.contract_size,
+            min_trade_amount=instrument.min_trade_amount,
+            use_all=sell_all,
+        )
+        from_amount = order_amount
+        requested_from_amount = order_amount
+    else:
+        if sell_all or (amount is not None and str(amount).strip().lower() == "all"):
+            requested_from_amount = from_available
+        elif amount is not None and str(amount).strip():
+            requested_from_amount = to_decimal(amount)
+        order_amount, from_amount = _resolve_buy_base_amount(
+            quote_spend_raw=amount,
+            available_quote=from_available,
+            trade_price=trade_price,
+            contract_size=instrument.contract_size,
+            min_trade_amount=instrument.min_trade_amount,
+            use_all=sell_all,
+        )
 
     payload: dict[str, Any] = {
         "action": "trade_spot" if live else "trade_spot_preview",
         "live": live,
-        "direction": "sell",
-        "from_currency": base,
-        "to_currency": quote,
+        "direction": direction,
+        "from_currency": from_ccy,
+        "to_currency": to_ccy,
+        "base_currency": base,
+        "quote_currency": quote,
         "instrument_name": resolved_instrument,
-        "amount": format_decimal(aligned_amount, 8),
-        "available": format_decimal(available, 8),
+        "amount": format_decimal(order_amount, 8),
+        "from_amount": format_decimal(requested_from_amount or from_amount, 8),
+        "available": format_decimal(from_available, 8),
         "order_type": order_type,
     }
+    _attach_trade_price_fields(
+        payload,
+        direction=direction,
+        trade_price=trade_price,
+        price_source=price_source,
+        quote_currency=quote,
+        base_amount=order_amount,
+        from_amount=from_amount,
+        book=book,
+    )
+    if order_type == "limit" and trade_price > 0:
+        payload["limit_price"] = format_decimal(trade_price, 4)
     if not live:
         return payload
 
-    order_label = label or f"{config.order_label_prefix}-spot-sell"
-    response = client.place_sell_order(
-        instrument_name=resolved_instrument,
-        amount=aligned_amount,
-        label=order_label,
-        order_type=order_type,
-    )
+    order_label = label or f"{config.order_label_prefix}-spot-{direction}"
+    order_kwargs: dict[str, Any] = {
+        "instrument_name": resolved_instrument,
+        "amount": order_amount,
+        "label": order_label,
+        "order_type": order_type,
+    }
+    if order_type == "limit":
+        if trade_price <= 0:
+            raise ConfigurationError(f"Cannot determine limit price for spot {direction} (empty order book?)")
+        order_kwargs["price"] = trade_price
+    place_order = client.place_buy_order if direction == "buy" else client.place_sell_order
+    response = place_order(**order_kwargs)
     payload["response"] = response
     order = response.get("order") if isinstance(response, dict) else None
     if isinstance(order, dict):
         payload["order_id"] = order.get("order_id")
         payload["order_state"] = order.get("order_state")
         payload["average_price"] = order.get("average_price")
+        fill_price = to_decimal(order.get("average_price"))
+        if fill_price > 0:
+            _attach_trade_price_fields(
+                payload,
+                direction=direction,
+                trade_price=fill_price,
+                price_source="average_fill",
+                quote_currency=quote,
+                base_amount=order_amount,
+                from_amount=from_amount,
+            )
     return payload
 
 
@@ -229,14 +553,15 @@ def internal_transfer(
     client: DeribitClient,
     *,
     investor_dir: Path,
+    strategy_env: Path | None = None,
     currency: str,
     amount: str,
     destination_id: int | None = None,
     live: bool = False,
     nonce: str | None = None,
 ) -> dict[str, Any]:
-    if config.is_fee_collection_account:
-        raise ConfigurationError("internal-transfer must run on a strategy sub-account, not ACCOUNT_ROLE=fee")
+    if config.is_fee_collection_account or config.is_main_account:
+        raise ConfigurationError("internal-transfer must run on a strategy sub-account, not fee/main env")
 
     ccy = currency.upper()
     if ccy not in TRANSFER_CURRENCIES:
@@ -263,7 +588,11 @@ def internal_transfer(
         client,
         fee_config=fee_config,
         destination_id=destination_id,
+        investor_dir=investor_dir,
     )
+    source_id, source_label = resolve_source_subaccount_id(client, strategy_env=strategy_env)
+    main_client = _main_transfer_client(investor_dir)
+    transfer_via = "main_account_api" if main_client is not None else "strategy_subaccount_api"
 
     payload: dict[str, Any] = {
         "action": "internal_transfer" if live else "internal_transfer_preview",
@@ -271,19 +600,37 @@ def internal_transfer(
         "currency": ccy,
         "amount": format_decimal(transfer_amount, 8),
         "available": format_decimal(available, 8),
+        "source_subaccount_id": source_id,
+        "source_subaccount": source_label,
         "destination_subaccount_id": dest_id,
         "destination_subaccount": dest_label,
         "fee_subaccount_name": fee_config.subaccount_name,
+        "transfer_via": transfer_via,
     }
+    if main_client is None:
+        payload["transfer_note"] = (
+            "No accounts/.env.main credentials found; live transfer may fail with 12100. "
+            "Deribit requires main-account API auth for subaccount-to-subaccount transfers."
+        )
     if not live:
         return payload
 
-    response = client.submit_transfer_between_subaccounts(
-        currency=ccy,
-        amount=transfer_amount,
-        destination=dest_id,
-        nonce=nonce,
-    )
+    transfer_client = main_client or client
+    transfer_kwargs: dict[str, Any] = {
+        "currency": ccy,
+        "amount": transfer_amount,
+        "destination": dest_id,
+        "nonce": nonce,
+    }
+    if main_client is not None:
+        transfer_kwargs["source"] = source_id
+    try:
+        response = transfer_client.submit_transfer_between_subaccounts(**transfer_kwargs)
+    except ExchangeError as exc:
+        text = str(exc)
+        if "12100" in text or "transfer_not_allowed" in text:
+            raise _transfer_not_allowed_help(exc) from exc
+        raise
     payload["response"] = response
     if isinstance(response, dict):
         payload["transfer_id"] = response.get("id")
@@ -326,6 +673,7 @@ def run_wallet_command(
             to_currency=kwargs.get("to_currency") or "USDC",
             instrument_name=kwargs.get("instrument_name"),
             order_type=kwargs.get("order_type") or "market",
+            limit_price=kwargs.get("limit_price"),
             sell_all=bool(kwargs.get("sell_all")),
             live=live,
             label=kwargs.get("label"),
@@ -338,6 +686,7 @@ def run_wallet_command(
             config,
             client,
             investor_dir=investor_dir,
+            strategy_env=Path(env_file),
             currency=kwargs["currency"],
             amount=kwargs["amount"],
             destination_id=kwargs.get("destination_id"),

@@ -13,44 +13,49 @@ WALLET_COMMANDS = frozenset({"trade-spot", "internal-transfer"})
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     trade_spot_parser = subparsers.add_parser(
         "trade-spot",
-        help="Sell spot (BTC/ETH) for USDC/USDT — e.g. covered_call fee collection",
+        help="Trade spot: sell BTC/ETH→USDC/USDT or buy BTC/ETH with USDC/USDT",
     )
     add_env_file_after_subcommand(trade_spot_parser)
     trade_spot_parser.add_argument(
         "--from-currency",
         required=True,
-        choices=("BTC", "ETH"),
-        help="Spot base currency to sell",
+        choices=("BTC", "ETH", "USDC", "USDT"),
+        help="Currency to spend (BTC/ETH sell, or USDC/USDT buy)",
     )
     trade_spot_parser.add_argument(
         "--to",
         dest="to_currency",
-        default="USDC",
-        choices=("USDC", "USDT"),
-        help="Quote stablecoin (default: USDC)",
+        required=True,
+        choices=("BTC", "ETH", "USDC", "USDT"),
+        help="Currency to receive",
     )
     trade_spot_parser.add_argument(
         "--instrument",
         dest="instrument_name",
         default=None,
-        help="Override spot pair, e.g. BTC_USDC (default: <from>_<to>)",
+        help="Override spot pair, e.g. BTC_USDC (default: <base>_<quote>)",
     )
     trade_spot_parser.add_argument(
         "--amount",
         default=None,
-        help="Amount in base currency; omit when using --all",
+        help="Amount in --from-currency (base for sell, quote spend for buy)",
     )
     trade_spot_parser.add_argument(
         "--all",
         dest="sell_all",
         action="store_true",
-        help="Sell all available base currency (aligned to exchange minimum)",
+        help="Use full available --from-currency balance",
     )
     trade_spot_parser.add_argument(
         "--order-type",
         default="market",
         choices=("market", "limit"),
-        help="Order type (default: market)",
+        help="Order type: market=taker; limit=maker (sell@ask, buy@bid)",
+    )
+    trade_spot_parser.add_argument(
+        "--price",
+        default=None,
+        help="Limit order price in quote currency (default for limit: best ask)",
     )
     trade_spot_parser.add_argument(
         "--label",
@@ -119,6 +124,7 @@ def dispatch(args: argparse.Namespace) -> int | None:
         to_currency=getattr(args, "to_currency", None),
         instrument_name=getattr(args, "instrument_name", None),
         order_type=getattr(args, "order_type", None),
+        limit_price=getattr(args, "price", None),
         sell_all=getattr(args, "sell_all", False),
         label=getattr(args, "label", None),
         currency=args.currency if args.command == "internal-transfer" else None,

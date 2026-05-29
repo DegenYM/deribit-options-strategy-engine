@@ -191,7 +191,7 @@ def _ensure_entry_net_apr(
     index_usd: dict[str, Decimal],
     contract_size: Decimal = Decimal("1"),
 ) -> None:
-    from .models import TradeGroup
+    from ..models import TradeGroup
 
     dte = _entry_dte_days_at_open(group)
     if dte <= 0:
