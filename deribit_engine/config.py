@@ -138,6 +138,26 @@ class BotConfig:
     short_call_fallback_only: bool = True
     # Minimum cooldown between two entries in the same book.
     entry_cooldown_minutes: int = 20
+    # Volatility entry gates (IV rank uses DVOL or contract mark_iv).
+    enable_iv_entry_gate: bool = False
+    min_iv_rank: Decimal = Decimal("0")
+    max_iv_rank: Decimal = Decimal("1")
+    min_iv_minus_rv: Decimal = Decimal("0")
+    iv_rank_lookback_days: int = 252
+    rv_lookback_days: int = 30
+    # Weighted candidate scoring (when enabled, replaces lexicographic sort).
+    enable_weighted_candidate_scoring: bool = False
+    score_weight_net_apr: Decimal = Decimal("3")
+    score_weight_margin_efficiency: Decimal = Decimal("2")
+    score_weight_spread: Decimal = Decimal("1")
+    score_weight_delta_distance: Decimal = Decimal("1")
+    score_weight_otm_distance: Decimal = Decimal("0.5")
+    # Dynamic take-profit thresholds by DTE.
+    enable_dynamic_tp: bool = False
+    tp_capture_pct_dte_long: Decimal = Decimal("0.40")
+    tp_capture_pct_dte_short: Decimal = Decimal("0.60")
+    tp_dte_long_threshold: Decimal = Decimal("14")
+    tp_dte_short_threshold: Decimal = Decimal("7")
     # How often to cancel+requote unfilled entry orders.
     reprice_minutes: int = 3
     # Liquidity gates split by collateral type.
@@ -753,6 +773,25 @@ def load_config(
         book_mm_hard=to_decimal(_optional(values, "BOOK_MM_HARD", "0.33")),
         short_call_fallback_only=short_call_fallback_only,
         entry_cooldown_minutes=int(_optional(values, "ENTRY_COOLDOWN_MINUTES", "20")),
+        enable_iv_entry_gate=_to_bool(_optional(values, "ENABLE_IV_ENTRY_GATE", "false"), default=False),
+        min_iv_rank=to_decimal(_optional(values, "MIN_IV_RANK", "0")),
+        max_iv_rank=to_decimal(_optional(values, "MAX_IV_RANK", "1")),
+        min_iv_minus_rv=to_decimal(_optional(values, "MIN_IV_MINUS_RV", "0")),
+        iv_rank_lookback_days=max(10, int(_optional(values, "IV_RANK_LOOKBACK_DAYS", "252"))),
+        rv_lookback_days=max(5, int(_optional(values, "RV_LOOKBACK_DAYS", "30"))),
+        enable_weighted_candidate_scoring=_to_bool(
+            _optional(values, "ENABLE_WEIGHTED_CANDIDATE_SCORING", "false"), default=False
+        ),
+        score_weight_net_apr=to_decimal(_optional(values, "SCORE_WEIGHT_NET_APR", "3")),
+        score_weight_margin_efficiency=to_decimal(_optional(values, "SCORE_WEIGHT_MARGIN_EFFICIENCY", "2")),
+        score_weight_spread=to_decimal(_optional(values, "SCORE_WEIGHT_SPREAD", "1")),
+        score_weight_delta_distance=to_decimal(_optional(values, "SCORE_WEIGHT_DELTA_DISTANCE", "1")),
+        score_weight_otm_distance=to_decimal(_optional(values, "SCORE_WEIGHT_OTM_DISTANCE", "0.5")),
+        enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "false"), default=False),
+        tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.40")),
+        tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.60")),
+        tp_dte_long_threshold=to_decimal(_optional(values, "TP_DTE_LONG_THRESHOLD", "14")),
+        tp_dte_short_threshold=to_decimal(_optional(values, "TP_DTE_SHORT_THRESHOLD", "7")),
         reprice_minutes=int(_optional(values, "REPRICE_MINUTES", "3")),
         inverse_min_open_interest=inverse_min_open_interest,
         btc_inverse_min_open_interest=btc_inverse_min_open_interest,

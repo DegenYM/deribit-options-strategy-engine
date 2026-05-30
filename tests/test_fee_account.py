@@ -20,7 +20,6 @@ def _bootstrap_repo(tmp_path: Path) -> Path:
         "accounts/.env.naked.example",
         "accounts/.env.bull_put.example",
         "accounts/.env.covered_call.example",
-        "accounts/.env.fee.example",
     ):
         src = example / rel
         dest = tmp_path / "config" / "investors" / "_example" / rel
@@ -151,6 +150,8 @@ def test_fetch_fee_account_balance_missing_account_read_scope(tmp_path: Path, mo
 def test_fetch_fee_account_balance_missing_creds(tmp_path: Path) -> None:
     repo = _bootstrap_repo(tmp_path)
     investor_init("bob", strategies=("naked",), repo_root=repo)
+    fee_env = repo / "config/investors/bob/accounts/.env.fee"
+    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=testnet\n", encoding="utf-8")
     with pytest.raises(ConfigurationError, match="missing DERIBIT_CLIENT_ID/SECRET"):
         fetch_fee_account_balance("bob", repo_root=repo)
 
@@ -158,6 +159,5 @@ def test_fetch_fee_account_balance_missing_creds(tmp_path: Path) -> None:
 def test_fetch_fee_account_balance_missing_env(tmp_path: Path) -> None:
     repo = _bootstrap_repo(tmp_path)
     investor_init("carol", strategies=("naked",), repo_root=repo)
-    (repo / "config/investors/carol/accounts/.env.fee").unlink()
     with pytest.raises(ConfigurationError, match="Fee account env not found"):
         fetch_fee_account_balance("carol", repo_root=repo)

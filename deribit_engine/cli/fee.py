@@ -292,18 +292,11 @@ def dispatch(args: argparse.Namespace) -> int | None:
         return 0
 
     if args.command == "fee-balance":
-        from ..fee_account import fetch_fee_account_balance
-
-        if not args.investor:
-            raise SystemExit("fee-balance requires --investor <ID>")
-        repo_root = find_repo_root(Path.cwd())
-        if repo_root is None:
-            raise SystemExit("Cannot locate repository root")
-        render(
-            {"action": "fee-balance", **fetch_fee_account_balance(args.investor, repo_root=repo_root)},
-            args.json,
+        raise SystemExit(
+            "fee-balance is deprecated: fee sub-accounts are no longer used. "
+            "Investors pay via external addresses in config/platform/fee-payout-addresses.toml. "
+            "See docs/investor-fee-disclosure-zh-TW.md section 5."
         )
-        return 0
 
     if args.command == "fee-flow-report":
         from ..investor_cash_flow import fetch_cumulative_net_flow_usdc, flow_report_dict

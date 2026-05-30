@@ -25,7 +25,6 @@ def _bootstrap_repo(tmp_path: Path) -> Path:
         ".env.investor.example",
         "accounts/.env.naked.example",
         "accounts/.env.covered_call.example",
-        "accounts/.env.fee.example",
     ):
         src = example / rel
         dest = tmp_path / "config" / "investors" / "_example" / rel

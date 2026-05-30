@@ -232,14 +232,14 @@ def test_legacy_investor_env_path_emits_deprecation_warning(tmp_path: Path):
 def test_legacy_defaults_env_emits_deprecation_warning(tmp_path: Path):
     (tmp_path / "deribit_engine").mkdir()
     (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
-    (tmp_path / "config" / "shared" / ".env.defaults").write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    (tmp_path / "config" / "shared" / "defaults.env").write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
     investor = tmp_path / "config" / "investors" / "alpha"
     (investor / "accounts").mkdir(parents=True)
     account = investor / "accounts" / ".env.naked"
     account.write_text("OPTION_STRATEGY=naked_short\n", encoding="utf-8")
-    with pytest.warns(DeprecationWarning, match=".env.defaults"):
+    with pytest.warns(DeprecationWarning, match="defaults.env"):
         layers = env_layer_paths(account, "naked_short")
-    assert layers[0].name == ".env.defaults"
+    assert layers[0].name == "defaults.env"
 
 
 def test_legacy_root_strategy_profile_emits_deprecation_warning(tmp_path: Path):

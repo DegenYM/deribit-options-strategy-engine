@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-DOC_VERSION = "1.0"
+DOC_VERSION = "1.1"
 DOC_DATE = date.today().isoformat()
 
 _PALETTE = {
@@ -25,13 +25,9 @@ _IMAGES: dict[str, tuple[str, str]] = {
     "s2_deposit": ("03-wallet-deposit-menu.png", "Wallet → Deposit"),
     "s5_api_perm": (
         "10-api-strategy-permissions.png",
-        "策略子帳 Change API Key Scope（Account=read、Trade=read_write、Wallet=read_write）",
+        "策略子帳 Change API Key Scope（Account=read、Trade=read_write、Wallet=none）",
     ),
     "s5_api_done": ("11-api-key-created.png", "API Key 建立成功（請妥善保存 Secret）"),
-    "s6_fee_api": (
-        "13-api-fee-permissions.png",
-        "Fee 專戶 Change API Key Scope（Account=read、Wallet=none、Trade=none）",
-    ),
     "s7_dashboard": ("14-cloudflare-access-login.png", "Cloudflare Access 登入"),
     "s3_margin": ("15.margin-selection.png", "Change Margin → Segregated Portfolio Margin"),
 }
@@ -388,18 +384,14 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
     )
 
     # --- 開始前 ---
-    story.append(_h2("開始前：先搞懂三個名詞"))
+    story.append(_h2("開始前：先搞懂名詞"))
     story.append(
         _kt_table(
             [
                 ["名詞", "白話說明"],
-                ["主帳戶", "你註冊 Deribit 時的總帳戶。入金通常先到這裡。"],
-                ["策略子帳", "主帳底下的分戶，一個策略一個（如 naked）。自動交易只用這裡的 API。"],
-                [
-                    "費用專戶（Fee account）",
-                    "獨立子帳（Deribit 建議名稱 fee_acc，至少 5 字元；勿用 fee）。季結算後管理方在策略子帳先賣獲利現貨兌 USDC/USDT，再劃轉至此供對帳；你確認後自主帳提幣。",
-                ],
-                ["API Key", "策略子帳與 Fee 專戶各用一把，權限不同（見下文）。"],
+                ["主帳戶", "你註冊 Deribit 時的總帳戶。入金通常先到這裡；季結算付費也常從這裡或外部錢包轉出。"],
+                ["策略子帳", "主帳底下的分戶，一個策略一個（如 naked）。自動交易與季末賣現貨兌穩定幣只用這裡的 API。"],
+                ["API Key", "僅在策略子帳建立；不要提供主帳 API。"],
             ],
             [1.2 * inch, usable_w - 1.2 * inch],
             font,
@@ -414,11 +406,11 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
                     [
                         "註冊 Deribit 並完成身分驗證",
                         "入金到主帳戶（注意幣種與鏈，見第二節）",
-                        "建立策略子帳 + Fee 專戶，並將各帳設為 Segregated Portfolio Margin",
+                        "建立策略子帳，並設為 Segregated Portfolio Margin",
                         "從主帳把資金劃到各策略子帳",
-                        "在每個策略子帳建 API Key（account:read + trade:read_write + wallet:read_write；Trade＝賣現貨，Wallet＝劃轉至 fee_acc）",
-                        "在 Fee 專戶建 API Key（account:read；Wallet、Trade 均 none）",
+                        "在每個策略子帳建 API Key（account:read + trade:read_write + wallet:none）",
                         "提供儀表板登入用 Email（Cloudflare 白名單）",
+                        "記下管理方外部收款地址（第六節）",
                         "填寫交接清單（第八節）交給管理方",
                     ]
                 ),
@@ -553,14 +545,14 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
 
     # --- 三、子帳 ---
     story.append(PageBreak())
-    story.append(_h2("三、建立子帳戶（策略子帳 + Fee 專戶）"))
+    story.append(_h2("三、建立策略子帳"))
     story.append(_h3("3.1 為什麼要開子帳？"))
     story.extend(
         _bullets(
             [
                 "不同策略分開資金",
                 "每個子帳一把 API Key，程式只能動該子帳",
-                "季結算抽 fee：策略子帳 Trade 賣現貨 → Wallet 劃轉至 fee_acc",
+                "季結算：管理方在策略子帳 Trade 賣獲利現貨兌 USDC/USDT/USDE；你以鏈上轉帳付費",
                 "對帳、看績效比較清楚",
             ]
         )
@@ -590,7 +582,6 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
                 ["備兌賣 Call", "covered_call"],
                 ["裸賣期權", "naked"],
                 ["牛市看跌價差", "bull_put"],
-                ["費用專戶（必建）", "fee_acc"],
             ],
             [2.2 * inch, usable_w - 2.2 * inch],
             font,
@@ -598,10 +589,7 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
     )
     story.append(
         Paragraph(
-            _p(
-                "Deribit 子帳名稱至少 5 字元（英數與底線）。fee 僅 3 字元會被拒絕。"
-                "管理方本機設定檔仍為 accounts/.env.fee，與 Deribit 顯示名稱無需相同。"
-            ),
+            _p("Deribit 子帳名稱通常至少 5 字元（英數與底線）；上表名稱已符合。"),
             styles["BodyTight"],
         )
     )
@@ -621,7 +609,7 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
                 Spacer(1, 2),
                 Paragraph(
                     _p(
-                        "管理方策略以 <b>Segregated Portfolio Margin</b> 運作。請對主帳戶以及每一個子帳（含 fee_acc）完成設定。",
+                        "管理方策略以 <b>Segregated Portfolio Margin</b> 運作。請對主帳戶以及每一個策略子帳完成設定。",
                         allow_markup=True,
                     ),
                     styles["Body"],
@@ -698,19 +686,18 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
         story,
         [
             _h2("五、策略子帳的 API Key（每個策略子帳各一把）"),
-            _body("僅適用 naked / covered_call / bull_put 等策略子帳，<b>不適用</b> Fee 專戶。"),
-            _h3("5.0 季結算抽 fee：為什麼 Trade 與 Wallet 都要開？"),
+            _h3("5.0 季結算：Trade 要開、Wallet 不開"),
             *_bullets(
                 [
-                    "Trade（read_write）：期權下單／平倉；季末賣出獲利現貨（如 covered_call 的 BTC／ETH）兌 USDC／USDT",
-                    "Wallet（read_write）：將兌換後的 USDC／USDT 劃轉至 fee_acc（或子帳已有穩定幣時直接劃轉）",
-                    "Fee 專戶不開 Trade／Wallet；賣現貨與劃轉都在策略子帳 API 完成",
+                    "Trade（read_write）：期權下單／平倉；季末賣出獲利現貨兌 USDC／USDT／USDE",
+                    "Wallet（none）：管理方無主帳 API，無法代你做子帳互轉",
+                    "付費：確認帳單後轉至管理方外部收款地址（第六節）",
                 ]
             ),
             _h3("5.1 一定要先進入該策略子帳"),
             *_numbered(
                 [
-                    "切換到策略子帳（例如 naked），確認不是 Main account、不是 fee_acc",
+                    "切換到策略子帳（例如 naked），確認不是 Main account",
                     "再建立 Key",
                 ]
             ),
@@ -729,8 +716,8 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
                     ["欄位", "策略子帳請選"],
                     ["Block Trade / Block RFQ / Custody / Features", "none 或留空"],
                     ["Account", "read"],
-                    ["Trade", "read_write（期權 + 季末賣現貨兌 USDC／USDT）"],
-                    ["Wallet", "read_write（劃轉至 fee_acc）"],
+                    ["Trade", "read_write（期權 + 季末賣現貨兌 USDC／USDT／USDE）"],
+                    ["Wallet", "none"],
                 ],
                 [2.0 * inch, usable_w - 2.0 * inch],
                 font,
@@ -773,62 +760,28 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
         )
     )
 
-    # --- 六、Fee（獨立一頁；圖+兩張表+說明不拆頁）---
-    fee_img_h = min(_remaining_img_height(frame_h, 4.9 * inch), 4.0 * inch)
+    # --- 六、季結算付費 ---
     _append_chapter(
         story,
         [
-            _h2("六、費用專戶（Fee account）與 API Key"),
-            _body(
-                "管理費、績效費<b>不會</b>從策略子帳自動扣款。請另建 fee_acc 子帳作對帳專戶；"
-                "管理方在策略子帳<b>先 Trade 賣現貨、再 Wallet 劃轉</b>至 fee_acc，你確認後自主帳提幣付費。"
-            ),
-            _h3("6.2 Fee 專戶 API Key"),
-            Paragraph(
-                _p(
-                    "切換到 fee_acc → Account → API → Add new key → Deribit-generated key → "
-                    "<b>Change API Key Scope</b> 設為下表，按 Confirm。",
-                    allow_markup=True,
-                ),
-                styles["Body"],
-            ),
-            Spacer(1, 2),
-            _table(
-                [
-                    ["欄位", "Fee 專戶請選"],
-                    ["Block Trade / Block RFQ / Custody / Features", "none 或留空"],
-                    ["Account", "read"],
-                    ["Trade", "none"],
-                    ["Wallet", "none"],
-                ],
-                [2.0 * inch, usable_w - 2.0 * inch],
-                font,
-            ),
-            Spacer(1, 2),
-            *_image_flowables(
-                "s6_fee_api",
-                usable_w=usable_w,
-                frame_h=frame_h,
-                portrait_max_h=fee_img_h,
-                portrait_max_w=min(usable_w, 4.4 * inch),
-            ),
-            _table(
-                [
-                    ["欄位", "策略子帳", "Fee 專戶"],
-                    ["Account", "read", "read"],
-                    ["Trade", "read_write（期權 + 季末賣現貨）", "none"],
-                    ["Wallet", "read_write（劃轉至 fee_acc）", "none"],
-                ],
-                [1.35 * inch, 1.35 * inch, usable_w - 2.7 * inch],
-                font,
-            ),
-            Spacer(1, 2),
+            _h2("六、季結算付費與管理方外部收款地址"),
             *_bullets(
                 [
-                    "Fee 專戶裡的穩定幣 = 已結算、供雙方對帳的應付費用",
-                    "實際付費：確認對帳後自主帳提幣至管理方指定地址",
-                    "勿把大額策略資金放在 Fee 專戶",
+                    "管理方出具帳單後，必要時在策略子帳 Trade 賣獲利現貨兌 USDC/USDT/USDE",
+                    "你確認金額後，轉至管理方指定的外部鏈上地址（非 Deribit 子帳劃轉）",
+                    "可從主帳 Withdraw 或自有錢包轉帳；鏈與幣別須與管理方指示一致",
                 ]
+            ),
+            _h3("6.1 收款地址（以管理方交付清單為準）"),
+            _table(
+                [
+                    ["幣別", "鏈／網路", "地址", "備註"],
+                    ["USDC", "Ethereum (ERC-20)", "（管理方提供）", "先小額測試"],
+                    ["USDT", "Ethereum (ERC-20)", "（管理方提供）", "先小額測試"],
+                    ["USDE", "Ethereum (ERC-20)", "（管理方提供）", "先小額測試"],
+                ],
+                [0.85 * inch, 1.35 * inch, 2.0 * inch, usable_w - 4.2 * inch],
+                font,
             ),
             Spacer(1, 2),
         ],
@@ -875,8 +828,8 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
         "【保證金模式】主帳與所有子帳均已設為 Segregated Portfolio Margin",
         "【naked／bull_put】子帳名稱與已劃轉 USDC",
         "【covered_call】子帳名稱、備兌 BTC／ETH 數量（僅現貨，無 USDC）",
-        "【Fee 專戶】已建立子帳、已交付 Fee API（Account=read，Wallet／Trade 均 none）",
-        "【策略 API】已透過安全管道交付（Trade＝期權＋季末賣現貨；Wallet＝劃轉至 fee_acc）",
+        "【策略 API】已透過安全管道交付（account:read + trade:read_write + wallet:none）",
+        "【季結算付費】已收到管理方外部收款地址清單（USDC／USDT／USDE）",
     ]
     story.extend(_bullets(checklist))
 
@@ -887,9 +840,8 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
             [
                 ["請勿", "原因"],
                 ["把主帳 API Key 交給管理方", "風險範圍過大"],
-                ["策略子帳 API Key 外洩", "含 Wallet 權限，外洩可能被對外提幣"],
-                ["把策略子帳 Key 當 Fee 專戶 Key", "權限設計不同"],
-                ["在 Fee 專戶開啟 Trade", "Fee 專戶不應下單"],
+                ["策略子帳 API 開啟 Wallet", "外洩可能被對外提幣；且管理方流程不需 Wallet"],
+                ["付費選錯鏈或填錯管理方地址", "可能無法到帳"],
                 ["入金選錯鏈或填錯地址", "可能永久遺失"],
                 ["子帳保證金模式未設為 Segregated Portfolio Margin", "與策略保證金計算不一致"],
                 ["在 covered_call 子帳劃入 USDC", "此策略僅用 BTC／ETH 現貨作保證金"],
@@ -906,19 +858,19 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
     story.append(
         _faq(
             "管理費／績效費怎麼付？",
-            "季結算後管理方開帳單；在策略子帳先 Trade 賣獲利現貨兌 USDC/USDT（若需要），再 Wallet 劃至 fee_acc 供對帳；你確認後自主帳提幣。不會從策略子帳自動扣。",
+            "季結算後管理方開帳單；必要時在策略子帳 Trade 賣獲利現貨兌 USDC/USDT/USDE。你確認後轉至管理方外部收款地址。不會自動扣款，亦不需費用子帳。",
         )
     )
     story.append(
         _faq(
             "下拉選單怎麼選？",
-            "策略子帳：Account=read、Trade=read_write（期權＋季末賣現貨）、Wallet=read_write（劃轉至 fee_acc）。Fee：Account=read、Wallet=none、Trade=none。",
+            "策略子帳：Account=read、Trade=read_write（期權＋季末賣現貨）、Wallet=none。",
         )
     )
     story.append(
         _faq(
-            "策略子帳為什麼要開 Trade 和 Wallet？",
-            "Trade＝期權 bot 下單／平倉，以及季結算賣現貨兌 USDC／USDT。Wallet＝將穩定幣劃轉至 fee_acc。僅限該策略子帳，不含主帳提幣。",
+            "策略子帳為什麼要開 Trade、不開 Wallet？",
+            "Trade＝期權 bot 下單／平倉，以及季結算賣現貨兌 USDC／USDT／USDE。Wallet 不開：子帳互轉需主帳 API，管理方不持有。付費改為鏈上轉至管理方地址。",
         )
     )
     story.append(

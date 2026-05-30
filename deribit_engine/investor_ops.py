@@ -135,9 +135,6 @@ def investor_init(
         )
         _copy_env_example_if_present(example_dir, accounts_dir, slug)
 
-    _write_fee_env(accounts_dir, investor_id=investor_id, deribit_env=deribit_env)
-    _write_main_env(accounts_dir, investor_id=investor_id, deribit_env=deribit_env)
-
     frontend_port: int | None = None
     if register:
         frontend_port = allocate_frontend_port(registry)
@@ -234,25 +231,6 @@ def import_handoff(
         _update_env_file(env_path, updates)
         updated_slugs.append(slug)
 
-    fee_meta = data.get("fee") or data.get("fee_account")
-    fee_updated = False
-    if isinstance(fee_meta, dict):
-        fee_id = str(fee_meta.get("client_id") or "").strip()
-        fee_secret = str(fee_meta.get("client_secret") or "").strip()
-        if fee_id and fee_secret:
-            fee_env = investor_dir / "accounts" / account_env_basename("fee")
-            if not fee_env.is_file():
-                _write_fee_env(investor_dir / "accounts", investor_id=resolved_id, deribit_env=deribit_env)
-            _update_env_file(
-                fee_env,
-                {
-                    "DERIBIT_ENV": deribit_env,
-                    "DERIBIT_CLIENT_ID": fee_id,
-                    "DERIBIT_CLIENT_SECRET": fee_secret,
-                },
-            )
-            fee_updated = True
-
     email = investor_meta.get("dashboard_email")
     if email:
         patch_registry_investor(
@@ -268,7 +246,6 @@ def import_handoff(
     return {
         "investor_id": resolved_id,
         "strategies_updated": updated_slugs,
-        "fee_updated": fee_updated,
         "deribit_env": deribit_env,
     }
 
@@ -409,34 +386,17 @@ def validate_investor(
                 )
             )
 
-    fee_env = manifest.root / "accounts" / account_env_basename("fee")
-    if fee_env.is_file() and not has_private_creds_for_env(fee_env):
+    from .fee_payout import load_fee_payout_addresses
+
+    if not load_fee_payout_addresses(cwd_repo):
         issues.append(
             ValidationIssue(
                 "warning",
-                "fee_creds_missing",
-                f"Fee env present but missing credentials: {fee_env}",
+                "fee_payout_addresses_missing",
+                "Copy config/platform/fee-payout-addresses.toml.example to "
+                "fee-payout-addresses.toml and fill manager external payout addresses.",
             )
         )
-    if fee_env.is_file():
-        try:
-            fee_cfg = load_config(fee_env, require_private=False)
-            if not fee_cfg.is_fee_collection_account:
-                issues.append(
-                    ValidationIssue(
-                        "warning",
-                        "fee_role_missing",
-                        f"Add ACCOUNT_ROLE=fee to {fee_env} (fee wallet must not load strategy profiles)",
-                    )
-                )
-        except ConfigurationError as exc:
-            issues.append(
-                ValidationIssue(
-                    "error",
-                    "fee_env_invalid",
-                    f"Fee env failed to load: {exc}",
-                )
-            )
 
     if check_api:
         for account in manifest.operational_accounts():
@@ -460,29 +420,6 @@ def validate_investor(
                         "error",
                         "api_auth_failed",
                         f"Deribit API check failed for {slug!r}: {exc}",
-                    )
-                )
-
-        if fee_env.is_file() and has_private_creds_for_env(fee_env):
-            try:
-                config = load_config(fee_env, require_private=True)
-                client = DeribitClient(config)
-                summaries = client.get_account_summaries(extended=False)
-                api_checks.append(
-                    {
-                        "slug": "fee",
-                        "env": config.env,
-                        "ok": True,
-                        "account_count": len(summaries),
-                    }
-                )
-            except Exception as exc:
-                api_checks.append({"slug": "fee", "ok": False, "error": str(exc)})
-                issues.append(
-                    ValidationIssue(
-                        "error",
-                        "fee_api_auth_failed",
-                        f"Deribit API check failed for fee account: {exc}",
                     )
                 )
 
@@ -781,47 +718,6 @@ def _substitute_placeholders(
     if f"OPTION_STRATEGY={strategy}" not in text:
         text = re.sub(r"OPTION_STRATEGY=.*", f"OPTION_STRATEGY={strategy}", text)
     return text
-
-
-def _write_fee_env(accounts_dir: Path, *, investor_id: str, deribit_env: str) -> None:
-    path = accounts_dir / account_env_basename("fee")
-    body = "\n".join(
-        [
-            "# Operator fee-collection sub-account (Deribit sub-account name: fee_acc; at least 5 chars).",
-            "# Not listed in accounts.toml — excluded from live supervisor and frontend aggregation.",
-            "# API: Account=read, Wallet=none, Trade=none. Read-only reconciliation sub-account.",
-            "# Do NOT: ./bot run --env-file .../.env.fee",
-            "ACCOUNT_ROLE=fee",
-            f"DERIBIT_ENV={deribit_env}",
-            "DERIBIT_CLIENT_ID=",
-            "DERIBIT_CLIENT_SECRET=",
-            f"ORDER_LABEL_PREFIX={investor_id}_fee",
-            "",
-        ]
-    )
-    path.write_text(body, encoding="utf-8")
-    shutil.copy2(path, accounts_dir / ".env.fee.example")
-
-
-def _write_main_env(accounts_dir: Path, *, investor_id: str, deribit_env: str) -> None:
-    path = accounts_dir / account_env_basename("main")
-    body = "\n".join(
-        [
-            "# Deribit MAIN account API (not a subaccount). Required for internal-transfer.",
-            "# Create on main account: Account=read + Wallet=read_write.",
-            "# Do NOT: ./bot run --env-file .../.env.main",
-            "ACCOUNT_ROLE=main",
-            f"DERIBIT_ENV={deribit_env}",
-            "DERIBIT_CLIENT_ID=",
-            "DERIBIT_CLIENT_SECRET=",
-            f"ORDER_LABEL_PREFIX={investor_id}_main",
-            "",
-        ]
-    )
-    path.write_text(body, encoding="utf-8")
-    example = accounts_dir / ".env.main.example"
-    if not example.is_file():
-        shutil.copy2(path, example)
 
 
 def _update_env_file(path: Path, updates: dict[str, str]) -> None:

@@ -77,9 +77,7 @@ def test_investor_init_scaffolds_manifest_and_registry(tmp_path: Path):
     assert result.investor_id == "alice"
     assert (repo / "config/investors/alice/accounts.toml").is_file()
     assert (repo / "config/investors/alice/accounts/.env.naked").is_file()
-    assert (repo / "config/investors/alice/accounts/.env.fee").is_file()
-    fee_text = (repo / "config/investors/alice/accounts/.env.fee").read_text(encoding="utf-8")
-    assert "ACCOUNT_ROLE=fee" in fee_text
+    assert not (repo / "config/investors/alice/accounts/.env.fee").exists()
     assert result.frontend_port == 8800
 
     registry = load_platform_registry(repo_root=repo)
@@ -107,17 +105,13 @@ def test_import_handoff_writes_credentials(tmp_path: Path):
                 'client_secret = "sec"',
                 "reference_capital_usdc = 42000",
                 "",
-                "[fee]",
-                'client_id = "feeid"',
-                'client_secret = "feesec"',
-                "",
             ]
         ),
         encoding="utf-8",
     )
     outcome = import_handoff(handoff, repo_root=repo)
     assert outcome["strategies_updated"] == ["naked"]
-    assert outcome["fee_updated"] is True
+    assert "fee_updated" not in outcome
 
     env_text = (repo / "config/investors/bob/accounts/.env.naked").read_text(encoding="utf-8")
     assert "DERIBIT_CLIENT_ID=cid" in env_text

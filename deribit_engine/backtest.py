@@ -9,6 +9,11 @@ from typing import Any
 
 from .backtest_data import BacktestDataClient, pick_nearest_value
 from .config import BotConfig
+from .exit_eval import (
+    backtest_remaining_apr_gate,
+    backtest_tp_target_premium,
+    exit_eval_context_from_config,
+)
 from .fees import option_trade_fee_native
 from .margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
@@ -23,7 +28,14 @@ from .margin import (
 from .models import OptionInstrument, RiskRegime
 from .strategy import StrategySelector
 from .stress import StressScenario, stress_short_option_loss_breakdown_usdc, summarize_loss_entries
+from .trade_apr import opened_notional_for_position
 from .utils import ONE, ZERO, dte_days, safe_div, to_decimal
+from .vol_metrics import (
+    dvol_iv_rank_at_ts,
+    iv_minus_rv_spread,
+    passes_iv_entry_gate,
+    realized_vol_annualized_from_index_series,
+)
 
 
 def _norm_cdf(x: float) -> float:
@@ -299,6 +311,7 @@ def run_backtest(
     peak_equity = equity_usdc
     max_drawdown = Decimal("0")
     selector = StrategySelector(config)
+    exit_ctx = exit_eval_context_from_config(config)
 
     # Staged black-swan ladder. Slippage increases with shock magnitude.
     scenarios = [
@@ -412,8 +425,49 @@ def run_backtest(
             current_premium = mark_premium(leg.instrument)
             spot, sigma = spot_saved, sigma_saved
 
-            # Take-profit: short option gains when premium decays.
-            tp_target = leg.entry_premium * (ONE - config.tp_capture_pct)
+            leg_dte = dte_days(leg.instrument.expiration_timestamp_ms, now=day)
+            abs_delta = abs(
+                to_decimal(
+                    bs_delta(
+                        spot=float(leg_spot),
+                        strike=float(leg.strike()),
+                        t_years=max(float(leg_dte) / 365.0, 1e-6),
+                        sigma=float(leg_sigma),
+                        option_type=leg.option_type,
+                    )
+                )
+            )
+            max_loss = (
+                leg.estimated_im_collateral if leg.estimated_im_collateral > 0 else leg.entry_premium * leg.quantity
+            )
+            loss_amount = max((current_premium - leg.entry_premium) * leg.quantity, ZERO)
+            loss_pct = safe_div(loss_amount, max_loss)
+            hard_stop = abs_delta >= config.hard_defense_delta or loss_pct >= config.hard_stop_loss_pct
+            if hard_stop:
+                close_fee = _fee_for_trade(
+                    leg.instrument,
+                    premium=current_premium,
+                    quantity=leg.quantity,
+                    fee_rate=config.option_fee_rate,
+                    fee_cap_rate=config.option_fee_cap_rate,
+                    index_price=leg_spot,
+                )
+                pnl_settle = (leg.entry_premium - current_premium) * leg.quantity - leg.entry_fee - close_fee
+                pnl_usdc = pnl_settle if leg.instrument.settlement_currency.upper() == "USDC" else pnl_settle * leg_spot
+                equity_usdc += pnl_usdc
+                trades.append(
+                    {
+                        "action": "close_hard_stop",
+                        "instrument": leg.instrument.instrument_name,
+                        "date": day.strftime("%Y-%m-%d"),
+                        "close_premium": current_premium,
+                        "pnl_usdc": pnl_usdc,
+                    }
+                )
+                day_row["closed"] += 1
+                continue
+
+            tp_target = backtest_tp_target_premium(leg.entry_premium, leg_dte, exit_ctx)
             if current_premium > 0 and current_premium <= tp_target:
                 # Close at current_premium (proxy), include fee.
                 close_fee = _fee_for_trade(
@@ -439,8 +493,52 @@ def run_backtest(
                 day_row["closed"] += 1
                 continue
 
+            capital_base = opened_notional_for_position(
+                strategy="naked_short",
+                collateral_currency=leg.collateral_currency,
+                option_type=leg.option_type,
+                quantity=leg.quantity,
+                contract_size=leg.instrument.contract_size,
+                strike=leg.strike(),
+                index_price_usd=leg_spot,
+                estimated_im_collateral=leg.estimated_im_collateral,
+                covered_underlying_quantity=ZERO,
+            )
+            close_fee_per = _fee_for_trade(
+                leg.instrument,
+                premium=current_premium,
+                quantity=Decimal("1"),
+                fee_rate=config.option_fee_rate,
+                fee_cap_rate=config.option_fee_cap_rate,
+                index_price=leg_spot,
+            )
+            if backtest_remaining_apr_gate(
+                entry_premium=leg.entry_premium,
+                current_premium=current_premium,
+                close_fee_per_contract=close_fee_per,
+                quantity=leg.quantity,
+                capital_base=capital_base,
+                dte_days=leg_dte,
+                ctx=exit_ctx,
+            ):
+                close_fee = close_fee_per * leg.quantity
+                pnl_settle = (leg.entry_premium - current_premium) * leg.quantity - leg.entry_fee - close_fee
+                pnl_usdc = pnl_settle if leg.instrument.settlement_currency.upper() == "USDC" else pnl_settle * leg_spot
+                equity_usdc += pnl_usdc
+                trades.append(
+                    {
+                        "action": "close_early_exit",
+                        "instrument": leg.instrument.instrument_name,
+                        "date": day.strftime("%Y-%m-%d"),
+                        "close_premium": current_premium,
+                        "pnl_usdc": pnl_usdc,
+                    }
+                )
+                day_row["closed"] += 1
+                continue
+
             # Time exit: if DTE <= config.time_exit_dte, close at premium close (approx by TradingView close).
-            dte = dte_days(leg.instrument.expiration_timestamp_ms, now=day)
+            dte = leg_dte
             if dte <= Decimal(str(config.time_exit_dte)):
                 close = current_premium if current_premium > 0 else leg.entry_premium
                 close_fee = _fee_for_trade(
@@ -502,10 +600,46 @@ def run_backtest(
             continue
 
         # Pick best candidate across currencies and collateral books (simplified).
+        iv_rank_by_currency: dict[str, Decimal] = {}
+        iv_minus_rv_by_currency: dict[str, Decimal] = {}
+        for c in currencies:
+            ccy = c.upper()
+            rank = dvol_iv_rank_at_ts(
+                dvol_by_ccy[ccy],
+                ts_ms=day_ms,
+                lookback_days=config.iv_rank_lookback_days,
+            )
+            if rank is not None:
+                iv_rank_by_currency[ccy] = rank
+            dvol_close = pick_nearest_value(dvol_by_ccy[ccy], ts_ms=day_ms)
+            current_iv = to_decimal(dvol_close or 0) / Decimal("100")
+            rv = realized_vol_annualized_from_index_series(
+                index_by_ccy[ccy],
+                end_ts_ms=day_ms,
+                window=config.rv_lookback_days,
+            )
+            if current_iv > 0 and rv is not None:
+                spread = iv_minus_rv_spread(iv=current_iv, rv=rv)
+                if spread is not None:
+                    iv_minus_rv_by_currency[ccy] = spread
+        selector.update_vol_entry_context(
+            iv_rank_by_currency=iv_rank_by_currency,
+            iv_minus_rv_by_currency=iv_minus_rv_by_currency,
+        )
+
         best: tuple[Decimal, dict[str, Any]] | None = None
         for c in currencies:
             ccy = c.upper()
             if regime_by_ccy[ccy] is RiskRegime.CRISIS:
+                continue
+            if not passes_iv_entry_gate(
+                iv_rank_value=iv_rank_by_currency.get(ccy),
+                iv_minus_rv=iv_minus_rv_by_currency.get(ccy),
+                min_iv_rank=config.min_iv_rank,
+                max_iv_rank=config.max_iv_rank,
+                min_iv_minus_rv=config.min_iv_minus_rv,
+                gate_enabled=config.enable_iv_entry_gate,
+            ):
                 continue
             spot = to_decimal(pick_nearest_value(index_by_ccy[ccy], ts_ms=day_ms) or 0)
             if spot <= 0:
@@ -608,7 +742,18 @@ def run_backtest(
                 if regime is RiskRegime.CRISIS:
                     continue
                 candidates = []
-                if config.enable_short_put:
+                if config.option_strategy == "bull_put_spread":
+                    candidates = selector.build_bull_put_spread_candidates(
+                        insts,
+                        loader,
+                        regime=regime,
+                        summary_equity=book_equity,
+                        summary_maintenance_margin=ZERO,
+                        collateral_currency=collateral,
+                        currency=ccy,
+                        existing_im_by_expiry=existing_im,
+                    )
+                elif config.enable_short_put:
                     candidates = selector.build_naked_short_put_candidates(
                         insts,
                         loader,

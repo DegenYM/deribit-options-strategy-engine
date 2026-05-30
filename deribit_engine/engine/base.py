@@ -8,6 +8,7 @@ from typing import Any
 
 from ..client import DeribitClient
 from ..config import BotConfig
+from ..entry_gates import entry_cooldown_active, last_entry_timestamp_ms_by_book, open_group_count_for_book
 from ..fees import option_trade_fee_native, option_trade_fee_usdc, premium_value_usdc
 from ..live_heartbeat import LiveHeartbeatRecord, heartbeat_path_for_state, write_live_heartbeat
 from ..models import (
@@ -43,6 +44,7 @@ from ..utils import (
     utc_now,
     utc_now_ms,
 )
+from ..vol_metrics import dvol_iv_rank_at_ts, iv_minus_rv_spread, realized_vol_annualized_from_index_series
 from .context import (
     LOGGER,
     ExchangePrefetch,
@@ -992,6 +994,72 @@ class EngineBase:
             self.config.max_groups_per_currency > 0
             and self._open_group_count_for_currency(state, currency, strategy=strategy)
             >= self.config.max_groups_per_currency
+        )
+
+    def _strategy_at_book_limit(self, state: StrategyState, book: str, *, strategy: str | None = None) -> bool:
+        return (
+            self.config.max_groups_per_book > 0
+            and open_group_count_for_book(self._open_groups(state), book, strategy=strategy)
+            >= self.config.max_groups_per_book
+        )
+
+    def _last_entry_timestamp_by_book(self, state: StrategyState) -> dict[str, int]:
+        return last_entry_timestamp_ms_by_book(state.groups)
+
+    def _book_entry_cooldown_active(self, state: StrategyState, book: str) -> bool:
+        return entry_cooldown_active(
+            book=book,
+            last_entry_by_book=self._last_entry_timestamp_by_book(state),
+            now_ms=utc_now_ms(),
+            cooldown_minutes=self.config.entry_cooldown_minutes,
+        )
+
+    def _refresh_vol_entry_context(self) -> None:
+        if not self.config.enable_iv_entry_gate:
+            self.strategy.update_vol_entry_context()
+            return
+        iv_rank_by_currency: dict[str, Decimal] = {}
+        iv_minus_rv_by_currency: dict[str, Decimal] = {}
+        end_timestamp = utc_now_ms()
+        start_timestamp = end_timestamp - (self.config.iv_rank_lookback_days * 24 * 3600 * 1000)
+        for currency in self.config.managed_currencies:
+            ccy = currency.upper()
+            try:
+                dvol_payload = self.client.get_volatility_index_data(
+                    ccy,
+                    start_timestamp=start_timestamp,
+                    end_timestamp=end_timestamp,
+                    resolution="1D",
+                )
+                dvol_rows = dvol_payload.get("data") or []
+                dvol_series = [(int(row[0]), row[4]) for row in dvol_rows if len(row) >= 5]
+                rank = dvol_iv_rank_at_ts(
+                    dvol_series,
+                    ts_ms=end_timestamp,
+                    lookback_days=self.config.iv_rank_lookback_days,
+                )
+                if rank is not None:
+                    iv_rank_by_currency[ccy] = rank
+                current_iv = to_decimal(dvol_rows[-1][4]) if dvol_rows else Decimal("0")
+            except Exception:
+                current_iv = Decimal("0")
+            try:
+                index_payload = self.client.get_index_chart_data(f"{ccy.lower()}_usd", range_name="1y")
+                index_series = [(int(row[0]), row[4]) for row in index_payload if len(row) >= 5]
+                rv = realized_vol_annualized_from_index_series(
+                    index_series,
+                    end_ts_ms=end_timestamp,
+                    window=self.config.rv_lookback_days,
+                )
+                if current_iv > 0 and rv is not None:
+                    spread = iv_minus_rv_spread(iv=current_iv / Decimal("100"), rv=rv)
+                    if spread is not None:
+                        iv_minus_rv_by_currency[ccy] = spread
+            except Exception:
+                pass
+        self.strategy.update_vol_entry_context(
+            iv_rank_by_currency=iv_rank_by_currency,
+            iv_minus_rv_by_currency=iv_minus_rv_by_currency,
         )
 
     def _reserved_covered_call_quantity(self, state: StrategyState, currency: str) -> Decimal:

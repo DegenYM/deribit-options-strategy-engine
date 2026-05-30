@@ -230,6 +230,16 @@ class ScannerMixin:
             )
             return blockers
         if candidates:
+            cooled_books = [
+                book
+                for book in sorted({(c.collateral_currency or c.currency or "").upper() for c in candidates})
+                if book and self._book_entry_cooldown_active(context.state, book)
+            ]
+            if cooled_books:
+                blockers.append(
+                    f"entry_cooldown_active: {', '.join(cooled_books)} ({self.config.entry_cooldown_minutes}m)"
+                )
+                return blockers
             return []
         if not include_scan_diagnostics:
             blockers: list[str] = []
@@ -654,6 +664,10 @@ class ScannerMixin:
                 # (drawdown, cooldown, or hard IM/MM breach) while still
                 # evaluating other books for the same underlying.
                 if snapshot.halt_entries_by_book.get(collateral_ccy):
+                    continue
+                if self._book_entry_cooldown_active(context.state, collateral_ccy):
+                    continue
+                if self._strategy_at_book_limit(context.state, collateral_ccy):
                     continue
                 collateral_summary = context.summaries.get(collateral_ccy)
                 if collateral_summary is None or collateral_summary.equity <= 0:

@@ -47,9 +47,9 @@ deribit-options-strategy-engine/
 | 2 | `config/investors/<id>/.env.investor` | 投資人層級（費率、備兌現貨等） |
 | 3 | `config/shared/strategies/.env.<strategy>` | 策略參數 |
 | 4 | `config/investors/<id>/accounts/.env.<slug>` | 子帳憑證、資金規模、覆寫 |
-| — | `config/investors/<id>/accounts/.env.fee` | 費用專戶（`ACCOUNT_ROLE=fee`；**不在** accounts.toml） |
+| — | `config/platform/fee-payout-addresses.toml` | 管理方外部收款地址（季結算付費；非 Deribit 子帳） |
 
-子帳清單：`config/investors/<id>/accounts.toml`（`[investor].id` 必須 **小寫**）。**fee 專戶不寫入 manifest**。
+子帳清單：`config/investors/<id>/accounts.toml`（`[investor].id` 必須 **小寫**）。
 
 ## 執行期資料（現行）
 

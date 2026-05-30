@@ -24,8 +24,8 @@ from .utils import align_option_order_amount, floor_to_step, format_decimal, to_
 
 DEFAULT_FEE_SUBACCOUNT_NAME = "fee_acc"
 SPOT_BASE_CURRENCIES = frozenset({"BTC", "ETH"})
-SPOT_QUOTE_CURRENCIES = frozenset({"USDC", "USDT"})
-TRANSFER_CURRENCIES = frozenset({"BTC", "ETH", "USDC", "USDT"})
+SPOT_QUOTE_CURRENCIES = frozenset({"USDC", "USDT", "USDE"})
+TRANSFER_CURRENCIES = frozenset({"BTC", "ETH", "USDC", "USDT", "USDE"})
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ def spot_instrument_name(base_currency: str, quote_currency: str) -> str:
     if base not in SPOT_BASE_CURRENCIES:
         raise ConfigurationError(f"Unsupported spot base currency {base!r}; expected one of: BTC, ETH")
     if quote not in SPOT_QUOTE_CURRENCIES:
-        raise ConfigurationError(f"Unsupported spot quote currency {quote!r}; expected USDC or USDT")
+        raise ConfigurationError(f"Unsupported spot quote currency {quote!r}; expected USDC, USDT, or USDE")
     return f"{base}_{quote}"
 
 

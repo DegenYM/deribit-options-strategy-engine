@@ -2,7 +2,7 @@
 
 Layout (canonical)::
 
-    config/shared/defaults.env          # optional shared fallbacks
+    config/shared/.env.defaults         # optional shared fallbacks
     config/shared/strategies/.env.<strategy>  # strategy tuning (no secrets)
     config/investors/<id>/accounts.toml  # manifest (investor id + ≤ few sub-accounts)
     config/investors/<id>/accounts/.env.<slug>  # sub-account credentials + sizing + optional overrides
@@ -409,10 +409,10 @@ def _fee_account_layer_paths(account_env: Path) -> tuple[Path, ...]:
         for name in (".env.defaults", "defaults.env"):
             defaults = root / CONFIG_SHARED / name
             if defaults.is_file():
-                if name == ".env.defaults":
+                if name == "defaults.env":
                     _warn_legacy_path(
-                        "defaults:.env.defaults",
-                        "config/shared/.env.defaults is deprecated; rename to config/shared/defaults.env.",
+                        "defaults:defaults.env",
+                        "config/shared/defaults.env is deprecated; rename to config/shared/.env.defaults.",
                     )
                 layers.append(defaults)
                 break
@@ -452,10 +452,10 @@ def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
         for name in (".env.defaults", "defaults.env"):
             defaults = root / CONFIG_SHARED / name
             if defaults.is_file():
-                if name == ".env.defaults":
+                if name == "defaults.env":
                     _warn_legacy_path(
-                        "defaults:.env.defaults",
-                        "config/shared/.env.defaults is deprecated; rename to config/shared/defaults.env.",
+                        "defaults:defaults.env",
+                        "config/shared/defaults.env is deprecated; rename to config/shared/.env.defaults.",
                     )
                 layers.append(defaults)
                 break

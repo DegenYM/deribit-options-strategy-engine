@@ -2590,6 +2590,7 @@ def test_naked_im_by_expiry_keeps_inverse_and_usdc_units_separate(tmp_path, fake
 
     state = StrategyState()
 
+    shared_exp = future_expiry(14)
     btc_group = _build_group(
         short_instrument_name="BTC-8MAY26-68000-P",
         currency="BTC",
@@ -2597,6 +2598,7 @@ def test_naked_im_by_expiry_keeps_inverse_and_usdc_units_separate(tmp_path, fake
         quantity=Decimal("0.1"),
         max_loss=Decimal("800"),  # USDC-scale (legacy)
     )
+    btc_group.expiration_timestamp_ms = shared_exp
     btc_group.estimated_im_collateral = Decimal("0.0109")  # BTC-native
     state.groups.append(btc_group)
 
@@ -2607,6 +2609,7 @@ def test_naked_im_by_expiry_keeps_inverse_and_usdc_units_separate(tmp_path, fake
         quantity=Decimal("1"),
         max_loss=Decimal("1500"),
     )
+    usdc_group.expiration_timestamp_ms = shared_exp
     usdc_group.estimated_im_collateral = Decimal("1500")  # USDC-native
     state.groups.append(usdc_group)
 

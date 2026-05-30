@@ -56,7 +56,7 @@ def test_bootstrap_loads_shared_defaults(tmp_path: Path, monkeypatch: pytest.Mon
     shared.mkdir(parents=True)
     (shared / "strategies").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
-    (shared / "defaults.env").write_text(
+    (shared / ".env.defaults").write_text(
         "TELEGRAM_ALERTS_ENABLED=true\nTELEGRAM_BOT_TOKEN=from_defaults\n",
         encoding="utf-8",
     )
@@ -86,7 +86,7 @@ def test_send_test_alert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     shared.mkdir(parents=True)
     (shared / "strategies").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
-    (shared / "defaults.env").write_text(
+    (shared / ".env.defaults").write_text(
         "\n".join(
             [
                 "TELEGRAM_ALERTS_ENABLED=true",

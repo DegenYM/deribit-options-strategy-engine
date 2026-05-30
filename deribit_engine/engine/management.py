@@ -12,6 +12,11 @@ from ..bull_put_settlement import (
     spread_expiry_close_debit_usdc,
 )
 from ..exceptions import TransientExchangeError
+from ..exit_eval import (
+    dynamic_tp_capture_pct,
+    evaluate_early_exit_reason,
+    exit_eval_context_from_config,
+)
 from ..investor_cash_flow import sum_external_flow_native_in_window
 from ..margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
@@ -279,6 +284,7 @@ class ManagementMixin:
                 )
             regime_by_currency[currency] = regime
             regime_detail_by_currency[currency] = tuple(detail)
+        self._refresh_vol_entry_context()
         self._update_recovery_counts(state, regime_by_currency)
         for group in self._open_groups(state):
             self._refresh_group(context_markets=markets_by_currency, group=group, orderbook_cache=orderbook_cache)
@@ -461,7 +467,7 @@ class ManagementMixin:
                     actions.append(self._execute_hedge_plan(context, hedge_plan, live=live))
             actions.extend(self._close_group(context, group, reason="hard_stop", live=live))
             return actions
-        if group.profit_capture >= self.config.tp_capture_pct:
+        if group.profit_capture >= dynamic_tp_capture_pct(group.dte_days, exit_eval_context_from_config(self.config)):
             actions.extend(self._close_group(context, group, reason="take_profit", live=live))
             return actions
         early_exit_reason = self._maybe_early_exit_reason(context, group)
@@ -499,7 +505,7 @@ class ManagementMixin:
                 return robust_exit_actions
             return []
         actions: list[dict[str, Any]] = []
-        if group.profit_capture >= self.config.tp_capture_pct:
+        if group.profit_capture >= dynamic_tp_capture_pct(group.dte_days, exit_eval_context_from_config(self.config)):
             actions.extend(self._close_group(context, group, reason="take_profit", live=live))
             return actions
         early_exit_reason = self._maybe_early_exit_reason(context, group)
@@ -725,48 +731,24 @@ class ManagementMixin:
         return target
 
     def _maybe_early_exit_reason(self, context: RuntimeContext, group: TradeGroup) -> str | None:
-        """Decide whether to close a short option leg early.
-
-        Triggers ``early_exit_low_apr`` when:
-          * ``enable_early_exit`` is on, and
-          * the short leg's book spread is tight enough that crossing the ask
-            is cheap (maker/taker fees on Deribit options are equal, so taker
-            execution has no structural disadvantage), and
-          * at least ``early_exit_min_profit_capture`` of the entry credit has
-            been realized (we don't bail out while still in the red), and
-          * the *remaining* annualized yield of holding the position to expiry
-            has decayed below ``early_exit_remaining_apr`` — typically because
-            the underlying moved away from the strike and the residual premium
-            is no longer worth the margin lock-up.
-        """
+        """Decide whether to close a short option leg early."""
         if not self.config.enable_early_exit:
             return None
-        if group.dte_days <= 0 or group.max_loss <= 0:
+        if group.dte_days <= 0:
             return None
         try:
             short_book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
         except Exception:
-            # Orderbook fetch can fail transiently (rate-limit, network blip);
-            # early exit is optional so surface the failure in the log and skip
-            # this group rather than swallowing the traceback silently.
             LOGGER.exception(
                 "early_exit: failed to load orderbook for %s, skipping",
                 group.short_instrument_name,
             )
             return None
-        if short_book.best_ask_price <= 0 or short_book.best_bid_price <= 0:
-            return None
-        if short_book.spread_ratio > self.config.early_exit_max_spread_ratio:
-            return None
-        if group.profit_capture < self.config.early_exit_min_profit_capture:
-            return None
-        remaining_credit = max(group.current_debit - group.current_close_fee, Decimal("0"))
-        if remaining_credit <= 0:
-            return "early_exit_low_apr"
-        remaining_apr = (remaining_credit / group.max_loss) * (Decimal("365") / group.dte_days)
-        if remaining_apr < self.config.early_exit_remaining_apr:
-            return "early_exit_low_apr"
-        return None
+        return evaluate_early_exit_reason(
+            group,
+            short_book,
+            exit_eval_context_from_config(self.config),
+        )
 
     def _maybe_unwind_hedge(self, context: RuntimeContext, *, currency: str, live: bool) -> dict[str, Any] | None:
         recovery_count = context.state.normal_recovery_counts.get(currency, 0)
@@ -971,6 +953,9 @@ class ManagementMixin:
             if cooling_by_book.get(book) and not shielded:
                 halt_entries_by_book[book] = True
                 halt_reasons_by_book[book].append("cooldown_active")
+            if self._book_entry_cooldown_active(state, book) and not shielded:
+                halt_entries_by_book[book] = True
+                halt_reasons_by_book[book].append(f"entry_cooldown_active ({self.config.entry_cooldown_minutes}m)")
 
         for collateral_ccy, (book_im, book_mm) in per_currency_ratios.items():
             if self._covered_call_book_im_mm_shielded(

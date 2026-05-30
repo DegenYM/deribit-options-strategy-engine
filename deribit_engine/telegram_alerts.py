@@ -172,7 +172,7 @@ def send_test_alert(*, repo_root: Path | str | None = None) -> bool:
     if not cfg.enabled:
         raise RuntimeError(
             "Telegram alerts are disabled. Set TELEGRAM_ALERTS_ENABLED=true, "
-            "TELEGRAM_BOT_TOKEN, and TELEGRAM_CHAT_ID in config/shared/defaults.env "
+            "TELEGRAM_BOT_TOKEN, and TELEGRAM_CHAT_ID in config/shared/.env.defaults "
             "or your account env."
         )
     message = format_alert_message(

@@ -4,12 +4,12 @@
 !.env.example
 !config/shared/strategies/.env.*
 !config/investors/_example/**/.env.*
-config/shared/defaults.env
 config/shared/.env.defaults
 config/investors/*
 !config/investors/_example/
 !config/investors/_example/**
 config/platform/registry.toml
+config/platform/fee-payout-addresses.toml
 config/platform/generated/
 config/handoff/*
 !config/handoff/handoff.template.toml

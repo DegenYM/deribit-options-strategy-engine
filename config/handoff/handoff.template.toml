@@ -1,5 +1,8 @@
 # Investor handoff — fill and deliver via a secure channel (not chat plaintext).
 # Manager: ./bot investor import-handoff path/to/handoff.toml
+#
+# Fee payment: investor sends USDC/USDT/USDE to manager addresses in
+# config/platform/fee-payout-addresses.toml (not Deribit internal transfer).
 
 [investor]
 id = "alice"
@@ -18,11 +21,6 @@ reference_capital_usdc = 50000
 # slug = "covered_call"
 # client_id = "..."
 # client_secret = "..."
-
-[fee]
-# Deribit sub-account name: fee_acc (≥5 chars; do not use "fee"). Maps to accounts/.env.fee locally.
-client_id = "FEE_CLIENT_ID"
-client_secret = "FEE_CLIENT_SECRET"
 
 [checklist]
 margin_segregated = true

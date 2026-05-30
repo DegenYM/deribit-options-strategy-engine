@@ -1,6 +1,5 @@
 # Investor manifest: one row per Deribit sub-account (typically ≤ 3 strategies).
 # Copy _example/ to config/investors/<your_id>/ and fill accounts/.env.<slug> from *.example.
-# Fee wallet: accounts/.env.fee (ACCOUNT_ROLE=fee) — NOT listed here; created by investor init.
 
 [investor]
 id = "demo"

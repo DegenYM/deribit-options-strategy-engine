@@ -26,10 +26,10 @@
 ```text
 config/shared/defaults.env              # 可選：全投資人共用 fallback
 config/shared/strategies/.env.<strategy>  # 策略參數（無 API key）
+config/platform/fee-payout-addresses.toml  # 管理方外部收款地址（投資人季結算付費）
 config/investors/<investor_id>/
-  accounts.toml                         # 策略子帳清單（通常 ≤ 3；不含 fee）
+  accounts.toml                         # 策略子帳清單（通常 ≤ 3）
   accounts/.env.<slug>                  # 策略子帳：憑證、STATE_FILE、資金規模
-  accounts/.env.fee                       # 費用專戶（ACCOUNT_ROLE=fee；不在 accounts.toml）
 
 # 同 repo 多投資人時，執行期資料依 investor_id 分目錄（互不干擾）：
 .state/investors/<investor_id>/<slug>.json
@@ -49,9 +49,9 @@ logs/live/<investor_id>/<slug>.log
 3. `config/shared/strategies/.env.<OPTION_STRATEGY>`（或相容的 legacy 路徑，如 repo 根 `.env.<strategy>`）
 4. `accounts/.env.<slug>`（策略子帳；`accounts/<slug>.env` 為 legacy 別名）
 
-**Fee 專戶**（`accounts/.env.fee`）只載入 defaults + `.env.investor` + 自身 env，**不**合併策略 profile；亦**不在** `accounts.toml`，因此不會被 live 監督或 frontend 聚合。誤用 `./bot run --env-file .../.env.fee` 會被 CLI 拒絕。
-
 若使用 repo 根目錄單一 `.env`（非 `config/investors/.../accounts/`），則仍為：defaults → 該 `.env` → 策略 profile（profile 優先於重疊鍵）。
+
+**季結算付費地址**：複製 `config/platform/fee-payout-addresses.toml.example` 為 `fee-payout-addresses.toml` 並填入 USDC／USDT／USDE 鏈上地址；`./bot investor validate` 若缺少此檔會 warning。
 
 ### 子帳 env 建議欄位
 
@@ -79,7 +79,7 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 
 ## 績效費 NAV 快照（Performance fee）
 
-計費口徑見 [`investor-fee-disclosure-zh-TW.md`](investor-fee-disclosure-zh-TW.md)：`NAV_perf`（扣備兌現貨）、`AUM_mgmt`（含現貨）、HWM、10% 績效費。收取方式：季末管理方以策略子帳 API（`wallet:read_write`）將 USDC/USDT 劃至 **Fee 子帳**供對帳，投資人確認後自**主帳**提至管理方指定地址（見 [`investor-onboarding-zh-TW.md`](investor-onboarding-zh-TW.md) 第五、六節）。
+計費口徑見 [`investor-fee-disclosure-zh-TW.md`](investor-fee-disclosure-zh-TW.md)：`NAV_perf`（扣備兌現貨）、`AUM_mgmt`（含現貨）、HWM、10% 績效費。收取方式：季末管理方在策略子帳 **Trade** 將獲利現貨兌 **USDC／USDT／USDE**，投資人確認帳單後轉至 `fee-payout-addresses.toml` 之外部地址（見 [`investor-onboarding-zh-TW.md`](investor-onboarding-zh-TW.md) 第五、六節）。
 
 1. 在 `config/investors/<id>/.env.investor` 設定備兌現貨數量與費率（範本：[`config/investors/_example/.env.investor.example`](../config/investors/_example/.env.investor.example)）。
 2. **首次** `./bot --investor <id> fee-snapshot` 會從 **accounts.toml 內所有已設 API 的子帳**加總 `deposit` + `withdrawal` + `transfer`（BTC/ETH/USDC 各帳本，再換算 USDC）。**子帳互轉**在加總時會互相抵銷；**主帳入金再轉入子帳**時，即使沒有主帳 API，也會算在子帳的 inbound `transfer` 上。若首次結果有誤可 `./bot --investor <id> fee-flow-report` 核對，再以 `--force-bootstrap` 重跑。
@@ -95,7 +95,6 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 ```bash
 ./bot --investor an fee-snapshot          # 立即快照
 ./bot --investor an fee-status            # 查看 HWM / 最近快照 / 歷史結算
-./bot --investor an fee-balance           # 查看 Fee 專戶即時餘額
 ./bot --investor an fee-settle --period 2026-Q1 --net-flow-usdc 0
 
 # 自訂區間結算 + 報表（PDF/MD/CSV）；淨申赎預設自 Deribit 流水計算

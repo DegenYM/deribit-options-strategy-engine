@@ -1,6 +1,6 @@
 # Investor Fee Disclosure
 
-**Deribit Options Program** | Version 1.1 | Performance fee 10% | Management fee 1.0% p.a.
+**Deribit Options Program** | Version 1.2 | Performance fee 10% | Management fee 1.0% p.a.
 
 > Binding terms are governed by the signed investment management agreement.
 
@@ -14,7 +14,7 @@
 | Performance fee | 10% | Only on profits above HWM |
 | Billing unit | Per investor (consolidated) | All **strategy** sub-accounts merged for NAV |
 | High water mark | Required | **Tied to NAV_perf only** |
-| Collection | Dedicated **Fee sub-account** + **main-account withdrawal** | Manager converts spot profit to USDC/USDT, transfers to Fee sub for reconciliation; investor withdraws from main account to manager's address after confirmation |
+| Collection | **Quarter-end spot sale** + **external on-chain payment** | Manager trades spot to USDC/USDT/USDE in strategy subs; investor pays to manager's external addresses after confirmation |
 
 ---
 
@@ -25,7 +25,6 @@
 - **Definition**: Sum of USDC-equivalent equity across **strategy** sub-accounts minus agreed collateral spot  
 - **Used for**: Period P&L, HWM, 10% performance fee  
 - **Excludes**: Investor-owned BTC/ETH collateral and its price moves  
-- **Excludes** Fee sub-account balance (not part of NAV_perf / HWM)
 
 ### AUM_mgmt — includes collateral spot
 
@@ -55,45 +54,37 @@ HWM tracks NAV_perf only, not spot
 
 ---
 
-## 5. Collection: Fee sub-account reconciliation + main-account withdrawal
+## 5. Collection: quarter-end conversion + external payment
 
 Management and performance fees are **not** deducted directly from strategy sub-accounts.
 
-### 5.1 What is the Fee sub-account?
+### 5.1 Manager (after settlement)
 
-- A separate Deribit **sub-account** (suggested name: `fee_acc`; at least 5 characters—`fee` is rejected) used as a **reconciliation rail** after quarterly settlement.  
-- **Strategy bots connect only to strategy sub-accounts**; they do **not** trade on the Fee sub-account.  
-- Fee sub-account balance is excluded from NAV_perf / HWM.
+1. **Invoice**: USDC-equivalent invoice with management and performance fee detail.  
+2. **Spot sale (if needed)**: Trade relevant spot profits to **USDC, USDT, or USDE** in the **strategy** sub-account (stablecoins remain there for Deribit UI reconciliation).  
+3. **Reconciliation**: Confirm the invoice with the investor.
 
-### 5.2 Quarterly collection workflow
+The manager does **not** require the **main-account** API and does **not** perform Deribit **internal transfers** between sub-accounts (main-account authorization required).
 
-1. **Invoice**: After quarter-end, the manager issues a USDC-equivalent invoice (management + performance fee detail).  
-2. **Convert and transfer (manager)**: If spot profits must be converted to pay fees, the manager **trades** the relevant portion to **USDC or USDT** in the strategy sub-account, then **internal-transfers** to the Fee sub-account via the **strategy** API (Wallet=read_write).  
-3. **Reconciliation (both parties)**: The manager verifies the Fee sub-account balance via API (Account=read); the investor confirms the balance matches the invoice in the Deribit UI.  
-4. **Payment (investor)**: After confirmation, the investor **withdraws** from the **main account** to the manager's specified on-chain address (currency, chain, and amount per invoice and manager instructions).
+### 5.2 Investor (payment)
 
-### 5.3 Investor obligations
+1. Receive and confirm the invoice with the manager.  
+2. Send the amount to the manager's **external on-chain addresses** (see `config/platform/fee-payout-addresses.toml`; a formal list is provided at onboarding).  
+3. Typical assets: **USDC, USDT, USDE**; **network** must match manager instructions (often Ethereum ERC-20).  
+4. Payment may be via Deribit **main-account withdraw** or an external wallet/exchange.
 
-1. Create the Fee sub-account separately from strategy subs.  
-2. Create a **dedicated API key** on the Fee sub-account (see 5.4) and deliver it securely to the manager (for balance verification).  
-3. After receiving the invoice, reconcile with the manager and confirm in writing or by agreed channel.  
-4. **Withdraw from the main account** to the manager's specified address to complete payment.  
-5. **Strategy** API keys must enable **Wallet read/write** (internal transfer to Fee sub-account). **Main-account** API keys must **not** be delivered to the manager.
+### 5.3 Strategy sub-account API permissions
 
-### 5.4 API permissions (strategy sub-account vs Fee sub-account)
+| Permission | Strategy sub-account |
+|------------|----------------------|
+| Read | ✅ Required |
+| Trade | ✅ Required (options + quarter-end spot sale to stablecoins) |
+| Wallet | ❌ **Off** (manager has no main-account API) |
 
-| Permission | Strategy sub-account | Fee sub-account |
-|------------|----------------------|-----------------|
-| Read | ✅ Required | ✅ Required |
-| Trade | ✅ Required | ❌ Off |
-| Wallet read/write | ✅ **Required** (API transfer to Fee sub) | ❌ **Off** |
+### 5.4 Currency and late payment
 
-The manager uses **strategy** API wallet permissions for internal transfers; the **Fee** sub-account API is Account=read only for balance verification. **Actual collection** is completed by the investor withdrawing from the **main account**.
-
-### 5.5 Currency and late payment
-
-- Invoices are in **USDC equivalent** at settlement; the reconciliation sub-account should hold **USDC or USDT** to avoid conversion disputes.  
-- Late reconciliation confirmation or failure to pay from the main account may trigger a pause on new entries per the investment management agreement.
+- Invoices are in **USDC equivalent** at settlement; on-chain payment should use the specified **USDC, USDT, or USDE** to avoid disputes.  
+- Late reconciliation or failure to pay on-chain may trigger a pause on new entries per the investment management agreement.
 
 ---
 
@@ -103,7 +94,7 @@ The manager uses **strategy** API wallet permissions for internal transfers; the
 |------|-----------------|
 | Regular settlement | Quarter-end (UTC) |
 | Invoice | Within ~10 business days after quarter-end |
-| Investor payment | Within ~5 business days after reconciliation, withdraw from **main account** to manager's address |
+| Investor payment | Within ~5 business days after reconciliation, to manager's external addresses |
 | Redemption | Accrued fees on effective redemption date |
 
 ---

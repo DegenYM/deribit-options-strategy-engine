@@ -275,6 +275,20 @@ def entry_net_apr_from_fill(
     )
 
 
+def remaining_apr_for_group(
+    *,
+    remaining_credit: Decimal,
+    capital_base: Decimal,
+    dte_days: Decimal,
+) -> Decimal:
+    """Annualized yield of holding to expiry given remaining close cost."""
+    return annualized_return(
+        net_credit=remaining_credit,
+        capital_base=capital_base,
+        dte_days=dte_days,
+    )
+
+
 def realized_apr_from_close(
     *,
     strategy: str,

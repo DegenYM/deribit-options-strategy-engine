@@ -142,30 +142,30 @@ def _zh_content() -> FeeDisclosureContent:
             "HWM <b>僅</b>追蹤 NAV_perf，<b>不</b>含備兌現貨。因此 BTC／ETH 現貨下跌不會直接拉低 HWM，"
             "期權策略賺錢仍可依 NAV_perf 收取績效費。新增資金、部分贖回之 HWM 處理依投資管理協議或 side letter 約定。"
         ),
-        s5_title="五、費用收取：Fee 專戶對帳 + 主帳提幣",
+        s5_title="五、費用收取：季末兌幣 + 外部地址付費",
         s5_intro=(
-            "管理費與績效費<b>不</b>自策略子帳直接扣款。投資人另開<b>Fee 專戶</b>子帳作對帳專戶；"
-            "季結算後管理方將獲利現貨 TRADE 成 USDC/USDT，以策略子帳 API（Wallet 讀寫）劃轉至 Fee 專戶對帳；"
-            "投資人自<b>主帳</b>提幣至管理方指定地址。Fee 專戶 API 僅 Account=read。"
+            "管理費與績效費<b>不</b>自策略子帳直接扣款。季結算後管理方在<b>策略子帳</b>以 Trade 將獲利現貨"
+            "兌成 USDC／USDT／USDE（穩定幣留在子帳供對帳）；投資人確認帳單後轉至管理方<b>外部鏈上地址</b>。"
+            "管理方不要求主帳 API，亦不做 Deribit 子帳 Internal transfer。"
         ),
         s5_1_title="5.1 投資人義務",
         s5_1_items=[
-            "建立獨立 Fee 子帳（建議名稱 fee_acc；至少 5 字元，勿用 fee），與策略子帳分開；",
-            "為 Fee 專戶建立專用 API Key（Account=read，Wallet／Trade 均 none）並安全交付管理人；",
-            "策略子帳 API 開 Account=read、Trade=read_write、Wallet=read_write（供季末 API 劃轉至 Fee 專戶）；",
+            "策略子帳 API：Account=read、Trade=read_write、Wallet=none；",
             "收到帳單後與管理人對帳並確認；",
-            "自<b>主帳</b> Withdraw 提幣至管理方指定地址，完成付費；",
+            "將應付金額轉至管理人提供之 USDC／USDT／USDE 外部地址（可從主帳 Withdraw 或外部錢包）；",
+            "鏈／網路須與管理人指示一致（多為 Ethereum ERC-20）；",
             "主帳 API 勿交付管理人；",
             "逾期未確認對帳或未付費，管理人得依協議暫停新開倉直至結清。",
         ],
         s5_2_title="5.2 與 NAV_perf 的關係",
         s5_2_body=(
-            "NAV_perf／HWM 僅合併<b>策略</b>子帳權益，不含 Fee 專戶餘額。Fee 專戶僅為對帳用，實際收取由投資人自主帳提幣完成。"
+            "NAV_perf／HWM 僅合併<b>策略</b>子帳權益。季末兌換後之穩定幣留在策略子帳供對帳；"
+            "實際收取以投資人鏈上轉帳至管理人外部地址為準。"
         ),
         s5_3_title="5.3 管理費與績效費",
         s5_3_body=(
             f"管理費按 AUM_mgmt（含備兌現貨）計提、績效費為可分配利潤之 {perf}%；"
-            "帳單均以 USDC 等價開立。管理方換幣劃轉至 Fee 專戶供對帳，投資人確認後自主帳提幣付費。"
+            "帳單均以 USDC 等價開立；付費幣別以帳單與 fee-payout-addresses 清單為準。"
         ),
         s6_title="六、結算週期與投資人報表",
         s6_table=[
@@ -173,7 +173,7 @@ def _zh_content() -> FeeDisclosureContent:
             ["定期結算", "每季末（3／6／9／12 月最後一日，UTC）"],
             ["計價時點", "結算日 23:59 UTC 快照"],
             ["帳單出具", "結算日後 10 個工作天內"],
-            ["費用支付", "對帳確認後 5 個工作天內，自<b>主帳</b>提至管理方指定地址"],
+            ["費用支付", "對帳確認後 5 個工作天內，轉至管理方外部收款地址"],
             ["贖回", "贖回生效日另結算應計管理費與績效費"],
         ],
         s6_report_title="每季報表至少包含：",
@@ -302,34 +302,31 @@ def _en_content() -> FeeDisclosureContent:
             "lower HWM; options profits can still trigger a performance fee when NAV_perf makes a new high. "
             "Subscriptions and partial redemptions follow the IMA or side letter."
         ),
-        s5_title="5. Collection: Fee sub-account reconciliation + main-account withdrawal",
+        s5_title="5. Collection: quarter-end conversion + external payment",
         s5_intro=(
-            "Fees are <b>not</b> deducted from strategy sub-accounts. The investor opens a separate <b>Fee</b> sub-account "
-            "for reconciliation. After quarter-end the manager trades spot profits to USDC/USDT and transfers from the "
-            "<b>strategy</b> sub-account API (wallet read/write) to the Fee sub; "
-            "after both parties confirm, the investor withdraws from the <b>main account</b>. "
-            "Fee sub-account API is Account=read only."
+            "Fees are <b>not</b> deducted from strategy sub-accounts. After quarter-end the manager <b>trades</b> spot "
+            "profits to USDC/USDT/USDE in the <b>strategy</b> sub-account (stablecoins remain for reconciliation); "
+            "after confirmation the investor pays to the manager's <b>external on-chain addresses</b>. "
+            "The manager does not use the main-account API or Deribit internal transfers between subs."
         ),
         s5_1_title="5.1 Investor obligations",
         s5_1_items=[
-            "Create a dedicated Fee sub-account (suggested name: fee_acc; at least 5 characters—do not use fee), separate from strategy subs;",
-            "Create a Fee-only API key (Account=read, Wallet/Trade off) and deliver securely to the manager;",
-            "Strategy sub-account API: Read + Trade + Wallet read/write (for API transfer to Fee sub);",
+            "Strategy sub-account API: Account=read, Trade=read_write, Wallet=none;",
             "After invoice, reconcile with the manager and confirm;",
-            "Withdraw from the <b>main account</b> to the manager's specified address to complete payment;",
+            "Pay to the manager's USDC/USDT/USDE external addresses (main-account withdraw or external wallet);",
+            "Network must match manager instructions (often Ethereum ERC-20);",
             "Do not deliver main-account API keys to the manager;",
             "Late reconciliation or payment may trigger a pause on new entries per the IMA.",
         ],
         s5_2_title="5.2 Relation to NAV_perf",
         s5_2_body=(
-            "NAV_perf and HWM consolidate <b>strategy</b> sub-accounts only; Fee sub-account balance is excluded. "
-            "The Fee sub-account is for reconciliation only; actual collection is via main-account withdrawal."
+            "NAV_perf and HWM consolidate <b>strategy</b> sub-accounts only. Post-conversion stablecoins stay in the "
+            "strategy sub for reconciliation; actual collection is the investor's on-chain transfer."
         ),
         s5_3_title="5.3 Management and performance fees",
         s5_3_body=(
             f"Management fee on AUM_mgmt (including collateral spot); performance fee at {perf}% of distributable profit. "
-            "Invoices are USDC-equivalent; the manager converts and transfers to the Fee sub for reconciliation; "
-            "the investor pays by withdrawing from the main account after confirmation."
+            "Invoices are USDC-equivalent; payment currency per invoice and fee-payout-addresses list."
         ),
         s6_title="6. Settlement cycle and investor reports",
         s6_table=[
@@ -339,7 +336,7 @@ def _en_content() -> FeeDisclosureContent:
             ["Invoice issued", "Within 10 business days after quarter-end"],
             [
                 "Payment due",
-                "Within 5 business days after reconciliation, withdraw from <b>main account</b> to manager's address",
+                "Within 5 business days after reconciliation, pay to manager's external addresses",
             ],
             ["Redemption", "Accrued fees settled on effective redemption date"],
         ],

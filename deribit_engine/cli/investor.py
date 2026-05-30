@@ -175,6 +175,7 @@ def dispatch(args: argparse.Namespace) -> int | None:
             "launchd_paths": [str(path) for path in result.launchd_paths],
             "systemd_paths": [str(path) for path in result.systemd_paths],
             "next_steps": [
+                "Set fee payout addresses: cp config/platform/fee-payout-addresses.toml.example fee-payout-addresses.toml",
                 "Fill secrets: ./bot investor import-handoff config/handoff/<id>.toml",
                 f"Validate + initial HWM: ./bot investor validate {result.investor_id}",
                 "Install launchd (macOS) or systemd (Linux): see docs/operator-onboarding-zh-TW.md",

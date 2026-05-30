@@ -28,11 +28,38 @@ from .margin import (
 )
 from .models import NakedPutCandidate, OptionInstrument, OptionSide, OrderBookSnapshot, RiskRegime, SpreadLeg
 from .utils import ceil_to_step, floor_to_step, format_decimal
+from .vol_metrics import passes_iv_entry_gate
 
 
 class StrategySelector:
     def __init__(self, config: BotConfig):
         self.config = config
+        self._iv_rank_by_currency: dict[str, Decimal] = {}
+        self._iv_minus_rv_by_currency: dict[str, Decimal] = {}
+
+    def update_vol_entry_context(
+        self,
+        *,
+        iv_rank_by_currency: dict[str, Decimal] | None = None,
+        iv_minus_rv_by_currency: dict[str, Decimal] | None = None,
+    ) -> None:
+        self._iv_rank_by_currency = dict(iv_rank_by_currency or {})
+        self._iv_minus_rv_by_currency = dict(iv_minus_rv_by_currency or {})
+
+    def _iv_entry_rejection_reason(self, currency: str) -> str | None:
+        if not self.config.enable_iv_entry_gate:
+            return None
+        ccy = currency.upper()
+        if not passes_iv_entry_gate(
+            iv_rank_value=self._iv_rank_by_currency.get(ccy),
+            iv_minus_rv=self._iv_minus_rv_by_currency.get(ccy),
+            min_iv_rank=self.config.min_iv_rank,
+            max_iv_rank=self.config.max_iv_rank,
+            min_iv_minus_rv=self.config.min_iv_minus_rv,
+            gate_enabled=True,
+        ):
+            return "iv_entry_gate"
+        return None
 
     def _screening_net_apr(
         self,
@@ -355,6 +382,9 @@ class StrategySelector:
             return "book_notional_below_min"
         if book.spread_ratio > max_spread:
             return "spread_ratio_above_max"
+        iv_reason = self._iv_entry_rejection_reason(currency)
+        if iv_reason is not None:
+            return iv_reason
         return None
 
     def _naked_short_put_rejection_reason(
@@ -552,7 +582,28 @@ class StrategySelector:
     ) -> tuple[bool, list[str]]:
         return self.core_regime_liquidity_detail(currency, markets, orderbook_loader)
 
+    def naked_put_candidate_score(self, candidate: NakedPutCandidate) -> Decimal:
+        option_type = candidate.option_type or "put"
+        pdmin, pdmax = self.config.preferred_delta_bounds(candidate.currency, option_type)
+        pomin, pomax = self.config.preferred_otm_bounds(candidate.currency, option_type)
+        target_delta = (pdmin + pdmax) / Decimal("2")
+        target_otm = (pomin + pomax) / Decimal("2")
+        otm = candidate._otm_ratio()
+        spread = self.short_spread_ratio_or_zero(candidate)
+        score = (
+            self.config.score_weight_net_apr * candidate.net_apr
+            + self.config.score_weight_margin_efficiency * candidate.margin_efficiency
+            - self.config.score_weight_spread * spread
+            - self.config.score_weight_delta_distance * abs(abs(candidate.short_leg.delta) - target_delta)
+            - self.config.score_weight_otm_distance * abs(otm - target_otm)
+        )
+        if candidate.in_target_apr_band:
+            score += Decimal("0.01")
+        return score
+
     def naked_put_sort_key(self, candidate: NakedPutCandidate) -> tuple:
+        if self.config.enable_weighted_candidate_scoring:
+            return (-self.naked_put_candidate_score(candidate),)
         option_type = candidate.option_type or "put"
         pdmin, pdmax = self.config.preferred_delta_bounds(candidate.currency, option_type)
         pomin, pomax = self.config.preferred_otm_bounds(candidate.currency, option_type)
@@ -1538,6 +1589,7 @@ class StrategySelector:
                 orderbook_loader=orderbook_loader,
                 short_leg=short_candidate.short_leg,
             )
+            best_spread: NakedPutCandidate | None = None
             for long_instrument, long_book in long_matches:
                 quantity = min(
                     short_candidate.quantity,
@@ -1560,9 +1612,10 @@ class StrategySelector:
                         short_instrument.expiration_timestamp_ms, Decimal("0")
                     ),
                 )
-                if candidate is not None:
-                    candidates.append(candidate)
-                    break
+                if candidate is not None and (best_spread is None or candidate.net_apr > best_spread.net_apr):
+                    best_spread = candidate
+            if best_spread is not None:
+                candidates.append(best_spread)
         return sorted(candidates, key=self.naked_put_sort_key)
 
     def _short_call_unit_margin(

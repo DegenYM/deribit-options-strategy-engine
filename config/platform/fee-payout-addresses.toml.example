@@ -1,0 +1,21 @@
+# 管理方外部收款地址 — 投資人季結算付費時使用（鏈上轉帳，非 Deribit 內部劃轉）。
+# 複製為 fee-payout-addresses.toml 並填入真實地址；勿提交含真實地址的檔案至 git。
+# 管理方在出具帳單時附上本檔對應列；投資人 onboarding 亦會引用此清單。
+
+[[addresses]]
+asset = "USDC"
+network = "Ethereum (ERC-20)"
+address = "0x0000000000000000000000000000000000000000"
+notes = "請勿使用其他鏈；先小額測試"
+
+[[addresses]]
+asset = "USDT"
+network = "Ethereum (ERC-20)"
+address = "0x0000000000000000000000000000000000000000"
+notes = "請勿使用其他鏈；先小額測試"
+
+[[addresses]]
+asset = "USDE"
+network = "Ethereum (ERC-20)"
+address = "0x0000000000000000000000000000000000000000"
+notes = "請勿使用其他鏈；先小額測試"

@@ -62,6 +62,15 @@ class EntryMixin:
                 "reason": "duplicate_open_group",
                 "candidate": candidate.to_dict(),
             }
+        entry_book = (candidate.collateral_currency or candidate.currency or "USDC").upper()
+        if self._book_entry_cooldown_active(context.state, entry_book):
+            return {
+                "action": "entry_skipped",
+                "reason": "entry_cooldown_active",
+                "book": entry_book,
+                "cooldown_minutes": self.config.entry_cooldown_minutes,
+                "candidate": candidate.to_dict(),
+            }
         group_id = self._next_group_id(context.state)
         labels = self._spread_labels(candidate.currency, group_id)
         if not live:
