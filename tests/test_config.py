@@ -254,6 +254,42 @@ def test_covered_call_spot_exit_switches_parse(tmp_path: Path):
     assert config.covered_call_spot_order_type == "market"
 
 
+def test_covered_call_spot_exit_appends_usdt_collateral(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "TRADED_COLLATERALS=BTC,ETH",
+                "COVERED_CALL_SPOT_EXIT_ENABLED=true",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.covered_call_spot_exit_enabled is True
+    assert "USDT" in config.traded_collaterals
+
+
+def test_covered_call_profit_sweep_appends_usdt_collateral(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "TRADED_COLLATERALS=BTC,ETH",
+                "COVERED_CALL_PROFIT_SWEEP_ENABLED=true",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.covered_call_profit_sweep_enabled is True
+    assert "USDT" in config.traded_collaterals
+
+
 def test_strategy_profile_mismatch_raises(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text("OPTION_STRATEGY=bull_put_spread\n")

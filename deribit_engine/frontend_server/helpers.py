@@ -17,11 +17,14 @@ from ..env_layout import (
     find_repo_root,
     investor_frontend_ledger_dir,
     investor_metrics_db_path,
+    load_investor_manifest,
     resolve_investor_scope,
 )
+from ..exceptions import ConfigurationError
 from ..metrics_store import MetricsStore, fingerprint_from_cache_key, performance_scope_key
 from ..models import (
     TradeGroup,
+    normalize_strategy_name,
 )
 from ..utils import format_decimal, json_default, to_decimal, utc_now_ms
 from .constants import (
@@ -287,6 +290,39 @@ def _configure_metrics_db(env_files: tuple[Path, ...]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     _active_metrics_db_path = path
     return path
+
+
+def _dashboard_strategies(
+    *,
+    investor_id: str | None,
+    repo_root: Path | None,
+    accounts: list[DashboardAccount],
+) -> list[str]:
+    """Strategy ids shown on the dashboard (from accounts.toml enabled rows when scoped)."""
+    if investor_id and repo_root is not None:
+        try:
+            manifest = load_investor_manifest(investor_id, repo_root=repo_root)
+            ordered: list[str] = []
+            seen: set[str] = set()
+            for account in manifest.enabled_accounts():
+                strategy = normalize_strategy_name(account.strategy)
+                if strategy in seen:
+                    continue
+                seen.add(strategy)
+                ordered.append(strategy)
+            return ordered
+        except ConfigurationError:
+            pass
+
+    ordered = []
+    seen: set[str] = set()
+    for account in accounts:
+        strategy = normalize_strategy_name(account.config.option_strategy)
+        if strategy in seen:
+            continue
+        seen.add(strategy)
+        ordered.append(strategy)
+    return ordered
 
 
 def _make_dashboard_accounts(

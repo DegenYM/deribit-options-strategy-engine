@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>投資組合總覽 · Deribit 選擇權策略</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=inv-reload-fix-20260527" as="script" />
+    <link rel="preload" href="/app-investor.js?v=dashboard-strategies-20260531" as="script" />
     <link rel="stylesheet" href="/tailwind.css?v=20260526" />
-    <link rel="stylesheet" href="/styles.css?v=inv-layout-6" />
+    <link rel="stylesheet" href="/styles.css?v=equity-rows-20260531g" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -51,6 +51,11 @@
           id="strategy-badge"
           class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
         >策略：—</span>
+        <span
+          id="profit-sweep-badge"
+          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300 hidden"
+          hidden
+        >獲利兌 USDT：—</span>
         </div>
         <div class="investor-header-spot flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-emerald-200/90 tabular-nums">
         <span id="header-spot-btc">BTC —</span>
@@ -269,6 +274,6 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script defer src="/app-investor.js?v=inv-reload-fix-20260527"></script>
+    <script defer src="/app-investor.js?v=dashboard-strategies-20260531"></script>
   </body>
 </html>

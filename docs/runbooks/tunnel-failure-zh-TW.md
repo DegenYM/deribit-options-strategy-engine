@@ -9,18 +9,20 @@
 ## 立即檢查
 
 1. `./bot investor frontend status`（或 launchd frontend plist）
-2. 本機 curl：`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<frontend_port>/api/dashboard_bundle`
-3. Cloudflare Zero Trust / Tunnel 控制台該 connector 是否在線
-4. `config/platform/registry.toml` 的 `hostname`、`frontend_port` 是否正確
+2. `./bot investor tunnel status`（launchd + `http://127.0.0.1:20241/metrics`）
+3. 本機 curl：`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:<frontend_port>/api/dashboard_bundle`
+4. Cloudflare Zero Trust / Tunnel 控制台該 connector 是否在線
+5. `config/platform/registry.toml` 的 `hostname`、`frontend_port`、`tunnel_name` 是否正確
 
 ## 處理步驟
 
 | 步驟 | 動作 |
 |------|------|
 | 1 | 重啟 frontend：`./bot investor frontend restart --investor <id>` |
-| 2 | 重啟 cloudflared（依你方部署方式） |
-| 3 | 確認 Access policy 未誤刪 `dashboard_email` 對應規則 |
-| 4 | Bot live 可獨立運行；dashboard 掛掉不必然停 trading |
+| 2 | 重啟 tunnel：`./bot investor tunnel restart`（或前景除錯：`cloudflared tunnel --config ~/.cloudflared/config.yml run`） |
+| 3 | 查 log：`~/Library/Logs/cloudflared-<tunnel_name>.log`（`<tunnel_name>` 見 `registry.toml`） |
+| 4 | 確認 Access policy 未誤刪 `dashboard_email` 對應規則 |
+| 5 | Bot live 可獨立運行；dashboard 掛掉不必然停 trading |
 
 ## 預防
 

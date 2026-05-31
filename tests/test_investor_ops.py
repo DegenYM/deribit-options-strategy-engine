@@ -11,6 +11,7 @@ from deribit_engine.investor_ops import (
     is_hwm_bootstrapped,
     list_investors,
     parse_strategy_slugs,
+    render_launchd_plists,
     validate_investor,
 )
 from deribit_engine.investor_registry import load_platform_registry
@@ -63,6 +64,17 @@ def _bootstrap_repo(tmp_path: Path) -> Path:
 def test_parse_strategy_slugs_rejects_unknown():
     with pytest.raises(ConfigurationError):
         parse_strategy_slugs("naked,unknown")
+
+
+def test_render_launchd_plists_uses_distinct_live_and_frontend_labels(tmp_path: Path):
+    repo = _bootstrap_repo(tmp_path)
+    registry = load_platform_registry(repo_root=repo)
+    paths = render_launchd_plists("alice", repo_root=repo, registry=registry, frontend_port=8810)
+    live_path = repo / "config/platform/generated/launchd/com.deribit.live.alice.plist"
+    frontend_path = repo / "config/platform/generated/launchd/com.deribit.frontend.alice.plist"
+    assert paths == (live_path, frontend_path)
+    assert "<string>com.deribit.live.alice</string>" in live_path.read_text(encoding="utf-8")
+    assert "<string>com.deribit.frontend.alice</string>" in frontend_path.read_text(encoding="utf-8")
 
 
 def test_investor_init_scaffolds_manifest_and_registry(tmp_path: Path):

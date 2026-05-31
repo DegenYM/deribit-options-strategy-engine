@@ -605,6 +605,11 @@ class TradeGroup:
     spot_exit_instrument_name: str = ""
     spot_exit_order_id: str = ""
     spot_exit_reason: str = ""
+    profit_sweep_status: str = ""
+    profit_sweep_amount: Decimal = Decimal("0")
+    profit_sweep_instrument_name: str = ""
+    profit_sweep_order_id: str = ""
+    profit_sweep_reason: str = ""
 
     @property
     def dte_days(self) -> Decimal:
@@ -1100,6 +1105,16 @@ class TradeGroup:
             payload["spot_exit_order_id"] = self.spot_exit_order_id
         if self.spot_exit_reason:
             payload["spot_exit_reason"] = self.spot_exit_reason
+        if self.profit_sweep_status:
+            payload["profit_sweep_status"] = self.profit_sweep_status
+        if self.profit_sweep_amount > 0:
+            payload["profit_sweep_amount"] = self.profit_sweep_amount
+        if self.profit_sweep_instrument_name:
+            payload["profit_sweep_instrument_name"] = self.profit_sweep_instrument_name
+        if self.profit_sweep_order_id:
+            payload["profit_sweep_order_id"] = self.profit_sweep_order_id
+        if self.profit_sweep_reason:
+            payload["profit_sweep_reason"] = self.profit_sweep_reason
         return payload
 
     @classmethod
@@ -1208,6 +1223,11 @@ class TradeGroup:
             spot_exit_instrument_name=str(payload.get("spot_exit_instrument_name") or ""),
             spot_exit_order_id=str(payload.get("spot_exit_order_id") or ""),
             spot_exit_reason=str(payload.get("spot_exit_reason") or ""),
+            profit_sweep_status=str(payload.get("profit_sweep_status") or ""),
+            profit_sweep_amount=to_decimal(payload.get("profit_sweep_amount")),
+            profit_sweep_instrument_name=str(payload.get("profit_sweep_instrument_name") or ""),
+            profit_sweep_order_id=str(payload.get("profit_sweep_order_id") or ""),
+            profit_sweep_reason=str(payload.get("profit_sweep_reason") or ""),
         )
 
 

@@ -17,6 +17,7 @@ from ..exit_eval import (
     evaluate_early_exit_reason,
     exit_eval_context_from_config,
 )
+from ..exit_reasons import INCOME_EXIT_REASONS
 from ..investor_cash_flow import sum_external_flow_native_in_window
 from ..margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
@@ -60,6 +61,7 @@ class ManagementMixin:
         actions: list[dict[str, Any]] = []
 
         actions.extend(self._pending_covered_call_spot_exit_actions(context, live=live))
+        actions.extend(self._pending_profit_sweep_actions(context, live=live))
 
         if context.snapshot.hard_derisk:
             cooldown_until = utc_now_ms() + (self.config.cooldown_hours * 3600 * 1000)
@@ -591,6 +593,173 @@ class ManagementMixin:
                 )
         return actions
 
+    def _maybe_schedule_profit_sweep(self, group: TradeGroup, *, reason: str, live: bool) -> None:
+        """Queue a post-close spot sale of native premium profit to USDT."""
+        if not live:
+            return
+        if not self.config.covered_call_profit_sweep_enabled:
+            return
+        if self.config.option_strategy != "covered_call":
+            return
+        if reason not in INCOME_EXIT_REASONS:
+            return
+        if not self._is_covered_call_group(group):
+            return
+        native = group.realized_pnl_collateral_native
+        if native is None or native <= 0:
+            return
+        group.profit_sweep_status = "pending"
+        group.profit_sweep_reason = reason
+        group.profit_sweep_amount = native
+
+    def _pending_profit_sweep_actions(
+        self,
+        context: RuntimeContext,
+        *,
+        live: bool,
+    ) -> list[dict[str, Any]]:
+        if not self.config.covered_call_profit_sweep_enabled:
+            return []
+        actions: list[dict[str, Any]] = []
+        for group in context.state.groups:
+            if (
+                group.status == "closed"
+                and self._is_covered_call_group(group)
+                and group.profit_sweep_status == "pending"
+            ):
+                actions.append(self._execute_covered_call_profit_sweep(context, group, live=live))
+        return actions
+
+    @staticmethod
+    def _covered_call_profit_sweep_instrument(currency: str) -> str:
+        return ManagementMixin._covered_call_spot_instrument(currency)
+
+    def _profit_sweep_amount(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        live: bool,
+    ) -> Decimal:
+        target = group.profit_sweep_amount
+        if target <= 0 and group.realized_pnl_collateral_native is not None:
+            target = group.realized_pnl_collateral_native
+        if target <= 0:
+            return Decimal("0")
+
+        summary = context.summaries.get(group.currency)
+        if live:
+            summary = self._account_summaries_by_currency().get(group.currency, summary)
+        if summary is not None:
+            available = max(summary.available_funds, summary.available_withdrawal_funds, summary.balance)
+            if available <= 0:
+                return Decimal("0")
+            target = min(target, available)
+
+        instrument_name = self._covered_call_profit_sweep_instrument(group.currency)
+        contract_size, min_trade_amount = self._spot_min_trade_amount(instrument_name, group.currency)
+        aligned = align_option_order_amount(target, contract_size, min_trade_amount)
+        if contract_size > 0 or min_trade_amount > 0:
+            return aligned
+        return target
+
+    def _execute_covered_call_profit_sweep(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        live: bool,
+    ) -> dict[str, Any]:
+        if group.profit_sweep_status in {"submitted", "filled"}:
+            return {
+                "action": "covered_call_profit_sweep_skipped",
+                "group_id": group.group_id,
+                "reason": f"already_{group.profit_sweep_status}",
+                "profit_sweep_status": group.profit_sweep_status,
+                "profit_sweep_order_id": group.profit_sweep_order_id or None,
+            }
+
+        instrument_name = self._covered_call_profit_sweep_instrument(group.currency)
+        amount = self._profit_sweep_amount(context, group, live=live)
+        if amount <= 0:
+            if live:
+                group.profit_sweep_status = "skipped"
+                if not group.profit_sweep_reason:
+                    group.profit_sweep_reason = "amount_below_min_or_unavailable"
+            return {
+                "action": "covered_call_profit_sweep_skipped",
+                "group_id": group.group_id,
+                "reason": "amount_below_min_or_unavailable",
+                "instrument_name": instrument_name,
+                "amount": format_decimal(amount, 8),
+                "live": live,
+            }
+
+        payload: dict[str, Any] = {
+            "action": "covered_call_profit_sweep" if live else "covered_call_profit_sweep_preview",
+            "group_id": group.group_id,
+            "reason": group.profit_sweep_reason or "profit_sweep",
+            "instrument_name": instrument_name,
+            "amount": format_decimal(amount, 8),
+            "order_type": self.config.covered_call_spot_order_type,
+            "live": live,
+        }
+        if not live:
+            return payload
+
+        group.profit_sweep_status = "submitted"
+        group.profit_sweep_amount = amount
+        group.profit_sweep_instrument_name = instrument_name
+        label = f"{self.config.order_label_prefix}-profit-sweep-{group.currency.lower()}-{group.group_id}"
+        try:
+            from ..wallet_ops import trade_spot
+
+            result = trade_spot(
+                self.config,
+                self.client,
+                from_currency=group.currency,
+                to_currency="USDT",
+                amount=format_decimal(amount, 8),
+                instrument_name=instrument_name,
+                order_type=self.config.covered_call_spot_order_type,
+                live=True,
+                label=label,
+            )
+        except Exception as exc:
+            group.profit_sweep_reason = f"{group.profit_sweep_reason or 'profit_sweep'}: submission_failed: {exc}"
+            payload["profit_sweep_status"] = group.profit_sweep_status
+            payload["error"] = str(exc)
+            return payload
+
+        if result.get("action") == "trade_spot_skipped":
+            skip_reason = str(result.get("reason") or "skipped")
+            if skip_reason == "slippage_exceeded":
+                group.profit_sweep_status = "pending"
+            else:
+                group.profit_sweep_status = "skipped"
+            group.profit_sweep_reason = f"{group.profit_sweep_reason or 'profit_sweep'}: {skip_reason}"
+            payload["action"] = "covered_call_profit_sweep_skipped"
+            payload["reason"] = skip_reason
+            payload["reference_mark_price"] = result.get("reference_mark_price")
+            payload["slippage_limit_price"] = result.get("slippage_limit_price")
+            payload["profit_sweep_status"] = group.profit_sweep_status
+            return payload
+
+        order_id = result.get("order_id")
+        if order_id:
+            group.profit_sweep_order_id = str(order_id)
+        order_state = str(result.get("order_state") or "").lower()
+        if order_state == "filled":
+            group.profit_sweep_status = "filled"
+        elif order_state in {"cancelled", "rejected"}:
+            group.profit_sweep_status = "failed"
+        else:
+            group.profit_sweep_status = "filled"
+        payload["profit_sweep_status"] = group.profit_sweep_status
+        payload["profit_sweep_order_id"] = group.profit_sweep_order_id or None
+        payload["response"] = result.get("response")
+        return payload
+
     def _is_covered_call_strategy(self) -> bool:
         return self.config.option_strategy == "covered_call"
 
@@ -689,10 +858,10 @@ class ManagementMixin:
 
     @staticmethod
     def _covered_call_spot_instrument(currency: str) -> str:
-        return f"{currency.upper()}_USDC"
+        return f"{currency.upper()}_USDT"
 
     def _spot_min_trade_amount(self, instrument_name: str, currency: str) -> tuple[Decimal, Decimal]:
-        for lookup_currency in ("USDC", currency.upper()):
+        for lookup_currency in ("USDT", "USDC", currency.upper()):
             try:
                 rows = self.client.get_instruments(lookup_currency, kind="spot", expired=False)
             except Exception:
@@ -813,7 +982,7 @@ class ManagementMixin:
             native_start = state.day_start_equity_native_by_book.get(book)
             if native_start and native_start > 0:
                 per_book_native_day_start[book] = native_start
-            elif book == "USDC":
+            elif book in ("USDC", "USDT"):
                 per_book_native_day_start[book] = per_book_day_start[book]
             else:
                 per_book_native_day_start[book] = native_equity
@@ -846,7 +1015,7 @@ class ManagementMixin:
             native_equity = per_book_native_equities.get(book, Decimal("0"))
             native_start = per_book_native_day_start.get(book, native_equity)
             native_flow = day_net_flow_native_by_book.get(book, Decimal("0"))
-            spot = Decimal("1") if book == "USDC" else self._currency_index_price(book, orderbook_cache)
+            spot = Decimal("1") if book in ("USDC", "USDT") else self._currency_index_price(book, orderbook_cache)
             day_pnl_usdc_ex_flow_ex_spot_by_book[book] = (native_equity - native_start - native_flow) * spot
         day_pnl_usdc_ex_flow_ex_spot = sum(
             day_pnl_usdc_ex_flow_ex_spot_by_book.values(),
@@ -881,7 +1050,7 @@ class ManagementMixin:
             start = per_book_native_day_start.get(book, equity)
             if start <= 0:
                 continue
-            if book == "USDC":
+            if book in ("USDC", "USDT"):
                 net_flow = day_net_flow_usdc_by_book.get(book, Decimal("0"))
             else:
                 net_flow = day_net_flow_native_by_book.get(book, Decimal("0"))
@@ -1294,7 +1463,7 @@ class ManagementMixin:
                 )
                 continue
 
-            if collateral == "USDC":
+            if collateral in ("USDC", "USDT"):
                 net_usdc = net_native
             else:
                 index_price = self._currency_index_price(collateral, orderbook_cache)
@@ -1352,7 +1521,7 @@ class ManagementMixin:
             except Exception as exc:
                 LOGGER.warning("cash_flow_heal_failed currency=%s err=%s", collateral, exc)
                 continue
-            if collateral == "USDC":
+            if collateral in ("USDC", "USDT"):
                 net_usdc = net_native
             else:
                 index_price = self._currency_index_price(collateral, orderbook_cache)
@@ -1395,7 +1564,7 @@ class ManagementMixin:
                         now_ms=now_ms,
                     )
             for book, equity in per_book_native.items():
-                native_start = state.day_start_equity_by_book.get(book, equity) if book == "USDC" else equity
+                native_start = state.day_start_equity_by_book.get(book, equity) if book in ("USDC", "USDT") else equity
                 if book not in state.day_start_equity_native_by_book:
                     state.day_start_equity_native_by_book[book] = native_start
                     state.day_net_flow_native_by_book.setdefault(book, Decimal("0"))

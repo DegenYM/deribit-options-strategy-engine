@@ -40,7 +40,9 @@
 
 ### `covered_call`
 
-只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險，所以 call delta 可選較大。風險是上漲收益被履約價封頂，以及現金/幣本位結算後仍可能留下 spot exposure；若要鎖定 ITM 退場，可開啟 spot exit，robust 模式會先買回 call、再賣 BTC_USDC / ETH_USDC spot。
+只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險，所以 call delta 可選較大。風險是上漲收益被履約價封頂，以及現金/幣本位結算後仍可能留下 spot exposure；若要鎖定 ITM 退場，可開啟 spot exit，robust 模式會先買回 call、再賣 BTC_USDT / ETH_USDT spot。
+
+預設啟用 **槽位分配**（`COVERED_CALL_SLOT_SIZING=true`）：每筆進場數量 ≈ `剩餘可用 cover ÷ 剩餘 MAX_GROUPS_PER_CURRENCY 槽位`，隨現貨規模放大，無固定 QTY 上限。例如 0.5 BTC、`MAX_GROUPS_PER_CURRENCY=3` 時第一筆約 0.1～0.17 BTC，後續 cycle 逐步補滿不同合約。
 
 ## Payoff 示意
 

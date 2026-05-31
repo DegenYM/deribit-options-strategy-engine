@@ -135,6 +135,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         )
         p.add_argument("--json", action="store_true", help="Emit JSON")
 
+    inv_tunnel = investor_sub.add_parser(
+        "tunnel",
+        help="Start/stop/restart/status Cloudflare Tunnel via launchd (macOS)",
+    )
+    inv_tunnel_sub = inv_tunnel.add_subparsers(dest="tunnel_command", required=True)
+    for action in ("start", "stop", "restart", "status"):
+        p = inv_tunnel_sub.add_parser(action, help=f"{action} cloudflared LaunchAgent")
+        p.add_argument(
+            "--no-health",
+            action="store_true",
+            help="Skip local http://127.0.0.1:20241/metrics probe",
+        )
+        p.add_argument("--json", action="store_true", help="Emit JSON")
+
 
 def dispatch(args: argparse.Namespace) -> int | None:
     if args.command != "investor":
@@ -313,5 +327,26 @@ def dispatch(args: argparse.Namespace) -> int | None:
                 mark = "ok" if row.ok else "FAIL"
                 print(f"[{mark}] {row.investor_id} {row.state} — {row.message}{supervisor}")
         return 0 if all(row.ok for row in results) else 1
+
+    if args.investor_command == "tunnel":
+        from ..cloudflared_launchd import manage_tunnel_launchd
+
+        result = manage_tunnel_launchd(
+            args.tunnel_command,
+            repo_root=repo_root,
+            check_health=not args.no_health,
+        )
+        payload = {
+            "action": f"investor-tunnel-{args.tunnel_command}",
+            "result": result.to_dict(),
+        }
+        render(payload, args.json)
+        if not args.json:
+            health = ""
+            if result.health_ok is not None:
+                health = " health=" + ("ok" if result.health_ok else "fail")
+            mark = "ok" if result.ok else "FAIL"
+            print(f"[{mark}] {result.tunnel_name} {result.state} — {result.message}{health}")
+        return 0 if result.ok else 1
 
     raise SystemExit(2)

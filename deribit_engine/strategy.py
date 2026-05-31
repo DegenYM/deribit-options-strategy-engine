@@ -1859,6 +1859,41 @@ class StrategySelector:
             None,
         )
 
+    def covered_call_slot_entry_cap(
+        self,
+        *,
+        available_cover_quantity: Decimal,
+        open_group_count: int,
+    ) -> Decimal | None:
+        """Per-entry cover cap from remaining MAX_GROUPS_PER_CURRENCY slots.
+
+        Returns ``None`` when slot sizing is disabled or ``max_groups_per_currency``
+        is unset (<= 0), meaning callers should size to full available cover.
+        """
+        if not self.config.covered_call_slot_sizing:
+            return None
+        max_groups = self.config.max_groups_per_currency
+        if max_groups <= 0:
+            return None
+        remaining_slots = max(1, max_groups - open_group_count)
+        return available_cover_quantity / Decimal(remaining_slots)
+
+    @staticmethod
+    def _covered_call_entry_quantity(
+        *,
+        available_cover_quantity: Decimal,
+        slot_entry_cap: Decimal | None,
+        book: OrderBookSnapshot,
+        min_trade_amount: Decimal,
+    ) -> Decimal:
+        quantity_caps = [
+            floor_to_step(available_cover_quantity, min_trade_amount),
+            floor_to_step(book.best_bid_amount, min_trade_amount),
+        ]
+        if slot_entry_cap is not None and slot_entry_cap > 0:
+            quantity_caps.insert(0, floor_to_step(slot_entry_cap, min_trade_amount))
+        return min(quantity_caps)
+
     def covered_call_scan_rejection_detail(
         self,
         currency: str,
@@ -1870,6 +1905,7 @@ class StrategySelector:
         available_cover_quantity: Decimal,
         summary_equity: Decimal,
         index_price: Decimal | None = None,
+        open_group_count: int = 0,
     ) -> dict[str, Any]:
         """Aggregate why covered-call candidates are rejected; for scan JSON diagnostics."""
         calls = [
@@ -1894,6 +1930,10 @@ class StrategySelector:
             examples.append(message)
 
         ref_index = index_price if index_price is not None else Decimal("0")
+        slot_entry_cap = self.covered_call_slot_entry_cap(
+            available_cover_quantity=available_cover_quantity,
+            open_group_count=open_group_count,
+        )
         prefilter = (
             (
                 lambda inst: self._passes_strike_otm_prefilter(
@@ -1934,10 +1974,17 @@ class StrategySelector:
 
             max_by_cover = floor_to_step(available_cover_quantity, inst.min_trade_amount)
             max_by_liquidity = floor_to_step(book.best_bid_amount, inst.min_trade_amount)
-            quantity = min(max_by_cover, max_by_liquidity)
+            quantity = self._covered_call_entry_quantity(
+                available_cover_quantity=available_cover_quantity,
+                slot_entry_cap=slot_entry_cap,
+                book=book,
+                min_trade_amount=inst.min_trade_amount,
+            )
             if quantity < inst.min_trade_amount:
                 after_counts["quantity_below_min_trade"] += 1
                 caps = (("cover", max_by_cover), ("liq", max_by_liquidity))
+                if slot_entry_cap is not None:
+                    caps = (("slot", floor_to_step(slot_entry_cap, inst.min_trade_amount)),) + caps
                 binding = min(caps, key=lambda kv: kv[1])[0]
                 maybe_append_example(
                     f"{inst.instrument_name} [post] quantity_below_min_trade "
@@ -1978,6 +2025,8 @@ class StrategySelector:
             "calls_in_dte_window": len(calls),
             "distinct_expiries_in_dte_window": distinct_expiries,
             "available_cover_quantity": str(available_cover_quantity),
+            "slot_entry_cap": str(slot_entry_cap) if slot_entry_cap is not None else None,
+            "open_group_count": open_group_count,
             "liquidity_rejections": {k: liquidity_counts[k] for k, _ in liquidity_counts.most_common(16)},
             "after_liquidity_rejections": {k: after_counts[k] for k, _ in after_counts.most_common(16)},
             "instruments_passing_all_build_gates": buildable,
@@ -1997,6 +2046,7 @@ class StrategySelector:
         available_cover_quantity: Decimal,
         summary_equity: Decimal,
         index_price: Decimal | None = None,
+        open_group_count: int = 0,
     ) -> list[NakedPutCandidate]:
         if regime is RiskRegime.CRISIS:
             return []
@@ -2015,6 +2065,10 @@ class StrategySelector:
         ]
         candidates: list[NakedPutCandidate] = []
         ref_index = index_price if index_price is not None else Decimal("0")
+        slot_entry_cap = self.covered_call_slot_entry_cap(
+            available_cover_quantity=available_cover_quantity,
+            open_group_count=open_group_count,
+        )
         for inst in calls:
             if ref_index > 0 and not self._passes_strike_otm_prefilter(
                 inst, currency=currency, index_price=ref_index, option_type="call"
@@ -2023,9 +2077,11 @@ class StrategySelector:
             book = orderbook_loader(inst.instrument_name)
             if self._naked_short_call_rejection_reason(currency, inst, book) is not None:
                 continue
-            quantity = min(
-                floor_to_step(available_cover_quantity, inst.min_trade_amount),
-                floor_to_step(book.best_bid_amount, inst.min_trade_amount),
+            quantity = self._covered_call_entry_quantity(
+                available_cover_quantity=available_cover_quantity,
+                slot_entry_cap=slot_entry_cap,
+                book=book,
+                min_trade_amount=inst.min_trade_amount,
             )
             if quantity < inst.min_trade_amount:
                 continue

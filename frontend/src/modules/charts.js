@@ -10,13 +10,11 @@ import {
   FRONTEND_REFRESH_INTERVAL_MS,
   INVESTOR_OVERLAY_MAX_MS,
   INVESTOR_STATUS_TIMEOUT_MS,
-  STRATEGIES,
-  STRATEGY_BY_ID,
   USE_DASHBOARD_BUNDLE,
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { bookEquityNative, bookEquityUsdForDisplay, dedupeTradeGroups, fmtNum, fmtPct, fmtUsd, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, fmtNum, fmtPct, fmtUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -258,10 +256,10 @@ export function sumOpenCreditByBook(openGroups) {
 }
 
 export function sumOpenCreditByStrategy(openRows, status, groups) {
-  const out = Object.fromEntries(STRATEGIES.map((s) => [s.id, 0]));
+  const out = Object.fromEntries(dashboardStrategyIds().map((id) => [id, 0]));
   for (const g of openRows || []) {
     const id = strategyId(g);
-    if (!STRATEGY_BY_ID[id]) continue;
+    if (!isDashboardStrategy(id)) continue;
     const credit = openRowEntryCreditUsd(g, status, groups);
     if (credit === null) continue;
     out[id] += credit;

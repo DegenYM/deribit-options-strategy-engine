@@ -50,6 +50,11 @@
 ./bot --investor youming frontend --port 9000
 ./bot frontend --account-env-files config/investors/youming/accounts/.env.naked,config/investors/youming/accounts/.env.bull_put
 
+# macOS launchd 常駐（依 registry.toml）
+./bot investor frontend start    # dashboard
+./bot investor tunnel start      # cloudflared tunnel run
+./bot investor live start        # 實單監督
+
 # 同時啟動 accounts.toml 內 live_enabled 子帳的 `run --live`（log：logs/live/<investor_id>/<slug>.log）
 python scripts/run_live_profiles.py --investor youming --restart-failed
 python scripts/run_live_profiles.py --investor alice --restart-failed
@@ -60,7 +65,7 @@ python scripts/run_live_profiles.py \
   config/investors/youming/accounts/.env.bull_put
 ```
 
-Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。
+Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。Tunnel 手動 `run` 與對外設定見 [cloudflare-tunnel-investor.md](cloudflare-tunnel-investor.md)。
 
 ## 單一 `.env`（未用 `config/investors/...` 時）
 

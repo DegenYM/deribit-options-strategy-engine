@@ -179,6 +179,7 @@ class ScannerMixin:
             equity = summary.equity if summary is not None else Decimal("0")
             regime = context.regime_by_currency.get(ccy, RiskRegime.CRISIS)
             available_cover = self._available_covered_call_quantity(context, ccy)
+            open_group_count = self._covered_call_open_group_count(context.state, ccy)
             collateral_markets = [
                 market
                 for market in context.markets_by_currency.get(ccy, [])
@@ -195,6 +196,7 @@ class ScannerMixin:
                 available_cover_quantity=available_cover,
                 summary_equity=equity,
                 index_price=self._currency_index_price(ccy, context.orderbook_cache),
+                open_group_count=open_group_count,
             )
         return out
 
@@ -465,6 +467,7 @@ class ScannerMixin:
                 blockers.append(f"{ccy}/{ccy} [covered_call]: book equity<=0 or missing account summary")
                 continue
             available_cover = self._available_covered_call_quantity(context, ccy)
+            open_group_count = self._covered_call_open_group_count(context.state, ccy)
             if available_cover <= 0:
                 blockers.append(
                     f"{ccy}/{ccy} [covered_call]: no available {ccy} cover after existing covered_call reservations"
@@ -510,6 +513,7 @@ class ScannerMixin:
                 currency=ccy,
                 available_cover_quantity=available_cover,
                 summary_equity=summary.equity,
+                open_group_count=open_group_count,
             )
             if not raw_candidates:
                 detail = self.strategy.covered_call_scan_rejection_detail(
@@ -520,6 +524,7 @@ class ScannerMixin:
                     collateral_currency=ccy,
                     available_cover_quantity=available_cover,
                     summary_equity=summary.equity,
+                    open_group_count=open_group_count,
                 )
                 prefix = f"{ccy}/{ccy} [covered_call]"
                 liq = detail.get("liquidity_rejections") or {}
@@ -712,6 +717,7 @@ class ScannerMixin:
                     if self._strategy_at_concurrent_limit(context.state, "covered_call"):
                         continue
                     available_cover = self._available_covered_call_quantity(context, currency)
+                    open_group_count = self._covered_call_open_group_count(context.state, currency)
                     for candidate in self.strategy.build_covered_call_candidates(
                         collateral_markets,
                         loader,
@@ -721,6 +727,7 @@ class ScannerMixin:
                         available_cover_quantity=available_cover,
                         summary_equity=collateral_summary.equity,
                         index_price=index_price,
+                        open_group_count=open_group_count,
                     ):
                         if self._naked_candidate_matches_open_group(context.state, candidate):
                             continue

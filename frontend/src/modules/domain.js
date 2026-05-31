@@ -40,6 +40,38 @@ export function fmtPct(value, decimals = 2) {
   return decimals === 1 ? fmt.pct1.format(n) : fmt.pct2.format(n);
 }
 
+/** Display glyph for collateral book native amounts (Deribit-style where applicable). */
+export function bookNativeSymbol(book) {
+  const b = String(book || "").toUpperCase();
+  if (b === "BTC") return "(₿)";
+  if (b === "ETH") return "(♦)";
+  if (b === "USDC") return "($)";
+  if (b === "USDT") return "(₮)";
+  return b;
+}
+
+export function bookNativePlaces(book) {
+  const b = String(book || "").toUpperCase();
+  if (b === "BTC") return 5;
+  if (b === "ETH") return 4;
+  return 2;
+}
+
+function isKnownDeribitCollateral(currency) {
+  const c = String(currency || "").toUpperCase();
+  return c === "BTC" || c === "ETH" || c === "USDC" || c === "USDT";
+}
+
+function deribitPricePlaces(collateralCurrency) {
+  const c = String(collateralCurrency || "").toUpperCase();
+  if (c === "BTC" || c === "ETH") return 5;
+  return 4;
+}
+
+function deribitSymbolHtml(collateralCurrency) {
+  return `<span class="text-slate-500">${bookNativeSymbol(collateralCurrency)}</span>`;
+}
+
 function portfolioHasEquity(portfolio) {
   return num(portfolio?.total_equity_usdc) !== null;
 }
@@ -174,12 +206,12 @@ export function overviewMetricsGridHtml(ctx) {
   } = ctx;
   return `
     <div class="overview-metrics-grid">
-      <div class="overview-metric-cell">
+      <div class="overview-metric-cell overview-metric-cell--equity">
         <div class="text-xs text-slate-400">${i18n("Total equity", "總權益")}</div>
-        <div class="text-2xl font-mono">${fmtUsd(totalEquity)}</div>
+        <div class="text-2xl font-mono tabular-nums">${fmtUsd(totalEquity)}</div>
         <div class="text-[11px] text-slate-500">${i18n("USDC equivalent (all books)", "USDC 約當（全帳本合計）")}</div>
-        <div class="overview-metric-meta">
-          <div class="overview-metric-line">${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}</div>
+        <div class="overview-metric-meta overview-metric-meta--equity">
+          ${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}
           <div class="overview-metric-line">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
         </div>
       </div>
@@ -238,20 +270,18 @@ export function overviewMetricsGridHtml(ctx) {
     </div>`;
 }
 
-export function investorNativeChipsHtml(byBook, { pnl = false, places = { BTC: 5, ETH: 4, USDC: 2 } } = {}) {
-  const symbols = { BTC: "₿", ETH: "◆", USDC: "$" };
-  return ["BTC", "ETH", "USDC"]
-    .map((book) => {
+export function investorNativeChipsHtml(byBook, { pnl = false, places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 } } = {}) {
+  return CORE_BOOKS.map((book) => {
       const n = num(byBook[book]);
       const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
       const tone = pnl ? pnlClass(byBook[book]) : "";
-      return `<span class="inv-chip ${tone}"><span class="inv-chip-sym">${symbols[book]}</span><span class="inv-chip-val font-mono tabular-nums">${text}</span></span>`;
+      return `<span class="inv-chip ${tone}"><span class="inv-chip-sym">${bookNativeSymbol(book)}</span><span class="inv-chip-val font-mono tabular-nums">${text}</span></span>`;
     })
     .join("");
 }
 
 export function investorOpenCreditMiniHtml(byStrategy) {
-  return strategyOrder(new Set(STRATEGIES.map((s) => s.id)))
+  return strategyOrder(new Set(dashboardStrategyIds()))
     .map((id) => {
       const short = escapeHtml(strategyInfo(id).short);
       const n = num(byStrategy[id]);
@@ -294,10 +324,10 @@ export function investorOverviewHtml(ctx) {
   return `<div class="inv-dashboard">
     <section class="inv-panel inv-panel--hero" aria-label="${i18n("Account snapshot", "帳戶快照")}">
       <div class="inv-split">
-        <div class="inv-kpi">
+        <div class="inv-kpi inv-kpi--equity">
           <span class="inv-kpi-label">${i18n("Total equity", "總權益")}</span>
           <span class="inv-kpi-value font-mono tabular-nums">${fmtUsd(totalEquity)}</span>
-          <span class="inv-kpi-foot">${i18n("USDC equivalent", "USDC 約當")} · ${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</span>
+          <span class="inv-kpi-foot">${i18n("USDC equivalent (all books)", "USDC 約當（全帳本合計）")}</span>
         </div>
         <div class="inv-kpi">
           <span class="inv-kpi-label">${i18n("Day P&L", "本日損益")}</span>
@@ -305,7 +335,10 @@ export function investorOverviewHtml(ctx) {
           <span class="inv-kpi-foot">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</span>
         </div>
       </div>
-      <div class="inv-equity-dual">${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}</div>
+      <div class="inv-equity-breakdown">
+        ${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}
+        <div class="overview-metric-line">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
+      </div>
     </section>
 
     <section class="inv-panel" aria-label="${i18n("Open risk", "未平倉風險")}">
@@ -354,17 +387,13 @@ export function investorOverviewHtml(ctx) {
   </div>`;
 }
 
-/** Deribit-style: ($) for USDC, ₿ / ♦ for coin (option premium / mark). */
+/** Deribit-style: (₿)/(♦)/($)/(₮) prefix for option premium / mark. */
 export function fmtDeribitPriceCell(value, collateralCurrency) {
   const n = num(value);
   if (n === null) return "—";
   const c = String(collateralCurrency || "").toUpperCase();
-  const sp = '<span class="text-slate-500">';
-  const ep = "</span>";
-  if (c === "USDC") return `${sp}($)${ep}\u00A0${fmtNum(n, 4)}`;
-  if (c === "BTC") return `${sp}₿${ep}\u00A0${fmtNum(n, 5)}`;
-  if (c === "ETH") return `${sp}♦${ep}\u00A0${fmtNum(n, 5)}`;
-  return fmtNum(n, 4);
+  if (!isKnownDeribitCollateral(c)) return fmtNum(n, 4);
+  return `${deribitSymbolHtml(c)}\u00A0${fmtNum(n, deribitPricePlaces(c))}`;
 }
 
 /** Plain-text premium for activity meta lines (no inline HTML). */
@@ -372,10 +401,8 @@ export function fmtDeribitPricePlain(value, collateralCurrency) {
   const n = num(value);
   if (n === null) return "—";
   const c = String(collateralCurrency || "").toUpperCase();
-  if (c === "USDC") return `($) ${fmtNum(n, 4)}`;
-  if (c === "BTC") return `₿ ${fmtNum(n, 5)}`;
-  if (c === "ETH") return `♦ ${fmtNum(n, 5)}`;
-  return fmtNum(n, 4);
+  if (!isKnownDeribitCollateral(c)) return fmtNum(n, 4);
+  return `${bookNativeSymbol(c)} ${fmtNum(n, deribitPricePlaces(c))}`;
 }
 
 /**
@@ -788,9 +815,7 @@ export function fmtUsdcUnrealizedDeribit(usdEstimate) {
     maximumFractionDigits: 2,
     minimumFractionDigits: 2,
   }).format(v);
-  const sp = '<span class="text-slate-500">';
-  const ep = "</span>";
-  return `${sp}($)${ep}\u00A0${body}`;
+  return `${deribitSymbolHtml("USDC")}\u00A0${body}`;
 }
 
 export function openRowUnrealizedUsd(g) {
@@ -845,13 +870,11 @@ export function fmtUnrealizedCoinNativeDisplay(g, status) {
 
 export function fmtNativeUnrealizedDisplay(mtm, collateralCurrency) {
   const coll = String(collateralCurrency || "").toUpperCase();
-  if (coll === "USDC") {
-    if (mtm === null) return "—";
-    return fmtUsdcUnrealizedDeribit(mtm);
-  }
   if (mtm === null) return "—";
-  if (coll === "BTC") return `<span class="text-slate-500">₿</span>\u00A0${fmtNum(mtm, 8)}`;
-  if (coll === "ETH") return `<span class="text-slate-500">♦</span>\u00A0${fmtNum(mtm, 8)}`;
+  if (coll === "USDC") return fmtUsdcUnrealizedDeribit(mtm);
+  if (isKnownDeribitCollateral(coll)) {
+    return `${deribitSymbolHtml(coll)}\u00A0${fmtNum(mtm, 8)}`;
+  }
   return fmtNum(mtm, 8);
 }
 
@@ -892,7 +915,7 @@ export function bookEquityUsdForDisplay(book, status) {
   if (fromPortfolio !== null) return fromPortfolio;
   const native = num(status?.accounts?.[b]?.equity);
   if (native === null) return null;
-  if (b === "USDC") return native;
+  if (b === "USDC" || b === "USDT") return native;
   const spot = num(status?.underlying_index_usd?.[b]) ?? num(STATE.lastSpotUsd?.[b]);
   if (spot === null || spot <= 0) return null;
   return native * spot;
@@ -1001,13 +1024,12 @@ export function openPositionTitle(g) {
   return `${ccy} short ${side.toLowerCase()}`;
 }
 
-export function fmtNativeBookBreakdown(byBook, { places = { BTC: 5, ETH: 4, USDC: 2 }, pnl = false } = {}) {
-  const symbols = { BTC: "₿", ETH: "♦", USDC: "($)" };
-  const items = ["BTC", "ETH", "USDC"].map((book) => {
+export function fmtNativeBookBreakdown(byBook, { places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 }, pnl = false } = {}) {
+  const items = CORE_BOOKS.map((book) => {
     const n = num(byBook[book]);
     const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
     const cls = pnl ? ` ${pnlClass(byBook[book])}` : "";
-    return `<span class="native-book-item"><span class="native-book-symbol text-slate-500">${symbols[book]}</span> <span class="font-mono tabular-nums${cls}">${text}</span></span>`;
+    return `<span class="native-book-item"><span class="native-book-symbol text-slate-500 native-book-symbol--${book.toLowerCase()}">${bookNativeSymbol(book)}</span> <span class="font-mono tabular-nums${cls}">${text}</span></span>`;
   });
   return `<span class="native-book-breakdown">${items.join("")}</span>`;
 }
@@ -1021,38 +1043,35 @@ export function fmtBookEquityNativeBreakdown(byBook) {
 }
 
 /** Total-equity KPI: per-book native amount and USDC equivalent (matches book cards). */
-export function fmtBookEquityDualBreakdown(nativeByBook, usdByBook) {
-  const symbols = { BTC: "₿", ETH: "♦", USDC: "($)" };
-  const places = { BTC: 5, ETH: 4, USDC: 2 };
-  const items = ["BTC", "ETH", "USDC"]
-    .map((book) => {
+export function fmtBookEquityDualBreakdown(nativeByBook, usdByBook, _totalEquity = null) {
+  const places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 };
+  const rows = CORE_BOOKS.map((book) => {
       const native = num(nativeByBook?.[book]);
       const usd = num(usdByBook?.[book]);
-      if (native === null && usd === null) return null;
-      if (book === "USDC") {
-        const v = usd ?? native;
-        if (v === null) return null;
-        return `<div class="book-equity-dual-row">
-          <span class="native-book-symbol text-slate-500">${symbols[book]}</span>
-          <span class="font-mono tabular-nums">${fmtUsd(v)}</span>
-        </div>`;
+      const isStable = book === "USDC" || book === "USDT";
+      const usdVal = usd ?? native ?? 0;
+      const sym = `<span class="native-book-symbol text-slate-500 native-book-symbol--${book.toLowerCase()}">${bookNativeSymbol(book)}</span>`;
+      const usdStr = fmtUsd(usdVal);
+      if (isStable) {
+        return `<span class="native-book-item equity-book-item">
+          ${sym}
+          <span class="font-mono tabular-nums">${usdStr}</span>
+        </span>`;
       }
       const nativeStr = native === null ? "—" : fmtNum(native, places[book]);
-      const usdStr = usd === null ? "—" : fmtUsd(usd);
-      return `<div class="book-equity-dual-row">
-        <span class="native-book-symbol text-slate-500">${symbols[book]}</span>
-        <span class="font-mono tabular-nums">${nativeStr}</span>
-        <span class="book-equity-dual-sep text-slate-600" aria-hidden="true">·</span>
-        <span class="font-mono tabular-nums text-slate-400">${usdStr}</span>
-      </div>`;
-    })
-    .filter(Boolean);
-  if (!items.length) return `<span class="text-slate-500">—</span>`;
-  return `<div class="book-equity-dual-breakdown">${items.join("")}</div>`;
+      return `<span class="native-book-item equity-book-item">
+        ${sym}
+        <span class="font-mono tabular-nums">
+          <span class="equity-book-native">${nativeStr}</span>
+          <span class="equity-book-usd">(${usdStr})</span>
+        </span>
+      </span>`;
+    });
+  return `<div class="equity-book-rows">${rows.join("")}</div>`;
 }
 
 export function fmtOpenCreditStrategyBreakdown(byStrategy) {
-  const rows = strategyOrder(new Set(STRATEGIES.map((s) => s.id))).map((id) => {
+  const rows = strategyOrder(new Set(dashboardStrategyIds())).map((id) => {
     const short = escapeHtml(strategyInfo(id).short);
     const n = num(byStrategy[id]);
     const text = n === null ? "—" : fmtUsd(n);
@@ -1149,6 +1168,37 @@ export function normalizeStrategyId(raw) {
     coveredcall: "covered_call",
   };
   return aliases[normalized] || normalized;
+}
+
+/** Enabled strategies from accounts.toml (via /api/health); falls back to full catalog. */
+function parseDashboardStrategyList(raw) {
+  if (!Array.isArray(raw) || !raw.length) return null;
+  const ids = [];
+  const seen = new Set();
+  for (const item of raw) {
+    const id = normalizeStrategyId(item);
+    if (!id || !STRATEGY_BY_ID[id] || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids.length ? ids : null;
+}
+
+export function dashboardStrategyIds() {
+  if (typeof window !== "undefined") {
+    const boot = parseDashboardStrategyList(window.__DASHBOARD_STRATEGIES__);
+    if (boot) return boot;
+  }
+  const fromHealth = parseDashboardStrategyList(STATE.health?.dashboard_strategies);
+  if (fromHealth) return fromHealth;
+  const fromSnapshot = parseDashboardStrategyList(STATE.portfolioSnapshot?.dashboard_strategies);
+  if (fromSnapshot) return fromSnapshot;
+  return STRATEGIES.map((s) => s.id);
+}
+
+export function isDashboardStrategy(id) {
+  const key = normalizeStrategyId(id);
+  return Boolean(key && STRATEGY_BY_ID[key] && dashboardStrategyIds().includes(key));
 }
 
 export function strategyId(g) {
@@ -1338,7 +1388,7 @@ export function closedRowsForStrategyStats(report, groups) {
 }
 
 export function strategyOrder(ids) {
-  const known = STRATEGIES.map((s) => s.id);
+  const known = dashboardStrategyIds();
   const ordered = known.filter((id) => ids.has(id));
   const unknown = [...ids].filter((id) => !known.includes(id)).sort();
   return ordered.concat(unknown);
@@ -1894,11 +1944,36 @@ export function allTradeGroupsForActivity(status, groups) {
 export function activityOpenRows(status, groups) {
   return dedupeTradeGroups(allTradeGroupsForActivity(status, groups))
     .filter((g) => isOpenTradeGroup(g))
+    .filter((g) => isDashboardStrategy(strategyId(g)))
     .sort((a, b) => (entryTimestampMs(b) || 0) - (entryTimestampMs(a) || 0));
 }
 
+export function profitSweepMetaLine(g) {
+  const status = String(g?.profit_sweep_status || "").toLowerCase();
+  if (!status) return null;
+  if (status === "filled") {
+    const inst = String(g?.profit_sweep_instrument_name || "");
+    const base = inst.split("_")[0] || String(g?.currency || "").toUpperCase() || "—";
+    const amt = g?.profit_sweep_amount;
+    const amtDisplay = amt !== undefined && amt !== null && amt !== "" ? String(amt) : "—";
+    return [
+      i18n("Profit sweep", "獲利兌 USDT"),
+      `${amtDisplay} ${base} → USDT`,
+    ];
+  }
+  if (status === "skipped") {
+    return [
+      i18n("Profit sweep", "獲利兌 USDT"),
+      i18n("below min size, skipped", "低於最小成交單位，未兌換"),
+    ];
+  }
+  return null;
+}
+
 export function activityClosedRows(status, report, groups) {
-  return mergedClosedRows(report, groups, 500, status);
+  return mergedClosedRows(report, groups, 500, status).filter((g) =>
+    isDashboardStrategy(strategyId(g))
+  );
 }
 
 export function paginateRows(rows, page, pageSize) {
@@ -2023,6 +2098,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
       holding !== null
         ? [i18n("Held", "持有"), `${fmtNum(holding, 1)}${INVESTOR_ZH ? " 天" : "d"}`]
         : null,
+      profitSweepMetaLine(g),
     ].filter(Boolean);
     const pnlValue =
       pnl !== null

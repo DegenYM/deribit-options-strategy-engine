@@ -10,13 +10,11 @@ import {
   FRONTEND_REFRESH_INTERVAL_MS,
   INVESTOR_OVERLAY_MAX_MS,
   INVESTOR_STATUS_TIMEOUT_MS,
-  STRATEGIES,
-  STRATEGY_BY_ID,
   USE_DASHBOARD_BUNDLE,
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, isDashboardStrategy, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { bookEquityNativeByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
@@ -87,6 +85,31 @@ export function renderTopBar(health) {
       "text-xs px-2 py-0.5 rounded-full border border-sky-500/50 bg-sky-500/10 text-sky-200";
   }
 
+  const profitSweepBadge = document.getElementById("profit-sweep-badge");
+  if (profitSweepBadge) {
+    const showSweep =
+      INVESTOR &&
+      (health.covered_call_profit_sweep_enabled ||
+        health.option_strategy === "covered_call" ||
+        (health.accounts || []).some(
+          (a) => a.option_strategy === "covered_call" && a.covered_call_profit_sweep_enabled
+        ));
+    if (showSweep) {
+      profitSweepBadge.hidden = false;
+      const enabled = !!health.covered_call_profit_sweep_enabled;
+      profitSweepBadge.textContent = enabled
+        ? i18n("Profit → USDT: on", "獲利兌 USDT：開啟")
+        : i18n("Profit → USDT: off", "獲利兌 USDT：關閉");
+      profitSweepBadge.className =
+        "text-xs px-2 py-0.5 rounded-full border " +
+        (enabled
+          ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
+          : "border-slate-600 bg-slate-700/30 text-slate-300");
+    } else {
+      profitSweepBadge.hidden = true;
+    }
+  }
+
   const credsBadge = document.getElementById("creds-badge");
   if (credsBadge) {
     credsBadge.textContent = health.has_private_creds
@@ -139,6 +162,13 @@ export function renderRegime(status) {
 
 // ---------- book cards ----------
 
+function bookCardAccentClass(book) {
+  if (book === "BTC") return "book-card-btc";
+  if (book === "ETH") return "book-card-eth";
+  if (book === "USDT") return "book-card-usdt";
+  return "book-card-usdc";
+}
+
 export function bookCardHtml(book, status) {
   const portfolio = status?.portfolio || {};
   const accounts = status?.accounts || {};
@@ -159,12 +189,7 @@ export function bookCardHtml(book, status) {
   const haltEntries = portfolio?.halt_entries_by_book?.[book];
   const haltReasons = portfolio?.halt_entry_reasons_by_book?.[book] || [];
 
-  const accentClass =
-    book === "BTC"
-      ? "book-card-btc"
-      : book === "ETH"
-      ? "book-card-eth"
-      : "book-card-usdc";
+  const accentClass = bookCardAccentClass(book);
 
   const chips = [];
   if (!isRiskBook) {
@@ -197,15 +222,17 @@ export function bookCardHtml(book, status) {
     ? "bar-warn"
     : "bar-ok";
 
+  const nativePlaces = book === "BTC" ? 8 : book === "ETH" ? 8 : 4;
+
   return `
-    <div class="rounded-2xl border ${accentClass} bg-slate-900/60 p-4 shadow">
-      <div class="flex items-center justify-between mb-2">
-        <h3 class="text-sm font-semibold tracking-wide text-slate-200">${book} BOOK</h3>
-        <div class="flex flex-wrap gap-1">${chips.join("")}</div>
+    <div class="book-card-tile rounded-2xl border ${accentClass} bg-slate-900/60 p-4 shadow min-w-0">
+      <div class="flex items-start justify-between gap-2 mb-2 min-w-0">
+        <h3 class="text-sm font-semibold tracking-wide text-slate-200 shrink-0">${book} BOOK</h3>
+        <div class="flex flex-wrap justify-end gap-1 min-w-0">${chips.join("")}</div>
       </div>
-      <div class="text-2xl font-mono">${fmtUsd(equityUsdc)}</div>
-      <div class="text-xs text-slate-500 mb-3">
-        ${equityNative !== null ? fmtNum(equityNative, 8) + " " + book : ""}
+      <div class="text-2xl font-mono tabular-nums">${fmtUsd(equityUsdc)}</div>
+      <div class="book-card-meta text-xs text-slate-500 mb-3">
+        ${equityNative !== null ? fmtNum(equityNative, nativePlaces) + " " + book : ""}
         ${dayStartUsdc !== null ? "· day-start " + fmtUsd(dayStartUsdc) : ""}
       </div>
       <div class="kv"><span class="k">Day P&amp;L</span><span class="v ${pnlClass(
@@ -253,16 +280,18 @@ export function renderBookCards(status) {
   if (!document.getElementById("books-section")?.open) return;
   if (!status) {
     root.innerHTML = `
-      <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 text-slate-400 text-sm md:col-span-3">
+      <div class="book-cards-strip-empty rounded-2xl border border-slate-800 bg-slate-900/60 p-5 text-slate-400 text-sm">
         Need DERIBIT_CLIENT_ID/SECRET in <code>.env</code> to load live status.
         Read-only views (closed trades, cumulative PnL) still work below.
       </div>`;
     return;
   }
-  const activeBooks = Object.keys(status?.portfolio?.equity_by_book || {})
-    .map((book) => String(book).toUpperCase())
-    .filter((book) => CORE_BOOKS.includes(book));
-  const books = activeBooks.length ? activeBooks : CORE_BOOKS;
+  const activeSet = new Set(
+    Object.keys(status?.portfolio?.equity_by_book || {})
+      .map((book) => String(book).toUpperCase())
+      .filter((book) => CORE_BOOKS.includes(book))
+  );
+  const books = CORE_BOOKS.filter((book) => activeSet.size === 0 || activeSet.has(book));
   const html = books
     .map((book) => bookCardHtml(book, status))
     .join("");
@@ -515,14 +544,14 @@ export function strategyAggregateRealizedApr(summary) {
 }
 
 export function buildStrategySummaries(status, report, groups) {
-  const ids = new Set(STRATEGIES.map((s) => s.id));
+  const ids = new Set(dashboardStrategyIds());
   const summaries = new Map();
   for (const id of ids) summaries.set(id, emptyStrategySummary(id));
 
   const openRows = currentOpenRows(status, groups);
   for (const g of openRows) {
     const id = strategyId(g);
-    if (!STRATEGY_BY_ID[id]) continue;
+    if (!isDashboardStrategy(id)) continue;
     const s = ensureStrategySummary(summaries, ids, id);
     s.openCount += 1;
     const credit = openRowEntryCreditUsd(g, status, groups);
@@ -536,7 +565,7 @@ export function buildStrategySummaries(status, report, groups) {
   const closedRows = closedRowsForStrategyStats(report, groups);
   for (const g of closedRows) {
     const id = strategyId(g);
-    if (!STRATEGY_BY_ID[id]) continue;
+    if (!isDashboardStrategy(id)) continue;
     const s = ensureStrategySummary(summaries, ids, id);
     s.closedCount += 1;
     const pnl = realizedPnlDisplayUsdc(g, status);
@@ -925,11 +954,11 @@ function countActiveStrategyIds(openRows, report, groups) {
   const ids = new Set();
   for (const g of openRows) {
     const id = strategyId(g);
-    if (STRATEGY_BY_ID[id]) ids.add(id);
+    if (isDashboardStrategy(id)) ids.add(id);
   }
   const noteClosed = (g) => {
     const id = strategyId(g);
-    if (STRATEGY_BY_ID[id]) ids.add(id);
+    if (isDashboardStrategy(id)) ids.add(id);
   };
   for (const g of groups?.closed || []) noteClosed(g);
   for (const g of report?.recent_closed_trades || []) noteClosed(g);
@@ -976,10 +1005,10 @@ export function renderStrategyGroups(status, report, groups) {
   }
 
   const byStrategy = new Map();
-  const ids = new Set(STRATEGIES.map((s) => s.id));
+  const ids = new Set(dashboardStrategyIds());
   for (const g of openRows) {
     const id = strategyId(g);
-    if (!STRATEGY_BY_ID[id]) continue;
+    if (!isDashboardStrategy(id)) continue;
     if (!byStrategy.has(id)) byStrategy.set(id, []);
     byStrategy.get(id).push(g);
   }
@@ -1068,9 +1097,15 @@ export function closedAnnualizedReturnOnEquity(g, status) {
 
 export function stressSections(stress) {
   const grouped = Array.isArray(stress?.strategy_stresses)
-    ? stress.strategy_stresses.filter(Boolean)
+    ? stress.strategy_stresses.filter(Boolean).filter((row) =>
+        isDashboardStrategy(row?.option_strategy || row?.strategy_analysis?.label)
+      )
     : [];
-  return grouped.length ? grouped : [stress];
+  if (grouped.length) return grouped;
+  const single = stress && isDashboardStrategy(stress.option_strategy || stress.strategy_analysis?.label)
+    ? stress
+    : null;
+  return single ? [single] : [];
 }
 
 export function renderStressSection(stress, sectionCount) {

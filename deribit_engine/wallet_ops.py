@@ -121,7 +121,7 @@ def resolve_spot_trade_side(from_currency: str, to_currency: str) -> tuple[str, 
 
 
 def _lookup_spot_instrument(client: DeribitClient, instrument_name: str, base_currency: str) -> OptionInstrument:
-    for lookup_currency in ("USDC", base_currency.upper()):
+    for lookup_currency in ("USDT", "USDC", base_currency.upper()):
         try:
             rows = client.get_instruments(lookup_currency, kind="spot", expired=False)
         except ExchangeError:
@@ -252,6 +252,129 @@ def _spot_trade_price_quote(
     if book.index_price > 0:
         return _align_spot_limit_price(book.index_price, instrument), "index", book
     return Decimal("0"), "unavailable", book
+
+
+def _spot_reference_mark_price(book: OrderBookSnapshot) -> Decimal:
+    """Reference USD price for spot slippage checks (mark preferred)."""
+    if book.mark_price > 0:
+        return book.mark_price
+    if book.index_price > 0:
+        return book.index_price
+    if book.best_bid_price > 0 and book.best_ask_price > 0:
+        return (book.best_bid_price + book.best_ask_price) / Decimal("2")
+    if book.best_bid_price > 0:
+        return book.best_bid_price
+    if book.best_ask_price > 0:
+        return book.best_ask_price
+    return Decimal("0")
+
+
+def resolve_protected_spot_order(
+    *,
+    direction: str,
+    book: OrderBookSnapshot,
+    instrument: OptionInstrument,
+    order_type: str,
+    max_slippage_pct: Decimal,
+) -> tuple[str, Decimal | None, Decimal | None, str | None]:
+    """Map a market spot order to a limit IOC when ``max_slippage_pct`` > 0.
+
+    Returns ``(effective_order_type, limit_price, reference_mark, skip_reason)``.
+    For sells the limit floor is ``mark * (1 - max_slippage_pct)``; skip when
+    ``best_bid`` is below that floor.
+    """
+    if order_type != "market" or max_slippage_pct <= 0:
+        return order_type, None, None, None
+
+    mark = _spot_reference_mark_price(book)
+    if mark <= 0:
+        return order_type, None, None, "mark_price_unavailable"
+
+    is_buy = direction.lower() == "buy"
+    if is_buy:
+        cap = _align_spot_limit_price(mark * (Decimal("1") + max_slippage_pct), instrument)
+        if book.best_ask_price > 0 and book.best_ask_price > cap:
+            return order_type, None, mark, "slippage_exceeded"
+        return "limit", cap, mark, None
+
+    floor = _align_spot_limit_price(mark * (Decimal("1") - max_slippage_pct), instrument)
+    if book.best_bid_price > 0 and book.best_bid_price < floor:
+        return order_type, None, mark, "slippage_exceeded"
+    return "limit", floor, mark, None
+
+
+def place_protected_spot_order(
+    client: DeribitClient,
+    *,
+    instrument: OptionInstrument,
+    instrument_name: str,
+    direction: str,
+    amount: Decimal,
+    label: str,
+    order_type: str,
+    max_slippage_pct: Decimal,
+    live: bool,
+) -> dict[str, Any]:
+    """Place a spot order; market requests honor ``max_slippage_pct`` vs mark."""
+    book = OrderBookSnapshot.from_api(client.get_order_book(instrument_name, depth=1))
+    effective_type, limit_px, reference_mark, skip_reason = resolve_protected_spot_order(
+        direction=direction,
+        book=book,
+        instrument=instrument,
+        order_type=order_type,
+        max_slippage_pct=max_slippage_pct,
+    )
+    payload: dict[str, Any] = {
+        "instrument_name": instrument_name,
+        "direction": direction,
+        "amount": format_decimal(amount, 8),
+        "requested_order_type": order_type,
+        "order_type": effective_type,
+        "max_slippage_pct": format_decimal(max_slippage_pct, 8),
+        "live": live,
+    }
+    if reference_mark is not None and reference_mark > 0:
+        payload["reference_mark_price"] = format_decimal(reference_mark, 4)
+    if limit_px is not None and limit_px > 0:
+        payload["slippage_limit_price"] = format_decimal(limit_px, 4)
+    if book.best_bid_price > 0:
+        payload["best_bid_price"] = format_decimal(book.best_bid_price, 4)
+    if book.best_ask_price > 0:
+        payload["best_ask_price"] = format_decimal(book.best_ask_price, 4)
+
+    if skip_reason:
+        payload["skipped"] = True
+        payload["reason"] = skip_reason
+        return payload
+    if not live:
+        payload["preview"] = True
+        return payload
+
+    order_kwargs: dict[str, Any] = {
+        "instrument_name": instrument_name,
+        "amount": amount,
+        "label": label,
+        "order_type": effective_type,
+    }
+    if effective_type == "limit":
+        if limit_px is None or limit_px <= 0:
+            payload["skipped"] = True
+            payload["reason"] = "limit_price_unavailable"
+            return payload
+        order_kwargs["price"] = limit_px
+        order_kwargs["time_in_force"] = "immediate_or_cancel"
+
+    place_order = client.place_buy_order if direction.lower() == "buy" else client.place_sell_order
+    response = place_order(**order_kwargs)
+    payload["response"] = response
+    order = response.get("order") if isinstance(response, dict) else None
+    if isinstance(order, dict):
+        payload["order_id"] = order.get("order_id")
+        payload["order_state"] = order.get("order_state")
+        fill_price = to_decimal(order.get("average_price"))
+        if fill_price > 0:
+            payload["average_price"] = format_decimal(fill_price, 4)
+    return payload
 
 
 def _attach_trade_price_fields(
@@ -512,22 +635,53 @@ def trade_spot(
     )
     if order_type == "limit" and trade_price > 0:
         payload["limit_price"] = format_decimal(trade_price, 4)
+    if order_type == "market" and config.covered_call_spot_max_slippage_pct > 0:
+        effective_type, limit_px, reference_mark, skip_reason = resolve_protected_spot_order(
+            direction=direction,
+            book=book,
+            instrument=instrument,
+            order_type=order_type,
+            max_slippage_pct=config.covered_call_spot_max_slippage_pct,
+        )
+        payload["max_slippage_pct"] = format_decimal(config.covered_call_spot_max_slippage_pct, 8)
+        payload["effective_order_type"] = effective_type
+        if reference_mark is not None and reference_mark > 0:
+            payload["reference_mark_price"] = format_decimal(reference_mark, 4)
+        if limit_px is not None and limit_px > 0:
+            payload["slippage_limit_price"] = format_decimal(limit_px, 4)
+        if skip_reason:
+            payload["would_skip"] = skip_reason
     if not live:
         return payload
 
     order_label = label or f"{config.order_label_prefix}-spot-{direction}"
-    order_kwargs: dict[str, Any] = {
-        "instrument_name": resolved_instrument,
-        "amount": order_amount,
-        "label": order_label,
-        "order_type": order_type,
-    }
-    if order_type == "limit":
-        if trade_price <= 0:
-            raise ConfigurationError(f"Cannot determine limit price for spot {direction} (empty order book?)")
-        order_kwargs["price"] = trade_price
-    place_order = client.place_buy_order if direction == "buy" else client.place_sell_order
-    response = place_order(**order_kwargs)
+    protected = place_protected_spot_order(
+        client,
+        instrument=instrument,
+        instrument_name=resolved_instrument,
+        direction=direction,
+        amount=order_amount,
+        label=order_label,
+        order_type=order_type,
+        max_slippage_pct=config.covered_call_spot_max_slippage_pct,
+        live=True,
+    )
+    if protected.get("skipped"):
+        payload["action"] = "trade_spot_skipped"
+        payload["reason"] = protected.get("reason")
+        payload["reference_mark_price"] = protected.get("reference_mark_price")
+        payload["slippage_limit_price"] = protected.get("slippage_limit_price")
+        payload["order_type"] = protected.get("order_type", order_type)
+        return payload
+
+    response = protected.get("response")
+    payload["order_type"] = protected.get("order_type", order_type)
+    if protected.get("requested_order_type") == "market" and payload["order_type"] == "limit":
+        payload["order_type_note"] = "market_with_mark_slippage_cap"
+    if protected.get("reference_mark_price"):
+        payload["reference_mark_price"] = protected.get("reference_mark_price")
+    if protected.get("slippage_limit_price"):
+        payload["slippage_limit_price"] = protected.get("slippage_limit_price")
     payload["response"] = response
     order = response.get("order") if isinstance(response, dict) else None
     if isinstance(order, dict):

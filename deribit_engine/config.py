@@ -206,6 +206,11 @@ class BotConfig:
     covered_call_robust_exit_dte: Decimal = Decimal("0.5")
     covered_call_itm_buffer_pct: Decimal = Decimal("0")
     covered_call_spot_order_type: str = "market"
+    covered_call_spot_max_slippage_pct: Decimal = Decimal("0")
+    covered_call_profit_sweep_enabled: bool = False
+    # When true, each covered_call entry sizes to available_cover / remaining
+    # MAX_GROUPS_PER_CURRENCY slots (scales with spot; no fixed QTY cap).
+    covered_call_slot_sizing: bool = True
     # ``strategy`` = normal trading sub-account; ``fee`` = operator fee wallet only.
     account_role: str = "strategy"
 
@@ -621,6 +626,14 @@ def load_config(
     covered_call_spot_order_type = _optional(values, "COVERED_CALL_SPOT_ORDER_TYPE", "market").lower()
     if covered_call_spot_order_type != "market":
         raise ConfigurationError("COVERED_CALL_SPOT_ORDER_TYPE currently supports only: market")
+    covered_call_spot_max_slippage_pct = to_decimal(_optional(values, "COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT", "0"))
+    if covered_call_spot_max_slippage_pct < 0 or covered_call_spot_max_slippage_pct >= 1:
+        raise ConfigurationError("COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT must be in [0, 1)")
+    covered_call_spot_exit_enabled = _to_bool(_optional(values, "COVERED_CALL_SPOT_EXIT_ENABLED", "false"))
+    covered_call_profit_sweep_enabled = _to_bool(_optional(values, "COVERED_CALL_PROFIT_SWEEP_ENABLED", "false"))
+    covered_call_slot_sizing = _to_bool(_optional(values, "COVERED_CALL_SLOT_SIZING", "true"), default=True)
+    if (covered_call_profit_sweep_enabled or covered_call_spot_exit_enabled) and "USDT" not in traded_collaterals:
+        traded_collaterals = tuple(list(traded_collaterals) + ["USDT"])
 
     put_dte_min = int(_optional(values, "PUT_DTE_MIN", _optional(values, "ENTRY_DTE_MIN", "10")))
     put_dte_max = int(_optional(values, "PUT_DTE_MAX", _optional(values, "ENTRY_DTE_MAX", "21")))
@@ -821,10 +834,13 @@ def load_config(
         traded_collaterals=traded_collaterals,
         min_book_equity_usdc=min_book_equity_usdc,
         cash_flow_query_interval_seconds=cash_flow_query_interval_seconds,
-        covered_call_spot_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_SPOT_EXIT_ENABLED", "false")),
+        covered_call_spot_exit_enabled=covered_call_spot_exit_enabled,
         covered_call_robust_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_ROBUST_EXIT_ENABLED", "false")),
         covered_call_robust_exit_dte=to_decimal(_optional(values, "COVERED_CALL_ROBUST_EXIT_DTE", "0.5")),
         covered_call_itm_buffer_pct=to_decimal(_optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")),
         covered_call_spot_order_type=covered_call_spot_order_type,
+        covered_call_spot_max_slippage_pct=covered_call_spot_max_slippage_pct,
+        covered_call_profit_sweep_enabled=covered_call_profit_sweep_enabled,
+        covered_call_slot_sizing=covered_call_slot_sizing,
         account_role=account_role,
     )

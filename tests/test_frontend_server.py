@@ -857,6 +857,134 @@ def test_dashboard_bundle_endpoint_requires_private_creds(tmp_path, monkeypatch)
     assert response.status_code == 401
 
 
+def test_health_dashboard_strategies_from_accounts_toml(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / "config/shared/strategies").mkdir(parents=True)
+    investor = tmp_path / "config/investors/alpha"
+    accounts_dir = investor / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_env = accounts_dir / ".env.covered_call"
+    account_env.write_text(
+        "\n".join(
+            [
+                "DERIBIT_ENV=mainnet",
+                "OPTION_STRATEGY=covered_call",
+                "STATE_FILE=.state/alpha/covered_call.json",
+                "DERIBIT_CLIENT_ID=cid",
+                "DERIBIT_CLIENT_SECRET=sec",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (investor / "accounts.toml").write_text(
+        "\n".join(
+            [
+                '[investor]\nid = "alpha"\ndisplay_name = "Alpha"\n',
+                '[[accounts]]\nslug = "covered_call"\nstrategy = "covered_call"\nenabled = true\n',
+                '[[accounts]]\nslug = "naked"\nstrategy = "naked_short"\nenabled = false\n',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = make_config(
+        tmp_path,
+        state_file=tmp_path / "bot.json",
+        option_strategy="covered_call",
+        client_id="cid",
+        client_secret="sec",
+    )
+    monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
+    app = frontend_server.create_app(
+        env_file=account_env,
+        account_env_files=(account_env,),
+        enable_scheduler=False,
+    )
+    client = TestClient(app)
+
+    body = client.get("/api/health").json()
+
+    assert body["dashboard_strategies"] == ["covered_call"]
+    assert body["investor_id"] == "alpha"
+
+
+def test_investor_html_injects_dashboard_strategies(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / "config/shared/strategies").mkdir(parents=True)
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "frontend/investor.html").write_text(
+        "<!doctype html><html><head></head><body>ok</body></html>",
+        encoding="utf-8",
+    )
+    investor = tmp_path / "config/investors/alpha"
+    accounts_dir = investor / "accounts"
+    accounts_dir.mkdir(parents=True)
+    account_env = accounts_dir / ".env.covered_call"
+    account_env.write_text(
+        "\n".join(
+            [
+                "DERIBIT_ENV=mainnet",
+                "OPTION_STRATEGY=covered_call",
+                "STATE_FILE=.state/alpha/covered_call.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (investor / "accounts.toml").write_text(
+        "\n".join(
+            [
+                '[investor]\nid = "alpha"\ndisplay_name = "Alpha"\n',
+                '[[accounts]]\nslug = "covered_call"\nstrategy = "covered_call"\nenabled = true\n',
+                '[[accounts]]\nslug = "naked"\nstrategy = "naked_short"\nenabled = false\n',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = make_config(tmp_path, state_file=tmp_path / "bot.json", option_strategy="covered_call")
+    monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
+    app = frontend_server.create_app(
+        env_file=account_env,
+        account_env_files=(account_env,),
+        enable_scheduler=False,
+        investor_portal=True,
+    )
+    client = TestClient(app)
+
+    html = client.get("/investor.html").text
+
+    assert 'window.__DASHBOARD_STRATEGIES__=["covered_call"]' in html
+
+
+def test_dashboard_strategies_fallback_to_loaded_accounts(tmp_path, monkeypatch) -> None:
+    from deribit_engine.frontend_server.helpers import _dashboard_strategies
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    cfg = make_config(
+        tmp_path,
+        state_file=tmp_path / "bot.json",
+        option_strategy="bull_put_spread",
+        client_id="cid",
+        client_secret="sec",
+    )
+    assert _dashboard_strategies(
+        investor_id=None,
+        repo_root=None,
+        accounts=[
+            DashboardAccount(
+                name="bull_put",
+                env_file=env_file,
+                config=cfg,
+                state_path=Path(cfg.state_file),
+                ledger_root=tmp_path / "ledger",
+            )
+        ],
+    ) == ["bull_put_spread"]
+
+
 def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) -> None:
     import threading
     import time

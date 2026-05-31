@@ -33,9 +33,10 @@ export const BOOK_COLORS = {
   BTC: "#fb923c",
   ETH: "#818cf8",
   USDC: "#38bdf8",
+  USDT: "#22c55e",
   TOTAL: "#a3e635",
 };
-export const CORE_BOOKS = ["BTC", "ETH", "USDC"];
+export const CORE_BOOKS = ["BTC", "ETH", "USDC", "USDT"];
 export const FRONTEND_REFRESH_INTERVAL_MS = 180_000;
 export const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 3;
 export const USE_DASHBOARD_BUNDLE = true;

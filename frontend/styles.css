@@ -303,6 +303,64 @@ table tbody tr:hover {
 .book-card-usdc {
   border-color: rgba(56, 189, 248, 0.45);
 }
+.book-card-usdt {
+  border-color: rgba(34, 197, 94, 0.45);
+}
+
+/* Collateral books — four equal columns on desktop (full section width). */
+.book-cards-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  width: 100%;
+}
+
+.book-cards-strip > .book-card-tile {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.book-card-tile .book-card-meta {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
+}
+
+.book-card-tile .kv {
+  min-width: 0;
+}
+
+.native-book-symbol--btc {
+  color: rgb(251 146 60 / 0.88);
+}
+
+.native-book-symbol--eth {
+  color: rgb(165 180 252 / 0.92);
+}
+
+.native-book-symbol--usdc {
+  color: rgb(56 189 248 / 0.85);
+}
+
+.native-book-symbol--usdt {
+  color: rgb(74 222 128 / 0.9);
+}
+
+@media (min-width: 640px) {
+  .book-cards-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 768px) {
+  .book-cards-strip {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.book-cards-strip-empty {
+  grid-column: 1 / -1;
+}
 
 .strategy-card-put {
   border-color: rgba(251, 146, 60, 0.45);
@@ -1536,36 +1594,54 @@ table tbody tr:hover {
   line-height: 1.4;
 }
 
-.native-book-breakdown,
-.book-equity-dual-breakdown {
+.overview-metric-meta--equity {
+  margin-top: 0.35rem;
+  gap: 0.2rem;
+}
+
+.equity-book-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  align-items: flex-start;
+  width: 100%;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: rgb(100 116 139);
+}
+
+.equity-book-rows .native-book-item {
+  gap: 0.25rem;
+}
+
+.equity-book-native {
+  margin-right: 0.15rem;
+}
+
+.equity-book-usd {
+  color: rgb(148 163 184);
+}
+
+.inv-equity-breakdown {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgb(51 65 85 / 0.45);
+}
+
+.inv-equity-breakdown .overview-metric-line {
+  margin-top: 0.25rem;
+}
+
+.inv-kpi--equity {
+  min-width: 0;
+}
+
+.native-book-breakdown {
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
   align-items: flex-start;
   max-width: 100%;
-}
-
-.book-equity-dual-row {
-  display: inline-flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0.25rem 0.35rem;
-  max-width: 100%;
-}
-
-.book-equity-dual-sep {
-  font-size: 0.7rem;
-  user-select: none;
-}
-
-.inv-equity-dual {
-  margin-top: 0.65rem;
-  padding-top: 0.65rem;
-  border-top: 1px solid rgb(51 65 85 / 0.45);
-}
-
-.inv-equity-dual .book-equity-dual-row {
-  font-size: 0.8rem;
 }
 
 .native-book-item {

@@ -349,7 +349,7 @@ def test_covered_call_robust_exit_dry_run_previews_call_close_and_spot_sell(tmp_
     assert actions[0]["action"] == "close_group_preview"
     assert actions[0]["reason"] == "covered_call_robust_exit"
     assert actions[1]["action"] == "covered_call_spot_exit_preview"
-    assert actions[1]["instrument_name"] == "BTC_USDC"
+    assert actions[1]["instrument_name"] == "BTC_USDT"
     assert actions[1]["amount"] == "0.1"
 
 
@@ -378,7 +378,7 @@ def test_covered_call_robust_exit_live_sells_spot_after_call_close(tmp_path):
     result = engine.manage(live=True)
 
     assert any(action["action"] == "close_group" for action in result["actions"])
-    spot_orders = [order for order in client.placed_orders if order["instrument_name"] == "BTC_USDC"]
+    spot_orders = [order for order in client.placed_orders if order["instrument_name"] == "BTC_USDT"]
     assert len(spot_orders) == 1
     assert spot_orders[0]["direction"] == "sell"
     assert spot_orders[0]["order_type"] == "market"
@@ -416,7 +416,7 @@ def test_covered_call_robust_exit_does_not_sell_spot_when_close_incomplete(tmp_p
     result = engine.manage(live=True)
 
     assert any(action["action"] == "close_group_incomplete" for action in result["actions"])
-    assert not [order for order in client.placed_orders if order["instrument_name"] == "BTC_USDC"]
+    assert not [order for order in client.placed_orders if order["instrument_name"] == "BTC_USDT"]
 
 
 def test_covered_call_robust_exit_ignores_non_itm_call(tmp_path):
@@ -508,6 +508,109 @@ def test_covered_call_otm_take_profit_when_capture_exceeds_threshold(tmp_path):
 
     close_mock.assert_called_once_with(ctx, group, reason="take_profit", live=False)
     assert actions[0]["reason"] == "take_profit"
+
+
+def test_covered_call_profit_sweep_schedules_pending_on_income_exit(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group()
+    group.status = "closed"
+    group.realized_pnl_collateral_native = Decimal("0.000673")
+
+    engine._maybe_schedule_profit_sweep(group, reason="take_profit", live=True)
+
+    assert group.profit_sweep_status == "pending"
+    assert group.profit_sweep_amount == Decimal("0.000673")
+    assert group.profit_sweep_reason == "take_profit"
+
+
+def test_covered_call_profit_sweep_disabled_leaves_status_empty(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        covered_call_profit_sweep_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group()
+    group.status = "closed"
+    group.realized_pnl_collateral_native = Decimal("0.000673")
+
+    engine._maybe_schedule_profit_sweep(group, reason="take_profit", live=True)
+
+    assert group.profit_sweep_status == ""
+
+
+def test_covered_call_profit_sweep_live_sells_usdt(tmp_path):
+    client = FakeClient(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    group = _covered_call_group()
+    group.status = "closed"
+    group.close_reason = "take_profit"
+    group.profit_sweep_status = "pending"
+    group.profit_sweep_amount = Decimal("0.0005")
+    group.realized_pnl_collateral_native = Decimal("0.0005")
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    result = engine.manage(live=True)
+
+    assert any(action["action"] == "covered_call_profit_sweep" for action in result["actions"])
+    spot_orders = [order for order in client.placed_orders if order["instrument_name"] == "BTC_USDT"]
+    assert len(spot_orders) == 1
+    assert spot_orders[0]["direction"] == "sell"
+    saved = engine.state_store.load().groups[0]
+    assert saved.profit_sweep_status == "filled"
+    assert saved.profit_sweep_order_id
+
+
+def test_covered_call_profit_sweep_live_skips_on_slippage(tmp_path):
+    client = FakeClient(btc_book_equity="0.5")
+    client.order_book_overrides["BTC_USDT"] = {
+        "instrument_name": "BTC_USDT",
+        "best_bid_price": "69000",
+        "best_ask_price": "70100",
+        "mark_price": "70000",
+        "index_price": "70000",
+    }
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        covered_call_spot_max_slippage_pct=Decimal("0.005"),
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    group = _covered_call_group()
+    group.status = "closed"
+    group.close_reason = "take_profit"
+    group.profit_sweep_status = "pending"
+    group.profit_sweep_amount = Decimal("0.0005")
+    group.realized_pnl_collateral_native = Decimal("0.0005")
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    result = engine.manage(live=True)
+
+    assert any(action["action"] == "covered_call_profit_sweep_skipped" for action in result["actions"])
+    assert not [order for order in client.placed_orders if order["instrument_name"] == "BTC_USDT"]
+    saved = engine.state_store.load().groups[0]
+    assert saved.profit_sweep_status == "pending"
 
 
 def test_covered_call_itm_skips_take_profit_until_robust_exit(tmp_path):
@@ -636,7 +739,7 @@ def test_covered_call_settlement_exit_marks_pending_and_previews_spot_sell(tmp_p
     saved = engine.state_store.load().groups[0]
     assert saved.status == "closed"
     assert saved.spot_exit_status == "pending"
-    assert saved.spot_exit_instrument_name == "BTC_USDC"
+    assert saved.spot_exit_instrument_name == "BTC_USDT"
 
 
 def test_dry_run_bull_put_spread_entry_includes_long_leg(tmp_path, fake_client):

@@ -203,7 +203,7 @@ def native_book_amount_to_usdc(
     index_by_ccy: dict[str, Decimal],
 ) -> Decimal:
     """Convert a per-book net-flow native balance to USDC equivalent."""
-    if book == "USDC":
+    if book in ("USDC", "USDT"):
         return amount_native
     index = index_by_ccy.get(book, Decimal("0"))
     return amount_native * index

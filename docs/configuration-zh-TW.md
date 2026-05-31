@@ -90,6 +90,12 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 
 若需手動指定起始高水位，可設 `INITIAL_HWM_NAV_PERF`。交易流水預設自 **2026-01-01 UTC** 起掃描（覆寫：`FEE_FLOW_START_DATE=YYYY-MM-DD`）。備兌現貨可選填 `COLLATERAL_SPOT_BTC` / `COLLATERAL_SPOT_ETH`（多數投資人留 0 即可）。
 
+**Covered call 獲利兌 USDT（可選）**：在 `.env.investor` 設 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`（預設 false）。啟用後，covered_call 子帳在 income exit（take profit / time exit / early exit）獲利平倉時，會將該筆 native premium profit 自動 market 賣成 **USDT**；僅賣該筆 realized PnL，不動約定備兌現貨。修改後需**重啟**該子帳 live bot。Dashboard 會唯讀顯示開關狀態與每筆 sweep 紀錄。季末付費時若 profit 已在 USDT，通常只需兌剩餘 BTC/ETH 獲利。
+
+**Covered call ITM spot exit**：策略 profile 設 `COVERED_CALL_SPOT_EXIT_ENABLED=true` 時，ITM 退場（robust 或 settlement pending）也會 market 賣成 **BTC_USDT / ETH_USDT**，與 profit sweep 相同 quote。啟用 `COVERED_CALL_SPOT_EXIT_ENABLED` 或 `COVERED_CALL_PROFIT_SWEEP_ENABLED` 時，config 會**自動**把 **USDT** 加入 `TRADED_COLLATERALS`，無需手動改 strategy env。
+
+**Spot 滑價保護**：策略 profile 可設 `COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT`（例如 `0.005` = 相對 mark 最多賣低 0.5%）。大於 0 時，market 賣出會改為 **limit IOC**，底價 = `mark × (1 − pct)`；若當下 best bid 低於底價則**跳過**並下個 cycle 重試（profit sweep / ITM spot exit 維持 pending）。
+
 3. 手動或排程快照，寫入 `data/fee_ledger/<investor_id>/snapshots.db`：
 
 ```bash
@@ -373,6 +379,8 @@ COVERED_CALL_SPOT_ORDER_TYPE=market
 
 MAX_GROUPS_PER_CURRENCY=3
 MAX_CONCURRENT_GROUPS=6
+# 槽位分配（預設 true）：每筆進場 ≈ 剩餘 cover / 剩餘 MAX_GROUPS_PER_CURRENCY 槽位
+# COVERED_CALL_SLOT_SIZING=true
 ```
 
 ## 憑證需求

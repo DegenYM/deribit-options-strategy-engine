@@ -362,17 +362,24 @@ class ExecutionMixin:
         if not live:
             return payload
 
-        group.spot_exit_status = "submitted"
         group.spot_exit_amount = amount
         group.spot_exit_instrument_name = instrument_name
         group.spot_exit_reason = reason
         label = f"{group.short_label or self._spread_labels(group.currency, group.group_id)['short']}-spot-exit"
         try:
-            response = self.client.place_sell_order(
+            from ..wallet_ops import _lookup_spot_instrument, place_protected_spot_order
+
+            instrument = _lookup_spot_instrument(self.client, instrument_name, group.currency)
+            protected = place_protected_spot_order(
+                self.client,
+                instrument=instrument,
                 instrument_name=instrument_name,
+                direction="sell",
                 amount=amount,
                 label=label,
                 order_type=self.config.covered_call_spot_order_type,
+                max_slippage_pct=self.config.covered_call_spot_max_slippage_pct,
+                live=True,
             )
         except Exception as exc:  # Do not blindly retry non-idempotent spot sells.
             group.spot_exit_reason = f"{reason}: submission_uncertain: {exc}"
@@ -380,6 +387,24 @@ class ExecutionMixin:
             payload["error"] = str(exc)
             return payload
 
+        if protected.get("skipped"):
+            skip_reason = str(protected.get("reason") or "skipped")
+            group.spot_exit_reason = f"{reason}: {skip_reason}"
+            payload["reason"] = skip_reason
+            payload["reference_mark_price"] = protected.get("reference_mark_price")
+            payload["slippage_limit_price"] = protected.get("slippage_limit_price")
+            if skip_reason != "slippage_exceeded":
+                group.spot_exit_status = "skipped"
+            payload["spot_exit_status"] = group.spot_exit_status or "pending"
+            return payload
+
+        group.spot_exit_status = "submitted"
+        response = protected.get("response") or {}
+        payload["order_type"] = protected.get("order_type", self.config.covered_call_spot_order_type)
+        if protected.get("reference_mark_price"):
+            payload["reference_mark_price"] = protected.get("reference_mark_price")
+        if protected.get("slippage_limit_price"):
+            payload["slippage_limit_price"] = protected.get("slippage_limit_price")
         order = self._response_order(response)
         order_state = str(order.get("order_state") or "").lower()
         filled = self._response_filled_amount(response)
@@ -548,6 +573,8 @@ class ExecutionMixin:
             realized_return_on_max_loss=realized_return_on_max_loss,
             index_price_usd=short_book.index_price,
         )
+        if live:
+            self._maybe_schedule_profit_sweep(group, reason=reason, live=live)
         close_action = {
             "action": "close_group",
             "reason": reason,

@@ -127,8 +127,15 @@ def make_config(tmp_path: Path, **overrides) -> BotConfig:
         covered_call_robust_exit_dte=Decimal("0.5"),
         covered_call_itm_buffer_pct=Decimal("0"),
         covered_call_spot_order_type="market",
+        covered_call_spot_max_slippage_pct=Decimal("0"),
+        covered_call_profit_sweep_enabled=False,
+        covered_call_slot_sizing=True,
     )
     values.update(overrides)
+    if values.get("covered_call_profit_sweep_enabled"):
+        traded = list(values.get("traded_collaterals") or ("BTC", "ETH", "USDC"))
+        if "USDT" not in traded:
+            values["traded_collaterals"] = tuple(traded + ["USDT"])
     return BotConfig(**values)
 
 
@@ -223,6 +230,30 @@ class FakeClient:
                     "base_currency": "ETH",
                     "quote_currency": "USDC",
                     "settlement_currency": "USDC",
+                    "instrument_type": "spot",
+                    "kind": "spot",
+                    "tick_size": "0.05",
+                    "min_trade_amount": "0.001",
+                    "contract_size": "0.001",
+                    "instrument_state": "open",
+                },
+                {
+                    "instrument_name": "BTC_USDT",
+                    "base_currency": "BTC",
+                    "quote_currency": "USDT",
+                    "settlement_currency": "USDT",
+                    "instrument_type": "spot",
+                    "kind": "spot",
+                    "tick_size": "0.5",
+                    "min_trade_amount": "0.0001",
+                    "contract_size": "0.0001",
+                    "instrument_state": "open",
+                },
+                {
+                    "instrument_name": "ETH_USDT",
+                    "base_currency": "ETH",
+                    "quote_currency": "USDT",
+                    "settlement_currency": "USDT",
                     "instrument_type": "spot",
                     "kind": "spot",
                     "tick_size": "0.05",
@@ -430,6 +461,34 @@ class FakeClient:
                 "mark_iv": "0.55",
                 "open_interest": "60",
                 "greeks": {"delta": "0.11"},
+            }
+        if instrument_name in {"BTC_USDC", "ETH_USDC"}:
+            index_price = "70000" if instrument_name.startswith("BTC") else "3500"
+            return {
+                "instrument_name": instrument_name,
+                "best_bid_price": index_price,
+                "best_bid_amount": "1",
+                "best_ask_price": index_price,
+                "best_ask_amount": "1",
+                "mark_price": index_price,
+                "index_price": index_price,
+                "mark_iv": "0",
+                "open_interest": "1000",
+                "greeks": {"delta": "1"},
+            }
+        if instrument_name in {"BTC_USDT", "ETH_USDT"}:
+            index_price = "70000" if instrument_name.startswith("BTC") else "3500"
+            return {
+                "instrument_name": instrument_name,
+                "best_bid_price": index_price,
+                "best_bid_amount": "1",
+                "best_ask_price": index_price,
+                "best_ask_amount": "1",
+                "mark_price": index_price,
+                "index_price": index_price,
+                "mark_iv": "0",
+                "open_interest": "1000",
+                "greeks": {"delta": "1"},
             }
         raise KeyError(instrument_name)
 

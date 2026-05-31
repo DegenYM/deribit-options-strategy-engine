@@ -139,6 +139,19 @@ Cloudflare Tunnel / Access 仍依 [`cloudflare-tunnel-investor.md`](cloudflare-t
 ./scripts/frontend_launchd_all.sh start
 ```
 
+**Cloudflare Tunnel（cloudflared run）** — 全站**一個** tunnel 行程；讀 `registry.toml` 的 `[platform].tunnel_name`，實際執行 `cloudflared tunnel --config ~/.cloudflared/config.yml run`：
+
+```bash
+./bot investor tunnel start      # 啟動（先確認 frontend 已起）
+./bot investor tunnel stop       # 停止
+./bot investor tunnel restart    # 重啟
+./bot investor tunnel status     # launchd + 本機 metrics
+
+./scripts/tunnel_launchd.sh start
+```
+
+手動前景測試（不占 launchd）：見 [`cloudflare-tunnel-investor.md`](cloudflare-tunnel-investor.md) 第五節。
+
 **Live bot（實單監督）** — 依 `live_enabled = true` 批次管理 `com.deribit.live.*` LaunchAgent：
 
 ```bash
@@ -158,6 +171,7 @@ Cloudflare Tunnel / Access 仍依 [`cloudflare-tunnel-investor.md`](cloudflare-t
 |------|------|
 | `./bot investor list` | 列出 registry + 本機 `config/investors/` |
 | `./bot investor frontend start` | 一次啟動所有 `frontend_enabled` 的 dashboard |
+| `./bot investor tunnel start` | 啟動 cloudflared tunnel run（launchd 常駐） |
 | `./bot investor live start` | 一次啟動所有 `live_enabled` 的 live 監督 |
 | `./bot investor render-launchd alice` | 重產 launchd plist（改埠時加 `--port`） |
 | `./bot investor render-systemd alice` | 重產 systemd unit（Linux；改埠時加 `--port`） |

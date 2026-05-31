@@ -38,6 +38,7 @@ from .helpers import (
     _backfill_row_collateral_native,
     _configure_metrics_db,
     _cumulative_pnl_series_from_store,
+    _dashboard_strategies,
     _decimalize,
     _has_private_creds,
     _ledger_equity_cache_key,
@@ -103,6 +104,11 @@ def create_app(
             dashboard_investor_display_name = dashboard_investor_id
     config_public = accounts[0].config
     multi_account = len(accounts) > 1
+    dashboard_strategies_list = _dashboard_strategies(
+        investor_id=dashboard_investor_id,
+        repo_root=repo_root,
+        accounts=accounts,
+    )
     interval = int(
         snapshot_interval_sec
         if snapshot_interval_sec is not None
@@ -212,6 +218,10 @@ def create_app(
     @app.get("/api/health")
     def health() -> dict[str, Any]:
         any_have_creds = any(_has_private_creds(account.config) for account in accounts)
+        covered_call_sweep_enabled = any(
+            account.config.covered_call_profit_sweep_enabled and account.config.option_strategy == "covered_call"
+            for account in accounts
+        )
         any_scheduler_running = any(scheduler.state.running for scheduler in background_schedulers)
         last_attempts = [s.state.last_attempt_ms for s in equity_schedulers if s.state.last_attempt_ms is not None]
         last_successes = [s.state.last_success_ms for s in equity_schedulers if s.state.last_success_ms is not None]
@@ -259,12 +269,19 @@ def create_app(
                 )
             ),
             "halt_open_max_loss_pct": str(config_public.halt_open_max_loss_pct),
+            "covered_call_profit_sweep_enabled": covered_call_sweep_enabled,
             "multi_account": multi_account,
+            "dashboard_strategies": dashboard_strategies_list,
             "accounts": [
                 {
                     "name": account.name,
                     "env": account.config.env,
                     "option_strategy": account.config.option_strategy,
+                    "covered_call_profit_sweep_enabled": (
+                        account.config.covered_call_profit_sweep_enabled
+                        if account.config.option_strategy == "covered_call"
+                        else False
+                    ),
                     "state_file": str(account.state_path),
                     "ledger_dir": str(account.ledger_root),
                     "has_private_creds": _has_private_creds(account.config),
@@ -288,6 +305,8 @@ def create_app(
         )
         if payload is None:
             payload = {"source": "none"}
+        if isinstance(payload, dict) and payload.get("source") != "none":
+            payload["dashboard_strategies"] = list(dashboard_strategies_list)
         if payload.get("source") == "none":
             return JSONResponse(_decimalize(payload), status_code=200)
         try:
@@ -686,12 +705,24 @@ def create_app(
         for _html_name in ("index.html", "investor.html", "investor.zh.html"):
             _html_path = frontend_dir / _html_name
 
-            def _make_html_handler(path: Path) -> Any:
+            def _make_html_handler(path: Path, *, inject_strategies: bool) -> Any:
                 def _html_handler() -> Any:
                     if not path.is_file():
                         raise HTTPException(status_code=404, detail=f"{path.name} not found")
-                    return FileResponse(
-                        path,
+                    body = path.read_text(encoding="utf-8")
+                    if inject_strategies and dashboard_strategies_list:
+                        import json
+
+                        snippet = (
+                            "<script>window.__DASHBOARD_STRATEGIES__="
+                            f"{json.dumps(list(dashboard_strategies_list))};</script>"
+                        )
+                        if "</head>" in body:
+                            body = body.replace("</head>", f"  {snippet}\n  </head>", 1)
+                        else:
+                            body = snippet + body
+                    return Response(
+                        content=body,
                         media_type="text/html",
                         headers={"Cache-Control": "no-cache, must-revalidate"},
                     )
@@ -700,7 +731,10 @@ def create_app(
 
             app.add_api_route(
                 f"/{_html_name}",
-                _make_html_handler(_html_path),
+                _make_html_handler(
+                    _html_path,
+                    inject_strategies=_html_name.startswith("investor") or investor_portal,
+                ),
                 methods=["GET"],
                 include_in_schema=False,
             )

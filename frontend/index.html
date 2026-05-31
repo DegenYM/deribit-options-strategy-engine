@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Deribit Strategy Dashboard</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app.js?v=charts-fix-20260527" as="script" />
+    <link rel="preload" href="/app.js?v=symbol-parens-20260531" as="script" />
     <link rel="stylesheet" href="/tailwind.css?v=20260526" />
-    <link rel="stylesheet" href="/styles.css?v=20260522f" />
+    <link rel="stylesheet" href="/styles.css?v=equity-rows-20260531g" />
   </head>
   <body class="app-body text-slate-100 min-h-screen font-sans">
     <header class="app-header sticky top-0 z-10">
@@ -132,7 +132,7 @@
           <span class="section-toggle" aria-hidden="true"></span>
         </summary>
         <div class="section-body">
-          <div id="book-cards" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div id="book-cards" class="book-cards-strip">
             <!-- populated by app.js -->
           </div>
         </div>
@@ -304,6 +304,6 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script defer src="/app.js?v=charts-fix-20260527"></script>
+    <script defer src="/app.js?v=symbol-parens-20260531"></script>
   </body>
 </html>

@@ -10,8 +10,6 @@ import {
   FRONTEND_REFRESH_INTERVAL_MS,
   INVESTOR_OVERLAY_MAX_MS,
   INVESTOR_STATUS_TIMEOUT_MS,
-  STRATEGIES,
-  STRATEGY_BY_ID,
   USE_DASHBOARD_BUNDLE,
   fmt,
 } from "../shared/config.js";
@@ -541,6 +539,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
 
     const healthCore = fetchJson("/api/health").then((d) => {
       STATE.health = d;
+      scheduleRender();
       if (investorFirstLoad) {
         STATE.investorLoadTotal = investorLoadStepCount(Boolean(d?.has_private_creds), {
           includeCharts: chartsSectionOpen(),

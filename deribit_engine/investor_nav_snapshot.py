@@ -108,9 +108,9 @@ def agreed_spot_usdc(
 def snapshot_equity_native_by_book(row: NavSnapshotRow) -> dict[str, Decimal]:
     """Derive native book balances from stored USDC-equivalent equity and index prices."""
     out: dict[str, Decimal] = {}
-    for book in ("BTC", "ETH", "USDC"):
+    for book in ("BTC", "ETH", "USDC", "USDT"):
         usdc = row.equity_by_book.get(book, Decimal("0"))
-        if book == "USDC":
+        if book in ("USDC", "USDT"):
             out[book] = usdc
             continue
         idx = row.index_btc_usd if book == "BTC" else row.index_eth_usd
@@ -139,14 +139,15 @@ def financial_breakdown_from_snapshot(
         "BTC": row.index_btc_usd,
         "ETH": row.index_eth_usd,
         "USDC": Decimal("1"),
+        "USDT": Decimal("1"),
     }
     equity_usdc = {
         book: (
             row.equity_by_book.get(book, Decimal("0"))
-            if book == "USDC"
+            if book in ("USDC", "USDT")
             else native_book_amount_to_usdc(equity_native[book], book, index_by_ccy)
         )
-        for book in ("BTC", "ETH", "USDC")
+        for book in ("BTC", "ETH", "USDC", "USDT")
     }
     return {
         "ts_ms": row.ts_ms,
@@ -303,12 +304,14 @@ def capture_investor_nav(
         str(book).upper(): _dec((row or {}).get("equity") or "0")
         for book, row in (status.get("accounts") or {}).items()
     }
-    for book in ("BTC", "ETH", "USDC"):
+    for book in ("BTC", "ETH", "USDC", "USDT"):
         equity_native_by_book.setdefault(book, Decimal("0"))
     # Portfolio equity_by_book only includes books each bot tracks; raw API USDC
     # balances can differ when a sub-account omits USDC from traded_collaterals.
     if "USDC" in equity_by_book:
         equity_native_by_book["USDC"] = equity_by_book["USDC"]
+    if "USDT" in equity_by_book:
+        equity_native_by_book["USDT"] = equity_by_book["USDT"]
     spot, nav_perf, aum_mgmt = nav_from_equity(
         total_equity,
         fee_config,

@@ -1080,6 +1080,9 @@ class EngineBase:
             currency,
         )
 
+    def _covered_call_open_group_count(self, state: StrategyState, currency: str) -> int:
+        return self._open_group_count_for_currency(state, currency.upper(), strategy="covered_call")
+
     def _naked_candidate_matches_open_group(self, state: StrategyState, candidate: NakedPutCandidate) -> bool:
         for group in self._open_groups(state):
             if group.short_instrument_name == candidate.short_leg.instrument_name:
@@ -1255,6 +1258,8 @@ class EngineBase:
                 books.add(c)
         if "USDC" in traded:
             books.add("USDC")
+        if "USDT" in traded:
+            books.add("USDT")
         return frozenset(books)
 
     def _total_equity_usdc(
@@ -1295,6 +1300,9 @@ class EngineBase:
         if "USDC" in traded:
             usdc_summary = summaries.get("USDC")
             result["USDC"] = usdc_summary.equity if usdc_summary is not None else Decimal("0")
+        if "USDT" in traded:
+            usdt_summary = summaries.get("USDT")
+            result["USDT"] = usdt_summary.equity if usdt_summary is not None else Decimal("0")
         return result
 
     def _book_equities_native(
@@ -1315,6 +1323,9 @@ class EngineBase:
         if "USDC" in traded:
             usdc_summary = summaries.get("USDC")
             result["USDC"] = usdc_summary.equity if usdc_summary is not None else Decimal("0")
+        if "USDT" in traded:
+            usdt_summary = summaries.get("USDT")
+            result["USDT"] = usdt_summary.equity if usdt_summary is not None else Decimal("0")
         return result
 
     def _aggregate_margin(
@@ -1334,7 +1345,7 @@ class EngineBase:
                 amount = summary.initial_margin
             else:
                 amount = summary.maintenance_margin
-            if currency == "USDC":
+            if currency in ("USDC", "USDT"):
                 total += amount
             else:
                 total += amount * self._currency_index_price(currency, orderbook_cache)

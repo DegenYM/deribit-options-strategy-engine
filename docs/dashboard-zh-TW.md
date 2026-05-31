@@ -38,6 +38,8 @@ pip install -r requirements.txt
 
 **一鍵啟停全部 dashboard（launchd）**：`./bot investor frontend start|stop|restart|status`（依 `config/platform/registry.toml` 的 `frontend_enabled`）；包裝腳本 `./scripts/frontend_launchd_all.sh start`。
 
+**Cloudflare Tunnel（launchd）**：`./bot investor tunnel start|stop|restart|status`（執行 `cloudflared tunnel --config ~/.cloudflared/config.yml run`）；包裝腳本 `./scripts/tunnel_launchd.sh start`。須在 frontend 之後啟動；手動前景 run 見 [cloudflare-tunnel-investor.md](cloudflare-tunnel-investor.md#五tunnel-run手動驗證)。
+
 **一鍵啟停全部 live bot（launchd）**：`./bot investor live start|stop|restart|status`（依 `live_enabled`）；包裝腳本 `./scripts/live_launchd_all.sh start`。細節見 [live-profiles-launchd-zh-TW.md](live-profiles-launchd-zh-TW.md)。
 
 ## 相關文件

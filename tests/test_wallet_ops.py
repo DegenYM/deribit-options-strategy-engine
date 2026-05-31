@@ -8,9 +8,12 @@ import pytest
 from deribit_engine.client import DeribitClient
 from deribit_engine.exceptions import ConfigurationError
 from deribit_engine.investor_ops import investor_init
+from deribit_engine.models import OptionInstrument, OrderBookSnapshot
 from deribit_engine.wallet_ops import (
     internal_transfer,
+    place_protected_spot_order,
     resolve_fee_subaccount_id,
+    resolve_protected_spot_order,
     spot_instrument_name,
     trade_spot,
 )
@@ -655,3 +658,104 @@ def test_trade_spot_rejects_insufficient_balance(tmp_path: Path, monkeypatch: py
 
     with pytest.raises(ConfigurationError, match="exceeds available"):
         trade_spot(config, client, from_currency="BTC", amount="1", live=False)
+
+
+def _spot_instrument() -> OptionInstrument:
+    return OptionInstrument.from_api(
+        {
+            "instrument_name": "BTC_USDT",
+            "base_currency": "BTC",
+            "quote_currency": "USDT",
+            "settlement_currency": "USDT",
+            "instrument_type": "spot",
+            "tick_size": "0.5",
+            "min_trade_amount": "0.0001",
+            "contract_size": "0.0001",
+        }
+    )
+
+
+def test_resolve_protected_spot_order_skips_when_bid_below_mark_floor() -> None:
+    book = OrderBookSnapshot.from_api(
+        {
+            "instrument_name": "BTC_USDT",
+            "best_bid_price": "69000",
+            "best_ask_price": "70100",
+            "mark_price": "70000",
+            "index_price": "70000",
+        }
+    )
+    effective, limit_px, mark, skip = resolve_protected_spot_order(
+        direction="sell",
+        book=book,
+        instrument=_spot_instrument(),
+        order_type="market",
+        max_slippage_pct=Decimal("0.005"),
+    )
+    assert skip == "slippage_exceeded"
+    assert mark == Decimal("70000")
+    assert effective == "market"
+    assert limit_px is None
+
+
+def test_resolve_protected_spot_order_uses_limit_floor_when_bid_ok() -> None:
+    book = OrderBookSnapshot.from_api(
+        {
+            "instrument_name": "BTC_USDT",
+            "best_bid_price": "69900",
+            "best_ask_price": "70100",
+            "mark_price": "70000",
+            "index_price": "70000",
+        }
+    )
+    effective, limit_px, mark, skip = resolve_protected_spot_order(
+        direction="sell",
+        book=book,
+        instrument=_spot_instrument(),
+        order_type="market",
+        max_slippage_pct=Decimal("0.005"),
+    )
+    assert skip is None
+    assert effective == "limit"
+    assert mark == Decimal("70000")
+    assert limit_px == Decimal("69650")
+
+
+def test_place_protected_spot_order_live_uses_limit_ioc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from conftest import make_config
+
+    config = make_config(tmp_path, covered_call_spot_max_slippage_pct=Decimal("0.005"))
+    client = DeribitClient(config)
+    captured: dict[str, object] = {}
+
+    def fake_get_order_book(instrument_name, *, depth=1):
+        return {
+            "instrument_name": instrument_name,
+            "best_bid_price": "69900",
+            "best_ask_price": "70100",
+            "mark_price": "70000",
+            "index_price": "70000",
+        }
+
+    def fake_sell(**kwargs):
+        captured.update(kwargs)
+        return {"order": {"order_id": "spot-1", "order_state": "filled", "average_price": "69900"}}
+
+    monkeypatch.setattr(client, "get_order_book", fake_get_order_book)
+    monkeypatch.setattr(client, "place_sell_order", fake_sell)
+
+    out = place_protected_spot_order(
+        client,
+        instrument=_spot_instrument(),
+        instrument_name="BTC_USDT",
+        direction="sell",
+        amount=Decimal("0.001"),
+        label="trial-profit-sweep",
+        order_type="market",
+        max_slippage_pct=Decimal("0.005"),
+        live=True,
+    )
+    assert out.get("skipped") is not True
+    assert captured["order_type"] == "limit"
+    assert captured["time_in_force"] == "immediate_or_cancel"
+    assert captured["price"] == Decimal("69650")

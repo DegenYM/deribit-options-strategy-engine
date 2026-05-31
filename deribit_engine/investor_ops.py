@@ -516,9 +516,10 @@ def _investor_service_replacements(
     repo_root: Path,
     python_bin: str,
     frontend_port: int,
+    label: str,
 ) -> dict[str, str]:
     return {
-        "__LABEL__": f"com.deribit.live.{investor_id}",
+        "__LABEL__": label,
         "__REPO_ROOT__": str(repo_root),
         "__PYTHON_BIN__": python_bin,
         "__INVESTOR_ID__": investor_id,
@@ -539,8 +540,8 @@ def render_launchd_plists(
     entry = registry.entry_for(investor_id)
     port = frontend_port or (entry.frontend_port if entry else None) or 8765
     python_bin = registry.platform.python_bin or "python3"
-    replacements = _investor_service_replacements(
-        investor_id,
+    common = dict(
+        investor_id=investor_id,
         repo_root=repo_root,
         python_bin=python_bin,
         frontend_port=port,
@@ -552,11 +553,11 @@ def render_launchd_plists(
     templates = {
         f"com.deribit.live.{investor_id}.plist": (
             repo_root / "config/launchd/com.deribit.live.plist.template",
-            replacements,
+            _investor_service_replacements(**common, label=f"com.deribit.live.{investor_id}"),
         ),
         f"com.deribit.frontend.{investor_id}.plist": (
             repo_root / "config/launchd/com.deribit.frontend.plist.template",
-            replacements,
+            _investor_service_replacements(**common, label=f"com.deribit.frontend.{investor_id}"),
         ),
     }
 
@@ -587,6 +588,7 @@ def render_systemd_units(
         repo_root=repo_root,
         python_bin=python_bin,
         frontend_port=port,
+        label=f"com.deribit.live.{investor_id}",
     )
 
     out_dir = repo_root / "config/platform/generated/systemd"
