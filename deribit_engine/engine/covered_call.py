@@ -429,11 +429,7 @@ class CoveredCallMixin:
 
     @staticmethod
     def _is_covered_call_group(group: TradeGroup) -> bool:
-        return group.option_type == "call" and (
-            (group.strategy or "") == "covered_call"
-            or group.covered_underlying_quantity > 0
-            or group.short_label.startswith("covered_call-")
-        )
+        return group.is_covered_call_group()
 
     def _covered_call_itm(self, group: TradeGroup, context: RuntimeContext) -> bool:
         index_price = self._currency_index_price(group.currency, context.orderbook_cache)

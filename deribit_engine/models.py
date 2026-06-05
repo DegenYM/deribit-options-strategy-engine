@@ -656,6 +656,22 @@ class TradeGroup:
             return None
         return value
 
+    def is_covered_call_group(self) -> bool:
+        """True when this group is a short covered call (a call leg backed by spot).
+
+        Single source of truth shared by the live engine and trade-journal
+        backfill: a covered call is always a short *call*, identified by the
+        ``covered_call`` strategy, a positive covered underlying quantity, or a
+        ``covered_call-`` short label.
+        """
+        if (self.option_type or "").lower() != "call":
+            return False
+        return (
+            (self.strategy or "") == "covered_call"
+            or self.covered_underlying_quantity > 0
+            or str(self.short_label or "").startswith("covered_call-")
+        )
+
     def underlying_index_usd_for_apr(self) -> Decimal:
         """Underlying BTC/ETH spot for USDC linear call APR denominators."""
         if self.collateral_book() != "USDC":

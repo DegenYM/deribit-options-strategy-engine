@@ -189,12 +189,7 @@ _DEFAULT_OPTION_FEE_CAP_RATE = Decimal("0.125")
 
 
 def _is_covered_call_group(group: TradeGroup) -> bool:
-    if (group.strategy or "") == "covered_call":
-        return True
-    label = str(group.short_label or "")
-    if label.startswith("covered_call-"):
-        return True
-    return group.option_type == "call" and group.covered_underlying_quantity > 0
+    return group.is_covered_call_group()
 
 
 def _account_env_candidates_for_state(state_path: Path) -> list[Path]:

@@ -1084,9 +1084,10 @@ class EngineBase:
                 total += fee
         return total
 
-    def _short_entry_ledger(
+    def _short_leg_ledger(
         self,
         *,
+        fee_sign: Decimal,
         premium: Decimal,
         quantity: Decimal,
         index_price: Decimal,
@@ -1095,13 +1096,17 @@ class EngineBase:
         collateral_currency: str,
         at_timestamp_ms: int | None = None,
     ) -> tuple[Decimal, Decimal, Decimal]:
-        """Return ``(net_credit_usdc, entry_fee_usdc, entry_fee_collateral)`` for one short leg."""
+        """Cash-flow ledger for one short leg; ``fee_sign`` is -1 for entry credit, +1 for close debit.
+
+        Returns ``(value_usdc, fee_usdc, fee_collateral)`` where ``value_usdc`` is a
+        net credit (entry) or total debit (close) in USDC.
+        """
         usdc_linear = instrument.quote_currency.upper() == "USDC" and instrument.settlement_currency.upper() == "USDC"
         book = collateral_currency.upper()
         if usdc_linear or book == "USDC":
-            entry_fee_usdc = self._sum_trade_fees_usdc(trades)
-            if entry_fee_usdc <= 0:
-                entry_fee_usdc = self._option_fee_usdc(
+            fee_usdc = self._sum_trade_fees_usdc(trades)
+            if fee_usdc <= 0:
+                fee_usdc = self._option_fee_usdc(
                     premium=premium,
                     quantity=quantity,
                     index_price=index_price,
@@ -1116,11 +1121,11 @@ class EngineBase:
                 index_price=index_price,
                 instrument=instrument,
             )
-            return gross_usdc - entry_fee_usdc, entry_fee_usdc, Decimal("0")
+            return gross_usdc + fee_sign * fee_usdc, fee_usdc, Decimal("0")
 
-        entry_fee_collateral = self._sum_trade_fees_native(trades, book)
-        if entry_fee_collateral <= 0:
-            entry_fee_collateral = self._option_fee_native(
+        fee_collateral = self._sum_trade_fees_native(trades, book)
+        if fee_collateral <= 0:
+            fee_collateral = self._option_fee_native(
                 premium=premium,
                 quantity=quantity,
                 index_price=index_price,
@@ -1129,10 +1134,33 @@ class EngineBase:
                 at_timestamp_ms=at_timestamp_ms,
             )
         gross_native = premium * quantity
-        net_native = gross_native - entry_fee_collateral
+        total_native = gross_native + fee_sign * fee_collateral
         if index_price <= 0:
-            return Decimal("0"), Decimal("0"), entry_fee_collateral
-        return net_native * index_price, entry_fee_collateral * index_price, entry_fee_collateral
+            return Decimal("0"), Decimal("0"), fee_collateral
+        return total_native * index_price, fee_collateral * index_price, fee_collateral
+
+    def _short_entry_ledger(
+        self,
+        *,
+        premium: Decimal,
+        quantity: Decimal,
+        index_price: Decimal,
+        trades: list[dict[str, Any]],
+        instrument: OptionInstrument,
+        collateral_currency: str,
+        at_timestamp_ms: int | None = None,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        """Return ``(net_credit_usdc, entry_fee_usdc, entry_fee_collateral)`` for one short leg."""
+        return self._short_leg_ledger(
+            fee_sign=Decimal("-1"),
+            premium=premium,
+            quantity=quantity,
+            index_price=index_price,
+            trades=trades,
+            instrument=instrument,
+            collateral_currency=collateral_currency,
+            at_timestamp_ms=at_timestamp_ms,
+        )
 
     def _close_short_ledger(
         self,
@@ -1146,43 +1174,16 @@ class EngineBase:
         at_timestamp_ms: int | None = None,
     ) -> tuple[Decimal, Decimal, Decimal]:
         """Return ``(total_close_debit_usdc, close_fee_usdc, close_fee_collateral)`` for buy-to-close."""
-        usdc_linear = instrument.quote_currency.upper() == "USDC" and instrument.settlement_currency.upper() == "USDC"
-        book = collateral_currency.upper()
-        if usdc_linear or book == "USDC":
-            close_fee_usdc = self._sum_trade_fees_usdc(trades)
-            if close_fee_usdc <= 0:
-                close_fee_usdc = self._option_fee_usdc(
-                    premium=premium,
-                    quantity=quantity,
-                    index_price=index_price,
-                    base_currency=instrument.base_currency,
-                    quote_currency=instrument.quote_currency,
-                    settlement_currency=instrument.settlement_currency,
-                    at_timestamp_ms=at_timestamp_ms,
-                )
-            gross_usdc = self._premium_value_usdc(
-                premium=premium,
-                quantity=quantity,
-                index_price=index_price,
-                instrument=instrument,
-            )
-            return gross_usdc + close_fee_usdc, close_fee_usdc, Decimal("0")
-
-        close_fee_collateral = self._sum_trade_fees_native(trades, book)
-        if close_fee_collateral <= 0:
-            close_fee_collateral = self._option_fee_native(
-                premium=premium,
-                quantity=quantity,
-                index_price=index_price,
-                quote_currency=instrument.quote_currency,
-                settlement_currency=instrument.settlement_currency,
-                at_timestamp_ms=at_timestamp_ms,
-            )
-        gross_native = premium * quantity
-        total_native = gross_native + close_fee_collateral
-        if index_price <= 0:
-            return Decimal("0"), Decimal("0"), close_fee_collateral
-        return total_native * index_price, close_fee_collateral * index_price, close_fee_collateral
+        return self._short_leg_ledger(
+            fee_sign=Decimal("1"),
+            premium=premium,
+            quantity=quantity,
+            index_price=index_price,
+            trades=trades,
+            instrument=instrument,
+            collateral_currency=collateral_currency,
+            at_timestamp_ms=at_timestamp_ms,
+        )
 
     def _order_trades(self, response: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(response, dict):
