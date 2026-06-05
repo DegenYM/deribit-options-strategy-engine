@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import random
 import threading
 import time
 from collections.abc import Callable
@@ -13,7 +14,7 @@ import requests
 
 from .config import BotConfig
 from .exceptions import AuthenticationError, ExchangeError, TransientExchangeError
-from .exchange_throttle import pace_exchange_request
+from .exchange_throttle import note_rate_limited, note_success, pace_exchange_request
 from .utils import format_decimal, utc_now_ms
 
 
@@ -291,13 +292,13 @@ class DeribitClient:
                 if attempt < attempts - 1:
                     wait = self._retry_after_seconds(response)
                     if wait is None:
-                        wait = self.AUTH_RETRY_BACKOFF_SECONDS[attempt]
+                        wait = self._backoff_with_jitter(self.AUTH_RETRY_BACKOFF_SECONDS[attempt])
                     time.sleep(wait)
                     continue
                 raise TransientExchangeError("public/auth rate limited (HTTP 429)")
             if status in self.RETRYABLE_STATUS_CODES:
                 if attempt < attempts - 1:
-                    time.sleep(self.AUTH_RETRY_BACKOFF_SECONDS[attempt])
+                    time.sleep(self._backoff_with_jitter(self.AUTH_RETRY_BACKOFF_SECONDS[attempt]))
                     continue
                 raise TransientExchangeError(f"public/auth HTTP {status}")
             if status >= 400:
@@ -354,13 +355,21 @@ class DeribitClient:
         *,
         headers: dict[str, str],
     ) -> requests.Response:
-        pace_exchange_request(self.config.client_id or None)
-        return self.session.post(
+        identity = self.config.client_id or None
+        pace_exchange_request(identity)
+        response = self.session.post(
             url,
             json=payload,
             headers=headers,
             timeout=self.config.request_timeout_seconds,
         )
+        # Feed back into adaptive pacing so future calls slow down after a 429
+        # and recover once the exchange accepts requests again.
+        if response.status_code == self.RATE_LIMIT_STATUS:
+            note_rate_limited(identity)
+        elif response.status_code < 400:
+            note_success(identity)
+        return response
 
     def _parse_jsonrpc(self, response: requests.Response, method_name: str) -> dict[str, Any]:
         try:
@@ -376,6 +385,13 @@ class DeribitClient:
             if not isinstance(payload.get("error"), dict):
                 raise ExchangeError(f"{method_name} missing jsonrpc id field")
         return payload
+
+    @staticmethod
+    def _backoff_with_jitter(seconds: float) -> float:
+        """Full-jitter backoff in ``[seconds/2, seconds]`` to desync retries across processes."""
+        if seconds <= 0:
+            return 0.0
+        return seconds * (0.5 + random.random() * 0.5)
 
     @staticmethod
     def _retry_after_seconds(response: requests.Response) -> float | None:
@@ -425,7 +441,7 @@ class DeribitClient:
             except requests.exceptions.RequestException as exc:
                 last_error = exc
                 if attempt < attempts - 1:
-                    time.sleep(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
+                    time.sleep(self._backoff_with_jitter(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt]))
                     continue
                 raise TransientExchangeError(f"{method_name} failed after retries: {exc}") from exc
 
@@ -435,13 +451,13 @@ class DeribitClient:
                 if attempt < attempts - 1:
                     wait = self._retry_after_seconds(response)
                     if wait is None:
-                        wait = self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt]
+                        wait = self._backoff_with_jitter(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
                     time.sleep(wait)
                     continue
                 raise TransientExchangeError(f"{method_name} rate limited: HTTP 429")
             if status in self.RETRYABLE_STATUS_CODES:
                 if attempt < attempts - 1:
-                    time.sleep(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
+                    time.sleep(self._backoff_with_jitter(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt]))
                     continue
                 raise TransientExchangeError(f"{method_name} retryable failure: HTTP {status}")
             if self._should_retry_private_auth(
