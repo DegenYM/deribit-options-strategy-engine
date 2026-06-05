@@ -8,15 +8,19 @@ from __future__ import annotations
 import calendar
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .investor_cash_flow import default_fee_flow_start_ms
 from .models import TradeGroup
 from .state import StrategyStateStore
 from .trade_journal import TradeJournalStore, journal_db_path_for_state, scope_key_for_state
+
+if TYPE_CHECKING:
+    from .config import BotConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +28,42 @@ ANCHOR_FIRST_TRADE = "first_trade"
 ANCHOR_REGISTRATION = "registration"
 
 _DEFAULT_DISCOUNT_MONTHS = 6
+
+
+@dataclass
+class FeeDiscountContext:
+    """Single source of truth for the option fee-discount rate.
+
+    Both screening (``StrategySelector``) and execution (``EngineBase``) resolve
+    the discount through one shared instance so scan economics match live fills.
+    The engine lazily populates ``first_trade_timestamp_ms`` from
+    state/journal/exchange; the strategy reads it back through the same object.
+    """
+
+    base_rate: Decimal
+    discount_months: int
+    anchor: str
+    registration_timestamp_ms: int | None
+    first_trade_timestamp_ms: int | None = None
+
+    @classmethod
+    def from_config(cls, config: BotConfig) -> FeeDiscountContext:
+        return cls(
+            base_rate=config.option_fee_discount_rate,
+            discount_months=config.option_fee_discount_months,
+            anchor=config.option_fee_discount_anchor,
+            registration_timestamp_ms=config.option_fee_discount_registration_ms or None,
+        )
+
+    def rate_at(self, at_timestamp_ms: int) -> Decimal:
+        return effective_option_fee_discount_rate(
+            base_rate=self.base_rate,
+            discount_months=self.discount_months,
+            first_trade_timestamp_ms=self.first_trade_timestamp_ms,
+            anchor=self.anchor,
+            registration_timestamp_ms=self.registration_timestamp_ms,
+            at_timestamp_ms=at_timestamp_ms,
+        )
 
 
 def add_calendar_months_ms(timestamp_ms: int, months: int) -> int:

@@ -33,24 +33,26 @@ from .vol_metrics import passes_iv_entry_gate
 
 class StrategySelector:
     def __init__(self, config: BotConfig):
+        from .fee_discount import FeeDiscountContext
+
         self.config = config
         self._iv_rank_by_currency: dict[str, Decimal] = {}
         self._iv_minus_rv_by_currency: dict[str, Decimal] = {}
-        self.first_option_trade_timestamp_ms: int | None = None
+        self.fee_discount = FeeDiscountContext.from_config(config)
+
+    @property
+    def first_option_trade_timestamp_ms(self) -> int | None:
+        return self.fee_discount.first_trade_timestamp_ms
+
+    @first_option_trade_timestamp_ms.setter
+    def first_option_trade_timestamp_ms(self, value: int | None) -> None:
+        self.fee_discount.first_trade_timestamp_ms = value
 
     def _effective_fee_discount_rate(self, at_timestamp_ms: int | None = None) -> Decimal:
-        from .fee_discount import effective_option_fee_discount_rate
         from .utils import utc_now_ms
 
         at_ms = int(at_timestamp_ms if at_timestamp_ms is not None else utc_now_ms())
-        return effective_option_fee_discount_rate(
-            base_rate=self.config.option_fee_discount_rate,
-            discount_months=self.config.option_fee_discount_months,
-            first_trade_timestamp_ms=self.first_option_trade_timestamp_ms,
-            anchor=self.config.option_fee_discount_anchor,
-            registration_timestamp_ms=self.config.option_fee_discount_registration_ms or None,
-            at_timestamp_ms=at_ms,
-        )
+        return self.fee_discount.rate_at(at_ms)
 
     def update_vol_entry_context(
         self,

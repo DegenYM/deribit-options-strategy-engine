@@ -271,22 +271,15 @@ class EngineBase:
         return resolved
 
     def _option_fee_discount_rate_at(self, at_timestamp_ms: int | None = None) -> Decimal:
-        from ..fee_discount import effective_option_fee_discount_rate
         from ..utils import utc_now_ms
 
         at_ms = int(at_timestamp_ms if at_timestamp_ms is not None else utc_now_ms())
         if self.config.option_fee_discount_rate <= 0 or self.config.option_fee_discount_months <= 0:
             return Decimal("0")
+        # Populate the shared FeeDiscountContext (owned by the strategy) so
+        # screening and execution resolve the same anchor/rate.
         self._resolve_fee_discount_first_trade_ms()
-        first_ms = getattr(self.strategy, "first_option_trade_timestamp_ms", None)
-        return effective_option_fee_discount_rate(
-            base_rate=self.config.option_fee_discount_rate,
-            discount_months=self.config.option_fee_discount_months,
-            first_trade_timestamp_ms=first_ms,
-            anchor=self.config.option_fee_discount_anchor,
-            registration_timestamp_ms=self.config.option_fee_discount_registration_ms or None,
-            at_timestamp_ms=at_ms,
-        )
+        return self.strategy.fee_discount.rate_at(at_ms)
 
     def _option_fee_native(
         self,
