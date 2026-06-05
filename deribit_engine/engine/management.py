@@ -2071,9 +2071,7 @@ class ManagementMixin:
             idx = book.index_price
             if idx <= 0:
                 continue
-            mark = (
-                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
-            )
+            mark = book.effective_mark
             if mark <= 0:
                 continue
 

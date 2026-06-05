@@ -885,9 +885,37 @@ class StrategySelector:
             existing_im_for_expiry=existing_im_for_expiry,
         )
 
-    def _try_build_naked_put_for_quantity(
+    def _short_put_unit_margin(
         self,
         *,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        mark: Decimal,
+        collateral_currency: str,
+    ) -> tuple[Decimal, Decimal]:
+        usdc_collateral = collateral_currency.upper() == "USDC"
+        if usdc_collateral:
+            im_1 = linear_usdc_short_put_initial_per_contract_usdc(
+                index_price=book.index_price,
+                strike=instrument.strike,
+                mark_usdc=mark,
+                contract_size=instrument.contract_size,
+            )
+            mm_1 = linear_usdc_short_put_mm_per_contract_usdc(
+                index_price=book.index_price,
+                strike=instrument.strike,
+                mark_usdc=mark,
+                contract_size=instrument.contract_size,
+            )
+        else:
+            im_1 = short_put_initial_unit(index_price=book.index_price, strike=instrument.strike, mark_price=mark)
+            mm_1 = short_put_maintenance_unit(index_price=book.index_price, strike=instrument.strike, mark_price=mark)
+        return im_1, mm_1
+
+    def _try_build_naked_for_quantity(
+        self,
+        *,
+        option_type: str,
         instrument: OptionInstrument,
         book: OrderBookSnapshot,
         regime: RiskRegime,
@@ -899,8 +927,12 @@ class StrategySelector:
         existing_im_for_expiry: Decimal,
         relax_apr: bool,
     ) -> tuple[NakedPutCandidate | None, str | None]:
+        """Side-agnostic naked short builder; put/call differ only in margin/bounds/option_type."""
+        is_call = option_type == "call"
+        if quantity <= 0:
+            return None, "quantity<=0"
         screening_bid = book.best_bid_price
-        mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+        mark = book.effective_mark
         if mark <= 0:
             return None, "mark<=0"
         usdc_collateral = collateral_currency.upper() == "USDC"
@@ -934,31 +966,21 @@ class StrategySelector:
             book=book,
             premium_per_contract=screening_bid,
             collateral_currency=collateral_currency,
-            option_type="put",
+            option_type=option_type,
         )
         if not relax_apr and net_apr < self.config.min_net_apr:
             return None, "net_apr_below_min"
-        if usdc_collateral:
-            im_1 = linear_usdc_short_put_initial_per_contract_usdc(
-                index_price=book.index_price,
-                strike=instrument.strike,
-                mark_usdc=mark,
-                contract_size=instrument.contract_size,
+        if is_call:
+            im_1, mm_1 = self._short_call_unit_margin(
+                instrument=instrument, book=book, mark=mark, collateral_currency=collateral_currency
             )
-            mm_1 = linear_usdc_short_put_mm_per_contract_usdc(
-                index_price=book.index_price,
-                strike=instrument.strike,
-                mark_usdc=mark,
-                contract_size=instrument.contract_size,
-            )
-            im_total = im_1 * quantity
-            mm_total = mm_1 * quantity
         else:
-            im_u = short_put_initial_unit(index_price=book.index_price, strike=instrument.strike, mark_price=mark)
-            mm_u = short_put_maintenance_unit(index_price=book.index_price, strike=instrument.strike, mark_price=mark)
-            im_total = im_u * quantity
-            mm_total = mm_u * quantity
-        per_leg_cap = self.config.per_leg_im_cap(currency)
+            im_1, mm_1 = self._short_put_unit_margin(
+                instrument=instrument, book=book, mark=mark, collateral_currency=collateral_currency
+            )
+        im_total = im_1 * quantity
+        mm_total = mm_1 * quantity
+        per_leg_cap = self.config.per_leg_im_cap(currency, option_type=option_type)
         if im_total > summary_equity * per_leg_cap:
             return None, "per_leg_im_cap"
         exp_cap = self.config.expiry_im_cap(currency)
@@ -968,18 +990,22 @@ class StrategySelector:
         if summary_maintenance_margin + mm_total > summary_equity * hard_mm:
             return None, "hard_mm_utilization"
         margin_efficiency = (net_prem - fee_native) / im_total if im_total > 0 else Decimal("0")
-        instrument_for_price = instrument
-        target_price = self.sell_mid_price(instrument_for_price, book)
+        target_price = self.sell_mid_price(instrument, book)
         short_leg = self._short_put_spread_leg(
             instrument=instrument,
             book=book,
             quantity=quantity,
-            entry_price=self.sell_taker_price(instrument_for_price, book),
+            entry_price=self.sell_taker_price(instrument, book),
             target_price=target_price,
         )
-        pdmin, pdmax = self.config.preferred_put_delta_bounds(currency)
-        pomin, pomax = self.config.preferred_put_otm_bounds(currency)
-        otm = self._put_otm_ratio(instrument, book)
+        if is_call:
+            pdmin, pdmax = self.config.preferred_call_delta_bounds(currency)
+            pomin, pomax = self.config.preferred_call_otm_bounds(currency)
+            otm = self._call_otm_ratio(instrument, book)
+        else:
+            pdmin, pdmax = self.config.preferred_put_delta_bounds(currency)
+            pomin, pomax = self.config.preferred_put_otm_bounds(currency)
+            otm = self._put_otm_ratio(instrument, book)
         preferred_delta = pdmin <= abs(book.delta) <= pdmax
         preferred_otm = pomin <= otm <= pomax
         in_band = self.config.target_net_apr_min <= net_apr <= self.config.target_net_apr_max
@@ -1003,8 +1029,37 @@ class StrategySelector:
                 preferred_delta=preferred_delta,
                 preferred_otm=preferred_otm,
                 in_target_apr_band=in_band,
+                option_type=option_type,
             ),
             None,
+        )
+
+    def _try_build_naked_put_for_quantity(
+        self,
+        *,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        regime: RiskRegime,
+        summary_equity: Decimal,
+        summary_maintenance_margin: Decimal,
+        collateral_currency: str,
+        currency: str,
+        quantity: Decimal,
+        existing_im_for_expiry: Decimal,
+        relax_apr: bool,
+    ) -> tuple[NakedPutCandidate | None, str | None]:
+        return self._try_build_naked_for_quantity(
+            option_type="put",
+            instrument=instrument,
+            book=book,
+            regime=regime,
+            summary_equity=summary_equity,
+            summary_maintenance_margin=summary_maintenance_margin,
+            collateral_currency=collateral_currency,
+            currency=currency,
+            quantity=quantity,
+            existing_im_for_expiry=existing_im_for_expiry,
+            relax_apr=relax_apr,
         )
 
     def _build_naked_put_for_quantity(
@@ -1035,8 +1090,9 @@ class StrategySelector:
         )
         return cand
 
-    def naked_put_scan_rejection_detail(
+    def _scan_rejection_detail(
         self,
+        option_type: str,
         currency: str,
         markets: Iterable[OptionInstrument],
         orderbook_loader: Callable[[str], OrderBookSnapshot],
@@ -1048,11 +1104,13 @@ class StrategySelector:
         existing_im_by_expiry: dict[int, Decimal],
         index_price: Decimal | None = None,
     ) -> dict[str, Any]:
-        """Aggregate why naked puts are rejected (liquidity screen + sizing + build gates); for scan JSON."""
-        puts = [
+        """Aggregate why naked shorts are rejected (liquidity screen + sizing + build gates); for scan JSON."""
+        is_call = option_type == "call"
+        side_value = OptionSide.CALL.value if is_call else OptionSide.PUT.value
+        markets_in_window = [
             item
             for item in markets
-            if item.option_type == OptionSide.PUT.value
+            if item.option_type == side_value
             and self._instrument_active(item)
             and item.strike > 0
             and self.config.entry_dte_min <= item.dte_days() <= self.config.entry_dte_max
@@ -1063,55 +1121,44 @@ class StrategySelector:
         max_examples = 10
         buildable = 0
         buildable_names: list[str] = []
-        usdc_collateral = collateral_currency.upper() == "USDC"
 
         ref_index = index_price if index_price is not None else Decimal("0")
-        for inst in puts:
+        for inst in markets_in_window:
             if ref_index > 0 and not self._passes_strike_otm_prefilter(
-                inst, currency=currency, index_price=ref_index, option_type="put"
+                inst, currency=currency, index_price=ref_index, option_type=option_type
             ):
                 liquidity_counts["otm_out_of_range"] += 1
                 continue
             book = orderbook_loader(inst.instrument_name)
-            liq = self._naked_short_put_rejection_reason(currency, inst, book)
+            liq = self._naked_short_option_rejection_reason(currency, inst, book, option_type=option_type)
             if liq is not None:
                 liquidity_counts[liq] += 1
                 if len(examples) < max_examples:
                     examples.append(f"{inst.instrument_name} [liquidity] {liq}")
                 continue
 
-            mark = (
-                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
-            )
+            mark = book.effective_mark
             if mark <= 0 or book.index_price <= 0:
                 after_counts["mark_or_index_invalid"] += 1
                 if len(examples) < max_examples:
                     examples.append(f"{inst.instrument_name} [post] mark_or_index_invalid")
                 continue
 
-            if usdc_collateral:
-                im_1 = linear_usdc_short_put_initial_per_contract_usdc(
-                    index_price=book.index_price,
-                    strike=inst.strike,
-                    mark_usdc=mark,
-                    contract_size=inst.contract_size,
-                )
-                mm_1 = linear_usdc_short_put_mm_per_contract_usdc(
-                    index_price=book.index_price,
-                    strike=inst.strike,
-                    mark_usdc=mark,
-                    contract_size=inst.contract_size,
+            if is_call:
+                im_1, mm_1 = self._short_call_unit_margin(
+                    instrument=inst, book=book, mark=mark, collateral_currency=collateral_currency
                 )
             else:
-                im_1 = short_put_initial_unit(index_price=book.index_price, strike=inst.strike, mark_price=mark)
-                mm_1 = short_put_maintenance_unit(index_price=book.index_price, strike=inst.strike, mark_price=mark)
+                im_1, mm_1 = self._short_put_unit_margin(
+                    instrument=inst, book=book, mark=mark, collateral_currency=collateral_currency
+                )
             if im_1 <= 0:
                 after_counts["im_per_contract_nonpositive"] += 1
                 if len(examples) < max_examples:
                     examples.append(f"{inst.instrument_name} [post] im_per_contract_nonpositive")
                 continue
 
-            per_leg_cap = self.config.per_leg_im_cap(currency)
+            per_leg_cap = self.config.per_leg_im_cap(currency, option_type=option_type)
             exp_cap = self.config.expiry_im_cap(currency)
             hard_mm = self.config.hard_mm_utilization(currency)
             max_by_im_leg = floor_to_step((summary_equity * per_leg_cap) / im_1, inst.min_trade_amount)
@@ -1145,7 +1192,8 @@ class StrategySelector:
                     )
                 continue
 
-            cand, breason = self._try_build_naked_put_for_quantity(
+            cand, breason = self._try_build_naked_for_quantity(
+                option_type=option_type,
                 instrument=inst,
                 book=book,
                 regime=regime,
@@ -1165,7 +1213,7 @@ class StrategySelector:
                 if len(examples) < max_examples:
                     examples.append(f"{inst.instrument_name} [build] {breason}")
 
-        distinct_expiries = len({p.expiration_timestamp_ms for p in puts})
+        distinct_expiries = len({m.expiration_timestamp_ms for m in markets_in_window})
         note = (
             "目前是 crisis 風控狀態，實盤不會產生可下單候選；下方統計只用來看 orderbook 資料與篩選門檻卡在哪裡。"
             if regime is RiskRegime.CRISIS
@@ -1174,7 +1222,7 @@ class StrategySelector:
         return {
             "currency": currency,
             "regime": regime.value,
-            "puts_in_dte_window": len(puts),
+            f"{option_type}s_in_dte_window": len(markets_in_window),
             "distinct_expiries_in_dte_window": distinct_expiries,
             "liquidity_rejections": {k: liquidity_counts[k] for k, _ in liquidity_counts.most_common(16)},
             "after_liquidity_rejections": {k: after_counts[k] for k, _ in after_counts.most_common(16)},
@@ -1183,6 +1231,33 @@ class StrategySelector:
             "example_messages": examples,
             "note": note,
         }
+
+    def naked_put_scan_rejection_detail(
+        self,
+        currency: str,
+        markets: Iterable[OptionInstrument],
+        orderbook_loader: Callable[[str], OrderBookSnapshot],
+        *,
+        regime: RiskRegime,
+        summary_equity: Decimal,
+        summary_maintenance_margin: Decimal,
+        collateral_currency: str,
+        existing_im_by_expiry: dict[int, Decimal],
+        index_price: Decimal | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate why naked puts are rejected (liquidity screen + sizing + build gates); for scan JSON."""
+        return self._scan_rejection_detail(
+            "put",
+            currency,
+            markets,
+            orderbook_loader,
+            regime=regime,
+            summary_equity=summary_equity,
+            summary_maintenance_margin=summary_maintenance_margin,
+            collateral_currency=collateral_currency,
+            existing_im_by_expiry=existing_im_by_expiry,
+            index_price=index_price,
+        )
 
     def naked_call_scan_rejection_detail(
         self,
@@ -1198,127 +1273,18 @@ class StrategySelector:
         index_price: Decimal | None = None,
     ) -> dict[str, Any]:
         """Aggregate why naked calls are rejected; mirrors naked_put_scan_rejection_detail."""
-        calls = [
-            item
-            for item in markets
-            if item.option_type == OptionSide.CALL.value
-            and self._instrument_active(item)
-            and item.strike > 0
-            and self.config.entry_dte_min <= item.dte_days() <= self.config.entry_dte_max
-        ]
-        liquidity_counts: Counter[str] = Counter()
-        after_counts: Counter[str] = Counter()
-        examples: list[str] = []
-        max_examples = 10
-        buildable = 0
-        buildable_names: list[str] = []
-        usdc_collateral = collateral_currency.upper() == "USDC"
-
-        ref_index = index_price if index_price is not None else Decimal("0")
-        for inst in calls:
-            if ref_index > 0 and not self._passes_strike_otm_prefilter(
-                inst, currency=currency, index_price=ref_index, option_type="call"
-            ):
-                liquidity_counts["otm_out_of_range"] += 1
-                continue
-            book = orderbook_loader(inst.instrument_name)
-            liq = self._naked_short_call_rejection_reason(currency, inst, book)
-            if liq is not None:
-                liquidity_counts[liq] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [liquidity] {liq}")
-                continue
-
-            mark = (
-                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
-            )
-            if mark <= 0 or book.index_price <= 0:
-                after_counts["mark_or_index_invalid"] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [post] mark_or_index_invalid")
-                continue
-
-            im_1, mm_1 = self._short_call_unit_margin(
-                instrument=inst, book=book, mark=mark, collateral_currency=collateral_currency
-            )
-            if im_1 <= 0:
-                after_counts["im_per_contract_nonpositive"] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [post] im_per_contract_nonpositive")
-                continue
-
-            per_leg_cap = self.config.per_leg_im_cap(currency, option_type="call")
-            exp_cap = self.config.expiry_im_cap(currency)
-            hard_mm = self.config.hard_mm_utilization(currency)
-            max_by_im_leg = floor_to_step((summary_equity * per_leg_cap) / im_1, inst.min_trade_amount)
-            exp_key = inst.expiration_timestamp_ms
-            existing_im = existing_im_by_expiry.get(exp_key, Decimal("0"))
-            max_by_expiry = floor_to_step((summary_equity * exp_cap - existing_im) / im_1, inst.min_trade_amount)
-            max_by_mm = floor_to_step(
-                (summary_equity * hard_mm - summary_maintenance_margin) / mm_1, inst.min_trade_amount
-            )
-            max_by_liquidity = floor_to_step(book.best_bid_amount, inst.min_trade_amount)
-            quantity = min(max_by_im_leg, max_by_expiry, max_by_mm, max_by_liquidity)
-            if quantity < inst.min_trade_amount:
-                after_counts["quantity_below_min_trade"] += 1
-                if len(examples) < max_examples:
-                    caps = (
-                        ("im_leg", max_by_im_leg),
-                        ("exp", max_by_expiry),
-                        ("mm", max_by_mm),
-                        ("liq", max_by_liquidity),
-                    )
-                    binding = min(caps, key=lambda kv: kv[1])[0]
-                    examples.append(
-                        f"{inst.instrument_name} [post] quantity_below_min_trade "
-                        f"bind={binding} q={format_decimal(quantity, 8)} "
-                        f"im_leg={format_decimal(max_by_im_leg, 8)} "
-                        f"exp={format_decimal(max_by_expiry, 8)} "
-                        f"mm={format_decimal(max_by_mm, 8)} "
-                        f"liq={format_decimal(max_by_liquidity, 8)} "
-                        f"min={format_decimal(inst.min_trade_amount, 8)} "
-                        f"eq={format_decimal(summary_equity, 8)}"
-                    )
-                continue
-
-            cand, breason = self._try_build_naked_call_for_quantity(
-                instrument=inst,
-                book=book,
-                regime=regime,
-                summary_equity=summary_equity,
-                summary_maintenance_margin=summary_maintenance_margin,
-                collateral_currency=collateral_currency,
-                currency=currency,
-                quantity=quantity,
-                existing_im_for_expiry=existing_im,
-                relax_apr=False,
-            )
-            if cand is not None:
-                buildable += 1
-                buildable_names.append(inst.instrument_name)
-            elif breason is not None:
-                after_counts[breason] += 1
-                if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [build] {breason}")
-
-        distinct_expiries = len({c.expiration_timestamp_ms for c in calls})
-        note = (
-            "目前是 crisis 風控狀態，實盤不會產生可下單候選；下方統計只用來看 orderbook 資料與篩選門檻卡在哪裡。"
-            if regime is RiskRegime.CRISIS
-            else None
+        return self._scan_rejection_detail(
+            "call",
+            currency,
+            markets,
+            orderbook_loader,
+            regime=regime,
+            summary_equity=summary_equity,
+            summary_maintenance_margin=summary_maintenance_margin,
+            collateral_currency=collateral_currency,
+            existing_im_by_expiry=existing_im_by_expiry,
+            index_price=index_price,
         )
-        return {
-            "currency": currency,
-            "regime": regime.value,
-            "calls_in_dte_window": len(calls),
-            "distinct_expiries_in_dte_window": distinct_expiries,
-            "liquidity_rejections": {k: liquidity_counts[k] for k, _ in liquidity_counts.most_common(16)},
-            "after_liquidity_rejections": {k: after_counts[k] for k, _ in after_counts.most_common(16)},
-            "instruments_passing_all_build_gates": buildable,
-            "instrument_names_passing_all_build_gates": buildable_names,
-            "example_messages": examples,
-            "note": note,
-        }
 
     def build_naked_short_call_candidates(
         self,
@@ -1356,9 +1322,7 @@ class StrategySelector:
             book = orderbook_loader(inst.instrument_name)
             if self._naked_short_call_rejection_reason(currency, inst, book) is not None:
                 continue
-            mark = (
-                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
-            )
+            mark = book.effective_mark
             if mark <= 0 or book.index_price <= 0:
                 continue
             im_1, mm_1 = self._short_call_unit_margin(
@@ -1681,99 +1645,18 @@ class StrategySelector:
         existing_im_for_expiry: Decimal,
         relax_apr: bool,
     ) -> tuple[NakedPutCandidate | None, str | None]:
-        if quantity <= 0:
-            return None, "quantity<=0"
-        screening_bid = book.best_bid_price
-        mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
-        if mark <= 0:
-            return None, "mark<=0"
-        usdc_collateral = collateral_currency.upper() == "USDC"
-        if usdc_collateral:
-            fee_1 = option_trade_fee_native(
-                index_price=book.index_price,
-                premium=screening_bid,
-                quantity=Decimal("1"),
-                fee_rate=self.config.option_fee_rate,
-                fee_cap_rate=self.config.option_fee_cap_rate,
-                quote_currency="USDC",
-                settlement_currency="USDC",
-                fee_discount_rate=self._effective_fee_discount_rate(),
-            )
-        else:
-            fee_1 = inverse_option_fee_native_per_contract(
-                premium=screening_bid,
-                fee_rate=self.config.option_fee_rate,
-                fee_cap_rate=self.config.option_fee_cap_rate,
-                fee_discount_rate=self._effective_fee_discount_rate(),
-            )
-        net_prem = screening_bid * quantity
-        fee_native = fee_1 * quantity
-        net_credit = net_prem - fee_native
-        if net_credit <= 0:
-            return None, "net_credit<=0"
-        if summary_equity <= 0:
-            return None, "summary_equity<=0"
-        net_apr = self._screening_net_apr(
-            instrument=instrument,
-            book=book,
-            premium_per_contract=screening_bid,
-            collateral_currency=collateral_currency,
+        return self._try_build_naked_for_quantity(
             option_type="call",
-        )
-        if not relax_apr and net_apr < self.config.min_net_apr:
-            return None, "net_apr_below_min"
-        im_1, mm_1 = self._short_call_unit_margin(
-            instrument=instrument, book=book, mark=mark, collateral_currency=collateral_currency
-        )
-        im_total = im_1 * quantity
-        mm_total = mm_1 * quantity
-        per_leg_cap = self.config.per_leg_im_cap(currency, option_type="call")
-        if im_total > summary_equity * per_leg_cap:
-            return None, "per_leg_im_cap"
-        exp_cap = self.config.expiry_im_cap(currency)
-        if existing_im_for_expiry + im_total > summary_equity * exp_cap:
-            return None, "expiry_im_cap"
-        hard_mm = self.config.hard_mm_utilization(currency)
-        if summary_maintenance_margin + mm_total > summary_equity * hard_mm:
-            return None, "hard_mm_utilization"
-        margin_efficiency = (net_prem - fee_native) / im_total if im_total > 0 else Decimal("0")
-        target_price = self.sell_mid_price(instrument, book)
-        short_leg = self._short_put_spread_leg(
             instrument=instrument,
             book=book,
+            regime=regime,
+            summary_equity=summary_equity,
+            summary_maintenance_margin=summary_maintenance_margin,
+            collateral_currency=collateral_currency,
+            currency=currency,
             quantity=quantity,
-            entry_price=self.sell_taker_price(instrument, book),
-            target_price=target_price,
-        )
-        pdmin, pdmax = self.config.preferred_call_delta_bounds(currency)
-        pomin, pomax = self.config.preferred_call_otm_bounds(currency)
-        otm = self._call_otm_ratio(instrument, book)
-        preferred_delta = pdmin <= abs(book.delta) <= pdmax
-        preferred_otm = pomin <= otm <= pomax
-        in_band = self.config.target_net_apr_min <= net_apr <= self.config.target_net_apr_max
-        return (
-            NakedPutCandidate(
-                currency=currency,
-                collateral_currency=collateral_currency,
-                quantity=quantity,
-                dte_days=instrument.dte_days(),
-                short_leg=short_leg,
-                screening_bid=screening_bid,
-                screening_mark=mark,
-                target_limit_price=target_price,
-                net_premium_native=net_prem - fee_native,
-                fee_native=fee_native,
-                net_apr=net_apr,
-                margin_efficiency=margin_efficiency,
-                estimated_im_total=im_total,
-                estimated_mm_total=mm_total,
-                regime=regime,
-                preferred_delta=preferred_delta,
-                preferred_otm=preferred_otm,
-                in_target_apr_band=in_band,
-                option_type="call",
-            ),
-            None,
+            existing_im_for_expiry=existing_im_for_expiry,
+            relax_apr=relax_apr,
         )
 
     def _build_naked_call_for_quantity(
@@ -1823,7 +1706,7 @@ class StrategySelector:
         ):
             return None, "not_native_cover_book"
         screening_bid = book.best_bid_price
-        mark = book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
+        mark = book.effective_mark
         if screening_bid <= 0 or mark <= 0:
             return None, "bid_or_mark<=0"
         fee_1 = inverse_option_fee_native_per_contract(
@@ -2250,9 +2133,7 @@ class StrategySelector:
             reason = self._naked_short_put_rejection_reason(currency, inst, book)
             if reason is not None:
                 continue
-            mark = (
-                book.mark_price if book.mark_price > 0 else (book.best_bid_price + book.best_ask_price) / Decimal("2")
-            )
+            mark = book.effective_mark
             if mark <= 0 or book.index_price <= 0:
                 continue
             usdc_collateral = collateral_currency.upper() == "USDC"

@@ -202,6 +202,13 @@ class OrderBookSnapshot:
             return Decimal("1")
         return (self.best_ask_price - self.best_bid_price) / midpoint
 
+    @property
+    def effective_mark(self) -> Decimal:
+        """Mark price for screening/margin; falls back to bid/ask midpoint when mark is missing."""
+        if self.mark_price > 0:
+            return self.mark_price
+        return (self.best_bid_price + self.best_ask_price) / Decimal("2")
+
     def quote_sane_for_close(self, *, max_spread_ratio: Decimal) -> bool:
         """True when bid/ask are usable for management exits (not stale outliers)."""
         mark = self.mark_price
