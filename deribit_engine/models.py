@@ -195,6 +195,27 @@ class OrderBookSnapshot:
             open_interest=to_decimal(payload.get("open_interest")),
         )
 
+    @classmethod
+    def from_book_summary(cls, payload: dict[str, Any]) -> OrderBookSnapshot:
+        """Build a snapshot from ``get_book_summary_by_currency`` (no depth amounts or greeks).
+
+        Only valid as a liquidity prefilter: ``best_*_amount`` and ``delta`` are
+        unknown and set to zero, so it must not be used past the ``best_bid<=0``
+        rejection gate.
+        """
+        return cls(
+            instrument_name=str(payload.get("instrument_name") or ""),
+            best_bid_price=to_decimal(payload.get("bid_price")),
+            best_bid_amount=Decimal("0"),
+            best_ask_price=to_decimal(payload.get("ask_price")),
+            best_ask_amount=Decimal("0"),
+            mark_price=to_decimal(payload.get("mark_price")),
+            index_price=to_decimal(payload.get("index_price") or payload.get("underlying_price")),
+            delta=Decimal("0"),
+            iv=to_decimal(payload.get("mark_iv")),
+            open_interest=to_decimal(payload.get("open_interest")),
+        )
+
     @property
     def spread_ratio(self) -> Decimal:
         midpoint = (self.best_bid_price + self.best_ask_price) / Decimal("2")

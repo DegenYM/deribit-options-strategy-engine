@@ -224,6 +224,11 @@ class BotConfig:
     # ``strategy`` = normal trading sub-account; ``fee`` = operator fee wallet only.
     account_role: str = "strategy"
     risk_tier: str = RISK_TIER_MEDIUM
+    # When set, prefetch one book summary per currency each scan cycle and skip
+    # per-instrument order-book fetches for strikes with no bid (which are
+    # rejected at best_bid<=0 regardless). Trades one batch call for many N+1
+    # calls; most useful on large option chains prone to 429.
+    scan_book_summary_prefilter: bool = False
 
     @property
     def is_fee_collection_account(self) -> bool:
@@ -780,6 +785,7 @@ def load_config(
         enable_adopt_exchange_positions=_to_bool(
             _optional(values, "ENABLE_ADOPT_EXCHANGE_POSITIONS", "true"), default=True
         ),
+        scan_book_summary_prefilter=_to_bool(_optional(values, "SCAN_BOOK_SUMMARY_PREFILTER", "false")),
         enable_short_put=enable_short_put,
         enable_short_call=enable_short_call,
         short_call_delta_min=to_decimal(_optional(values, "SHORT_CALL_DELTA_MIN", "0.08")),

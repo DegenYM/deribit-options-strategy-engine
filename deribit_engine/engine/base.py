@@ -910,6 +910,35 @@ class EngineBase:
             cache[instrument_name] = OrderBookSnapshot.from_api(self.client.get_order_book(instrument_name))
         return cache[instrument_name]
 
+    def _prefetch_scan_book_summaries(
+        self,
+        markets_by_currency: dict[str, list[OptionInstrument]],
+        orderbook_cache: dict[str, OrderBookSnapshot],
+    ) -> None:
+        """Pre-seed no-bid strikes from one batch summary per currency to avoid N+1 order-book calls.
+
+        A strike with no bid is rejected at the ``best_bid<=0`` gate before delta
+        is evaluated, so seeding the cache with a bid=0 snapshot is
+        behavior-preserving for both candidate scanning and rejection
+        diagnostics, while skipping a per-instrument ``get_order_book`` call.
+        """
+        if not self.config.scan_book_summary_prefilter:
+            return
+        for currency in sorted(markets_by_currency):
+            if not markets_by_currency.get(currency):
+                continue
+            try:
+                rows = self.client.get_book_summary_by_currency(currency, kind="option")
+            except Exception:
+                continue
+            for row in rows:
+                name = str(row.get("instrument_name") or "")
+                if not name or name in orderbook_cache:
+                    continue
+                snapshot = OrderBookSnapshot.from_book_summary(row)
+                if snapshot.best_bid_price <= 0:
+                    orderbook_cache[name] = snapshot
+
     def _supports_option_market(self, market: OptionInstrument) -> bool:
         if self.config.option_markets_profile == "linear_usdc":
             return (

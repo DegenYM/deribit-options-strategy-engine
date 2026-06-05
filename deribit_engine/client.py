@@ -586,6 +586,20 @@ class DeribitClient:
     def get_order_book(self, instrument_name: str, *, depth: int = 1) -> dict[str, Any]:
         return self._request("public/get_order_book", params={"instrument_name": instrument_name, "depth": depth}) or {}
 
+    def get_book_summary_by_currency(self, currency: str, *, kind: str = "option") -> list[dict[str, Any]]:
+        """Per-instrument quote summary (bid/ask/mark/underlying/OI) for a whole currency in one call.
+
+        Lacks order-book depth amounts and greeks, so it is only a liquidity
+        prefilter, not a replacement for ``get_order_book``.
+        """
+        return (
+            self._request(
+                "public/get_book_summary_by_currency",
+                params={"currency": currency.upper(), "kind": kind},
+            )
+            or []
+        )
+
     def get_index_price(self, index_name: str) -> dict[str, Any]:
         def _load() -> dict[str, Any]:
             return self._request("public/get_index_price", params={"index_name": index_name}) or {}

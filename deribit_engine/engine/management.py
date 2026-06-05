@@ -306,6 +306,8 @@ class ManagementMixin:
             future_positions=future_positions,
             orderbook_cache=orderbook_cache,
         )
+        if not dashboard_display:
+            self._prefetch_scan_book_summaries(markets_by_currency, orderbook_cache)
         return RuntimeContext(
             state=state,
             summaries=summaries,

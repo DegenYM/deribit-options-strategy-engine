@@ -176,6 +176,25 @@ class SimulatedDeribitClient:
                     return self._feed.synthetic_order_book(inst)
         raise KeyError(instrument_name)
 
+    def get_book_summary_by_currency(self, currency: str, *, kind: str = "option") -> list[dict[str, Any]]:
+        if kind != "option":
+            return []
+        rows: list[dict[str, Any]] = []
+        for inst in self._feed.instruments_by_currency.get(currency.upper(), []):
+            book = self._feed.synthetic_order_book(inst)
+            rows.append(
+                {
+                    "instrument_name": inst.instrument_name,
+                    "bid_price": book.get("best_bid_price"),
+                    "ask_price": book.get("best_ask_price"),
+                    "mark_price": book.get("mark_price"),
+                    "underlying_price": book.get("index_price"),
+                    "mark_iv": book.get("mark_iv"),
+                    "open_interest": book.get("open_interest"),
+                }
+            )
+        return rows
+
     def get_index_price(self, index_name: str) -> dict[str, Any]:
         ccy = index_name.split("_")[0].upper()
         price = self._feed.spot(ccy)
