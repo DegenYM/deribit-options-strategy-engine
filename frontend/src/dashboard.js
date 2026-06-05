@@ -50,7 +50,9 @@ function setBookFilter(book) {
       charts.renderDailyPnlChart();
       charts.scheduleChartResizeAll();
     })
-    .catch((err) => domain.showToast(`charts: ${err.message}`));
+    .catch((err) =>
+      domain.showToast(`charts: ${err.message}`, { retry: () => setBookFilter(book) })
+    );
 }
 
 function attachAutoRefresh() {
@@ -89,15 +91,18 @@ function attachControls() {
     else if (section === "closed") STATE.activityClosedPage += dir;
     render.renderRecentActivity(STATE.status, STATE.report, STATE.groups);
   });
-  document.getElementById("apr-window")?.addEventListener("change", async (e) => {
-    STATE.aprWindow = parseInt(e.target.value, 10) || 30;
+  const reloadAprSeries = async () => {
     try {
       await loadChartJs();
       STATE.aprSeries = await domain.fetchJson(charts.aprSeriesUrl());
     } catch (err) {
-      domain.showToast(`apr series: ${err.message}`);
+      domain.showToast(`apr series: ${err.message}`, { retry: reloadAprSeries });
     }
     charts.renderAprChart();
+  };
+  document.getElementById("apr-window")?.addEventListener("change", (e) => {
+    STATE.aprWindow = parseInt(e.target.value, 10) || 30;
+    reloadAprSeries();
   });
 }
 
@@ -119,9 +124,28 @@ function attachStressHoverPrefetch() {
   });
 }
 
+const SECTION_STATE_PREFIX = "dash:section:";
+
+function readSavedSectionState(id) {
+  try {
+    return window.localStorage.getItem(`${SECTION_STATE_PREFIX}${id}`);
+  } catch {
+    return null;
+  }
+}
+
+function saveSectionState(id, open) {
+  try {
+    window.localStorage.setItem(`${SECTION_STATE_PREFIX}${id}`, open ? "open" : "closed");
+  } catch {
+    /* ignore storage failures (private mode, quota, etc.) */
+  }
+}
+
 function attachExpandableSections() {
   document.querySelectorAll("details.collapsible-section").forEach((details) => {
     details.addEventListener("toggle", () => {
+      if (details.id) saveSectionState(details.id, details.open);
       if (!details.open) return;
       if (details.id === "charts-section") {
         refresh
@@ -152,6 +176,15 @@ function attachExpandableSections() {
       }
       charts.scheduleChartResizeAll();
     });
+
+    if (details.id) {
+      const saved = readSavedSectionState(details.id);
+      if (saved === "open" && !details.open) {
+        details.open = true;
+      } else if (saved === "closed" && details.open) {
+        details.open = false;
+      }
+    }
   });
 }
 
@@ -166,6 +199,7 @@ export function initDashboard() {
     attachChartHoverPrefetch();
     attachStressHoverPrefetch();
     attachAutoRefresh();
+    refresh.startLastRefreshTicker();
     refresh.refreshAll({ force: true, renderDashboard });
   };
   if (document.readyState === "loading") {

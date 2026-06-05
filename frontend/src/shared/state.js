@@ -25,6 +25,7 @@ export const STATE = {
   investorLoadTotal: 0,
   investorLoadDone: 0,
   lastRefreshStartedMs: 0,
+  lastRefreshMs: 0,
   statusErrorOnce: false,
   lastUnderlyingIndexUsd: {},
   lastSpotUsd: { BTC: null, ETH: null },

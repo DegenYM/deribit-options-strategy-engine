@@ -714,9 +714,9 @@ export function creditCaptureBarHtml(value) {
 export function openPositionMetricHtml(label, valueHtml, extraClass = "", { secondary = false } = {}) {
   const secondaryClass = secondary ? " open-position-kpi-secondary" : "";
   return `
-    <div class="open-position-metric${secondaryClass} ${extraClass}">
+    <div class="open-position-metric${secondaryClass}">
       <span class="open-position-label">${label}</span>
-      <span class="open-position-value">${valueHtml}</span>
+      <span class="open-position-value ${extraClass}">${valueHtml}</span>
     </div>`;
 }
 

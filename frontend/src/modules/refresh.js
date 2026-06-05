@@ -16,7 +16,7 @@ import {
 import { STATE } from "../shared/state.js";
 import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, updateUnderlyingIndexCache } from "./domain.js";
 import { loadChartJs } from "./chart-vendor.js";
-import { formatTimeHms } from "./date-time.js";
+import { formatDateTimeHmsLocal } from "./date-time.js";
 import { aprSeriesUrl, renderAprChart, renderBookEquityChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
 import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress } from "./render.js";
 
@@ -32,6 +32,39 @@ export function registerRenderDashboard(fn) {
 
 function invokeRenderDashboard() {
   (activeRenderDashboard ?? persistentRenderDashboard)?.();
+}
+
+let lastRefreshTickHandle = null;
+
+function relativeRefreshText(deltaMs) {
+  const s = Math.max(0, Math.round(deltaMs / 1000));
+  if (s < 10) return i18n("just now", "剛剛");
+  if (s < 60) return i18n(`${s}s ago`, `${s} 秒前`);
+  const m = Math.round(s / 60);
+  if (m < 60) return i18n(`${m}m ago`, `${m} 分鐘前`);
+  const h = Math.round(m / 60);
+  if (h < 24) return i18n(`${h}h ago`, `${h} 小時前`);
+  const d = Math.round(h / 24);
+  return i18n(`${d}d ago`, `${d} 天前`);
+}
+
+export function updateLastRefreshLabel() {
+  const el = document.getElementById("last-refresh");
+  if (!el || !STATE.lastRefreshMs) return;
+  const full = formatDateTimeHmsLocal(new Date(STATE.lastRefreshMs));
+  el.textContent = i18n(
+    `updated ${relativeRefreshText(Date.now() - STATE.lastRefreshMs)}`,
+    `更新於 ${relativeRefreshText(Date.now() - STATE.lastRefreshMs)}`
+  );
+  el.title = i18n(
+    `Last refresh (local time): ${full}`,
+    `上次更新（本地時間）：${full}`
+  );
+}
+
+export function startLastRefreshTicker() {
+  if (lastRefreshTickHandle) return;
+  lastRefreshTickHandle = setInterval(updateLastRefreshLabel, 15000);
 }
 
 function roundIvRankPctOneDecimal(pct) {
@@ -415,7 +448,9 @@ export async function fetchStatusWithTimeout() {
     }
     STATE.status = null;
     if (!STATE.statusErrorOnce) {
-      showToast(`status: ${err.message}`);
+      showToast(`status: ${err.message}`, {
+        retry: () => refreshAll({ force: true, renderDashboard: persistentRenderDashboard }),
+      });
       STATE.statusErrorOnce = true;
     }
     return null;
@@ -755,7 +790,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         .catch((err) => {
           STATE.status = null;
           if (!STATE.statusErrorOnce) {
-            showToast(`status: ${err.message}`);
+            showToast(`status: ${err.message}`, {
+              retry: () => refreshAll({ force: true, renderDashboard: persistentRenderDashboard }),
+            });
             STATE.statusErrorOnce = true;
           }
         });
@@ -859,10 +896,8 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
 
     setRefreshProgressBar(false);
     setRefreshControlsDisabled(false);
-    setText(
-      "last-refresh",
-      `${i18n("last refresh (local time):", "上次更新（本地時間）：")} ${formatTimeHms()}`
-    );
+    STATE.lastRefreshMs = Date.now();
+    updateLastRefreshLabel();
   } finally {
     STATE.refreshInFlight = false;
     setRefreshProgressBar(false);

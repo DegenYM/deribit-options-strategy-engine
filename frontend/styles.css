@@ -1,5 +1,16 @@
 /* Custom component CSS (Tailwind utilities come from tailwind.css). */
 
+/* Unified keyboard focus indicator. Mouse clicks stay clean (focus-visible only). */
+:where(a, button, summary, select, input, [tabindex]):focus-visible {
+  outline: 2px solid rgb(94 234 212);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.section-summary:focus-visible {
+  background: rgba(30, 41, 59, 0.4);
+}
+
 .app-body {
   background:
     radial-gradient(circle at top left, rgba(20, 184, 166, 0.12), transparent 30rem),
@@ -22,6 +33,25 @@
   flex-wrap: wrap;
   align-items: stretch;
   gap: 0.5rem;
+}
+
+/* Group secondary system badges so they read as one cluster, not loose chips. */
+.header-status-cluster {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(51, 65, 85, 0.5);
+  background: rgba(15, 23, 42, 0.4);
+}
+
+@media (max-width: 900px) {
+  .header-status-cluster {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 
 .header-market-card {
@@ -315,6 +345,22 @@
   background: rgba(15, 23, 42, 0.6);
 }
 
+/* Footer links: enlarge the touch target to ~44px for comfortable tapping. */
+.footer-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding-inline: 0.35rem;
+}
+
+/* Chart sub-panels: align with the section-card design system instead of ad-hoc utilities. */
+.chart-panel {
+  border: 1px solid rgba(51, 65, 85, 0.72);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.6);
+  padding: 1rem;
+}
+
 .stress-panel {
   border-top: 1px solid rgba(30, 41, 59, 0.72);
 }
@@ -450,6 +496,18 @@ table tbody tr:hover {
 }
 .pnl-neg {
   color: rgb(253 164 175);
+}
+
+/* Non-color cue for P&L direction (don't rely on green/red alone). */
+.pnl-pos::before {
+  content: "\25B2\00A0";
+  font-size: 0.72em;
+  vertical-align: 0.08em;
+}
+.pnl-neg::before {
+  content: "\25BC\00A0";
+  font-size: 0.72em;
+  vertical-align: 0.08em;
 }
 
 .mini-bar {
@@ -1118,11 +1176,11 @@ table tbody tr:hover {
   white-space: nowrap;
 }
 
-.open-position-metric.pnl-pos .open-position-value {
+.open-position-value.pnl-pos {
   color: rgb(110 231 183);
 }
 
-.open-position-metric.pnl-neg .open-position-value {
+.open-position-value.pnl-neg {
   color: rgb(253 164 175);
 }
 
@@ -2105,6 +2163,28 @@ table tbody tr:hover {
   color: rgb(100 116 139);
 }
 
+#toast:not(.hidden) {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.toast-retry {
+  flex-shrink: 0;
+  padding: 0.15rem 0.6rem;
+  border-radius: 9999px;
+  border: 1px solid rgba(254, 205, 211, 0.5);
+  background: rgba(244, 63, 94, 0.18);
+  color: rgb(254 226 226);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.toast-retry:hover {
+  background: rgba(244, 63, 94, 0.32);
+}
+
 .skeleton-block {
   position: relative;
   overflow: hidden;
@@ -2164,5 +2244,21 @@ table tbody tr:hover {
   }
   100% {
     transform: scaleX(0.15) translateX(220%);
+  }
+}
+
+/* Respect users who prefer reduced motion: drop shimmer, hover lifts, and looping bars. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .open-position-card:hover {
+    transform: none;
   }
 }

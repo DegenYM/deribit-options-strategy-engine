@@ -74,7 +74,7 @@
           </div>
         </div>
         <div class="investor-header-actions ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-400">
-          <span id="last-refresh">上次更新（本地時間）：—</span>
+          <span id="last-refresh" aria-live="polite">上次更新（本地時間）：—</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
             <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
             自動更新
@@ -251,9 +251,9 @@
         本頁面僅供資訊揭露與溝通，不構成買賣建議。加密資產與選擇權具高波動與本金虧損風險；過去績效不代表未來結果。
         金額以 USDC 約當列示者依當下匯率與標的指數換算。價差策略之報表通常不含永續對沖部位之損益。
         <span class="block mt-2 text-slate-500">
-          <a href="/investor.html" class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">English investor view</a>
+          <a href="/investor.html" class="footer-link text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">English investor view</a>
           ·
-          <a href="/index.html" class="text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">內部營運儀表板</a>
+          <a href="/index.html" class="footer-link text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">內部營運儀表板</a>
           （含帳戶路徑、保證金細節與壓力情境）
         </span>
       </footer>
@@ -282,6 +282,8 @@
 
     <div
       id="toast"
+      role="alert"
+      aria-live="assertive"
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 

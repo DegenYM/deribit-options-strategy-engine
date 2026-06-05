@@ -2493,13 +2493,25 @@ export function setText(id, text) {
   if (el) el.textContent = text;
 }
 
-export function showToast(msg) {
+export function showToast(msg, options = {}) {
   const el = document.getElementById("toast");
   if (!el) return;
-  el.textContent = msg;
+  const retry = typeof options.retry === "function" ? options.retry : null;
+  if (retry) {
+    el.innerHTML =
+      `<span class="toast-msg"></span>` +
+      `<button type="button" class="toast-retry">${i18n("Retry", "重試")}</button>`;
+    el.querySelector(".toast-msg").textContent = msg;
+    el.querySelector(".toast-retry").addEventListener("click", () => {
+      el.classList.add("hidden");
+      retry();
+    });
+  } else {
+    el.textContent = msg;
+  }
   el.classList.remove("hidden");
   clearTimeout(showToast._t);
-  showToast._t = setTimeout(() => el.classList.add("hidden"), 5000);
+  showToast._t = setTimeout(() => el.classList.add("hidden"), retry ? 12000 : 5000);
 }
 
 export function delay(ms) {

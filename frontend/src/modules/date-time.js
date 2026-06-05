@@ -8,6 +8,10 @@ export function formatTimeHms(date = new Date()) {
   return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`;
 }
 
+export function formatDateTimeHmsLocal(date = new Date()) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${formatTimeHms(date)}`;
+}
+
 export function parseIsoUtcMs(value) {
   if (value == null || value === "") return null;
   const ms = Date.parse(String(value).trim());
