@@ -63,6 +63,26 @@ def _annualize_apr(pnl: Decimal, sample_days: Decimal, capital: Decimal) -> Deci
     return safe_div(pnl, capital) * (Decimal("365") / sample_days)
 
 
+def _profit_sweep_display_usdc(
+    group: TradeGroup,
+    native: Decimal,
+    spot: Decimal,
+) -> Decimal:
+    """Coin profit swapped to USDT uses actual quote proceeds, not live spot on sold size."""
+    if native <= 0:
+        return native * spot
+    sweep = str(group.profit_sweep_status or "").lower()
+    swept_usdt = group.profit_sweep_quote_proceeds
+    sweep_amt = group.profit_sweep_amount if group.profit_sweep_amount > 0 else native
+    if sweep == "filled" and swept_usdt > 0:
+        swept_native = min(sweep_amt, native)
+        held_native = max(Decimal("0"), native - swept_native)
+        if held_native > 0:
+            return swept_usdt + held_native * spot
+        return swept_usdt
+    return native * spot
+
+
 def realized_pnl_usdc_at_spot(
     row: dict[str, Any],
     spot_index: dict[str, Decimal] | None,
@@ -85,8 +105,8 @@ def realized_pnl_usdc_at_spot(
         group.backfill_realized_pnl_collateral_native(spot_index_usd=spot)
         native = group.realized_pnl_collateral_native
     if native is not None:
-        return native * spot
-    return to_decimal(row.get("realized_pnl"))
+        return _profit_sweep_display_usdc(group, native, spot)
+    return None
 
 
 def _row_realized_pnl_usdc(

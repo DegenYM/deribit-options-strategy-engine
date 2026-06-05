@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, fmtNum, fmtPct, fmtUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, fmtNum, fmtPct, fmtUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -288,6 +288,38 @@ export function sumLifetimeRealizedPnlNativeByBook(report, groups, status) {
     out[book] += native;
   }
   return out;
+}
+
+function _aggregateProfitDispositionRows(rows, status) {
+  const out = emptyProfitDisposition();
+  let any = false;
+  for (const g of rows) {
+    const disp = profitDispositionForGroup(g, status);
+    if (!disp) continue;
+    if (disp.book === "USDC") {
+      out.heldNative.USDC += disp.held;
+    } else {
+      out.heldNative[disp.book] += disp.held;
+      out.pendingSweepNative[disp.book] += disp.pending;
+      out.sweptNativeRef[disp.book] += disp.sweptNative;
+      out.sweptUsdt += disp.sweptUsdt;
+    }
+    any = true;
+  }
+  return any ? out : null;
+}
+
+/** Held spot profit vs USDT swapped (excludes USDT from held USDC profit line). */
+export function aggregateProfitDisposition(report, groups, status, { windowDays = null } = {}) {
+  let rows = lifetimeRealizedClosedRows(report, groups, status);
+  if (windowDays != null) {
+    const cutoffMs = Date.now() - windowDays * 24 * 3600 * 1000;
+    rows = rows.filter((g) => {
+      const closedMs = closedTimestampMs(g);
+      return closedMs !== null && closedMs >= cutoffMs;
+    });
+  }
+  return _aggregateProfitDispositionRows(rows, status);
 }
 
 /** Lifetime Total profit in USDC using live index for coin-collateral rows. */

@@ -4,51 +4,56 @@
 
 | 方式 | 範例 |
 |------|------|
-| **投資人 + slug**（建議） | `./bot --investor youming --account naked <子命令>`；slug 見 `config/investors/<id>/accounts.toml` |
+| **投資人 + slug**（建議） | `export INVESTOR=youming` 後 `./bot --investor $INVESTOR --account naked <子命令>`；slug 見 `config/investors/<id>/accounts.toml` |
 | **直接 env 路徑** | `./bot --env-file config/investors/youming/accounts/.env.naked <子命令>`（路徑可寫在子命令前或後） |
-| **舊版單一 `.env`** | 不帶 `--investor`，預設讀 repo 根目錄 `.env` |
+| **舊版單一 `.env`**（不建議） | 不帶 `--investor`，預設讀 repo 根目錄 `.env` |
 
 `--investor` 與一般子命令並用時，**多數子命令必須加 `--account <slug>`**（`frontend` 例外：不帶 `--account` 時會聚合該投資人 `accounts.toml` 內所有 `enabled` 子帳）。
 
 - 預設 **dry-run**；要真的下單須加 `--live`（`enter-best`、`manage`、`run`、`panic-close`、`close-position`）。
-- 除 `ping` 外，需要連線與私有金鑰；實單前先在 `testnet` 或 dry-run 確認輸出。
+- 除 `ping` 外，需要連線與私有金鑰；實單前先在 dry-run 確認輸出。
 
 ## 投資人子帳（youming 範例）
 
 ```bash
+export INVESTOR=youming
+ACCT=naked   # 或 bull_put、covered_call，見 accounts.toml
+
 # 連線 / 部位 / 掃描 / 一輪管理（dry-run）
-./bot --investor youming --account naked ping --json
-./bot --investor youming --account naked status --json
-./bot --investor youming --account naked scan --currencies BTC,ETH --json
-./bot --investor youming --account naked manage --json
+./bot --investor $INVESTOR --account $ACCT ping --json
+./bot --investor $INVESTOR --account $ACCT status --json
+./bot --investor $INVESTOR --account $ACCT scan --currencies BTC,ETH --json
+./bot --investor $INVESTOR --account $ACCT manage --json
 
 # 下單與持續迴圈（--live 才實單）
-./bot --investor youming --account naked enter-best --currencies BTC,ETH --json
-./bot --investor youming --account naked enter-best --currencies BTC,ETH --live --json
-./bot --investor youming --account naked manage --live --json
-./bot --investor youming --account naked run --cycles 1 --json
-./bot --investor youming --account naked run --cycles 0 --live
+./bot --investor $INVESTOR --account $ACCT enter-best --currencies BTC,ETH --json
+./bot --investor $INVESTOR --account $ACCT enter-best --currencies BTC,ETH --live --json
+./bot --investor $INVESTOR --account $ACCT manage --live --json
+./bot --investor $INVESTOR --account $ACCT run --cycles 1 --json
+./bot --investor $INVESTOR --account $ACCT run --cycles 0 --live
 
 # 報表、壓力測試、成交查詢（依子帳 API）
-./bot --investor youming --account naked report --days 30 --json
-./bot --investor youming --account naked stress-current --json
-./bot --investor youming --account naked user-trades --currency USDC --count 50 --json
+./bot --investor $INVESTOR --account $ACCT report --days 30 --json
+./bot --investor $INVESTOR --account $ACCT stress-current --json
+./bot --investor $INVESTOR --account $ACCT user-trades --currency USDC --count 50 --json
 
 # 緊急全平（取消掛單 + 平倉；--live 才送單）
-./bot --investor youming --account naked panic-close --json
-./bot --investor youming --account naked panic-close --live --json
+./bot --investor $INVESTOR --account $ACCT panic-close --json
+./bot --investor $INVESTOR --account $ACCT panic-close --live --json
 
 # 依 order id 取消單筆掛單
-./bot --investor youming --account naked cancel --order-id YOUR_ORDER_ID --json
+./bot --investor $INVESTOR --account $ACCT cancel --order-id YOUR_ORDER_ID --json
 ```
 
 ## 儀表板與多子帳 live
 
 ```bash
+export INVESTOR=youming
+
 # 本地 dashboard（預設 http://127.0.0.1:8765 ）
-./bot --investor youming frontend
-./bot --investor youming frontend --port 9000
-./bot frontend --account-env-files config/investors/youming/accounts/.env.naked,config/investors/youming/accounts/.env.bull_put
+./bot --investor $INVESTOR frontend
+./bot --investor $INVESTOR frontend --port 9000
+./bot frontend --account-env-files config/investors/$INVESTOR/accounts/.env.naked,config/investors/$INVESTOR/accounts/.env.bull_put
 
 # macOS launchd 常駐（依 registry.toml）
 ./bot investor frontend start    # dashboard
@@ -56,18 +61,19 @@
 ./bot investor live start        # 實單監督
 
 # 同時啟動 accounts.toml 內 live_enabled 子帳的 `run --live`（log：logs/live/<investor_id>/<slug>.log）
-python scripts/run_live_profiles.py --investor youming --restart-failed
-python scripts/run_live_profiles.py --investor alice --restart-failed
+python scripts/run_live_profiles.py --investor $INVESTOR --restart-failed
 
 # 不經 --investor，改用手動列出多個子帳 env：
 python scripts/run_live_profiles.py \
-  config/investors/youming/accounts/.env.naked \
-  config/investors/youming/accounts/.env.bull_put
+  config/investors/$INVESTOR/accounts/.env.naked \
+  config/investors/$INVESTOR/accounts/.env.bull_put
 ```
 
 Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。Tunnel 手動 `run` 與對外設定見 [cloudflare-tunnel-investor.md](cloudflare-tunnel-investor.md)。
 
-## 單一 `.env`（未用 `config/investors/...` 時）
+## 舊版單一 `.env`（legacy，不建議）
+
+若尚未遷移到 `config/investors/...`，仍可用 repo 根目錄 `.env`：
 
 ```bash
 ./bot ping
@@ -123,20 +129,22 @@ Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。Tunnel 手動
 - **永續／期貨**：`private/close_position`（市價）
 
 ```bash
+export INVESTOR=youming
+
 # 1) 先看子帳有哪些倉位
-./bot --investor youming --account naked status --json
-./bot --investor youming --account naked close-position --list --json
+./bot --investor $INVESTOR --account naked status --json
+./bot --investor $INVESTOR --account naked close-position --list --json
 
 # 2) 預覽平某一張（不送單）
-./bot --investor youming --account naked close-position \
+./bot --investor $INVESTOR --account naked close-position \
   --instrument BTC_USDC-27MAR26-90000-P --json
 
 # 3) 市價全平該合約
-./bot --investor youming --account naked close-position \
+./bot --investor $INVESTOR --account naked close-position \
   --instrument BTC_USDC-27MAR26-90000-P --live --json
 
 # 4) 選擇權用 limit 平倉
-./bot --investor youming --account bull_put close-position \
+./bot --investor $INVESTOR --account bull_put close-position \
   --instrument BTC_USDC-27MAR26-88000-P --order-type limit --live --json
 ```
 

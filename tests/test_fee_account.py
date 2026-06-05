@@ -62,7 +62,7 @@ def test_fetch_fee_account_balance(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         "\n".join(
             [
                 "ACCOUNT_ROLE=fee",
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "DERIBIT_CLIENT_ID=cid",
                 "DERIBIT_CLIENT_SECRET=sec",
                 "ORDER_LABEL_PREFIX=alice_fee",
@@ -111,7 +111,7 @@ def test_fetch_fee_account_balance(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     result = fetch_fee_account_balance("alice", repo_root=repo)
     assert result["investor_id"] == "alice"
-    assert result["env"] == "testnet"
+    assert result["env"] == "mainnet"
     assert result["total_equity_usdc"] == "1500.5"
     assert result["books"]["USDC"]["balance"] == "1500.5"
     assert result["books"]["USDC"]["available_withdrawal_funds"] == "1500.5"
@@ -126,7 +126,7 @@ def test_fetch_fee_account_balance_missing_account_read_scope(tmp_path: Path, mo
         "\n".join(
             [
                 "ACCOUNT_ROLE=fee",
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "DERIBIT_CLIENT_ID=cid",
                 "DERIBIT_CLIENT_SECRET=sec",
                 "ORDER_LABEL_PREFIX=dave_fee",
@@ -151,7 +151,7 @@ def test_fetch_fee_account_balance_missing_creds(tmp_path: Path) -> None:
     repo = _bootstrap_repo(tmp_path)
     investor_init("bob", strategies=("naked",), repo_root=repo)
     fee_env = repo / "config/investors/bob/accounts/.env.fee"
-    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=testnet\n", encoding="utf-8")
+    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=mainnet\n", encoding="utf-8")
     with pytest.raises(ConfigurationError, match="missing DERIBIT_CLIENT_ID/SECRET"):
         fetch_fee_account_balance("bob", repo_root=repo)
 

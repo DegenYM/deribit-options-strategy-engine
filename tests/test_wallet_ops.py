@@ -118,7 +118,7 @@ def test_resolve_fee_subaccount_id_via_fee_env(tmp_path: Path, monkeypatch: pyte
         "\n".join(
             [
                 "ACCOUNT_ROLE=fee",
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "DERIBIT_CLIENT_ID=fee_cid",
                 "DERIBIT_CLIENT_SECRET=fee_sec",
                 "ORDER_LABEL_PREFIX=eve_fee",
@@ -542,7 +542,7 @@ def test_internal_transfer_live_uses_main_account_api(tmp_path: Path, monkeypatc
         "\n".join(
             [
                 "ACCOUNT_ROLE=main",
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "DERIBIT_CLIENT_ID=main_cid",
                 "DERIBIT_CLIENT_SECRET=main_sec",
                 "ORDER_LABEL_PREFIX=mainxfer_main",
@@ -632,6 +632,19 @@ def test_trade_spot_rejects_insufficient_balance(tmp_path: Path, monkeypatch: py
     }
     monkeypatch.setattr(
         client, "get_instruments", lambda currency, kind="option", expired=False: [spot_row] if kind == "spot" else []
+    )
+    monkeypatch.setattr(
+        client,
+        "get_order_book",
+        lambda instrument_name, depth=1: {
+            "instrument_name": instrument_name,
+            "best_bid_price": 74925,
+            "best_bid_amount": 2,
+            "best_ask_price": 74952,
+            "best_ask_amount": 1.5,
+            "mark_price": 74918.85,
+            "index_price": 74900,
+        },
     )
     monkeypatch.setattr(
         client,
@@ -759,3 +772,31 @@ def test_place_protected_spot_order_live_uses_limit_ioc(tmp_path: Path, monkeypa
     assert captured["order_type"] == "limit"
     assert captured["time_in_force"] == "immediate_or_cancel"
     assert captured["price"] == Decimal("69650")
+
+
+def test_spot_sell_quote_proceeds_from_trades_deducts_fees() -> None:
+    from decimal import Decimal
+
+    from deribit_engine.wallet_ops import spot_sell_quote_proceeds_from_trades
+
+    usdt_fee_trades = [
+        {
+            "direction": "sell",
+            "amount": Decimal("0.0046"),
+            "price": Decimal("2650"),
+            "fee": Decimal("0.05"),
+            "fee_currency": "USDT",
+        }
+    ]
+    assert spot_sell_quote_proceeds_from_trades(usdt_fee_trades) == Decimal("12.14")
+
+    eth_fee_trades = [
+        {
+            "direction": "sell",
+            "amount": Decimal("0.0046"),
+            "price": Decimal("2650"),
+            "fee": Decimal("0.000001"),
+            "fee_currency": "ETH",
+        }
+    ]
+    assert spot_sell_quote_proceeds_from_trades(eth_fee_trades) == Decimal("12.18735")

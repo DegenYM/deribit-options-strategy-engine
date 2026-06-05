@@ -28,6 +28,10 @@ export const STATE = {
   statusErrorOnce: false,
   lastUnderlyingIndexUsd: {},
   lastSpotUsd: { BTC: null, ETH: null },
+  lastPriceChangePct24h: { BTC: null, ETH: null },
+  lastIvRankPct: { BTC: null, ETH: null },
+  lastDvol: { BTC: null, ETH: null },
+  ivRankLookbackDays: null,
   activityOpenPage: 1,
   activityClosedPage: 1,
   /** Set by refresh.registerRenderDashboard for late async API completions. */

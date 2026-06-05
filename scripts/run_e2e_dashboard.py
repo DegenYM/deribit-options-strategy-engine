@@ -50,7 +50,7 @@ def main() -> int:
     env_file.write_text(
         "\n".join(
             [
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "DERIBIT_CLIENT_ID=e2e",
                 "DERIBIT_CLIENT_SECRET=e2e",
                 "",

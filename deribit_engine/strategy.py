@@ -36,6 +36,21 @@ class StrategySelector:
         self.config = config
         self._iv_rank_by_currency: dict[str, Decimal] = {}
         self._iv_minus_rv_by_currency: dict[str, Decimal] = {}
+        self.first_option_trade_timestamp_ms: int | None = None
+
+    def _effective_fee_discount_rate(self, at_timestamp_ms: int | None = None) -> Decimal:
+        from .fee_discount import effective_option_fee_discount_rate
+        from .utils import utc_now_ms
+
+        at_ms = int(at_timestamp_ms if at_timestamp_ms is not None else utc_now_ms())
+        return effective_option_fee_discount_rate(
+            base_rate=self.config.option_fee_discount_rate,
+            discount_months=self.config.option_fee_discount_months,
+            first_trade_timestamp_ms=self.first_option_trade_timestamp_ms,
+            anchor=self.config.option_fee_discount_anchor,
+            registration_timestamp_ms=self.config.option_fee_discount_registration_ms or None,
+            at_timestamp_ms=at_ms,
+        )
 
     def update_vol_entry_context(
         self,
@@ -50,11 +65,12 @@ class StrategySelector:
         if not self.config.enable_iv_entry_gate:
             return None
         ccy = currency.upper()
+        min_iv_rank, max_iv_rank = self.config.iv_rank_bounds(ccy)
         if not passes_iv_entry_gate(
             iv_rank_value=self._iv_rank_by_currency.get(ccy),
             iv_minus_rv=self._iv_minus_rv_by_currency.get(ccy),
-            min_iv_rank=self.config.min_iv_rank,
-            max_iv_rank=self.config.max_iv_rank,
+            min_iv_rank=min_iv_rank,
+            max_iv_rank=max_iv_rank,
             min_iv_minus_rv=self.config.min_iv_minus_rv,
             gate_enabled=True,
         ):
@@ -88,6 +104,7 @@ class StrategySelector:
                     dte_days=dte_days,
                     fee_rate=self.config.option_fee_rate,
                     fee_cap_rate=self.config.option_fee_cap_rate,
+                    fee_discount_rate=self._effective_fee_discount_rate(),
                 )
             return net_apr_linear_usdc_short_put_per_contract(
                 premium_per_contract=premium_per_contract,
@@ -96,6 +113,7 @@ class StrategySelector:
                 index_price=book.index_price,
                 fee_rate=self.config.option_fee_rate,
                 fee_cap_rate=self.config.option_fee_cap_rate,
+                fee_discount_rate=self._effective_fee_discount_rate(),
             )
         return net_apr_inverse_short_per_contract(
             premium_per_contract=premium_per_contract,
@@ -103,6 +121,7 @@ class StrategySelector:
             dte_days=dte_days,
             fee_rate=self.config.option_fee_rate,
             fee_cap_rate=self.config.option_fee_cap_rate,
+            fee_discount_rate=self._effective_fee_discount_rate(),
         )
 
     def put_delta_min(self, currency: str) -> Decimal:
@@ -668,6 +687,7 @@ class StrategySelector:
             fee_cap_rate=self.config.option_fee_cap_rate,
             quote_currency=instrument.quote_currency,
             settlement_currency=instrument.settlement_currency,
+            fee_discount_rate=self._effective_fee_discount_rate(),
         )
 
     @staticmethod
@@ -893,12 +913,14 @@ class StrategySelector:
                 fee_cap_rate=self.config.option_fee_cap_rate,
                 quote_currency="USDC",
                 settlement_currency="USDC",
+                fee_discount_rate=self._effective_fee_discount_rate(),
             )
         else:
             fee_1 = inverse_option_fee_native_per_contract(
                 premium=screening_bid,
                 fee_rate=self.config.option_fee_rate,
                 fee_cap_rate=self.config.option_fee_cap_rate,
+                fee_discount_rate=self._effective_fee_discount_rate(),
             )
         net_prem = screening_bid * quantity
         fee_native = fee_1 * quantity
@@ -1675,12 +1697,14 @@ class StrategySelector:
                 fee_cap_rate=self.config.option_fee_cap_rate,
                 quote_currency="USDC",
                 settlement_currency="USDC",
+                fee_discount_rate=self._effective_fee_discount_rate(),
             )
         else:
             fee_1 = inverse_option_fee_native_per_contract(
                 premium=screening_bid,
                 fee_rate=self.config.option_fee_rate,
                 fee_cap_rate=self.config.option_fee_cap_rate,
+                fee_discount_rate=self._effective_fee_discount_rate(),
             )
         net_prem = screening_bid * quantity
         fee_native = fee_1 * quantity
@@ -1806,6 +1830,7 @@ class StrategySelector:
             premium=screening_bid,
             fee_rate=self.config.option_fee_rate,
             fee_cap_rate=self.config.option_fee_cap_rate,
+            fee_discount_rate=self._effective_fee_discount_rate(),
         )
         fee_native = fee_1 * quantity
         net_prem = screening_bid * quantity - fee_native
@@ -1864,11 +1889,16 @@ class StrategySelector:
         *,
         available_cover_quantity: Decimal,
         open_group_count: int,
+        min_trade_amount: Decimal | None = None,
     ) -> Decimal | None:
         """Per-entry cover cap from remaining MAX_GROUPS_PER_CURRENCY slots.
 
         Returns ``None`` when slot sizing is disabled or ``max_groups_per_currency``
         is unset (<= 0), meaning callers should size to full available cover.
+
+        When ``min_trade_amount`` is set, slots are only split across positions
+        that can each satisfy the contract minimum — e.g. 0.1 BTC cover with
+        min 0.1 uses one slot (0.1), not three (0.033 floored to 0).
         """
         if not self.config.covered_call_slot_sizing:
             return None
@@ -1876,6 +1906,12 @@ class StrategySelector:
         if max_groups <= 0:
             return None
         remaining_slots = max(1, max_groups - open_group_count)
+        if min_trade_amount is not None and min_trade_amount > 0:
+            max_fillable = floor_to_step(available_cover_quantity, min_trade_amount)
+            if max_fillable < min_trade_amount:
+                return Decimal("0")
+            fillable_slots = int(max_fillable // min_trade_amount)
+            remaining_slots = min(remaining_slots, max(1, fillable_slots))
         return available_cover_quantity / Decimal(remaining_slots)
 
     @staticmethod
@@ -1930,10 +1966,6 @@ class StrategySelector:
             examples.append(message)
 
         ref_index = index_price if index_price is not None else Decimal("0")
-        slot_entry_cap = self.covered_call_slot_entry_cap(
-            available_cover_quantity=available_cover_quantity,
-            open_group_count=open_group_count,
-        )
         prefilter = (
             (
                 lambda inst: self._passes_strike_otm_prefilter(
@@ -1974,6 +2006,11 @@ class StrategySelector:
 
             max_by_cover = floor_to_step(available_cover_quantity, inst.min_trade_amount)
             max_by_liquidity = floor_to_step(book.best_bid_amount, inst.min_trade_amount)
+            slot_entry_cap = self.covered_call_slot_entry_cap(
+                available_cover_quantity=available_cover_quantity,
+                open_group_count=open_group_count,
+                min_trade_amount=inst.min_trade_amount,
+            )
             quantity = self._covered_call_entry_quantity(
                 available_cover_quantity=available_cover_quantity,
                 slot_entry_cap=slot_entry_cap,
@@ -2025,7 +2062,7 @@ class StrategySelector:
             "calls_in_dte_window": len(calls),
             "distinct_expiries_in_dte_window": distinct_expiries,
             "available_cover_quantity": str(available_cover_quantity),
-            "slot_entry_cap": str(slot_entry_cap) if slot_entry_cap is not None else None,
+            "slot_entry_cap": None,
             "open_group_count": open_group_count,
             "liquidity_rejections": {k: liquidity_counts[k] for k, _ in liquidity_counts.most_common(16)},
             "after_liquidity_rejections": {k: after_counts[k] for k, _ in after_counts.most_common(16)},
@@ -2065,10 +2102,6 @@ class StrategySelector:
         ]
         candidates: list[NakedPutCandidate] = []
         ref_index = index_price if index_price is not None else Decimal("0")
-        slot_entry_cap = self.covered_call_slot_entry_cap(
-            available_cover_quantity=available_cover_quantity,
-            open_group_count=open_group_count,
-        )
         for inst in calls:
             if ref_index > 0 and not self._passes_strike_otm_prefilter(
                 inst, currency=currency, index_price=ref_index, option_type="call"
@@ -2077,6 +2110,11 @@ class StrategySelector:
             book = orderbook_loader(inst.instrument_name)
             if self._naked_short_call_rejection_reason(currency, inst, book) is not None:
                 continue
+            slot_entry_cap = self.covered_call_slot_entry_cap(
+                available_cover_quantity=available_cover_quantity,
+                open_group_count=open_group_count,
+                min_trade_amount=inst.min_trade_amount,
+            )
             quantity = self._covered_call_entry_quantity(
                 available_cover_quantity=available_cover_quantity,
                 slot_entry_cap=slot_entry_cap,

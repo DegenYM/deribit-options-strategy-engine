@@ -7,9 +7,9 @@
     <!-- <meta name="dashboard-api-base" content="https://your-dashboard.example.com" /> -->
     <title>Investor summary · Deribit options</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=dashboard-strategies-20260531" as="script" />
+    <link rel="preload" href="/app-investor.js?v=ivr-header-20260601c" as="script" />
     <link rel="stylesheet" href="/tailwind.css?v=20260526" />
-    <link rel="stylesheet" href="/styles.css?v=equity-rows-20260531g" />
+    <link rel="stylesheet" href="/styles.css?v=ivr-header-20260602c" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -34,39 +34,50 @@
       // When this file is served from static hosting, point API calls at your public dashboard URL (same host you bind with --host 0.0.0.0 or your reverse proxy):
       // window.__API_BASE__ = "https://portfolio.yourcompany.com";
     </script>
-    <header class="app-header sticky top-0 z-10">
-      <div class="dashboard-shell investor-header-shell py-3 flex flex-wrap items-center gap-4">
-        <div class="investor-header-title min-w-0 w-full sm:min-w-[220px] sm:w-auto">
+    <header class="app-header">
+      <div class="dashboard-shell investor-header-shell py-3 flex flex-wrap items-center gap-3">
+        <div class="investor-header-title min-w-0">
           <h1 class="text-lg font-semibold tracking-tight text-slate-50">Investor summary</h1>
           <p class="text-xs text-slate-500">
             Live equity and strategy snapshot. Not investment advice. For operational detail use the internal dashboard.
           </p>
         </div>
-        <div class="investor-header-badges flex flex-wrap items-center gap-2">
-        <span
-          id="env-badge"
-          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-        >Loading…</span>
-        <span
-          id="regime-badge"
-          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-        >Risk posture: —</span>
-        <span
-          id="strategy-badge"
-          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-        >Strategy: —</span>
-        <span
-          id="profit-sweep-badge"
-          class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300 hidden"
-          hidden
-        >Profit → USDT: —</span>
-        </div>
-        <div class="investor-header-spot flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-mono text-emerald-200/90 tabular-nums">
-        <span id="header-spot-btc">BTC —</span>
-        <span id="header-spot-eth">ETH —</span>
+        <div class="investor-header-meta flex flex-wrap items-center gap-2 min-w-0 flex-1">
+          <div class="investor-header-badges flex flex-wrap items-center gap-2">
+            <span
+              id="env-badge"
+              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+            >Loading…</span>
+            <span
+              id="regime-badge"
+              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+            >Risk posture: —</span>
+            <span
+              id="strategy-badge"
+              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
+            >Strategy: —</span>
+            <span
+              id="profit-sweep-badge"
+              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300 hidden"
+              hidden
+            >Profit → USDT: —</span>
+          </div>
+          <div class="investor-header-spot header-market-strip" aria-label="Spot and IV Rank">
+            <div id="header-spot-btc" class="header-market-card header-market-card--btc">
+              <span class="header-market-symbol">BTC</span>
+              <span id="header-spot-btc-price" class="header-market-price">—</span>
+              <span id="header-spot-btc-change" class="header-price-change" hidden aria-label="24h change"></span>
+              <span id="header-spot-btc-ivr" class="header-ivr" hidden aria-label="IV Rank"></span>
+            </div>
+            <div id="header-spot-eth" class="header-market-card header-market-card--eth">
+              <span class="header-market-symbol">ETH</span>
+              <span id="header-spot-eth-price" class="header-market-price">—</span>
+              <span id="header-spot-eth-change" class="header-price-change" hidden aria-label="24h change"></span>
+              <span id="header-spot-eth-ivr" class="header-ivr" hidden aria-label="IV Rank"></span>
+            </div>
+          </div>
         </div>
         <div class="investor-header-actions ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-400">
-          <span id="data-freshness-slot"></span>
           <span id="last-refresh">Last refresh (local time): —</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
             <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
@@ -278,6 +289,6 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script defer src="/app-investor.js?v=dashboard-strategies-20260531"></script>
+    <script defer src="/app-investor.js?v=ivr-header-20260601c"></script>
   </body>
 </html>

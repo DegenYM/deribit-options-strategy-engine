@@ -69,6 +69,44 @@ def test_collateral_native_pnl_below_gross_premium_diff(engine: DeribitOptionTri
     assert native > Decimal("0.009")
 
 
+def test_apr_book_prefers_premium_native_over_usdc_division(engine: DeribitOptionTrialBot):
+    group = TradeGroup(
+        group_id="0047",
+        currency="ETH",
+        collateral_currency="ETH",
+        quantity=Decimal("1"),
+        entry_timestamp_ms=1,
+        expiration_timestamp_ms=2,
+        short_instrument_name="ETH-29MAY26-2300-C",
+        short_strike=Decimal("2300"),
+        entry_credit=Decimal("26.95"),
+        original_entry_credit=Decimal("26.95"),
+        max_loss=Decimal("100"),
+        regime_at_entry="normal",
+        entry_fee=Decimal("0.61"),
+        short_entry_average_price=Decimal("0.0135"),
+        short_close_average_price=Decimal("0.0085"),
+        entry_index_usd=Decimal("2041.64"),
+        close_index_usd=Decimal("1990.68"),
+        entry_fee_collateral=Decimal("0.0003"),
+        close_fee_collateral=Decimal("0.0003"),
+        realized_pnl=Decimal("9.431502"),
+        realized_pnl_collateral_native=Decimal("0.0044"),
+        strategy="covered_call",
+        option_type="call",
+        status="closed",
+    )
+    apr_native = engine._realized_pnl_native_for_apr_book(
+        group,
+        group.realized_pnl or Decimal("0"),
+        index_price_usd=Decimal("1990.68"),
+    )
+    assert apr_native == Decimal("0.0044")
+    inflated = (group.realized_pnl or Decimal("0")) / Decimal("2041.64")
+    assert inflated > Decimal("0.0046")
+    assert apr_native < inflated
+
+
 def test_usdc_pnl_over_current_index_inflates_eth_display(engine: DeribitOptionTrialBot):
     """Dividing USDC PnL by a lower spot than at entry overstates ETH PnL."""
     group = TradeGroup(
@@ -327,3 +365,85 @@ def test_entry_credit_net_usdc_detects_legacy_gross_entry() -> None:
         entry_index_usd=Decimal("2300"),
     )
     assert group.entry_credit_net_usdc() == Decimal("39.56")
+
+
+def test_apply_coin_close_from_native_derives_usdc_once() -> None:
+    """Coin close premium is source of truth; USDC debit is native × index, not reversed."""
+    group = TradeGroup(
+        group_id="0001",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.5"),
+        entry_timestamp_ms=1,
+        expiration_timestamp_ms=2,
+        short_instrument_name="BTC-26JUN26-80000-C",
+        short_strike=Decimal("80000"),
+        entry_credit=Decimal("300"),
+        original_entry_credit=Decimal("300"),
+        max_loss=Decimal("100"),
+        regime_at_entry="normal",
+        status="closed",
+        short_entry_average_price=Decimal("0.009"),
+        entry_index_usd=Decimal("70000"),
+    )
+    idx = Decimal("73270.7")
+    group.apply_coin_close_from_native(short_close_premium=Decimal("0.008"), index_usd=idx)
+    assert group.short_close_average_price == Decimal("0.008")
+    assert group.close_fee_collateral == Decimal("0.00015")
+    expected_debit = (Decimal("0.008") * Decimal("0.5") + Decimal("0.00015")) * idx
+    assert group.realized_close_debit == expected_debit
+    native = group.compute_realized_pnl_native()
+    assert native == Decimal("0.0002")
+
+
+def test_resolved_short_close_price_skips_usdc_round_trip_for_coin() -> None:
+    group = TradeGroup(
+        group_id="0001",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.5"),
+        entry_timestamp_ms=1,
+        expiration_timestamp_ms=2,
+        short_instrument_name="BTC-26JUN26-80000-C",
+        short_strike=Decimal("80000"),
+        entry_credit=Decimal("300"),
+        original_entry_credit=Decimal("300"),
+        max_loss=Decimal("100"),
+        regime_at_entry="normal",
+        status="closed",
+        close_index_usd=Decimal("73270.7"),
+        realized_close_debit=Decimal("311.46924"),
+        realized_close_fee=Decimal("10.990605"),
+    )
+    assert group.resolved_short_close_price() == Decimal("0")
+    group.short_close_average_price = Decimal("0.008")
+    assert group.resolved_short_close_price() == Decimal("0.008")
+
+
+def test_backfill_coin_collateral_ledger_does_not_infer_close_from_usdc_debit() -> None:
+    group = TradeGroup(
+        group_id="0001",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.5"),
+        entry_timestamp_ms=1,
+        expiration_timestamp_ms=2,
+        short_instrument_name="BTC-26JUN26-80000-C",
+        short_strike=Decimal("80000"),
+        entry_credit=Decimal("300"),
+        original_entry_credit=Decimal("300"),
+        max_loss=Decimal("100"),
+        regime_at_entry="normal",
+        status="closed",
+        short_entry_average_price=Decimal("0.009"),
+        entry_index_usd=Decimal("73266.17"),
+        close_index_usd=Decimal("73270.7"),
+        realized_close_debit=Decimal("311.46924"),
+        realized_close_fee=Decimal("10.990605"),
+    )
+    group.backfill_coin_collateral_ledger()
+    assert group.short_close_average_price is None or group.short_close_average_price <= 0
+    group.short_close_average_price = Decimal("0.008")
+    group.backfill_coin_collateral_ledger()
+    assert group.short_close_average_price == Decimal("0.008")
+    assert group.compute_realized_pnl_native() == Decimal("0.0002")

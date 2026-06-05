@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from .exit_eval import (
     backtest_tp_target_premium,
     exit_eval_context_from_config,
 )
+from .fee_discount import effective_option_fee_discount_rate
 from .fees import option_trade_fee_native
 from .margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
@@ -36,6 +38,8 @@ from .vol_metrics import (
     passes_iv_entry_gate,
     realized_vol_annualized_from_index_series,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _norm_cdf(x: float) -> float:
@@ -240,7 +244,18 @@ def _fee_for_trade(
     fee_rate: Decimal,
     fee_cap_rate: Decimal,
     index_price: Decimal,
+    config: BotConfig,
+    at_timestamp_ms: int,
+    first_option_trade_timestamp_ms: int | None = None,
 ) -> Decimal:
+    discount = effective_option_fee_discount_rate(
+        base_rate=config.option_fee_discount_rate,
+        discount_months=config.option_fee_discount_months,
+        first_trade_timestamp_ms=first_option_trade_timestamp_ms,
+        anchor=config.option_fee_discount_anchor,
+        registration_timestamp_ms=config.option_fee_discount_registration_ms or None,
+        at_timestamp_ms=at_timestamp_ms,
+    )
     return option_trade_fee_native(
         index_price=index_price,
         premium=premium,
@@ -249,6 +264,7 @@ def _fee_for_trade(
         fee_cap_rate=fee_cap_rate,
         quote_currency=instrument.quote_currency,
         settlement_currency=instrument.settlement_currency,
+        fee_discount_rate=discount,
     )
 
 
@@ -296,8 +312,11 @@ def run_backtest(
             base = (inst.base_currency or "").upper()
             if base in instruments_by_ccy:
                 instruments_by_ccy[base].append(inst)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # USDC-linear options are optional coverage; record the gap in the report
+        # notes so results are not silently incomplete.
+        notes.append(f"usdc_linear_instruments_unavailable={type(exc).__name__}")
+        LOGGER.warning("backtest: failed to load USDC linear instruments: %s", exc, exc_info=True)
 
     # Coverage note: Deribit public instruments listing may not include very old expired options.
     for c in currencies:
@@ -306,6 +325,7 @@ def run_backtest(
 
     equity_usdc = config.reference_capital_usdc
     open_legs: list[OpenLeg] = []
+    first_option_trade_ms: int | None = None
     trades: list[dict[str, Any]] = []
     daily: list[dict[str, Any]] = []
     peak_equity = equity_usdc
@@ -451,6 +471,9 @@ def run_backtest(
                     fee_rate=config.option_fee_rate,
                     fee_cap_rate=config.option_fee_cap_rate,
                     index_price=leg_spot,
+                    config=config,
+                    at_timestamp_ms=day_ms,
+                    first_option_trade_timestamp_ms=first_option_trade_ms,
                 )
                 pnl_settle = (leg.entry_premium - current_premium) * leg.quantity - leg.entry_fee - close_fee
                 pnl_usdc = pnl_settle if leg.instrument.settlement_currency.upper() == "USDC" else pnl_settle * leg_spot
@@ -477,6 +500,9 @@ def run_backtest(
                     fee_rate=config.option_fee_rate,
                     fee_cap_rate=config.option_fee_cap_rate,
                     index_price=leg_spot,
+                    config=config,
+                    at_timestamp_ms=day_ms,
+                    first_option_trade_timestamp_ms=first_option_trade_ms,
                 )
                 pnl_settle = (leg.entry_premium - current_premium) * leg.quantity - leg.entry_fee - close_fee
                 pnl_usdc = pnl_settle if leg.instrument.settlement_currency.upper() == "USDC" else pnl_settle * leg_spot
@@ -511,6 +537,9 @@ def run_backtest(
                 fee_rate=config.option_fee_rate,
                 fee_cap_rate=config.option_fee_cap_rate,
                 index_price=leg_spot,
+                config=config,
+                at_timestamp_ms=day_ms,
+                first_option_trade_timestamp_ms=first_option_trade_ms,
             )
             if backtest_remaining_apr_gate(
                 entry_premium=leg.entry_premium,
@@ -548,6 +577,9 @@ def run_backtest(
                     fee_rate=config.option_fee_rate,
                     fee_cap_rate=config.option_fee_cap_rate,
                     index_price=leg_spot,
+                    config=config,
+                    at_timestamp_ms=day_ms,
+                    first_option_trade_timestamp_ms=first_option_trade_ms,
                 )
                 pnl_settle = (leg.entry_premium - close) * leg.quantity - leg.entry_fee - close_fee
                 pnl_usdc = pnl_settle if leg.instrument.settlement_currency.upper() == "USDC" else pnl_settle * leg_spot
@@ -632,11 +664,12 @@ def run_backtest(
             ccy = c.upper()
             if regime_by_ccy[ccy] is RiskRegime.CRISIS:
                 continue
+            min_iv_rank, max_iv_rank = config.iv_rank_bounds(ccy)
             if not passes_iv_entry_gate(
                 iv_rank_value=iv_rank_by_currency.get(ccy),
                 iv_minus_rv=iv_minus_rv_by_currency.get(ccy),
-                min_iv_rank=config.min_iv_rank,
-                max_iv_rank=config.max_iv_rank,
+                min_iv_rank=min_iv_rank,
+                max_iv_rank=max_iv_rank,
                 min_iv_minus_rv=config.min_iv_minus_rv,
                 gate_enabled=config.enable_iv_entry_gate,
             ):
@@ -835,11 +868,16 @@ def run_backtest(
                     fee_rate=config.option_fee_rate,
                     fee_cap_rate=config.option_fee_cap_rate,
                     index_price=to_decimal(chosen["spot"]),
+                    config=config,
+                    at_timestamp_ms=day_ms,
+                    first_option_trade_timestamp_ms=first_option_trade_ms,
                 ),
                 collateral_currency=str(chosen["collateral"]),
                 estimated_im_collateral=to_decimal(chosen.get("estimated_im_collateral") or 0),
             )
             open_legs.append(leg)
+            if first_option_trade_ms is None:
+                first_option_trade_ms = day_ms
             trades.append({"action": "open", "date": day.strftime("%Y-%m-%d"), **chosen})
             day_row["opened"] += 1
 
@@ -943,6 +981,9 @@ def run_backtest(
                 fee_rate=config.option_fee_rate,
                 fee_cap_rate=config.option_fee_cap_rate,
                 index_price=leg_spot,
+                config=config,
+                at_timestamp_ms=final_ms,
+                first_option_trade_timestamp_ms=first_option_trade_ms,
             )
             pnl_settle = (leg.entry_premium - close) * leg.quantity - leg.entry_fee - close_fee
             pnl_usdc = pnl_settle if leg.instrument.settlement_currency.upper() == "USDC" else pnl_settle * leg_spot

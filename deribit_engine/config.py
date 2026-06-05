@@ -9,11 +9,13 @@ from dotenv import dotenv_values
 from .env_layout import (
     ACCOUNT_ROLE_FEE,
     ACCOUNT_ROLE_MAIN,
+    RISK_TIER_MEDIUM,
     _fee_account_layer_paths,
     _is_fee_account_env_file,
     _is_main_account_env_file,
     _main_account_layer_paths,
     env_layer_paths,
+    normalize_risk_tier,
 )
 from .exceptions import ConfigurationError
 from .utils import parse_csv, to_decimal
@@ -57,6 +59,10 @@ class BotConfig:
     order_poll_seconds: int
     option_fee_rate: Decimal
     option_fee_cap_rate: Decimal
+    option_fee_discount_rate: Decimal
+    option_fee_discount_months: int
+    option_fee_discount_anchor: str
+    option_fee_discount_registration_ms: int
     exit_buffer_ratio: Decimal
     index_drawdown_elevated_pct: Decimal
     index_drawdown_crisis_pct: Decimal
@@ -142,8 +148,12 @@ class BotConfig:
     enable_iv_entry_gate: bool = False
     min_iv_rank: Decimal = Decimal("0")
     max_iv_rank: Decimal = Decimal("1")
+    btc_min_iv_rank: Decimal | None = None
+    eth_min_iv_rank: Decimal | None = None
+    btc_max_iv_rank: Decimal | None = None
+    eth_max_iv_rank: Decimal | None = None
     min_iv_minus_rv: Decimal = Decimal("0")
-    iv_rank_lookback_days: int = 252
+    iv_rank_lookback_days: int = 365
     rv_lookback_days: int = 30
     # Weighted candidate scoring (when enabled, replaces lexicographic sort).
     enable_weighted_candidate_scoring: bool = False
@@ -213,6 +223,7 @@ class BotConfig:
     covered_call_slot_sizing: bool = True
     # ``strategy`` = normal trading sub-account; ``fee`` = operator fee wallet only.
     account_role: str = "strategy"
+    risk_tier: str = RISK_TIER_MEDIUM
 
     @property
     def is_fee_collection_account(self) -> bool:
@@ -224,8 +235,6 @@ class BotConfig:
 
     @property
     def rest_base_url(self) -> str:
-        if self.env == "testnet":
-            return "https://test.deribit.com/api/v2"
         return "https://www.deribit.com/api/v2"
 
     @property
@@ -366,6 +375,21 @@ class BotConfig:
             if option_type == "call"
             else self.preferred_put_otm_bounds(currency)
         )
+
+    def iv_rank_bounds(self, currency: str) -> tuple[Decimal, Decimal]:
+        """Return ``(min_iv_rank, max_iv_rank)`` for an underlying."""
+        c = currency.upper()
+        min_rank = self.min_iv_rank
+        max_rank = self.max_iv_rank
+        if c == "BTC" and self.btc_min_iv_rank is not None:
+            min_rank = self.btc_min_iv_rank
+        elif c == "ETH" and self.eth_min_iv_rank is not None:
+            min_rank = self.eth_min_iv_rank
+        if c == "BTC" and self.btc_max_iv_rank is not None:
+            max_rank = self.btc_max_iv_rank
+        elif c == "ETH" and self.eth_max_iv_rank is not None:
+            max_rank = self.eth_max_iv_rank
+        return min_rank, max_rank
 
     def min_open_interest(self, instrument_type: str, currency: str = "") -> Decimal:
         """Return the open-interest floor for an instrument type and underlying."""
@@ -583,11 +607,11 @@ def load_config(
         env_file,
         strategy_override=strategy_override,
     )
-    env = _optional(values, "DERIBIT_ENV", "testnet").lower()
-    if env not in {"mainnet", "testnet", "prod"}:
-        raise ConfigurationError("DERIBIT_ENV must be mainnet, testnet, or prod")
+    env = _optional(values, "DERIBIT_ENV", "mainnet").lower()
     if env == "prod":
         env = "mainnet"
+    if env != "mainnet":
+        raise ConfigurationError("DERIBIT_ENV must be mainnet (testnet is no longer supported)")
 
     account_role = _optional(values, "ACCOUNT_ROLE", "strategy").strip().lower()
     if account_role not in {"strategy", ACCOUNT_ROLE_FEE, ACCOUNT_ROLE_MAIN}:
@@ -600,6 +624,7 @@ def load_config(
         _required(values, "DERIBIT_CLIENT_SECRET")
 
     option_strategy = _option_strategy(_optional(values, "OPTION_STRATEGY", "naked_short"))
+    risk_tier = normalize_risk_tier(_optional(values, "RISK_TIER", RISK_TIER_MEDIUM))
     option_markets_profile = _optional(values, "OPTION_MARKETS_PROFILE", "all").lower()
     if option_markets_profile not in {"inverse_native", "all", "linear_usdc"}:
         raise ConfigurationError("OPTION_MARKETS_PROFILE must be one of: all, linear_usdc, inverse_native")
@@ -700,6 +725,10 @@ def load_config(
         order_poll_seconds=int(_optional(values, "ORDER_POLL_SECONDS", "10")),
         option_fee_rate=to_decimal(_optional(values, "OPTION_FEE_RATE", "0.0003")),
         option_fee_cap_rate=to_decimal(_optional(values, "OPTION_FEE_CAP_RATE", "0.125")),
+        option_fee_discount_rate=to_decimal(_optional(values, "OPTION_FEE_DISCOUNT_RATE", "0")),
+        option_fee_discount_months=max(0, int(_optional(values, "OPTION_FEE_DISCOUNT_MONTHS", "6"))),
+        option_fee_discount_anchor=str(_optional(values, "OPTION_FEE_DISCOUNT_ANCHOR", "registration")).strip().lower(),
+        option_fee_discount_registration_ms=max(0, int(_optional(values, "OPTION_FEE_DISCOUNT_REGISTRATION_MS", "0"))),
         exit_buffer_ratio=to_decimal(_optional(values, "EXIT_BUFFER_RATIO", "0.03")),
         index_drawdown_elevated_pct=to_decimal(_optional(values, "INDEX_DRAWDOWN_ELEVATED_PCT", "0.04")),
         index_drawdown_crisis_pct=to_decimal(_optional(values, "INDEX_DRAWDOWN_CRISIS_PCT", "0.06")),
@@ -789,8 +818,12 @@ def load_config(
         enable_iv_entry_gate=_to_bool(_optional(values, "ENABLE_IV_ENTRY_GATE", "false"), default=False),
         min_iv_rank=to_decimal(_optional(values, "MIN_IV_RANK", "0")),
         max_iv_rank=to_decimal(_optional(values, "MAX_IV_RANK", "1")),
+        btc_min_iv_rank=_optional_decimal(values, "BTC_MIN_IV_RANK"),
+        eth_min_iv_rank=_optional_decimal(values, "ETH_MIN_IV_RANK"),
+        btc_max_iv_rank=_optional_decimal(values, "BTC_MAX_IV_RANK"),
+        eth_max_iv_rank=_optional_decimal(values, "ETH_MAX_IV_RANK"),
         min_iv_minus_rv=to_decimal(_optional(values, "MIN_IV_MINUS_RV", "0")),
-        iv_rank_lookback_days=max(10, int(_optional(values, "IV_RANK_LOOKBACK_DAYS", "252"))),
+        iv_rank_lookback_days=max(10, int(_optional(values, "IV_RANK_LOOKBACK_DAYS", "365"))),
         rv_lookback_days=max(5, int(_optional(values, "RV_LOOKBACK_DAYS", "30"))),
         enable_weighted_candidate_scoring=_to_bool(
             _optional(values, "ENABLE_WEIGHTED_CANDIDATE_SCORING", "false"), default=False
@@ -843,4 +876,5 @@ def load_config(
         covered_call_profit_sweep_enabled=covered_call_profit_sweep_enabled,
         covered_call_slot_sizing=covered_call_slot_sizing,
         account_role=account_role,
+        risk_tier=risk_tier,
     )

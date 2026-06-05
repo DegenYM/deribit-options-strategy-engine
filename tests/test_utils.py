@@ -21,3 +21,12 @@ def test_parse_exchange_price_band_limit():
     assert parse_exchange_price_band_limit("price_too_high 2180.0") == Decimal("2180.0")
     assert parse_exchange_price_band_limit('private/buy failed: ... "message":"price_too_low 5.0"') == Decimal("5.0")
     assert parse_exchange_price_band_limit("insufficient_funds") is None
+
+
+def test_is_post_only_reject():
+    from deribit_engine.exceptions import ExchangeError
+    from deribit_engine.utils import is_post_only_reject
+
+    err = ExchangeError('private/sell failed: HTTP 400 {"error":{"code":11054,"message":"post_only_reject"}}')
+    assert is_post_only_reject(err)
+    assert not is_post_only_reject(ExchangeError("insufficient_funds"))

@@ -42,7 +42,7 @@ enabled = true
     )
     env_path = accounts_dir / ".env.naked"
     env_path.write_text(
-        "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\nTRADED_COLLATERALS=USDC\n",
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\nTRADED_COLLATERALS=USDC\n",
         encoding="utf-8",
     )
     (tmp_path / "deribit_engine").mkdir()
@@ -91,7 +91,7 @@ enabled = true
         encoding="utf-8",
     )
     (accounts_dir / ".env.naked").write_text(
-        "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\nTRADED_COLLATERALS=USDC\n",
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\nTRADED_COLLATERALS=USDC\n",
         encoding="utf-8",
     )
     (tmp_path / "deribit_engine").mkdir()
@@ -137,7 +137,7 @@ enabled = true
         encoding="utf-8",
     )
     (accounts_dir / ".env.naked").write_text(
-        "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\n",
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\n",
         encoding="utf-8",
     )
     (tmp_path / "deribit_engine").mkdir()
@@ -187,11 +187,11 @@ enabled = true
         encoding="utf-8",
     )
     (accounts_dir / ".env.covered_call").write_text(
-        "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=aaa\nDERIBIT_CLIENT_SECRET=sec_a\n",
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=aaa\nDERIBIT_CLIENT_SECRET=sec_a\n",
         encoding="utf-8",
     )
     (accounts_dir / ".env.naked").write_text(
-        "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=bbb\nDERIBIT_CLIENT_SECRET=sec_b\n",
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=bbb\nDERIBIT_CLIENT_SECRET=sec_b\n",
         encoding="utf-8",
     )
     (tmp_path / "deribit_engine").mkdir()
@@ -248,11 +248,11 @@ enabled = true
         encoding="utf-8",
     )
     (accounts_dir / ".env.covered_call").write_text(
-        "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=aaa\nDERIBIT_CLIENT_SECRET=sec_a\nTRADED_COLLATERALS=USDC\n",
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=aaa\nDERIBIT_CLIENT_SECRET=sec_a\nTRADED_COLLATERALS=USDC\n",
         encoding="utf-8",
     )
     (accounts_dir / ".env.naked").write_text(
-        "DERIBIT_ENV=testnet\nDERIBIT_CLIENT_ID=bbb\nDERIBIT_CLIENT_SECRET=sec_b\nTRADED_COLLATERALS=USDC\n",
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=bbb\nDERIBIT_CLIENT_SECRET=sec_b\nTRADED_COLLATERALS=USDC\n",
         encoding="utf-8",
     )
     (tmp_path / "deribit_engine").mkdir()

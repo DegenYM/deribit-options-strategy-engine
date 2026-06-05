@@ -395,6 +395,39 @@ def test_covered_call_slot_sizing_splits_available_cover(tmp_path):
     assert candidates_one_open[0].quantity == Decimal("0.2")
 
 
+def test_covered_call_slot_sizing_does_not_split_below_min_contract(tmp_path):
+    """0.1 BTC cover with min 0.1 contract should use one slot, not 3×0.033→0."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        min_net_apr=Decimal("0.01"),
+        entry_dte_min=7,
+        entry_dte_max=24,
+        max_groups_per_currency=3,
+        covered_call_slot_sizing=True,
+    )
+    selector = StrategySelector(config)
+    inst_payload, book_payload = _make_btc_call_payload(14, 77000)
+    book_payload = {**book_payload, "best_bid_amount": "1", "best_ask_amount": "1"}
+    instrument = OptionInstrument.from_api(inst_payload)
+
+    def loader(name):
+        return OrderBookSnapshot.from_api(book_payload)
+
+    candidates = selector.build_covered_call_candidates(
+        [instrument],
+        loader,
+        regime=RiskRegime.NORMAL,
+        collateral_currency="BTC",
+        currency="BTC",
+        available_cover_quantity=Decimal("0.1"),
+        summary_equity=Decimal("1"),
+        open_group_count=0,
+    )
+    assert candidates
+    assert candidates[0].quantity == Decimal("0.1")
+
+
 def test_covered_call_slot_sizing_disabled_uses_full_cover(tmp_path):
     config = make_config(
         tmp_path,

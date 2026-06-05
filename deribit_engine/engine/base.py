@@ -8,7 +8,13 @@ from typing import Any
 
 from ..client import DeribitClient
 from ..config import BotConfig
-from ..entry_gates import entry_cooldown_active, last_entry_timestamp_ms_by_book, open_group_count_for_book
+from ..entry_gates import (
+    candidate_entry_halted,
+    entry_cooldown_active,
+    last_entry_timestamp_ms_by_book,
+    open_group_count_for_book,
+    underlying_entry_halted,
+)
 from ..fees import option_trade_fee_native, option_trade_fee_usdc, premium_value_usdc
 from ..live_heartbeat import LiveHeartbeatRecord, heartbeat_path_for_state, write_live_heartbeat
 from ..models import (
@@ -44,7 +50,12 @@ from ..utils import (
     utc_now,
     utc_now_ms,
 )
-from ..vol_metrics import dvol_iv_rank_at_ts, iv_minus_rv_spread, realized_vol_annualized_from_index_series
+from ..vol_metrics import (
+    dvol_iv_rank_from_daily_rows,
+    index_chart_close_series,
+    iv_minus_rv_spread,
+    realized_vol_annualized_from_index_series,
+)
 from .context import (
     LOGGER,
     ExchangePrefetch,
@@ -159,6 +170,41 @@ class EngineBase:
             return
         self._persist_trade_journal_actions([result])
 
+    def _repair_reconciled_bot_income_exits_in_state(self, state: StrategyState) -> bool:
+        """Re-tag bot take-profit fills that were saved as reconciled_external after a close crash."""
+        from ..trade_journal_backfill import (
+            reconcile_profit_sweep_from_exchange,
+            repair_reconciled_bot_income_exit_group,
+        )
+
+        changed = False
+        try:
+            journal = self._trade_journal()
+            scope = self._journal_scope_key()
+        except Exception:  # noqa: BLE001
+            return False
+        for group in state.groups:
+            if group.status != "closed" or not group.group_id:
+                continue
+            try:
+                executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
+            except Exception:  # noqa: BLE001
+                continue
+            if repair_reconciled_bot_income_exit_group(
+                group,
+                executions,
+                order_label_prefix=self.config.order_label_prefix,
+                profit_sweep_enabled=self.config.covered_call_profit_sweep_enabled,
+            ):
+                changed = True
+            if self.config.has_private_credentials and reconcile_profit_sweep_from_exchange(
+                group,
+                client=self.client,
+                order_label_prefix=self.config.order_label_prefix,
+            ):
+                changed = True
+        return changed
+
     def _book_equity_native(
         self,
         collateral_currency: str,
@@ -183,9 +229,64 @@ class EngineBase:
             return realized_pnl_usdc
         if group.realized_pnl_collateral_native is not None:
             return group.realized_pnl_collateral_native
+        computed = group.compute_coin_profit_native(
+            allow_ledger_spot_infer=index_price_usd > 0,
+        )
+        if computed is not None:
+            return computed
         if index_price_usd <= 0:
             return Decimal("0")
         return realized_pnl_usdc / index_price_usd
+
+    def _coin_profit_native_for_sweep(self, group: TradeGroup) -> Decimal | None:
+        """Authoritative fee-aware coin profit for profit-sweep sizing (premium ledger only)."""
+        if not group.is_coin_collateral() or group.status != "closed":
+            return None
+        native = group.compute_coin_profit_native(allow_ledger_spot_infer=False)
+        close_idx = group.close_index_usd
+        if (native is None or native <= 0) and close_idx is not None and close_idx > 0:
+            native = group.compute_coin_profit_native(allow_ledger_spot_infer=True)
+        if (native is None or native <= 0) and group.realized_pnl_collateral_native is not None:
+            native = group.realized_pnl_collateral_native
+        if native is None or native <= 0:
+            return None
+        group.realized_pnl_collateral_native = native
+        if close_idx is not None and close_idx > 0:
+            group.backfill_realized_pnl_usdc(spot_index_usd=close_idx)
+        return native
+
+    def _resolve_fee_discount_first_trade_ms(self) -> int | None:
+        cached = getattr(self, "_fee_discount_first_trade_ms", None)
+        if cached is not None:
+            return cached if cached > 0 else None
+        from ..fee_discount import resolve_first_option_trade_timestamp_ms
+
+        resolved = resolve_first_option_trade_timestamp_ms(
+            state_path=self.config.state_file,
+            client=self.client,
+        )
+        self._fee_discount_first_trade_ms = int(resolved or 0)
+        if hasattr(self, "strategy") and resolved is not None:
+            self.strategy.first_option_trade_timestamp_ms = resolved
+        return resolved
+
+    def _option_fee_discount_rate_at(self, at_timestamp_ms: int | None = None) -> Decimal:
+        from ..fee_discount import effective_option_fee_discount_rate
+        from ..utils import utc_now_ms
+
+        at_ms = int(at_timestamp_ms if at_timestamp_ms is not None else utc_now_ms())
+        if self.config.option_fee_discount_rate <= 0 or self.config.option_fee_discount_months <= 0:
+            return Decimal("0")
+        self._resolve_fee_discount_first_trade_ms()
+        first_ms = getattr(self.strategy, "first_option_trade_timestamp_ms", None)
+        return effective_option_fee_discount_rate(
+            base_rate=self.config.option_fee_discount_rate,
+            discount_months=self.config.option_fee_discount_months,
+            first_trade_timestamp_ms=first_ms,
+            anchor=self.config.option_fee_discount_anchor,
+            registration_timestamp_ms=self.config.option_fee_discount_registration_ms or None,
+            at_timestamp_ms=at_ms,
+        )
 
     def _option_fee_native(
         self,
@@ -195,6 +296,7 @@ class EngineBase:
         index_price: Decimal,
         quote_currency: str,
         settlement_currency: str,
+        at_timestamp_ms: int | None = None,
     ) -> Decimal:
         return option_trade_fee_native(
             index_price=index_price,
@@ -204,6 +306,7 @@ class EngineBase:
             fee_cap_rate=self.config.option_fee_cap_rate,
             quote_currency=quote_currency,
             settlement_currency=settlement_currency,
+            fee_discount_rate=self._option_fee_discount_rate_at(at_timestamp_ms),
         )
 
     def _compute_realized_pnl_collateral_native(
@@ -373,6 +476,9 @@ class EngineBase:
 
     def _journal_reconcile_close(self, group: TradeGroup, *, closed_timestamp_ms: int) -> None:
         try:
+            close_premium = group.short_close_average_price
+            if close_premium is None or close_premium <= 0:
+                close_premium = None
             self._trade_journal().record_reconcile_close(
                 scope_key=self._journal_scope_key(),
                 group_id=group.group_id,
@@ -381,11 +487,92 @@ class EngineBase:
                 reason=group.close_reason or "reconciled_external",
                 quantity=group.quantity,
                 close_debit_usdc=group.realized_close_debit,
+                close_premium_native=close_premium,
                 closed_timestamp_ms=closed_timestamp_ms,
                 realized_pnl=group.realized_pnl,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("trade journal reconcile failed for %s: %s", group.group_id, exc)
+
+    def _reconcile_buy_close_premium_native(
+        self,
+        group: TradeGroup,
+        *,
+        short_book: OrderBookSnapshot,
+        closed_timestamp_ms: int,
+    ) -> Decimal:
+        """Actual or best-estimate buy-to-close premium per contract in collateral coin."""
+        if self.config.has_private_credentials:
+            try:
+                start_ms = max(int(group.entry_timestamp_ms or 0) - 60_000, 0)
+                end_ms = int(closed_timestamp_ms) + 300_000
+                payload = self.client.get_user_trades_by_instrument(
+                    group.short_instrument_name,
+                    start_timestamp=start_ms,
+                    end_timestamp=end_ms,
+                    count=200,
+                    sorting="asc",
+                    historical=True,
+                )
+                buy_trades = [
+                    row for row in (payload.get("trades") or []) if str(row.get("direction") or "").lower() == "buy"
+                ]
+                if buy_trades:
+                    total_amount = Decimal("0")
+                    weighted = Decimal("0")
+                    for trade in buy_trades:
+                        amount = to_decimal(trade.get("amount"))
+                        price = to_decimal(trade.get("price"))
+                        if amount <= 0 or price <= 0:
+                            continue
+                        weighted += price * amount
+                        total_amount += amount
+                    if total_amount > 0 and total_amount >= group.quantity * Decimal("0.5"):
+                        return weighted / total_amount
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug(
+                    "reconcile trade lookup failed group=%s instrument=%s: %s",
+                    group.group_id,
+                    group.short_instrument_name,
+                    exc,
+                )
+        close_premium = short_book.buy_close_premium(max_spread_ratio=self.config.early_exit_max_spread_ratio)
+        if close_premium <= 0:
+            close_premium = max(short_book.best_ask_price, short_book.mark_price)
+        return max(close_premium, Decimal("0"))
+
+    def _reconcile_coin_close_ledger(
+        self,
+        group: TradeGroup,
+        *,
+        short_book: OrderBookSnapshot,
+        short_instrument: OptionInstrument,
+        closed_timestamp_ms: int,
+    ) -> Decimal | None:
+        """Coin collateral: resolve native close premium, then derive USDC ledger once."""
+        index_price = short_book.index_price
+        if index_price <= 0:
+            index_price = group.close_index_usd or group.entry_index_usd or Decimal("0")
+        close_premium = self._reconcile_buy_close_premium_native(
+            group,
+            short_book=short_book,
+            closed_timestamp_ms=closed_timestamp_ms,
+        )
+        if close_premium <= 0 or index_price <= 0:
+            return None
+        close_fee_collateral = self._option_fee_native(
+            premium=close_premium,
+            quantity=group.quantity,
+            index_price=index_price,
+            quote_currency=short_instrument.quote_currency,
+            settlement_currency=short_instrument.settlement_currency,
+        )
+        group.apply_coin_close_from_native(
+            short_close_premium=close_premium,
+            index_usd=index_price,
+            close_fee_collateral=close_fee_collateral,
+        )
+        return group.realized_close_debit
 
     def _linear_usdc_mode(self) -> bool:
         return self.config.option_markets_profile == "linear_usdc"
@@ -437,9 +624,11 @@ class EngineBase:
             return Decimal("0")
         if self._group_collateral_currency(group).upper() == "USDC":
             return safe_div(realized_pnl_usdc, im)
-        if index_price_usd <= 0:
-            return Decimal("0")
-        pnl_native = realized_pnl_usdc / index_price_usd
+        pnl_native = self._realized_pnl_native_for_apr_book(
+            group,
+            realized_pnl_usdc,
+            index_price_usd=index_price_usd,
+        )
         return safe_div(pnl_native, im)
 
     def _realized_annualized_return_on_im_native(
@@ -852,6 +1041,7 @@ class EngineBase:
         base_currency: str,
         quote_currency: str,
         settlement_currency: str,
+        at_timestamp_ms: int | None = None,
     ) -> Decimal:
         return option_trade_fee_usdc(
             index_price=index_price,
@@ -862,6 +1052,7 @@ class EngineBase:
             base_currency=base_currency,
             quote_currency=quote_currency,
             settlement_currency=settlement_currency,
+            fee_discount_rate=self._option_fee_discount_rate_at(at_timestamp_ms),
         )
 
     def _sum_trade_fees_usdc(self, trades: list[dict[str, Any]]) -> Decimal:
@@ -879,6 +1070,119 @@ class EngineBase:
                 continue
             total += fee
         return total
+
+    def _sum_trade_fees_native(self, trades: list[dict[str, Any]], collateral_currency: str) -> Decimal:
+        """Sum trade fees already charged in the collateral book (BTC/ETH)."""
+        book = collateral_currency.upper()
+        total = Decimal("0")
+        for trade in trades:
+            fee = to_decimal(trade.get("fee"))
+            if fee <= 0:
+                continue
+            fee_currency = str(trade.get("fee_currency") or "").upper()
+            if fee_currency == book:
+                total += fee
+        return total
+
+    def _short_entry_ledger(
+        self,
+        *,
+        premium: Decimal,
+        quantity: Decimal,
+        index_price: Decimal,
+        trades: list[dict[str, Any]],
+        instrument: OptionInstrument,
+        collateral_currency: str,
+        at_timestamp_ms: int | None = None,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        """Return ``(net_credit_usdc, entry_fee_usdc, entry_fee_collateral)`` for one short leg."""
+        usdc_linear = instrument.quote_currency.upper() == "USDC" and instrument.settlement_currency.upper() == "USDC"
+        book = collateral_currency.upper()
+        if usdc_linear or book == "USDC":
+            entry_fee_usdc = self._sum_trade_fees_usdc(trades)
+            if entry_fee_usdc <= 0:
+                entry_fee_usdc = self._option_fee_usdc(
+                    premium=premium,
+                    quantity=quantity,
+                    index_price=index_price,
+                    base_currency=instrument.base_currency,
+                    quote_currency=instrument.quote_currency,
+                    settlement_currency=instrument.settlement_currency,
+                    at_timestamp_ms=at_timestamp_ms,
+                )
+            gross_usdc = self._premium_value_usdc(
+                premium=premium,
+                quantity=quantity,
+                index_price=index_price,
+                instrument=instrument,
+            )
+            return gross_usdc - entry_fee_usdc, entry_fee_usdc, Decimal("0")
+
+        entry_fee_collateral = self._sum_trade_fees_native(trades, book)
+        if entry_fee_collateral <= 0:
+            entry_fee_collateral = self._option_fee_native(
+                premium=premium,
+                quantity=quantity,
+                index_price=index_price,
+                quote_currency=instrument.quote_currency,
+                settlement_currency=instrument.settlement_currency,
+                at_timestamp_ms=at_timestamp_ms,
+            )
+        gross_native = premium * quantity
+        net_native = gross_native - entry_fee_collateral
+        if index_price <= 0:
+            return Decimal("0"), Decimal("0"), entry_fee_collateral
+        return net_native * index_price, entry_fee_collateral * index_price, entry_fee_collateral
+
+    def _close_short_ledger(
+        self,
+        *,
+        premium: Decimal,
+        quantity: Decimal,
+        index_price: Decimal,
+        trades: list[dict[str, Any]],
+        instrument: OptionInstrument,
+        collateral_currency: str,
+        at_timestamp_ms: int | None = None,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        """Return ``(total_close_debit_usdc, close_fee_usdc, close_fee_collateral)`` for buy-to-close."""
+        usdc_linear = instrument.quote_currency.upper() == "USDC" and instrument.settlement_currency.upper() == "USDC"
+        book = collateral_currency.upper()
+        if usdc_linear or book == "USDC":
+            close_fee_usdc = self._sum_trade_fees_usdc(trades)
+            if close_fee_usdc <= 0:
+                close_fee_usdc = self._option_fee_usdc(
+                    premium=premium,
+                    quantity=quantity,
+                    index_price=index_price,
+                    base_currency=instrument.base_currency,
+                    quote_currency=instrument.quote_currency,
+                    settlement_currency=instrument.settlement_currency,
+                    at_timestamp_ms=at_timestamp_ms,
+                )
+            gross_usdc = self._premium_value_usdc(
+                premium=premium,
+                quantity=quantity,
+                index_price=index_price,
+                instrument=instrument,
+            )
+            return gross_usdc + close_fee_usdc, close_fee_usdc, Decimal("0")
+
+        close_fee_collateral = self._sum_trade_fees_native(trades, book)
+        if close_fee_collateral <= 0:
+            close_fee_collateral = self._option_fee_native(
+                premium=premium,
+                quantity=quantity,
+                index_price=index_price,
+                quote_currency=instrument.quote_currency,
+                settlement_currency=instrument.settlement_currency,
+                at_timestamp_ms=at_timestamp_ms,
+            )
+        gross_native = premium * quantity
+        total_native = gross_native + close_fee_collateral
+        if index_price <= 0:
+            return Decimal("0"), Decimal("0"), close_fee_collateral
+        return total_native * index_price, close_fee_collateral * index_price, close_fee_collateral
 
     def _order_trades(self, response: dict[str, Any] | None) -> list[dict[str, Any]]:
         if not isinstance(response, dict):
@@ -1014,6 +1318,17 @@ class EngineBase:
             cooldown_minutes=self.config.entry_cooldown_minutes,
         )
 
+    def _filter_enterable_candidates(
+        self,
+        context: RuntimeContext,
+        candidates: list[NakedPutCandidate],
+    ) -> list[NakedPutCandidate]:
+        """Keep scan winners whose underlying regime and collateral book may still enter."""
+        return [c for c in candidates if not candidate_entry_halted(context.snapshot, c)]
+
+    def _underlying_entry_halted(self, context: RuntimeContext, underlying: str) -> bool:
+        return underlying_entry_halted(context.snapshot, underlying)
+
     def _refresh_vol_entry_context(self) -> None:
         if not self.config.enable_iv_entry_gate:
             self.strategy.update_vol_entry_context()
@@ -1032,9 +1347,8 @@ class EngineBase:
                     resolution="1D",
                 )
                 dvol_rows = dvol_payload.get("data") or []
-                dvol_series = [(int(row[0]), row[4]) for row in dvol_rows if len(row) >= 5]
-                rank = dvol_iv_rank_at_ts(
-                    dvol_series,
+                rank = dvol_iv_rank_from_daily_rows(
+                    dvol_rows,
                     ts_ms=end_timestamp,
                     lookback_days=self.config.iv_rank_lookback_days,
                 )
@@ -1045,7 +1359,7 @@ class EngineBase:
                 current_iv = Decimal("0")
             try:
                 index_payload = self.client.get_index_chart_data(f"{ccy.lower()}_usd", range_name="1y")
-                index_series = [(int(row[0]), row[4]) for row in index_payload if len(row) >= 5]
+                index_series = index_chart_close_series(index_payload)
                 rv = realized_vol_annualized_from_index_series(
                     index_series,
                     end_ts_ms=end_timestamp,
@@ -1565,6 +1879,16 @@ class EngineBase:
             "spot_exit_instrument_name": group.spot_exit_instrument_name or None,
             "spot_exit_order_id": group.spot_exit_order_id or None,
             "spot_exit_reason": group.spot_exit_reason or None,
+            "profit_sweep_status": group.profit_sweep_status or None,
+            "profit_sweep_amount": format_decimal(group.profit_sweep_amount, 8)
+            if group.profit_sweep_amount > 0
+            else None,
+            "profit_sweep_instrument_name": group.profit_sweep_instrument_name or None,
+            "profit_sweep_order_id": group.profit_sweep_order_id or None,
+            "profit_sweep_quote_proceeds": format_decimal(group.profit_sweep_quote_proceeds, 4)
+            if group.profit_sweep_quote_proceeds > 0
+            else None,
+            "profit_sweep_reason": group.profit_sweep_reason or None,
         }
 
     def _group_payload(

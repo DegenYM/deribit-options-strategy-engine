@@ -21,12 +21,15 @@ def _write_layout(repo: Path) -> Path:
     (repo / "deribit_engine").mkdir()
     (repo / "config" / "shared" / "strategies").mkdir(parents=True)
     (repo / "config" / "shared" / "strategies" / ".env.bull_put_spread").write_text(
-        "OPTION_STRATEGY=bull_put_spread\nSHORT_PUT_DELTA_MAX=0.17\n",
+        "OPTION_STRATEGY=bull_put_spread\n",
         encoding="utf-8",
     )
+    tiers_dir = repo / "config" / "shared" / "strategies" / "tiers" / "bull_put_spread"
+    tiers_dir.mkdir(parents=True)
+    (tiers_dir / ".env.medium").write_text("SHORT_PUT_DELTA_MAX=0.17\n", encoding="utf-8")
     investor = repo / "config" / "investors" / "alpha"
     (investor / "accounts").mkdir(parents=True)
-    (investor / ".env.investor").write_text("DERIBIT_ENV=testnet\nTARGET_PORTFOLIO_APR=0.30\n", encoding="utf-8")
+    (investor / ".env.investor").write_text("DERIBIT_ENV=mainnet\nTARGET_PORTFOLIO_APR=0.30\n", encoding="utf-8")
     account = investor / "accounts" / ".env.bull_put"
     account.write_text(
         "\n".join(
@@ -201,7 +204,7 @@ def test_fee_env_layers_skip_strategy_profile(tmp_path: Path):
     investor = repo / "config" / "investors" / "pat"
     (investor / "accounts").mkdir(parents=True)
     fee_env = investor / "accounts" / ".env.fee"
-    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=testnet\n", encoding="utf-8")
+    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=mainnet\n", encoding="utf-8")
 
     layers = env_layer_paths(fee_env, "naked_short")
 
@@ -224,7 +227,7 @@ def test_legacy_investor_env_path_emits_deprecation_warning(tmp_path: Path):
     investor = tmp_path / "config" / "investors" / "alpha"
     investor.mkdir(parents=True)
     legacy = investor / "investor.env"
-    legacy.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    legacy.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     with pytest.warns(DeprecationWarning, match="Legacy investor env"):
         assert resolve_investor_env_path(investor) == legacy.resolve()
 
@@ -232,7 +235,7 @@ def test_legacy_investor_env_path_emits_deprecation_warning(tmp_path: Path):
 def test_legacy_defaults_env_emits_deprecation_warning(tmp_path: Path):
     (tmp_path / "deribit_engine").mkdir()
     (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
-    (tmp_path / "config" / "shared" / "defaults.env").write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    (tmp_path / "config" / "shared" / "defaults.env").write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     investor = tmp_path / "config" / "investors" / "alpha"
     (investor / "accounts").mkdir(parents=True)
     account = investor / "accounts" / ".env.naked"
@@ -251,3 +254,51 @@ def test_legacy_root_strategy_profile_emits_deprecation_warning(tmp_path: Path):
     with pytest.warns(DeprecationWarning, match="Legacy strategy profile"):
         layers = env_layer_paths(account, "naked_short")
     assert tmp_path / ".env.naked_short" in layers
+
+
+def test_env_layer_paths_applies_risk_tier_override(tmp_path: Path):
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
+    (tmp_path / "config" / "shared" / "strategies" / ".env.bull_put_spread").write_text(
+        "OPTION_STRATEGY=bull_put_spread\n",
+        encoding="utf-8",
+    )
+    tiers_dir = tmp_path / "config" / "shared" / "strategies" / "tiers" / "bull_put_spread"
+    tiers_dir.mkdir(parents=True)
+    (tiers_dir / ".env.medium").write_text("SHORT_PUT_DELTA_MAX=0.17\n", encoding="utf-8")
+    (tiers_dir / ".env.low").write_text("SHORT_PUT_DELTA_MAX=0.12\n", encoding="utf-8")
+    investor = tmp_path / "config" / "investors" / "alpha"
+    (investor / "accounts").mkdir(parents=True)
+    account = investor / "accounts" / ".env.bull_put"
+    account.write_text(
+        "\n".join(
+            [
+                "DERIBIT_ENV=mainnet",
+                "OPTION_STRATEGY=bull_put_spread",
+                "RISK_TIER=low",
+                "STATE_FILE=.state/alpha/bull_put.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    layers = env_layer_paths(account, "bull_put_spread")
+    assert layers[-1].name == ".env.bull_put"
+    assert tiers_dir / ".env.low" in layers
+    config = load_config(account, require_private=False)
+    assert config.risk_tier == "low"
+    assert config.short_put_delta_max == Decimal("0.12")
+
+
+def test_load_investor_manifest_reads_risk_tier(tmp_path: Path):
+    account = _write_layout(tmp_path)
+    manifest_path = tmp_path / "config/investors/alpha/accounts.toml"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            'strategy = "bull_put_spread"\n',
+            'strategy = "bull_put_spread"\nrisk_tier = "high"\n',
+        ),
+        encoding="utf-8",
+    )
+    manifest = load_investor_manifest("alpha", repo_root=tmp_path)
+    assert manifest.accounts[0].risk_tier == "high"
+    assert account.is_file()

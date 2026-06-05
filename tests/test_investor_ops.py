@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from deribit_engine.investor_ops import (
     investor_init,
     is_hwm_bootstrapped,
     list_investors,
+    parse_risk_tier_map,
     parse_strategy_slugs,
     render_launchd_plists,
     validate_investor,
@@ -34,6 +36,14 @@ def _bootstrap_repo(tmp_path: Path) -> Path:
         dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
 
     (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
+    strategies_src = Path(__file__).resolve().parents[1] / "config" / "shared" / "strategies"
+    for path in strategies_src.rglob(".env*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(strategies_src)
+        dest = tmp_path / "config" / "shared" / "strategies" / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, dest)
     (tmp_path / "config" / "platform").mkdir(parents=True)
     (tmp_path / "config" / "launchd").mkdir(parents=True)
     for name in ("com.deribit.live.plist.template", "com.deribit.frontend.plist.template"):
@@ -64,6 +74,37 @@ def _bootstrap_repo(tmp_path: Path) -> Path:
 def test_parse_strategy_slugs_rejects_unknown():
     with pytest.raises(ConfigurationError):
         parse_strategy_slugs("naked,unknown")
+
+
+def test_parse_risk_tier_map_per_slug_and_default():
+    tiers = parse_risk_tier_map(("naked", "covered_call"), default_tier="medium")
+    assert tiers == {"naked": "medium", "covered_call": "medium"}
+    tiers = parse_risk_tier_map(
+        ("naked", "covered_call"),
+        default_tier="medium",
+        risk_tiers_raw="naked:low,covered_call:high",
+    )
+    assert tiers == {"naked": "low", "covered_call": "high"}
+    tiers = parse_risk_tier_map(("naked",), risk_tiers_raw="low")
+    assert tiers == {"naked": "low"}
+
+
+def test_investor_init_writes_risk_tier_to_manifest_and_env(tmp_path: Path):
+    repo = _bootstrap_repo(tmp_path)
+    investor_init(
+        "tiered",
+        strategies=("naked", "covered_call"),
+        risk_tiers={"naked": "low", "covered_call": "high"},
+        register=False,
+        repo_root=repo,
+    )
+    manifest = (repo / "config/investors/tiered/accounts.toml").read_text(encoding="utf-8")
+    assert 'risk_tier = "low"' in manifest
+    assert 'risk_tier = "high"' in manifest
+    naked_env = (repo / "config/investors/tiered/accounts/.env.naked").read_text(encoding="utf-8")
+    covered_env = (repo / "config/investors/tiered/accounts/.env.covered_call").read_text(encoding="utf-8")
+    assert "RISK_TIER=low" in naked_env
+    assert "RISK_TIER=high" in covered_env
 
 
 def test_render_launchd_plists_uses_distinct_live_and_frontend_labels(tmp_path: Path):

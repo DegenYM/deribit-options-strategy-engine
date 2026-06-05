@@ -15,7 +15,7 @@ import {
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
 import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, isDashboardStrategy, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
-import { bookEquityNativeByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
+import { bookEquityNativeByBook, aggregateProfitDisposition, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
   if (!INVESTOR || !health) return;
@@ -169,6 +169,39 @@ function bookCardAccentClass(book) {
   return "book-card-usdc";
 }
 
+function regimeChipClass(regime) {
+  if (regime === "normal") return "chip-ok";
+  if (regime === "elevated") return "chip-warn";
+  return "chip-bad";
+}
+
+/** USDC book trades BTC_USDC / ETH_USDC — show each underlying's risk regime, not ``regime_by_currency.USDC``. */
+function bookRegimeChipsHtml(book, portfolio, isRiskBook) {
+  if (!isRiskBook) return "";
+  const regimeByCcy = portfolio?.regime_by_currency || {};
+  const haltByCcy = portfolio?.halt_new_entries_by_currency || {};
+  if (book === "USDC") {
+    const lines = ["BTC", "ETH"]
+      .filter((ccy) => regimeByCcy[ccy])
+      .map((ccy) => {
+        const regime = regimeByCcy[ccy];
+        const halted = haltByCcy[ccy];
+        const suffix = halted ? " · no entry" : "";
+        return `<span class="chip ${regimeChipClass(regime)}">${ccy} ${regime}${suffix}</span>`;
+      });
+    return lines.join("");
+  }
+  const regime = regimeByCcy[book];
+  if (!regime) return "";
+  return `<span class="chip ${regimeChipClass(regime)}">${regime}</span>`;
+}
+
+function bookShowsUnderlyingEntryHalt(book, portfolio, isRiskBook) {
+  if (!isRiskBook || book !== "USDC") return false;
+  const haltByCcy = portfolio?.halt_new_entries_by_currency || {};
+  return ["BTC", "ETH"].some((ccy) => haltByCcy[ccy]);
+}
+
 export function bookCardHtml(book, status) {
   const portfolio = status?.portfolio || {};
   const accounts = status?.accounts || {};
@@ -183,10 +216,10 @@ export function bookCardHtml(book, status) {
   const imRatio = num(margin.im_ratio);
   const mmRatio = num(margin.mm_ratio);
   const delta = num(portfolio?.delta_totals_by_currency?.[book]);
-  const regime = portfolio?.regime_by_currency?.[book];
   const cooling = portfolio?.cooling_down_by_book?.[book];
   const hardDerisk = portfolio?.hard_derisk_by_book?.[book];
   const haltEntries = portfolio?.halt_entries_by_book?.[book];
+  const underlyingEntryHalt = bookShowsUnderlyingEntryHalt(book, portfolio, isRiskBook);
   const haltReasons = portfolio?.halt_entry_reasons_by_book?.[book] || [];
 
   const accentClass = bookCardAccentClass(book);
@@ -195,14 +228,14 @@ export function bookCardHtml(book, status) {
   if (!isRiskBook) {
     chips.push('<span class="chip chip-muted">not traded</span>');
   }
-  if (regime && isRiskBook) {
-    const cls =
-      regime === "normal" ? "chip-ok" : regime === "elevated" ? "chip-warn" : "chip-bad";
-    chips.push(`<span class="chip ${cls}">${regime}</span>`);
-  }
+  const regimeChips = bookRegimeChipsHtml(book, portfolio, isRiskBook);
+  if (regimeChips) chips.push(regimeChips);
   if (cooling) chips.push('<span class="chip chip-warn">cooling</span>');
   if (hardDerisk) chips.push('<span class="chip chip-bad">hard derisk</span>');
   if (haltEntries) chips.push('<span class="chip chip-warn">halt entries</span>');
+  if (underlyingEntryHalt && !haltEntries) {
+    chips.push('<span class="chip chip-warn">underlying halt</span>');
+  }
   if (chips.length === 0) chips.push('<span class="chip chip-ok">healthy</span>');
 
   const imPct = imRatio !== null ? Math.min(1, Math.max(0, imRatio)) : 0;
@@ -376,12 +409,14 @@ export function renderAggregate(status, report) {
   if (!portfolio && !summary) {
     if (INVESTOR && (STATE.refreshInFlight || !STATE.investorReady)) {
       root.innerHTML = aggregateSkeletonHtml();
+      renderDataFreshnessBadge();
     } else {
-      root.innerHTML = `<p class="text-sm text-slate-400">${i18n(
+      root.innerHTML = `<div class="overview-panel-inner"><p class="text-sm text-slate-400">${i18n(
         "No status / report data yet.",
         "尚無即時帳戶或績效摘要資料。"
-      )}</p>`;
+      )}</p><div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
     }
+    renderDataFreshnessBadge();
     return;
   }
 
@@ -420,32 +455,18 @@ export function renderAggregate(status, report) {
   const windowNativeByBook = summary
     ? sumWindowRealizedPnlNativeByBook(report, STATE.groups, status, windowLabelDays)
     : null;
+  const lifetimeProfitDisposition = summary
+    ? aggregateProfitDisposition(report, STATE.groups, status)
+    : null;
+  const windowProfitDisposition = summary
+    ? aggregateProfitDisposition(report, STATE.groups, status, { windowDays: windowLabelDays })
+    : null;
   const equityNativeByBook = bookEquityNativeByBook(status);
   const equityUsdByBook = bookEquityUsdByBook(status);
   const sinceLine =
     lifetimeStartMs !== null
       ? `${i18n("since", "自")} ${fmtDate(lifetimeStartMs)}`
       : i18n("no realized history yet", "尚無已實現紀錄");
-  const freshnessNote =
-    source === "snapshot"
-      ? `<p class="text-xs text-amber-200/80 mt-3">${i18n(
-          INVESTOR
-            ? "Equity from last snapshot; live sync continues in background."
-            : "Equity from last snapshot; live Deribit sync in progress.",
-          INVESTOR
-            ? "權益來自最近快照；即時同步於背景進行中。"
-            : "權益來自最近快照；Deribit 即時同步進行中。"
-        )}</p>`
-      : source === "live" && INVESTOR
-      ? `<p class="text-xs text-emerald-200/70 mt-3">${i18n("Live Deribit sync", "已同步 Deribit 即時資料")}</p>`
-      : source === "live" && STATE.summaryLoadPending
-      ? `<p class="text-xs text-amber-200/80 mt-3">${i18n(
-          "Performance summary still syncing…",
-          "績效摘要背景同步中…"
-        )}</p>`
-      : source === "live" && !INVESTOR && STATE.refreshInFlight
-      ? `<p class="text-xs text-slate-500 mt-3">${i18n("Refreshing…", "更新中…")}</p>`
-      : "";
 
   const overviewCtx = {
     totalEquity,
@@ -460,24 +481,27 @@ export function renderAggregate(status, report) {
     sinceLine,
     lifetimePnl,
     lifetimeNativeByBook,
+    lifetimeProfitDisposition,
     closedCount,
     windowLabelDays,
     windowPnl,
     windowNativeByBook,
+    windowProfitDisposition,
     lifetimeApr,
     windowApr,
     equityNativeByBook,
     equityUsdByBook,
   };
   const desktopOverview = overviewMetricsGridHtml(overviewCtx);
+  const overviewWrap = (inner) =>
+    `<div class="overview-panel-inner">${inner}<div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
 
   if (INVESTOR) {
-    root.innerHTML = `
+    root.innerHTML = overviewWrap(`
       <div class="investor-view-desktop">${desktopOverview}</div>
-      <div class="investor-view-mobile">${investorOverviewHtml(overviewCtx)}</div>
-      ${freshnessNote}`;
+      <div class="investor-view-mobile">${investorOverviewHtml(overviewCtx)}</div>`);
   } else {
-    root.innerHTML = `${desktopOverview}${freshnessNote}`;
+    root.innerHTML = overviewWrap(desktopOverview);
   }
   renderDataFreshnessBadge();
 }

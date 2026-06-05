@@ -15,6 +15,7 @@ from ..models import (
 from ..utils import (
     align_option_order_amount,
     format_decimal,
+    is_post_only_reject,
     to_decimal,
     utc_now_ms,
 )
@@ -31,8 +32,11 @@ class EntryMixin:
         currencies: tuple[str, ...] | None = None,
         live: bool = False,
     ) -> dict[str, Any]:
-        context = self._load_runtime()
-        candidates = self._scan_candidates(context, currencies=currencies, top_n=1)
+        context = self._load_runtime(live=live)
+        candidates = self._filter_enterable_candidates(
+            context,
+            self._scan_candidates(context, currencies=currencies, top_n=1),
+        )
         result = self._enter_best_from_candidates(context, candidates=candidates, live=live)
         if result.get("group") is not None:
             context.state.groups.append(result["group"])
@@ -229,8 +233,21 @@ class EntryMixin:
             request = self._entry_naked_short_request(
                 latest_candidate, label, quantity=remaining, aggressive=aggressive
             )
-            response = self._place_entry_order(context, "sell", request)
             window = min(self.config.order_poll_seconds, self.config.short_entry_wait_seconds - waited)
+            try:
+                response = self._place_entry_order(context, "sell", request)
+            except ExchangeError as exc:
+                if not is_post_only_reject(exc):
+                    raise
+                LOGGER.info(
+                    "entry post_only rejected on %s price=%s; repricing (%s)",
+                    locked_short,
+                    request.get("price"),
+                    exc,
+                )
+                requests.append(request)
+                waited += window
+                continue
             state = self._await_entry_order(response, max_wait_seconds=window)
             requests.append(request)
             responses.append(state)
@@ -292,23 +309,15 @@ class EntryMixin:
         short_book = self._get_orderbook(final_c.short_leg.instrument_name, context.orderbook_cache)
         idx = short_book.index_price
         short_trades = execution["trades"]
-        short_entry_fee = self._sum_trade_fees_usdc(short_trades)
-        if short_entry_fee <= 0:
-            short_entry_fee = self._option_fee_usdc(
-                premium=primary_short_average_price,
-                quantity=kept_quantity,
-                index_price=idx,
-                base_currency=final_c.currency,
-                quote_currency=final_c.short_leg.quote_currency,
-                settlement_currency=final_c.short_leg.settlement_currency,
-            )
-        actual_credit_usdc = self._premium_value_usdc(
+        actual_net_credit, short_entry_fee, entry_fee_collateral = self._short_entry_ledger(
             premium=primary_short_average_price,
             quantity=kept_quantity,
             index_price=idx,
+            trades=short_trades,
             instrument=short_instrument,
+            collateral_currency=final_c.collateral_currency,
+            at_timestamp_ms=utc_now_ms(),
         )
-        actual_net_credit = actual_credit_usdc - short_entry_fee
         im_per = final_c.estimated_im_total / final_c.quantity if final_c.quantity > 0 else Decimal("0")
         # ``im_per`` is already in the candidate's collateral-currency unit
         # (USDC for linear, BTC/ETH for inverse); store that raw figure so
@@ -335,6 +344,7 @@ class EntryMixin:
             estimated_im_collateral=estimated_im_collateral,
             regime_at_entry=final_c.regime.value,
             entry_fee=short_entry_fee,
+            entry_fee_collateral=entry_fee_collateral,
             short_entry_average_price=primary_short_average_price,
             entry_index_usd=idx,
             entry_net_apr=final_c.net_apr,
@@ -459,35 +469,43 @@ class EntryMixin:
         long_trades = self._order_trades(long_state)
         short_avg = self._filled_average_price(execution["responses"])
         long_avg = self._response_average_price(long_state)
-        short_fee = self._sum_trade_fees_usdc(short_trades) or self._option_fee_usdc(
+        entry_ts = utc_now_ms()
+        short_net, short_fee, short_fee_collateral = self._short_entry_ledger(
             premium=short_avg,
             quantity=kept_quantity,
             index_price=idx,
-            base_currency=short_instrument.base_currency,
-            quote_currency=short_instrument.quote_currency,
-            settlement_currency=short_instrument.settlement_currency,
-        )
-        long_fee = self._sum_trade_fees_usdc(long_trades) or self._option_fee_usdc(
-            premium=long_avg,
-            quantity=kept_quantity,
-            index_price=idx,
-            base_currency=long_instrument.base_currency,
-            quote_currency=long_instrument.quote_currency,
-            settlement_currency=long_instrument.settlement_currency,
-        )
-        short_credit = self._premium_value_usdc(
-            premium=short_avg,
-            quantity=kept_quantity,
-            index_price=idx,
+            trades=short_trades,
             instrument=short_instrument,
+            collateral_currency=final_c.collateral_currency,
+            at_timestamp_ms=entry_ts,
         )
-        long_debit = self._premium_value_usdc(
+        _, long_fee, long_fee_collateral = self._short_entry_ledger(
             premium=long_avg,
             quantity=kept_quantity,
             index_price=idx,
+            trades=long_trades,
             instrument=long_instrument,
+            collateral_currency=final_c.collateral_currency,
+            at_timestamp_ms=entry_ts,
         )
-        actual_net_credit = short_credit - long_debit - short_fee - long_fee
+        entry_fee_collateral = short_fee_collateral + long_fee_collateral
+        if final_c.collateral_currency.upper() == "USDC":
+            short_credit = self._premium_value_usdc(
+                premium=short_avg,
+                quantity=kept_quantity,
+                index_price=idx,
+                instrument=short_instrument,
+            )
+            long_debit = self._premium_value_usdc(
+                premium=long_avg,
+                quantity=kept_quantity,
+                index_price=idx,
+                instrument=long_instrument,
+            )
+            actual_net_credit = short_credit - long_debit - short_fee - long_fee
+        else:
+            gross_native = (short_avg - long_avg) * kept_quantity
+            actual_net_credit = (gross_native - entry_fee_collateral) * idx if idx > 0 else Decimal("0")
         width_usdc = max(final_c.short_leg.strike - candidate.long_leg.strike, Decimal("0")) * kept_quantity
         max_loss_usdc = max(width_usdc - actual_net_credit, Decimal("0"))
         estimated_im_collateral = (
@@ -511,6 +529,7 @@ class EntryMixin:
             estimated_im_collateral=estimated_im_collateral,
             regime_at_entry=final_c.regime.value,
             entry_fee=short_fee + long_fee,
+            entry_fee_collateral=entry_fee_collateral,
             short_entry_average_price=short_avg,
             long_entry_average_price=long_avg,
             entry_index_usd=idx,

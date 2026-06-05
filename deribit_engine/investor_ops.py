@@ -14,11 +14,14 @@ from .config import has_private_creds_for_env, load_config
 from .env_layout import (
     CONFIG_INVESTORS,
     EXAMPLE_INVESTOR_ID,
+    RISK_TIER_MEDIUM,
     account_env_basename,
     default_state_file,
     find_repo_root,
     load_investor_manifest,
+    normalize_risk_tier,
     resolve_investor_dir,
+    risk_tier_profile_path,
 )
 from .exceptions import ConfigurationError
 from .fee_snapshot_store import FeeSnapshotStore, fee_ledger_db_path
@@ -47,6 +50,12 @@ DISPLAY_NAME_BY_SLUG: dict[str, str] = {
 }
 
 KNOWN_STRATEGY_SLUGS = frozenset(STRATEGY_BY_SLUG)
+
+RISK_TIER_LABELS: dict[str, str] = {
+    "low": "低風險",
+    "medium": "中風險",
+    "high": "高風險",
+}
 
 
 @dataclass(frozen=True)
@@ -91,6 +100,39 @@ def parse_strategy_slugs(raw: str) -> tuple[str, ...]:
     return tuple(slugs)
 
 
+def parse_risk_tier_map(
+    strategies: tuple[str, ...],
+    *,
+    default_tier: str = RISK_TIER_MEDIUM,
+    risk_tiers_raw: str | None = None,
+) -> dict[str, str]:
+    """Map strategy slug → risk tier.
+
+    ``risk_tiers_raw`` accepts either a single tier for all slugs (``low``) or
+    per-slug pairs (``naked:low,covered_call:high``).
+    """
+    default = normalize_risk_tier(default_tier)
+    tiers = {slug: default for slug in strategies}
+    if not risk_tiers_raw:
+        return tiers
+    for part in risk_tiers_raw.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if ":" in token:
+            slug, tier_raw = token.split(":", 1)
+            slug = slug.strip().lower()
+            if slug not in strategies:
+                known = ", ".join(sorted(strategies))
+                raise ConfigurationError(f"Unknown strategy slug {slug!r} in --risk-tiers; selected: {known}")
+            tiers[slug] = normalize_risk_tier(tier_raw.strip())
+            continue
+        tier = normalize_risk_tier(token)
+        for slug in strategies:
+            tiers[slug] = tier
+    return tiers
+
+
 def investor_init(
     investor_id: str,
     *,
@@ -100,6 +142,7 @@ def investor_init(
     deribit_env: str = "mainnet",
     register: bool = True,
     repo_root: Path | None = None,
+    risk_tiers: dict[str, str] | None = None,
 ) -> InitResult:
     investor_id = validate_investor_id(investor_id)
     cwd_repo = repo_root or find_repo_root(Path.cwd())
@@ -122,7 +165,14 @@ def investor_init(
     accounts_dir.mkdir()
 
     label = display_name or investor_id.replace("_", " ").title()
-    _write_accounts_toml(investor_dir, investor_id=investor_id, display_name=label, strategies=strategies)
+    tier_by_slug = risk_tiers or {slug: RISK_TIER_MEDIUM for slug in strategies}
+    _write_accounts_toml(
+        investor_dir,
+        investor_id=investor_id,
+        display_name=label,
+        strategies=strategies,
+        risk_tiers=tier_by_slug,
+    )
     _copy_investor_env_example(example_dir, investor_dir)
 
     for slug in strategies:
@@ -132,6 +182,7 @@ def investor_init(
             slug=slug,
             investor_id=investor_id,
             deribit_env=deribit_env,
+            risk_tier=tier_by_slug.get(slug, RISK_TIER_MEDIUM),
         )
         _copy_env_example_if_present(example_dir, accounts_dir, slug)
 
@@ -199,8 +250,8 @@ def import_handoff(
         )
 
     deribit_env = str(investor_meta.get("deribit_env") or "mainnet").strip().lower()
-    if deribit_env not in {"mainnet", "testnet", "prod"}:
-        raise ConfigurationError(f"handoff [investor].deribit_env must be mainnet or testnet, got {deribit_env!r}")
+    if deribit_env not in {"mainnet", "prod"}:
+        raise ConfigurationError(f"handoff [investor].deribit_env must be mainnet, got {deribit_env!r}")
     if deribit_env == "prod":
         deribit_env = "mainnet"
 
@@ -383,6 +434,36 @@ def validate_investor(
                     "error",
                     "missing_env_file",
                     f"Missing env file for enabled account {account.slug!r}: {account.env_path}",
+                )
+            )
+            continue
+        tier_path = risk_tier_profile_path(cwd_repo, account.strategy, account.risk_tier)
+        if not tier_path.is_file():
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "missing_risk_tier_profile",
+                    f"Account {account.slug!r} risk_tier={account.risk_tier!r} but missing {tier_path}",
+                )
+            )
+        try:
+            config = load_config(account.env_path, require_private=False)
+        except ConfigurationError as exc:
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "config_load",
+                    f"Account {account.slug!r}: {exc}",
+                )
+            )
+            continue
+        if config.risk_tier != account.risk_tier:
+            issues.append(
+                ValidationIssue(
+                    "warning",
+                    "risk_tier_mismatch",
+                    f"Account {account.slug!r}: accounts.toml risk_tier={account.risk_tier!r} "
+                    f"but env RISK_TIER={config.risk_tier!r}",
                 )
             )
 
@@ -620,10 +701,13 @@ def _write_accounts_toml(
     investor_id: str,
     display_name: str,
     strategies: tuple[str, ...],
+    risk_tiers: dict[str, str] | None = None,
 ) -> None:
+    risk_tiers = risk_tiers or {}
     lines = [
         "# Generated by: ./bot investor init",
         "# Strategy manifest (ops metadata is in config/platform/registry.toml)",
+        "# risk_tier: low | medium | high — tier params in config/shared/strategies/tiers/<strategy>/.env.<tier>",
         "",
         "[investor]",
         f'id = "{investor_id}"',
@@ -633,12 +717,14 @@ def _write_accounts_toml(
     for slug in strategies:
         strategy = STRATEGY_BY_SLUG[slug]
         title = DISPLAY_NAME_BY_SLUG[slug]
+        risk_tier = normalize_risk_tier(risk_tiers.get(slug, RISK_TIER_MEDIUM))
         lines.extend(
             [
                 "[[accounts]]",
                 f'slug = "{slug}"',
                 f'strategy = "{strategy}"',
                 f'display_name = "{title}"',
+                f'risk_tier = "{risk_tier}"',
                 "enabled = true",
                 "",
             ]
@@ -666,10 +752,12 @@ def _materialize_account_env(
     slug: str,
     investor_id: str,
     deribit_env: str,
+    risk_tier: str = RISK_TIER_MEDIUM,
 ) -> None:
     example_env = example_dir / "accounts" / f".env.{slug}.example"
     dest = investor_dir / "accounts" / account_env_basename(slug)
     strategy = STRATEGY_BY_SLUG[slug]
+    tier = normalize_risk_tier(risk_tier)
     if example_env.is_file():
         text = example_env.read_text(encoding="utf-8")
         text = _substitute_placeholders(
@@ -688,6 +776,7 @@ def _materialize_account_env(
                     "DERIBIT_CLIENT_ID=",
                     "DERIBIT_CLIENT_SECRET=",
                     f"OPTION_STRATEGY={strategy}",
+                    f"RISK_TIER={tier}",
                     f"ORDER_LABEL_PREFIX={investor_id}_{slug}",
                     f"STATE_FILE={default_state_file(investor_id, slug)}",
                     "REFERENCE_CAPITAL_USDC=1000",
@@ -698,6 +787,8 @@ def _materialize_account_env(
             ),
             encoding="utf-8",
         )
+        return
+    _ensure_risk_tier_in_env(dest, tier)
 
 
 def _substitute_placeholders(
@@ -711,7 +802,7 @@ def _substitute_placeholders(
     state = str(default_state_file(investor_id, slug))
     replacements = {
         "demo": investor_id,
-        "DERIBIT_ENV=testnet": f"DERIBIT_ENV={deribit_env}",
+        "DERIBIT_ENV=mainnet": f"DERIBIT_ENV={deribit_env}",
         f"ORDER_LABEL_PREFIX=demo_{slug}": f"ORDER_LABEL_PREFIX={investor_id}_{slug}",
         f"STATE_FILE=.state/investors/demo/{slug}.json": f"STATE_FILE={state}",
     }
@@ -720,6 +811,10 @@ def _substitute_placeholders(
     if f"OPTION_STRATEGY={strategy}" not in text:
         text = re.sub(r"OPTION_STRATEGY=.*", f"OPTION_STRATEGY={strategy}", text)
     return text
+
+
+def _ensure_risk_tier_in_env(path: Path, risk_tier: str) -> None:
+    _update_env_file(path, {"RISK_TIER": normalize_risk_tier(risk_tier)})
 
 
 def _update_env_file(path: Path, updates: dict[str, str]) -> None:

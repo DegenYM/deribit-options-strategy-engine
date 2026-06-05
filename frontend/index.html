@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Deribit Strategy Dashboard</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app.js?v=symbol-parens-20260531" as="script" />
+    <link rel="preload" href="/app.js?v=ivr-header-20260601c" as="script" />
     <link rel="stylesheet" href="/tailwind.css?v=20260526" />
-    <link rel="stylesheet" href="/styles.css?v=equity-rows-20260531g" />
+    <link rel="stylesheet" href="/styles.css?v=ivr-header-20260602c" />
   </head>
   <body class="app-body text-slate-100 min-h-screen font-sans">
-    <header class="app-header sticky top-0 z-10">
+    <header class="app-header">
       <div class="dashboard-shell py-3 flex flex-wrap items-center gap-4">
         <div class="min-w-[220px]">
           <h1 class="text-lg font-semibold tracking-tight">
@@ -38,16 +38,21 @@
           id="scheduler-badge"
           class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
         >scheduler: ?</span>
-        <span
-          id="header-spot-btc"
-          class="text-xs font-mono text-emerald-200/90 tabular-nums"
-        >BTC —</span>
-        <span
-          id="header-spot-eth"
-          class="text-xs font-mono text-emerald-200/90 tabular-nums"
-        >ETH —</span>
+        <div class="header-market-strip" aria-label="Spot and IV Rank">
+          <div id="header-spot-btc" class="header-market-card header-market-card--btc">
+            <span class="header-market-symbol">BTC</span>
+            <span id="header-spot-btc-price" class="header-market-price">—</span>
+            <span id="header-spot-btc-change" class="header-price-change" hidden aria-label="24h change"></span>
+            <span id="header-spot-btc-ivr" class="header-ivr" hidden aria-label="IV Rank"></span>
+          </div>
+          <div id="header-spot-eth" class="header-market-card header-market-card--eth">
+            <span class="header-market-symbol">ETH</span>
+            <span id="header-spot-eth-price" class="header-market-price">—</span>
+            <span id="header-spot-eth-change" class="header-price-change" hidden aria-label="24h change"></span>
+            <span id="header-spot-eth-ivr" class="header-ivr" hidden aria-label="IV Rank"></span>
+          </div>
+        </div>
         <div class="ml-auto flex items-center gap-3 text-xs text-slate-400">
-          <span id="data-freshness-slot"></span>
           <span id="last-refresh">last refresh (local time): —</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
             <input
@@ -304,6 +309,6 @@
       class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
     ></div>
 
-    <script defer src="/app.js?v=symbol-parens-20260531"></script>
+    <script defer src="/app.js?v=ivr-header-20260601c"></script>
   </body>
 </html>

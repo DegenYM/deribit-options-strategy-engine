@@ -14,9 +14,157 @@
 
 .app-header {
   border-bottom: 1px solid rgba(30, 41, 59, 0.9);
-  background: rgba(2, 6, 23, 0.82);
-  backdrop-filter: blur(18px);
+  background: rgba(2, 6, 23, 0.92);
 }
+
+.header-market-strip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.header-market-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 0.625rem;
+  border: 1px solid rgb(51 65 85 / 0.55);
+  background: rgb(15 23 42 / 0.72);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.25;
+  flex-shrink: 0;
+}
+
+.header-market-card--btc {
+  border-color: rgb(245 158 11 / 0.24);
+  background:
+    linear-gradient(135deg, rgb(245 158 11 / 0.08), transparent 55%),
+    rgb(15 23 42 / 0.82);
+}
+
+.header-market-card--eth {
+  border-color: rgb(129 140 248 / 0.24);
+  background:
+    linear-gradient(135deg, rgb(129 140 248 / 0.08), transparent 55%),
+    rgb(15 23 42 / 0.82);
+}
+
+.header-market-symbol {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: rgb(148 163 184);
+}
+
+.header-market-card--btc .header-market-symbol {
+  color: rgb(251 191 36 / 0.9);
+}
+
+.header-market-card--eth .header-market-symbol {
+  color: rgb(165 180 252 / 0.9);
+}
+
+.header-market-price {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: rgb(209 250 229 / 0.92);
+  white-space: nowrap;
+}
+
+.header-price-change {
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-size: 0.625rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.header-price-change--up {
+  color: rgb(110 231 183 / 0.95);
+}
+
+.header-price-change--down {
+  color: rgb(251 113 133 / 0.95);
+}
+
+.header-price-change--flat {
+  color: rgb(148 163 184 / 0.95);
+}
+
+.header-ivr {
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.4rem;
+  border-radius: 9999px;
+  border: 1px solid rgb(167 139 250 / 0.28);
+  background: rgb(76 29 149 / 0.22);
+  font-size: 0.625rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: rgb(216 180 254 / 0.95);
+}
+
+.header-ivr--low {
+  border-color: rgb(167 139 250 / 0.35);
+  background: rgb(76 29 149 / 0.28);
+  color: rgb(216 180 254 / 0.95);
+}
+
+.header-ivr--mid {
+  border-color: rgb(251 191 36 / 0.35);
+  background: rgb(120 53 15 / 0.35);
+  color: rgb(253 230 138 / 0.95);
+}
+
+.header-ivr--high {
+  border-color: rgb(251 113 133 / 0.4);
+  background: rgb(136 19 55 / 0.35);
+  color: rgb(254 205 211 / 0.95);
+}
+
+.header-market-line {
+  flex-shrink: 0;
+  align-items: center;
+}
+
+.investor-portal .investor-header-spot,
+.app-header .header-market-strip {
+  overflow: visible;
+}
+
+/* Investor portal: title row, then badges + spot + refresh (Jack-style) */
+.investor-portal .investor-header-shell {
+  align-items: center;
+}
+
+.investor-portal .investor-header-title {
+  flex: 0 0 100%;
+  width: 100%;
+  max-width: 100%;
+}
+
+.investor-portal .investor-header-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.investor-portal .investor-header-spot {
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .app-header .header-market-strip {
+    width: 100%;
+    order: 3;
+  }
+}
+
 
 .dashboard-main {
   display: grid;
@@ -124,6 +272,40 @@
   background: linear-gradient(135deg, rgba(15, 23, 42, 0.82), rgba(6, 78, 59, 0.16));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
   padding: 18px;
+}
+
+.overview-panel-inner {
+  position: relative;
+  padding-bottom: 1.75rem;
+}
+
+.overview-freshness-corner {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+}
+
+.profit-swapped-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.profit-swapped-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.35rem;
+}
+
+.profit-swapped-label {
+  color: rgb(100 116 139);
+  flex-shrink: 0;
+}
+
+.profit-swapped-native-line .native-book-breakdown {
+  padding-left: 0;
 }
 
 .table-card {
@@ -330,19 +512,31 @@ table tbody tr:hover {
   min-width: 0;
 }
 
-.native-book-symbol--btc {
+.native-book-symbol.native-book-symbol--btc,
+.overview-metric-line .native-book-symbol.native-book-symbol--btc,
+.inv-profit-detail .native-book-symbol.native-book-symbol--btc,
+.inv-equity-breakdown .native-book-symbol.native-book-symbol--btc {
   color: rgb(251 146 60 / 0.88);
 }
 
-.native-book-symbol--eth {
+.native-book-symbol.native-book-symbol--eth,
+.overview-metric-line .native-book-symbol.native-book-symbol--eth,
+.inv-profit-detail .native-book-symbol.native-book-symbol--eth,
+.inv-equity-breakdown .native-book-symbol.native-book-symbol--eth {
   color: rgb(165 180 252 / 0.92);
 }
 
-.native-book-symbol--usdc {
+.native-book-symbol.native-book-symbol--usdc,
+.overview-metric-line .native-book-symbol.native-book-symbol--usdc,
+.inv-profit-detail .native-book-symbol.native-book-symbol--usdc,
+.inv-equity-breakdown .native-book-symbol.native-book-symbol--usdc {
   color: rgb(56 189 248 / 0.85);
 }
 
-.native-book-symbol--usdt {
+.native-book-symbol.native-book-symbol--usdt,
+.overview-metric-line .native-book-symbol.native-book-symbol--usdt,
+.inv-profit-detail .native-book-symbol.native-book-symbol--usdt,
+.inv-equity-breakdown .native-book-symbol.native-book-symbol--usdt {
   color: rgb(74 222 128 / 0.9);
 }
 
@@ -658,6 +852,12 @@ table tbody tr:hover {
   line-height: 1.35;
   word-break: break-all;
   margin-bottom: 10px;
+}
+
+.activity-card-group-id {
+  color: rgb(148 163 184);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .activity-lifecycle {
@@ -1298,7 +1498,6 @@ table tbody tr:hover {
 }
 
 .inv-chip-sym {
-  color: rgb(100 116 139);
   font-size: 10px;
 }
 
@@ -1360,6 +1559,62 @@ table tbody tr:hover {
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+.inv-profit-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.35rem;
+  min-width: 0;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.inv-profit-detail .overview-metric-line {
+  color: rgb(100 116 139);
+}
+
+.inv-profit-detail .overview-metric-line.profit-swapped-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.35rem;
+}
+
+.inv-profit-detail .native-book-item {
+  font-size: inherit;
+}
+
+.inv-profit-detail .native-book-breakdown {
+  gap: 0.25rem;
+}
+
+.inv-profit-detail .overview-metric-line .pnl-pos {
+  color: rgb(110 231 183);
+}
+
+.inv-profit-detail .overview-metric-line .pnl-neg {
+  color: rgb(253 164 175);
+}
+
+.inv-profit-detail .profit-swapped-block {
+  margin-top: 0;
+}
+
+@media (max-width: 520px) {
+  .investor-portal .inv-compare {
+    grid-template-columns: 1fr;
+  }
+
+  .investor-portal .inv-compare-col + .inv-compare-col {
+    border-left: none;
+    border-top: 1px solid rgba(51, 65, 85, 0.45);
+  }
+
+  .investor-portal .inv-compare-col {
+    padding: 12px;
+  }
 }
 
 .inv-kpi--compact .inv-kpi-value {
@@ -1590,6 +1845,13 @@ table tbody tr:hover {
   word-break: break-word;
 }
 
+.overview-metric-line.profit-swapped-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.35rem;
+}
+
 .overview-metric-line--hint {
   line-height: 1.4;
 }
@@ -1680,6 +1942,16 @@ table tbody tr:hover {
   white-space: nowrap;
 }
 
+@media (max-width: 767px) {
+  .overview-metric-meta .native-book-item {
+    white-space: normal;
+  }
+
+  .overview-metric-meta .profit-swapped-block {
+    margin-top: 0.1rem;
+  }
+}
+
 @media (min-width: 520px) {
   .overview-metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1712,6 +1984,11 @@ table tbody tr:hover {
     gap: 10px;
   }
 
+  .investor-portal .investor-header-meta {
+    width: 100%;
+    flex: 0 0 auto;
+  }
+
   .investor-portal .investor-header-actions {
     margin-left: 0;
     width: 100%;
@@ -1736,7 +2013,7 @@ table tbody tr:hover {
 }
 
 .investor-portal .app-header {
-  background: rgba(15, 23, 42, 0.88);
+  background: rgba(15, 23, 42, 0.94);
 }
 
 .investor-portal.investor-blocking-load .app-header,
@@ -1855,9 +2132,6 @@ table tbody tr:hover {
 }
 
 .investor-progress-bar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
   height: 3px;
   overflow: hidden;
   background: rgba(51, 65, 85, 0.55);

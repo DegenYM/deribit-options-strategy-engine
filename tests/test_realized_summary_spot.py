@@ -23,6 +23,23 @@ def test_realized_pnl_usdc_at_spot_uses_native_times_live_index() -> None:
     assert at_live == Decimal("120")
 
 
+def test_realized_pnl_usdc_at_spot_uses_usdt_when_profit_swept() -> None:
+    row = {
+        "status": "closed",
+        "collateral_currency": "BTC",
+        "currency": "BTC",
+        "realized_pnl": "100",
+        "realized_pnl_collateral_native": "0.001",
+        "profit_sweep_status": "filled",
+        "profit_sweep_amount": "0.001",
+        "profit_sweep_quote_proceeds": "146.2",
+        "closed_timestamp_ms": 1_700_000_000_000,
+        "entry_timestamp_ms": 1_699_000_000_000,
+    }
+    at_live = realized_pnl_usdc_at_spot(row, {"BTC": Decimal("120000")})
+    assert at_live == Decimal("146.2")
+
+
 def test_realized_summary_from_closed_sums_at_spot() -> None:
     rows = [
         {

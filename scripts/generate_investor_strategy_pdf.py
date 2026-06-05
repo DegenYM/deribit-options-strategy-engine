@@ -250,7 +250,7 @@ def _payoff_panel(
     _style_axes(ax)
 
     ax.axhline(0.0, color=_PALETTE["muted"], linewidth=1.0, zorder=1)
-    for x, sty in zip(strike_x, strike_styles):
+    for x, sty in zip(strike_x, strike_styles, strict=False):
         ax.axvline(x, color=_PALETTE["strike"], linestyle=sty, linewidth=1.15, zorder=2, alpha=0.85)
 
     ax.plot(S, pl, color=line_color, linewidth=2.35, zorder=4, solid_capstyle="round")

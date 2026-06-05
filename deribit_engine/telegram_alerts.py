@@ -162,7 +162,11 @@ def send_telegram_alert(
             return False
         return True
     except requests.RequestException as exc:
-        LOGGER.warning("telegram send error: %s", exc)
+        # Scrub the bot token from the request URL that requests embeds in its
+        # exception messages (e.g. ".../bot<token>/sendMessage").
+        from .structured_log import scrub_secrets
+
+        LOGGER.warning("telegram send error: %s", scrub_secrets(str(exc)))
         return False
 
 

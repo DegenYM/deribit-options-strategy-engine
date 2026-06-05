@@ -8,12 +8,21 @@ This project is not affiliated with or endorsed by Deribit.
 
 ## 快速開始
 
+設定放在 `config/investors/<id>/`（子帳憑證在 `accounts/.env.<slug>`），**不要**再用 repo 根目錄單一 `.env`。
+
 ```bash
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-cp .env.example .env
-./bot ping
-./bot scan --currencies BTC,ETH --json   # 預設 dry-run
+
+# 建立投資人目錄（或 ./bot investor init <id> --strategies naked,...）
+cp -R config/investors/_example config/investors/youming
+# 依 accounts/.env.<slug>.example 建立 .env.naked 等並填入 API key
+
+export INVESTOR=youming   # 後續指令可寫 --investor $INVESTOR
+
+./bot --investor $INVESTOR --account naked ping
+./bot --investor $INVESTOR --account naked scan --currencies BTC,ETH --json   # 預設 dry-run
+./bot --investor $INVESTOR frontend
 ```
 
 完整安裝、測試與第一次執行：[`docs/getting-started-zh-TW.md`](docs/getting-started-zh-TW.md)
@@ -65,14 +74,19 @@ cp .env.example .env
 | [前端 build / e2e](frontend/README.md) | Dashboard 前端 |
 | [腳本說明](scripts/README.md) | 輔助腳本 |
 
-## 投資人 layout（建議）
+## 投資人 layout
 
 一位投資人一個目錄，底下最多數個策略子帳；範本見 [`config/investors/_example/`](config/investors/_example/)。
 
 ```bash
-cp -R config/investors/_example config/investors/youming
-./bot --investor youming --account naked scan --currencies BTC,ETH --json
-./bot --investor youming frontend
+export INVESTOR=youming
+
+./bot --investor $INVESTOR --account naked scan --currencies BTC,ETH --json
+./bot --investor $INVESTOR --account naked manage --json
+./bot --investor $INVESTOR frontend
+
+# live 監督（accounts.toml 內 live_enabled 子帳）
+python scripts/run_live_profiles.py --investor $INVESTOR --restart-failed
 ```
 
-詳細載入順序與 env 範例：[`docs/configuration-zh-TW.md`](docs/configuration-zh-TW.md)
+多數子命令須加 `--account <slug>`（`frontend` 例外，會聚合該投資人所有 enabled 子帳）。詳細載入順序與 env 範例：[`docs/configuration-zh-TW.md`](docs/configuration-zh-TW.md)

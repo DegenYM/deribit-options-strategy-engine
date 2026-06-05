@@ -90,7 +90,7 @@ def list_pids_listening_on_tcp_port(port: int) -> list[int]:
     if port <= 0:
         return []
     result = subprocess.run(
-        ["lsof", "-tiTCP:%s" % port, "-sTCP:LISTEN"],
+        ["lsof", f"-tiTCP:{port}", "-sTCP:LISTEN"],
         capture_output=True,
         text=True,
         check=False,

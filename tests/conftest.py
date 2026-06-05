@@ -21,7 +21,7 @@ def future_expiry(days: int) -> int:
 
 def make_config(tmp_path: Path, **overrides) -> BotConfig:
     values = dict(
-        env="testnet",
+        env="mainnet",
         client_id="id",
         client_secret="secret",
         option_strategy="naked_short",
@@ -57,6 +57,10 @@ def make_config(tmp_path: Path, **overrides) -> BotConfig:
         order_poll_seconds=1,
         option_fee_rate=Decimal("0.0003"),
         option_fee_cap_rate=Decimal("0.125"),
+        option_fee_discount_rate=Decimal("0"),
+        option_fee_discount_months=6,
+        option_fee_discount_anchor="registration",
+        option_fee_discount_registration_ms=0,
         exit_buffer_ratio=Decimal("0.03"),
         index_drawdown_elevated_pct=Decimal("0.04"),
         index_drawdown_crisis_pct=Decimal("0.06"),
@@ -266,7 +270,7 @@ class FakeClient:
             return []
         if currency == "USDC":
             result = []
-            for base_currency, index_price, short_strike, long_strike, tick, min_amount in (
+            for base_currency, _index_price, short_strike, long_strike, tick, min_amount in (
                 ("BTC", Decimal("70000"), Decimal("63000"), Decimal("60000"), "2.5", "0.01"),
                 ("ETH", Decimal("3500"), Decimal("3150"), Decimal("3000"), "0.5", "0.1"),
             ):
@@ -866,6 +870,8 @@ class FakeClient:
             amount_dec = Decimal(str(filled_amount))
             price_dec = Decimal(str(average_price or price or "0"))
             index_price = Decimal("70000") if instrument_name.startswith("BTC") else Decimal("3500")
+            if price_dec <= 0 and ("_USDT" in instrument_name or "_USDC" in instrument_name):
+                price_dec = index_price
             fee_currency = (
                 "USDC" if "_USDC-" in instrument_name else ("BTC" if instrument_name.startswith("BTC") else "ETH")
             )
@@ -875,6 +881,7 @@ class FakeClient:
                 {
                     "order_id": order_id,
                     "instrument_name": instrument_name,
+                    "direction": direction,
                     "price": price_dec,
                     "amount": amount_dec,
                     "fee": fee_value,

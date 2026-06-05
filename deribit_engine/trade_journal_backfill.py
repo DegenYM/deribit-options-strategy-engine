@@ -18,6 +18,9 @@ from .bull_put_settlement import (
 )
 from .client import DeribitClient
 from .config import BotConfig, load_config
+from .exit_reasons import INCOME_EXIT_REASONS
+from .fee_discount import effective_option_fee_discount_rate, resolve_first_option_trade_timestamp_ms
+from .fees import option_trade_fee_native
 from .metrics_store import MetricsStore, performance_scope_key
 from .models import TradeGroup
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
@@ -64,6 +67,7 @@ class BackfillSummary:
     state_inserted: int
     metrics_synced: bool
     coin_groups_recalculated: int = 0
+    coin_close_repaired: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +82,7 @@ class BackfillSummary:
             "state_inserted": self.state_inserted,
             "metrics_synced": self.metrics_synced,
             "coin_groups_recalculated": self.coin_groups_recalculated,
+            "coin_close_repaired": self.coin_close_repaired,
         }
 
 
@@ -192,29 +197,337 @@ def _is_covered_call_group(group: TradeGroup) -> bool:
     return group.option_type == "call" and group.covered_underlying_quantity > 0
 
 
-def _fee_rates_for_state(state_path: Path) -> tuple[Decimal, Decimal]:
-    """Best-effort fee rates from a sibling account env; else Deribit defaults."""
-    try:
-        from .config import load_config
-        from .env_layout import find_repo_root
+def _account_env_candidates_for_state(state_path: Path) -> list[Path]:
+    from .env_layout import find_repo_root
 
-        repo = find_repo_root(state_path)
-        stem = state_path.stem
-        candidates: list[Path] = []
-        if repo is not None:
-            parent = state_path.resolve().parent
-            if parent.parent.name == "investors":
-                investor_id = parent.name
-                candidates.append(repo / "config" / "investors" / investor_id / "accounts" / f".env.{stem}")
-            candidates.append(repo / "config" / "shared" / "strategies" / f".env.{stem}")
-            candidates.append(repo / f".env.{stem}")
-        for env_path in candidates:
+    repo = find_repo_root(state_path)
+    stem = state_path.stem
+    candidates: list[Path] = []
+    if repo is not None:
+        parent = state_path.resolve().parent
+        if parent.parent.name == "investors":
+            investor_id = parent.name
+            candidates.append(repo / "config" / "investors" / investor_id / "accounts" / f".env.{stem}")
+        candidates.append(repo / "config" / "shared" / "strategies" / f".env.{stem}")
+        candidates.append(repo / f".env.{stem}")
+    return candidates
+
+
+def _config_for_state(state_path: Path) -> BotConfig | None:
+    """Best-effort account config from a sibling ``.env.<slug>`` file."""
+    try:
+        for env_path in _account_env_candidates_for_state(state_path):
             if env_path.is_file():
-                cfg = load_config(env_path, require_private=False)
-                return cfg.option_fee_rate, cfg.option_fee_cap_rate
+                return load_config(env_path, require_private=False)
     except Exception:  # noqa: BLE001
         pass
-    return _DEFAULT_OPTION_FEE_RATE, _DEFAULT_OPTION_FEE_CAP_RATE
+    return None
+
+
+def _fee_rates_for_state(state_path: Path) -> tuple[Decimal, Decimal, Decimal]:
+    """Best-effort fee rates from a sibling account env; else Deribit defaults."""
+    try:
+        cfg = _config_for_state(state_path)
+        if cfg is not None:
+            return cfg.option_fee_rate, cfg.option_fee_cap_rate, cfg.option_fee_discount_rate
+    except Exception:  # noqa: BLE001
+        pass
+    return _DEFAULT_OPTION_FEE_RATE, _DEFAULT_OPTION_FEE_CAP_RATE, Decimal("0")
+
+
+def repair_coin_fee_collateral_for_state(
+    state_path: Path,
+    *,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """Recompute coin ``*_fee_collateral`` and ``realized_pnl_collateral_native`` using account fee discount."""
+    cfg = _config_for_state(state_path)
+    base_discount = cfg.option_fee_discount_rate if cfg is not None else Decimal("0")
+    discount_months = cfg.option_fee_discount_months if cfg is not None else 6
+    anchor = cfg.option_fee_discount_anchor if cfg is not None else "registration"
+    registration_ms = cfg.option_fee_discount_registration_ms if cfg is not None else 0
+    fee_rate = cfg.option_fee_rate if cfg is not None else _DEFAULT_OPTION_FEE_RATE
+    fee_cap = cfg.option_fee_cap_rate if cfg is not None else _DEFAULT_OPTION_FEE_CAP_RATE
+
+    store = StrategyStateStore(state_path)
+    state = store.load()
+    first_trade_ms = resolve_first_option_trade_timestamp_ms(state_path=state_path)
+    updated = 0
+    for group in state.groups:
+        if group.status != "closed" or not group.is_coin_collateral():
+            continue
+        qty = group.quantity if group.quantity > 0 else Decimal("0")
+        if qty <= 0:
+            continue
+        book = group.collateral_currency or group.currency or "BTC"
+        entry_px = group.short_entry_average_price
+        close_px = group.short_close_average_price or Decimal("0")
+        if entry_px <= 0 or close_px <= 0:
+            continue
+        entry_idx = group.entry_index_usd if group.entry_index_usd > 0 else group.close_index_usd
+        close_idx = (
+            group.close_index_usd if group.close_index_usd is not None and group.close_index_usd > 0 else entry_idx
+        )
+        entry_ms = int(group.entry_timestamp_ms or 0)
+        close_ms = int(group.closed_timestamp_ms or entry_ms or 0)
+        entry_discount = effective_option_fee_discount_rate(
+            base_rate=base_discount,
+            discount_months=discount_months,
+            first_trade_timestamp_ms=first_trade_ms,
+            anchor=anchor,
+            registration_timestamp_ms=registration_ms or None,
+            at_timestamp_ms=entry_ms if entry_ms > 0 else close_ms,
+        )
+        close_discount = effective_option_fee_discount_rate(
+            base_rate=base_discount,
+            discount_months=discount_months,
+            first_trade_timestamp_ms=first_trade_ms,
+            anchor=anchor,
+            registration_timestamp_ms=registration_ms or None,
+            at_timestamp_ms=close_ms if close_ms > 0 else entry_ms,
+        )
+        entry_fee_collateral = option_trade_fee_native(
+            index_price=entry_idx,
+            premium=entry_px,
+            quantity=qty,
+            fee_rate=fee_rate,
+            fee_cap_rate=fee_cap,
+            quote_currency="",
+            settlement_currency=book,
+            fee_discount_rate=entry_discount,
+        )
+        close_fee_collateral = option_trade_fee_native(
+            index_price=close_idx,
+            premium=close_px,
+            quantity=qty,
+            fee_rate=fee_rate,
+            fee_cap_rate=fee_cap,
+            quote_currency="",
+            settlement_currency=book,
+            fee_discount_rate=close_discount,
+        )
+        before_native = group.realized_pnl_collateral_native
+        group.entry_fee_collateral = entry_fee_collateral
+        group.close_fee_collateral = close_fee_collateral
+        if entry_idx > 0:
+            group.entry_fee = entry_fee_collateral * entry_idx
+        if close_idx > 0:
+            group.realized_close_fee = close_fee_collateral * close_idx
+        group.backfill_realized_pnl_collateral_native(
+            spot_index_usd=close_idx if close_idx > 0 else None,
+        )
+        if group.realized_pnl_collateral_native != before_native or group.entry_fee_collateral != entry_fee_collateral:
+            updated += 1
+
+    if updated and not dry_run:
+        store.save(state)
+    return {"groups_updated": updated, "dry_run": int(dry_run)}
+
+
+def infer_bot_income_exit_close_reason(
+    executions: list[dict[str, Any]],
+    *,
+    order_label_prefix: str,
+) -> str | None:
+    """Recover income-exit reason when exchange closed via bot API but state reconcile ran."""
+    prefix = str(order_label_prefix or "").strip()
+    if not prefix:
+        return None
+    for row in executions:
+        if str(row.get("event_type") or "").lower() != "close":
+            continue
+        if str(row.get("leg") or "short").lower() not in {"", "short"}:
+            continue
+        if str(row.get("source_action") or "") == "reconcile_external":
+            continue
+        label = str(row.get("label") or "")
+        parsed = _parse_bot_label(label, label_prefix=prefix)
+        if parsed is None or parsed[2] != "close":
+            continue
+        if not str(row.get("order_id") or "").strip():
+            continue
+        reason = str(row.get("reason") or "").lower()
+        if reason in INCOME_EXIT_REASONS:
+            return reason
+        return "take_profit"
+    return None
+
+
+def profit_sweep_order_label(order_label_prefix: str, group: TradeGroup) -> str:
+    return f"{order_label_prefix}-profit-sweep-{group.currency.lower()}-{group.group_id}"
+
+
+def _order_state_by_label_rows(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, list):
+        return [row for row in raw if isinstance(row, dict)]
+    if isinstance(raw, dict):
+        nested = raw.get("order")
+        if isinstance(nested, dict):
+            return [nested]
+        if raw.get("order_id") or raw.get("order_state"):
+            return [raw]
+        orders = raw.get("orders")
+        if isinstance(orders, list):
+            return [row for row in orders if isinstance(row, dict)]
+    return []
+
+
+def reconcile_profit_sweep_from_exchange(
+    group: TradeGroup,
+    *,
+    client: DeribitClient,
+    order_label_prefix: str,
+) -> bool:
+    """Sync filled profit-sweep orders from Deribit when state still shows pending."""
+    if group.status != "closed" or not _is_covered_call_group(group):
+        return False
+    if group.profit_sweep_status == "filled" and group.profit_sweep_order_id and group.profit_sweep_quote_proceeds > 0:
+        return False
+    label = profit_sweep_order_label(order_label_prefix, group)
+    try:
+        raw = client.get_order_state_by_label(group.currency, label)
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("profit_sweep reconcile: label lookup failed group=%s", group.group_id, exc_info=True)
+        return False
+    filled: dict[str, Any] | None = None
+    for order in _order_state_by_label_rows(raw):
+        if str(order.get("order_state") or "").lower() == "filled":
+            filled = order
+            break
+    if filled is None:
+        return False
+    order_id = str(filled.get("order_id") or "").strip()
+    instrument_name = str(filled.get("instrument_name") or f"{group.currency.upper()}_USDT")
+    amount = to_decimal(filled.get("filled_amount") or filled.get("amount"))
+    group.profit_sweep_status = "filled"
+    group.profit_sweep_instrument_name = instrument_name
+    if order_id:
+        group.profit_sweep_order_id = order_id
+    if amount > 0:
+        group.profit_sweep_amount = amount
+    proceeds = Decimal("0")
+    if order_id:
+        try:
+            from .wallet_ops import spot_sell_quote_proceeds_from_trades
+
+            trades = client.get_user_trades_by_order(order_id)
+            proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
+        except Exception:  # noqa: BLE001
+            LOGGER.debug(
+                "profit_sweep reconcile: trades lookup failed order=%s group=%s",
+                order_id,
+                group.group_id,
+                exc_info=True,
+            )
+    if proceeds <= 0:
+        avg = to_decimal(filled.get("average_price"))
+        if avg > 0 and amount > 0:
+            proceeds = amount * avg
+    if proceeds > 0:
+        group.profit_sweep_quote_proceeds = proceeds
+    if not group.profit_sweep_reason:
+        group.profit_sweep_reason = "profit_sweep"
+    return True
+
+
+def reconcile_profit_sweeps_in_state(
+    state_path: Path,
+    *,
+    client: DeribitClient,
+    dry_run: bool = False,
+) -> int:
+    """Mark pending profit sweeps as filled when Deribit already executed them."""
+    store = StrategyStateStore(state_path)
+    state = store.load()
+    cfg = _config_for_state(state_path)
+    prefix = cfg.order_label_prefix if cfg is not None else "covered_call"
+    reconciled = 0
+    changed = False
+    for group in state.groups:
+        if reconcile_profit_sweep_from_exchange(
+            group,
+            client=client,
+            order_label_prefix=prefix,
+        ):
+            reconciled += 1
+            changed = True
+    if changed and not dry_run:
+        store.save(state)
+        LOGGER.info("reconciled profit sweeps in %s: count=%s", state_path.name, reconciled)
+    return reconciled
+
+
+def repair_reconciled_bot_income_exit_group(
+    group: TradeGroup,
+    executions: list[dict[str, Any]],
+    *,
+    order_label_prefix: str,
+    profit_sweep_enabled: bool,
+) -> bool:
+    """Fix reconciled_external closes that were bot income exits (post-crash reconcile)."""
+    if group.status != "closed":
+        return False
+    if (group.close_reason or "").lower() != "reconciled_external":
+        return False
+    inferred = infer_bot_income_exit_close_reason(
+        executions,
+        order_label_prefix=order_label_prefix,
+    )
+    if not inferred:
+        return False
+    group.enrich_fill_prices_from_journal(executions)
+    group.close_reason = inferred
+    group.last_action = inferred
+    close_idx = group.close_index_usd
+    spot = close_idx if close_idx is not None and close_idx > 0 else None
+    group.sync_coin_profit_native(spot_index_usd=spot)
+    if profit_sweep_enabled and inferred in INCOME_EXIT_REASONS and not group.profit_sweep_status:
+        native = group.realized_pnl_collateral_native
+        if native is not None and native > 0:
+            group.profit_sweep_status = "pending"
+            group.profit_sweep_amount = native
+            group.profit_sweep_reason = inferred
+    return True
+
+
+def repair_reconciled_bot_income_exit_in_state(
+    state_path: Path,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """Repair closed groups mis-tagged reconciled_external after bot take-profit fills."""
+    store = StrategyStateStore(state_path)
+    state = store.load()
+    cfg = _config_for_state(state_path)
+    order_label_prefix = cfg.order_label_prefix if cfg is not None else "covered_call"
+    profit_sweep_enabled = bool(cfg and cfg.covered_call_profit_sweep_enabled)
+    journal_path = journal_db_path_for_state(state_path)
+    journal = TradeJournalStore(journal_path) if journal_path.is_file() else None
+    scope = scope_key_for_state(state_path)
+    repaired = 0
+    changed = False
+    for group in state.groups:
+        if group.status != "closed":
+            continue
+        executions: list[dict[str, Any]] = []
+        if journal is not None and group.group_id:
+            executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
+        if repair_reconciled_bot_income_exit_group(
+            group,
+            executions,
+            order_label_prefix=order_label_prefix,
+            profit_sweep_enabled=profit_sweep_enabled,
+        ):
+            repaired += 1
+            changed = True
+    if changed and not dry_run:
+        store.save(state)
+        LOGGER.info(
+            "repaired reconciled bot income exits in %s: count=%s",
+            state_path.name,
+            repaired,
+        )
+    return repaired
 
 
 def _prepare_group_for_apr_backfill(
@@ -342,6 +655,232 @@ def _backfill_apr_for_group(group: TradeGroup) -> bool:
     return True
 
 
+def _weighted_buy_premium_native(
+    trades: list[dict[str, Any]],
+    *,
+    min_amount: Decimal,
+) -> Decimal | None:
+    total_amount = Decimal("0")
+    weighted = Decimal("0")
+    for trade in trades:
+        if str(trade.get("direction") or "").lower() != "buy":
+            continue
+        amount = to_decimal(trade.get("amount"))
+        price = to_decimal(trade.get("price"))
+        if amount <= 0 or price <= 0:
+            continue
+        weighted += price * amount
+        total_amount += amount
+    if total_amount <= 0 or total_amount < min_amount:
+        return None
+    return weighted / total_amount
+
+
+def _fetch_buy_close_trades_for_group(
+    client: DeribitClient,
+    group: TradeGroup,
+) -> list[dict[str, Any]]:
+    if not group.short_instrument_name or group.closed_timestamp_ms is None:
+        return []
+    start_ms = max(int(group.entry_timestamp_ms or 0) - 60_000, 0)
+    end_ms = int(group.closed_timestamp_ms) + 300_000
+    payload = client.get_user_trades_by_instrument(
+        group.short_instrument_name,
+        start_timestamp=start_ms,
+        end_timestamp=end_ms,
+        count=200,
+        sorting="asc",
+        historical=True,
+    )
+    return [row for row in (payload.get("trades") or []) if str(row.get("direction") or "").lower() == "buy"]
+
+
+def _best_journal_close_premium_native(
+    group: TradeGroup,
+    executions: list[dict[str, Any]],
+) -> Decimal | None:
+    target = group.short_instrument_name
+    if not target:
+        return None
+    best: tuple[int, Decimal] | None = None
+    for row in executions:
+        if str(row.get("instrument_name") or "") != target:
+            continue
+        if str(row.get("event_type") or "").lower() != "close":
+            continue
+        leg = str(row.get("leg") or "short")
+        if leg not in {"", "short"}:
+            continue
+        price = to_decimal(row.get("price"))
+        if not group._premium_price_plausible(price):
+            continue
+        rank = TradeGroup._journal_row_priority(row)
+        if best is None or rank < best[0]:
+            best = (rank, price)
+    return best[1] if best is not None else None
+
+
+def _coin_close_needs_repair(group: TradeGroup, authoritative: Decimal) -> bool:
+    current = group.short_close_average_price
+    if current is None or current <= 0:
+        return True
+    if authoritative <= 0:
+        return False
+    if group.close_reason == "reconciled_external" and current != authoritative:
+        return True
+    diff = abs(current - authoritative)
+    tolerance = max(Decimal("0.00001"), authoritative * Decimal("0.002"))
+    return diff >= tolerance
+
+
+def _insert_instrument_buy_trades(
+    store: TradeJournalStore,
+    *,
+    scope_key: str,
+    client: DeribitClient,
+    group: TradeGroup,
+    strategy: str,
+) -> int:
+    if group.status != "closed" or not group.short_instrument_name:
+        return 0
+    try:
+        buy_trades = _fetch_buy_close_trades_for_group(client, group)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug(
+            "instrument buy-trade lookup failed group=%s: %s",
+            group.group_id,
+            exc,
+        )
+        return 0
+    inserted = 0
+    for trade in buy_trades:
+        instrument = str(trade.get("instrument_name") or "")
+        amount = to_decimal(trade.get("amount"))
+        price = to_decimal(trade.get("price"))
+        if not instrument or amount <= 0 or price <= 0:
+            continue
+        ts_raw = trade.get("timestamp")
+        ts_ms = int(ts_raw) if ts_raw is not None else int(group.closed_timestamp_ms or 0)
+        if store.record_fill(
+            scope_key=scope_key,
+            event_type="close",
+            source_action="backfill_api_instrument",
+            instrument_name=instrument,
+            direction="buy",
+            amount=amount,
+            price=price,
+            group_id=group.group_id,
+            leg="short",
+            fee_usdc=_fee_usdc_from_trade(trade),
+            order_id=str(trade.get("order_id") or ""),
+            trade_id=_trade_id(trade),
+            label=str(trade.get("label") or trade.get("order_label") or ""),
+            strategy=strategy,
+            reason=group.close_reason or "deribit_user_trades",
+            ts_ms=ts_ms,
+            extra={"source": "deribit_api", "backfill": "instrument_lookup"},
+        ):
+            inserted += 1
+    return inserted
+
+
+def repair_coin_close_prices_in_state(
+    state_path: Path,
+    *,
+    client: DeribitClient | None = None,
+    journal_store: TradeJournalStore | None = None,
+    scope_key: str | None = None,
+    strategy: str = "",
+    dry_run: bool = False,
+) -> int:
+    """Fix coin-native close prices for closed groups (API fills > journal > skip)."""
+    store = StrategyStateStore(state_path)
+    state = store.load()
+    scope = scope_key or scope_key_for_state(state_path)
+    journal = journal_store
+    if journal is None:
+        journal_path = journal_db_path_for_state(state_path)
+        journal = TradeJournalStore(journal_path) if journal_path.is_file() else None
+
+    repaired = 0
+    changed = False
+    for group in state.groups:
+        if group.status != "closed" or not group.is_coin_collateral():
+            continue
+        if not group.short_instrument_name or group.quantity <= 0:
+            continue
+
+        authoritative: Decimal | None = None
+        if client is not None and journal is not None:
+            _insert_instrument_buy_trades(
+                journal,
+                scope_key=scope,
+                client=client,
+                group=group,
+                strategy=strategy or group.strategy or "",
+            )
+        if client is not None:
+            try:
+                buy_trades = _fetch_buy_close_trades_for_group(client, group)
+                authoritative = _weighted_buy_premium_native(
+                    buy_trades,
+                    min_amount=group.quantity * Decimal("0.5"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug(
+                    "repair close premium lookup failed group=%s: %s",
+                    group.group_id,
+                    exc,
+                )
+
+        if authoritative is None and journal is not None:
+            executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
+            authoritative = _best_journal_close_premium_native(group, executions)
+
+        if authoritative is None or authoritative <= 0:
+            continue
+        if not _coin_close_needs_repair(group, authoritative):
+            continue
+
+        idx = group.close_index_usd or group.entry_index_usd
+        if idx is None or idx <= 0:
+            group.infer_indices_from_fill_prices()
+            idx = group.close_index_usd or group.entry_index_usd
+        if idx is None or idx <= 0:
+            LOGGER.warning(
+                "%s group=%s: skip coin close repair (missing index)",
+                state_path.name,
+                group.group_id,
+            )
+            continue
+
+        before = group.short_close_average_price
+        if group.apply_coin_close_from_native(
+            short_close_premium=authoritative,
+            index_usd=idx,
+            close_fee_collateral=group.resolved_close_fee_collateral(),
+        ):
+            changed = True
+            repaired += 1
+            LOGGER.info(
+                "%s group=%s: repaired coin close %s -> %s",
+                state_path.name,
+                group.group_id,
+                before,
+                authoritative,
+            )
+
+    if changed and not dry_run:
+        store.save(state)
+        try:
+            from .frontend_server import invalidate_closed_groups_payload_cache
+
+            invalidate_closed_groups_payload_cache()
+        except Exception:
+            pass
+    return repaired
+
+
 def backfill_closed_group_stats_in_state(
     state_path: Path,
     *,
@@ -359,7 +898,7 @@ def backfill_closed_group_stats_in_state(
     scope = scope_key_for_state(state_path)
 
     if fee_rate is None or fee_cap_rate is None:
-        resolved_fee_rate, resolved_fee_cap = _fee_rates_for_state(state_path)
+        resolved_fee_rate, resolved_fee_cap, _resolved_discount = _fee_rates_for_state(state_path)
         fee_rate = fee_rate if fee_rate is not None else resolved_fee_rate
         fee_cap_rate = fee_cap_rate if fee_cap_rate is not None else resolved_fee_cap
 
@@ -370,6 +909,9 @@ def backfill_closed_group_stats_in_state(
     changed = False
 
     for group in state.groups:
+        if group.is_coin_collateral() and group.backfill_coin_collateral_ledger():
+            changed = True
+
         if group.group_id and group.entry_timestamp_ms > 0:
             _prepare_group_for_apr_backfill(group, journal=journal, scope=scope)
             before_entry_apr = group.entry_net_apr
@@ -417,6 +959,17 @@ def backfill_closed_group_stats_in_state(
                 and group.realized_pnl != before_spread_pnl
             ):
                 pnl_updated += 1
+                changed = True
+
+        if journal is not None and group.group_id:
+            executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
+            cfg = _config_for_state(state_path)
+            if cfg is not None and repair_reconciled_bot_income_exit_group(
+                group,
+                executions,
+                order_label_prefix=cfg.order_label_prefix,
+                profit_sweep_enabled=cfg.covered_call_profit_sweep_enabled,
+            ):
                 changed = True
 
         if group.is_coin_collateral():
@@ -559,14 +1112,19 @@ def _backfill_group_from_state(
             inserted += 1
 
     if group.status == "closed" and group.closed_timestamp_ms and group.short_instrument_name:
-        close_debit = group.realized_close_debit
-        if close_debit is None:
-            close_debit = group.current_debit
         close_fee = group.realized_close_fee
         if close_fee is None:
             close_fee = group.current_close_fee
-        premium_usdc = max((close_debit or Decimal("0")) - (close_fee or Decimal("0")), Decimal("0"))
-        close_price = _state_synthetic_premium_price(premium_usdc, qty, group)
+        close_price = None
+        if group.short_close_average_price is not None and group.short_close_average_price > 0:
+            close_price = group.short_close_average_price
+        else:
+            close_debit = group.realized_close_debit
+            if close_debit is None:
+                close_debit = group.current_debit
+            premium_usdc = max((close_debit or Decimal("0")) - (close_fee or Decimal("0")), Decimal("0"))
+            if not group.is_coin_collateral():
+                close_price = _state_synthetic_premium_price(premium_usdc, qty, group)
         close_label = f"{group.short_label}-close" if group.short_label else ""
         if close_price is None:
             pass
@@ -734,6 +1292,7 @@ def backfill_account(
     closed_payloads = [g.to_dict() for g in groups if g.status == "closed"]
 
     api_seen = api_inserted = api_skipped = 0
+    client: DeribitClient | None = None
     if use_api and cfg.has_private_credentials:
         client = DeribitClient(cfg)
         currencies = tuple(dict.fromkeys(list(cfg.managed_currencies) + ["USDC"]))
@@ -753,6 +1312,16 @@ def backfill_account(
             api_inserted,
             api_skipped,
         )
+
+    coin_close_repaired = repair_coin_close_prices_in_state(
+        state_path,
+        client=client,
+        journal_store=store,
+        scope_key=scope_key,
+        strategy=cfg.option_strategy,
+    )
+    if coin_close_repaired:
+        LOGGER.info("%s coin close repair: groups=%s", state_path.name, coin_close_repaired)
 
     state_inserted = 0
     state_skipped = 0
@@ -798,6 +1367,7 @@ def backfill_account(
         state_inserted=state_inserted,
         metrics_synced=metrics_ok,
         coin_groups_recalculated=coin_recalculated,
+        coin_close_repaired=coin_close_repaired,
     )
 
 
@@ -868,4 +1438,30 @@ def backfill_investor(
     for account in manifest.enabled_accounts():
         LOGGER.info("Backfilling %s (%s)", account.slug, account.env_path)
         summaries.append(backfill_account(account.env_path, **kwargs))
+    return summaries
+
+
+def backfill_all_investors(
+    *,
+    repo_root: Path | None = None,
+    skip_investor_ids: frozenset[str] = frozenset({"_example"}),
+    **kwargs: Any,
+) -> list[BackfillSummary]:
+    """Run ``backfill_investor`` for every investor under ``config/investors/``."""
+    from .env_layout import find_repo_root
+    from .investor_ops import list_investors
+
+    root = find_repo_root(repo_root or Path.cwd())
+    if root is None:
+        raise ValueError("Cannot locate repository root")
+    rows = list_investors(repo_root=root)
+    summaries: list[BackfillSummary] = []
+    for row in rows:
+        investor_id = str(row.get("investor_id") or "")
+        if not investor_id or investor_id in skip_investor_ids:
+            continue
+        try:
+            summaries.extend(backfill_investor(investor_id, repo_root=root, **kwargs))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.error("backfill failed for investor %s: %s", investor_id, exc)
     return summaries

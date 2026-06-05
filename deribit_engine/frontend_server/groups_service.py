@@ -131,9 +131,17 @@ def _load_closed_groups_payload(
     try:
         from ..trade_journal_backfill import _fee_rates_for_state
 
-        fee_rate, fee_cap_rate = _fee_rates_for_state(state_path)
+        fee_rate, fee_cap_rate, _fee_discount = _fee_rates_for_state(state_path)
     except Exception:  # noqa: BLE001
-        pass
+        # Fall back to standard Deribit option fee rates; PnL stays approximate
+        # rather than crashing the dashboard, but make the gap observable.
+        LOGGER.warning(
+            "fee rate lookup failed for %s; using defaults %s/%s",
+            state_path,
+            fee_rate,
+            fee_cap_rate,
+            exc_info=True,
+        )
     excluded_group_ids = load_performance_exclusion_group_ids(state_path)
     open_short_names = open_short_instrument_names(state.groups)
     open_groups = [g.to_dict() for g in state.groups if g.status != "closed"]
@@ -163,10 +171,28 @@ def _load_closed_groups_payload(
             ):
                 state_repaired = True
         if g.is_coin_collateral():
+            before_pnl = g.realized_pnl
+            before_native = g.realized_pnl_collateral_native
+            g.backfill_coin_collateral_ledger()
             g.backfill_realized_pnl_collateral_native(
                 spot_index_usd=spot if spot is not None and spot > 0 else None,
                 journal_executions=journal_rows,
             )
+            if g.realized_pnl != before_pnl or g.realized_pnl_collateral_native != before_native:
+                state_repaired = True
+        try:
+            from ..trade_journal_backfill import _config_for_state, repair_reconciled_bot_income_exit_group
+
+            cfg = _config_for_state(state_path)
+            if cfg is not None and repair_reconciled_bot_income_exit_group(
+                g,
+                journal_rows,
+                order_label_prefix=cfg.order_label_prefix,
+                profit_sweep_enabled=cfg.covered_call_profit_sweep_enabled,
+            ):
+                state_repaired = True
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("reconciled bot income exit repair failed for %s: %s", g.group_id, exc)
         closed_groups.append(g.to_dict())
     if state_repaired:
         try:

@@ -4,6 +4,7 @@ import itertools
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -28,6 +29,14 @@ _AUTH_CACHE_LOCK = threading.Lock()
 _INSTRUMENTS_CACHE: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
 _INSTRUMENTS_CACHE_LOCK = threading.Lock()
 
+# Short-TTL cache for public, read-only macro feeds (index price / chart / DVOL).
+# These are queried many times per cycle (e.g. ``_currency_index_price`` is hit
+# 20+ times) and are identical for all clients, so a process-global TTL cache
+# both de-duplicates redundant HTTP within a cycle and keeps valuations within a
+# single snapshot consistent.
+_PUBLIC_READ_CACHE: dict[str, tuple[float, Any]] = {}
+_PUBLIC_READ_CACHE_LOCK = threading.Lock()
+
 
 def _instruments_cache_ttl_seconds() -> float:
     raw = os.environ.get("DERIBIT_INSTRUMENTS_CACHE_TTL_SEC", "300")
@@ -35,6 +44,55 @@ def _instruments_cache_ttl_seconds() -> float:
         return max(float(raw), 0.0)
     except (TypeError, ValueError):
         return 300.0
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return max(float(raw), 0.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _index_price_cache_ttl_seconds() -> float:
+    # Index price feeds the live spot used for equity/PnL, so keep the TTL short.
+    return _env_float("DERIBIT_INDEX_PRICE_CACHE_TTL_SEC", 5.0)
+
+
+def _macro_cache_ttl_seconds() -> float:
+    # Index chart / DVOL are daily-resolution series; a longer window is safe.
+    return _env_float("DERIBIT_MACRO_CACHE_TTL_SEC", 60.0)
+
+
+def _cached_public_read(key: str, ttl: float, loader: Callable[[], Any]) -> Any:
+    """Return a TTL-cached public read, deep-ish copying mutable payloads."""
+    if ttl <= 0:
+        return loader()
+    now = time.monotonic()
+    with _PUBLIC_READ_CACHE_LOCK:
+        cached = _PUBLIC_READ_CACHE.get(key)
+        if cached is not None and (now - cached[0]) < ttl:
+            return _copy_cached(cached[1])
+    value = loader()
+    with _PUBLIC_READ_CACHE_LOCK:
+        _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(value))
+    return value
+
+
+def _copy_cached(value: Any) -> Any:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        return list(value)
+    return value
+
+
+def reset_public_read_cache() -> None:
+    """Clear the macro read cache (intended for tests)."""
+    with _PUBLIC_READ_CACHE_LOCK:
+        _PUBLIC_READ_CACHE.clear()
 
 
 class DeribitClient:
@@ -529,11 +587,19 @@ class DeribitClient:
         return self._request("public/get_order_book", params={"instrument_name": instrument_name, "depth": depth}) or {}
 
     def get_index_price(self, index_name: str) -> dict[str, Any]:
-        return self._request("public/get_index_price", params={"index_name": index_name}) or {}
+        def _load() -> dict[str, Any]:
+            return self._request("public/get_index_price", params={"index_name": index_name}) or {}
+
+        return _cached_public_read(f"index_price:{index_name}", _index_price_cache_ttl_seconds(), _load)
 
     def get_index_chart_data(self, index_name: str, *, range_name: str = "1d") -> list[list[Any]]:
-        result = self._request("public/get_index_chart_data", params={"index_name": index_name, "range": range_name})
-        return result or []
+        def _load() -> list[list[Any]]:
+            result = self._request(
+                "public/get_index_chart_data", params={"index_name": index_name, "range": range_name}
+            )
+            return result or []
+
+        return _cached_public_read(f"index_chart:{index_name}:{range_name}", _macro_cache_ttl_seconds(), _load)
 
     def get_volatility_index_data(
         self,
@@ -543,18 +609,29 @@ class DeribitClient:
         end_timestamp: int,
         resolution: str = "1D",
     ) -> dict[str, Any]:
-        return (
-            self._request(
-                "public/get_volatility_index_data",
-                params={
-                    "currency": currency.upper(),
-                    "start_timestamp": start_timestamp,
-                    "end_timestamp": end_timestamp,
-                    "resolution": resolution,
-                },
+        def _load() -> dict[str, Any]:
+            return (
+                self._request(
+                    "public/get_volatility_index_data",
+                    params={
+                        "currency": currency.upper(),
+                        "start_timestamp": start_timestamp,
+                        "end_timestamp": end_timestamp,
+                        "resolution": resolution,
+                    },
+                )
+                or {}
             )
-            or {}
-        )
+
+        # Bucket the request window to the TTL so near-simultaneous calls in the
+        # same cycle (which pass slightly different now()-based timestamps for the
+        # same logical window) share one cache entry.
+        ttl = _macro_cache_ttl_seconds()
+        bucket_ms = int(ttl * 1000) or 1
+        start_bucket = int(start_timestamp) // bucket_ms
+        end_bucket = int(end_timestamp) // bucket_ms
+        key = f"dvol:{currency.upper()}:{resolution}:{start_bucket}:{end_bucket}"
+        return _cached_public_read(key, ttl, _load)
 
     def get_funding_chart_data(self, instrument_name: str, *, length: str = "8h") -> dict[str, Any]:
         return (

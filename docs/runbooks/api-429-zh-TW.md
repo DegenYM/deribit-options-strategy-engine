@@ -20,7 +20,7 @@
 | 2 | 若 429 持續 >15 分鐘：停非必要 frontend stress prefetch、停多餘 bot |
 | 3 | 確認只有一個 `run_live_profiles` / launchd 監督該 investor |
 | 4 | 必要時 `./bot investor live restart --investor <id>` |
-| 5 | 仍失敗 → 檢查 IP 是否被限流、是否需換 testnet/mainnet env |
+| 5 | 仍失敗 → 檢查 IP 是否被限流 |
 
 ## 設定
 

@@ -144,6 +144,39 @@ def test_covered_call_live_entry_preserves_strategy_after_recheck(tmp_path):
     assert result["group"].covered_underlying_quantity > 0
 
 
+def test_entry_survives_post_only_reject_and_reprices(tmp_path):
+    from deribit_engine.exceptions import ExchangeError
+
+    class PostOnlyRejectOnceClient(FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.post_only_reject_calls = 0
+
+        def place_order(self, **kwargs):
+            if kwargs.get("post_only") and self.post_only_reject_calls == 0:
+                self.post_only_reject_calls += 1
+                raise ExchangeError(
+                    'private/sell failed: HTTP 400 {"error":{"code":11054,"message":"post_only_reject"}}'
+                )
+            return super().place_order(**kwargs)
+
+    client = PostOnlyRejectOnceClient(btc_book_equity="0.2")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        min_net_apr=Decimal("0.05"),
+        short_entry_wait_seconds=30,
+    )
+    engine = DeribitOptionTrialBot(config, client)
+
+    result = engine.enter_best(currencies=("BTC",), live=True)
+
+    assert client.post_only_reject_calls == 1
+    assert result["action"] == "covered_call_entered"
+    assert len(result["requests"]["short_attempts"]) >= 2
+
+
 def test_covered_call_scan_payload_uses_covered_call_diagnostics(tmp_path):
     client = FakeClient(btc_book_equity="0")
     config = make_config(
@@ -510,6 +543,40 @@ def test_covered_call_otm_take_profit_when_capture_exceeds_threshold(tmp_path):
     assert actions[0]["reason"] == "take_profit"
 
 
+def test_covered_call_profit_sweep_amount_capped_at_coin_profit_native(tmp_path):
+    """Sweep size must not exceed fee-aware native profit (no USDC÷index inflation)."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group()
+    group.status = "closed"
+    group.short_entry_average_price = Decimal("0.00135")
+    group.short_close_average_price = Decimal("0.00085")
+    group.entry_fee_collateral = Decimal("0.00003")
+    group.close_fee_collateral = Decimal("0.00003")
+    group.realized_pnl_collateral_native = Decimal("0.00044")
+    group.profit_sweep_amount = Decimal("0.00046")
+    group.profit_sweep_status = "pending"
+    ctx = SimpleNamespace(
+        state=SimpleNamespace(groups=[group]),
+        summaries={
+            "BTC": SimpleNamespace(
+                available_funds=Decimal("1"), available_withdrawal_funds=Decimal("1"), balance=Decimal("1")
+            )
+        },
+    )
+    amount = engine._profit_sweep_amount(ctx, group, live=True)
+    # Contract step alignment may round down; must not exceed native profit or inflated pending.
+    assert amount <= Decimal("0.00044")
+    assert amount < group.profit_sweep_amount
+    assert amount > 0
+
+
 def test_covered_call_profit_sweep_schedules_pending_on_income_exit(tmp_path):
     config = make_config(
         tmp_path,
@@ -575,6 +642,49 @@ def test_covered_call_profit_sweep_live_sells_usdt(tmp_path):
     saved = engine.state_store.load().groups[0]
     assert saved.profit_sweep_status == "filled"
     assert saved.profit_sweep_order_id
+    assert saved.profit_sweep_quote_proceeds > 0
+
+
+def test_covered_call_profit_sweep_backfills_quote_proceeds(tmp_path):
+    from decimal import Decimal
+
+    client = FakeClient(btc_book_equity="0.5")
+    order_id = "profit-sweep-order-1"
+    client.user_trades_by_order[order_id] = [
+        {
+            "order_id": order_id,
+            "instrument_name": "BTC_USDT",
+            "direction": "sell",
+            "amount": Decimal("0.0046"),
+            "price": Decimal("2650"),
+            "fee": Decimal("0.05"),
+            "fee_currency": "USDT",
+            "timestamp": 1,
+        }
+    ]
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    group = _covered_call_group()
+    group.status = "closed"
+    group.close_reason = "take_profit"
+    group.profit_sweep_status = "filled"
+    group.profit_sweep_amount = Decimal("0.0046")
+    group.profit_sweep_instrument_name = "BTC_USDT"
+    group.profit_sweep_order_id = order_id
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    engine.manage(live=True)
+
+    saved = engine.state_store.load().groups[0]
+    assert saved.profit_sweep_quote_proceeds == Decimal("12.14")
 
 
 def test_covered_call_profit_sweep_live_skips_on_slippage(tmp_path):
@@ -2158,7 +2268,11 @@ def test_portfolio_snapshot_hard_derisks_when_book_im_exceeds_hard_cap(tmp_path,
         orderbook_cache={},
     )
     assert snapshot.hard_derisk is True
-    assert snapshot.halt_new_entries is True
+    assert snapshot.halt_entries_by_book["USDC"] is True
+    # Underlying regimes are normal — portfolio flag stays open; USDC book gate blocks collateral.
+    assert snapshot.halt_new_entries is False
+    assert snapshot.halt_new_entries_by_currency["BTC"] is False
+    assert snapshot.halt_new_entries_by_currency["ETH"] is False
     assert any("USDC" in reason and "book_im_hard" in reason for reason in snapshot.halt_entry_reasons)
 
 
@@ -2246,10 +2360,13 @@ def test_portfolio_snapshot_isolates_drawdown_per_book(tmp_path, fake_client):
     assert snapshot.halt_entries_by_book["BTC"] is False
     assert snapshot.hard_derisk_by_book["USDC"] is False
     assert snapshot.halt_entries_by_book["USDC"] is False
-    # Aggregate hard_derisk stays True because any breach escalates, but
-    # ``halt_new_entries`` is also True only because some book is halted —
-    # the scan path checks ``halt_entries_by_book`` to keep other books live.
+    # Aggregate hard_derisk stays True because ETH book breached, but BTC may
+    # still open new entries when its regime is normal (ETH book halt is per-book).
     assert snapshot.hard_derisk is True
+    assert snapshot.halt_new_entries is False
+    assert snapshot.halt_new_entries_by_currency["BTC"] is False
+    assert snapshot.halt_new_entries_by_currency["ETH"] is False
+    assert snapshot.halt_entries_by_book["ETH"] is True
     assert "ETH" in snapshot.day_drawdown_pct_by_book
     assert snapshot.day_drawdown_pct_by_book["ETH"] >= Decimal("0.06")
     assert snapshot.day_drawdown_pct_by_book["BTC"] == Decimal("0")
@@ -2484,6 +2601,139 @@ def test_drawdown_corrects_withdrawal_via_net_flow(tmp_path, fake_client):
     assert dd < Decimal("0.005"), f"expected <0.5%, got {dd}"
     assert snapshot.hard_derisk_by_book["USDC"] is False
     assert snapshot.halt_entries_by_book["USDC"] is False
+
+
+def test_drawdown_ignores_usdt_to_btc_spot_swap(tmp_path, fake_client):
+    """Swapping USDT into BTC must not trip hard_derisk on the USDT book.
+
+    Reproduces the 2026-06-05 youming scenario: ~74 USDT spent on a BTC spot
+    buy while portfolio equity stayed roughly flat. External-flow tallies stay
+    zero because Deribit records the move as spot trades, not transfers.
+    """
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        halt_drawdown_pct=Decimal("0.03"),
+        hard_derisk_drawdown_pct=Decimal("0.06"),
+        min_book_equity_usdc=Decimal("50"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    state.day_start_equity_by_book = {
+        "BTC": Decimal("11329.64808062"),
+        "ETH": Decimal("5562.11702917"),
+        "USDT": Decimal("76.32231"),
+    }
+    state.day_start_equity_native_by_book = {
+        "BTC": Decimal("0.17784213"),
+        "ETH": Decimal("3.151109"),
+        "USDT": Decimal("76.32231"),
+    }
+    summaries = {
+        "BTC": _make_summary("BTC", equity="0.1792586", initial_margin="0", maintenance_margin="0.01"),
+        "ETH": _make_summary("ETH", equity="3.158351", initial_margin="0", maintenance_margin="0.01"),
+        "USDT": _make_summary("USDT", equity="1.92231", initial_margin="0", maintenance_margin="0"),
+    }
+    snapshot = engine._build_portfolio_snapshot(
+        state=state,
+        summaries=summaries,
+        regime_by_currency={"BTC": RiskRegime.ELEVATED, "ETH": RiskRegime.CRISIS},
+        regime_detail_by_currency={
+            "BTC": ("market_conditions_elevated",),
+            "ETH": ("market_conditions_crisis",),
+        },
+        future_positions=[],
+        orderbook_cache={},
+    )
+
+    assert snapshot.day_drawdown_pct_by_book.get("USDT", Decimal("0")) < Decimal("0.06")
+    assert snapshot.hard_derisk_by_book.get("USDT") is not True
+    assert snapshot.halt_entries_by_book.get("USDT") is not True
+
+
+def test_manage_clears_stale_usdt_cooldown_after_swap_fix(tmp_path, fake_client):
+    """Phantom USDT cooldown must drop once cross-book drawdown is corrected."""
+    from datetime import UTC, datetime
+
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        halt_drawdown_pct=Decimal("0.03"),
+        hard_derisk_drawdown_pct=Decimal("0.06"),
+        min_book_equity_usdc=Decimal("50"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    today_key = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    store = engine.state_store
+    state = StrategyState()
+    state.day_key = today_key
+    state.day_start_equity_by_book = {
+        "BTC": Decimal("11329.64808062"),
+        "ETH": Decimal("5562.11702917"),
+        "USDT": Decimal("76.32231"),
+    }
+    state.day_start_equity_native_by_book = {
+        "BTC": Decimal("0.17784213"),
+        "ETH": Decimal("3.151109"),
+        "USDT": Decimal("76.32231"),
+    }
+    state.last_equity_by_book = {
+        "BTC": Decimal("11014.25965582"),
+        "ETH": Decimal("5170.31533753"),
+        "USDT": Decimal("1.92231"),
+    }
+    state.last_equity_native_by_book = {
+        "BTC": Decimal("0.1792586"),
+        "ETH": Decimal("3.158351"),
+        "USDT": Decimal("1.92231"),
+    }
+    state.cooldown_until_ms_by_book = {"USDT": utc_now_ms() + 3_600_000}
+    store.save(state)
+    fake_client.btc_book_equity = "0.1792586"
+    fake_client.eth_book_equity = "3.158351"
+
+    result = engine.manage(live=True)
+    reloaded = store.load()
+
+    assert result["portfolio"]["hard_derisk_by_book"].get("USDT") is not True
+    assert "USDT" not in reloaded.cooldown_until_ms_by_book
+
+
+def test_manage_does_not_repeat_hard_derisk_cooldown(tmp_path, fake_client):
+    """An already-cooling book must not re-stamp cooldown or spam actions."""
+    from datetime import UTC, datetime
+
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        halt_drawdown_pct=Decimal("0.025"),
+        hard_derisk_drawdown_pct=Decimal("0.06"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    today_key = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+    store = engine.state_store
+    state = StrategyState()
+    state.day_key = today_key
+    state.day_start_equity_by_book = {
+        "BTC": Decimal("70000"),
+        "ETH": Decimal("35000"),
+        "USDC": Decimal("1000"),
+    }
+    state.day_start_equity_native_by_book = {
+        "BTC": Decimal("1"),
+        "ETH": Decimal("10"),
+        "USDC": Decimal("1000"),
+    }
+    state.last_equity_by_book = dict(state.day_start_equity_by_book)
+    state.last_equity_native_by_book = dict(state.day_start_equity_native_by_book)
+    state.cooldown_until_ms_by_book = {"ETH": utc_now_ms() + 3_600_000}
+    store.save(state)
+    fake_client.eth_book_equity = "8"
+    fake_client.btc_book_equity = "1"
+
+    result = engine.manage(live=True)
+    cooldowns = [a for a in result["actions"] if a.get("action") == "cooldown_started"]
+    assert not cooldowns
 
 
 def test_drawdown_catches_loss_masked_by_deposit(tmp_path, fake_client):

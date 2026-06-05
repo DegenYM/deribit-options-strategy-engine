@@ -11,6 +11,11 @@ from ..bull_put_settlement import (
     long_instrument_for_spread_reconcile,
     spread_expiry_close_debit_usdc,
 )
+from ..cross_book_flow import cross_book_flow_adjustments_native
+from ..entry_gates import (
+    append_underlying_regime_halt_reasons_for_usdc_book,
+    build_halt_new_entries_by_currency,
+)
 from ..exceptions import TransientExchangeError
 from ..exit_eval import (
     dynamic_tp_capture_pct,
@@ -57,7 +62,7 @@ from .context import (
 class ManagementMixin:
     def manage(self, *, live: bool = False, context: RuntimeContext | None = None) -> dict[str, Any]:
         if context is None:
-            context = self._load_runtime()
+            context = self._load_runtime(live=live)
         actions: list[dict[str, Any]] = []
 
         actions.extend(self._pending_covered_call_spot_exit_actions(context, live=live))
@@ -71,31 +76,43 @@ class ManagementMixin:
             # hard-defense delta / stop-loss hits) that aren't book-scoped.
             hard_books = [book for book, flag in context.snapshot.hard_derisk_by_book.items() if flag]
             global_trigger = context.snapshot.hard_derisk and not hard_books
+            now_ms = utc_now_ms()
+            newly_cooled: list[str] = []
             if live:
                 for book in hard_books:
-                    context.state.cooldown_until_ms_by_book[book] = cooldown_until
+                    existing = context.state.cooldown_until_ms_by_book.get(book)
+                    if not existing or existing <= now_ms:
+                        context.state.cooldown_until_ms_by_book[book] = cooldown_until
+                        newly_cooled.append(book)
                 if global_trigger:
-                    context.state.cooldown_until_ms = cooldown_until
-                reasons = context.snapshot.halt_entry_reasons
-                self._telegram_alert(
-                    "Hard derisk triggered",
-                    body=f"books={hard_books or ['portfolio']}",
-                    event_key=f"hard_derisk:{self._journal_scope_key()}",
-                    level="critical",
-                    extra={"reasons": "; ".join(reasons[:5]) if reasons else None},
+                    existing = context.state.cooldown_until_ms
+                    if not existing or existing <= now_ms:
+                        context.state.cooldown_until_ms = cooldown_until
+                        newly_cooled.append("portfolio")
+                if newly_cooled:
+                    reasons = context.snapshot.halt_entry_reasons
+                    self._telegram_alert(
+                        "Hard derisk triggered",
+                        body=f"books={hard_books or ['portfolio']}",
+                        event_key=f"hard_derisk:{self._journal_scope_key()}",
+                        level="critical",
+                        extra={"reasons": "; ".join(reasons[:5]) if reasons else None},
+                    )
+            if newly_cooled or not live:
+                actions.append(
+                    {
+                        "action": "cooldown_started" if live else "cooldown_recommended",
+                        "cooldown_until_ms": cooldown_until,
+                        "reason": "hard_derisk",
+                        "books": hard_books or ["portfolio"],
+                    }
                 )
-            actions.append(
-                {
-                    "action": "cooldown_started" if live else "cooldown_recommended",
-                    "cooldown_until_ms": cooldown_until,
-                    "reason": "hard_derisk",
-                    "books": hard_books or ["portfolio"],
-                }
-            )
 
         for group in sorted(self._open_groups(context.state), key=lambda item: item.max_loss, reverse=True):
             group_actions = self._manage_group(context, group, live=live)
             actions.extend(group_actions)
+
+        self._clear_stale_drawdown_cooldowns(context.state, context.snapshot)
 
         if self.config.enable_perp_hedge and context.snapshot.regime is RiskRegime.NORMAL:
             for currency in self.config.managed_currencies:
@@ -139,7 +156,7 @@ class ManagementMixin:
             if live:
                 self._write_live_heartbeat(cycle=cycle_no, regime=last_regime, last_error=None)
             try:
-                context = self._load_runtime()
+                context = self._load_runtime(live=live)
                 manage_result = self.manage(live=live, context=context)
                 cycle_result: dict[str, Any] = {"manage": manage_result}
 
@@ -153,24 +170,18 @@ class ManagementMixin:
                     include_scan_diagnostics=False,
                 )
                 portfolio = status_after_manage["portfolio"]
-                can_enter = not portfolio["halt_new_entries"]
+                enterable = self._filter_enterable_candidates(context, candidates)
+                can_enter = bool(enterable)
                 if can_enter:
                     cycle_result["entry"] = self._enter_best_from_candidates(
-                        context, candidates=candidates[:1], live=live
+                        context, candidates=enterable[:1], live=live
                     )
                     if cycle_result["entry"].get("group") is not None:
                         context.state.groups.append(cycle_result["entry"]["group"])
                 else:
-                    reason = (
-                        "hard_derisk"
-                        if portfolio["hard_derisk"]
-                        else "cooling_down"
-                        if portfolio["cooling_down"]
-                        else "halt_limit_reached"
-                    )
                     cycle_result["entry"] = {
                         "action": "entry_skipped",
-                        "reason": reason,
+                        "reason": self._entry_skip_reason(portfolio, candidates=candidates),
                     }
 
                 entry_action = cycle_result["entry"].get("action", "")
@@ -232,18 +243,21 @@ class ManagementMixin:
             self.sleep_fn(sleep_seconds)
         return {"action": "run", "cycles": iteration, "results": cycle_results}
 
-    def _load_runtime(self) -> RuntimeContext:
+    def _load_runtime(self, *, live: bool = False) -> RuntimeContext:
         if self.config.has_private_credentials:
-            return self._load_runtime_from_exchange(self.fetch_exchange_prefetch())
-        return self._load_runtime_from_exchange(None)
+            return self._load_runtime_from_exchange(self.fetch_exchange_prefetch(), live=live)
+        return self._load_runtime_from_exchange(None, live=live)
 
     def _load_runtime_from_exchange(
         self,
         prefetch: ExchangePrefetch | None,
         *,
         dashboard_display: bool = False,
+        live: bool = False,
     ) -> RuntimeContext:
         state = self.state_store.load()
+        if self._repair_reconciled_bot_income_exits_in_state(state) and not dashboard_display:
+            self.state_store.save(state)
         if prefetch is not None:
             summaries = prefetch.summaries
             open_orders = prefetch.open_orders
@@ -272,16 +286,26 @@ class ManagementMixin:
             option_positions=option_positions,
             orderbook_cache=orderbook_cache,
             markets_by_currency=markets_by_currency,
+            live=live,
         )
         regime_by_currency: dict[str, RiskRegime] = {}
         regime_detail_by_currency: dict[str, tuple[str, ...]] = {}
         for currency in self.config.managed_currencies:
-            if dashboard_display:
+            markets = markets_by_currency.get(currency) or []
+            # Use the same regime path for dashboard and live when markets are loaded
+            # so ETH elevated on the USDC book (ETH-USDC linear) matches bot entry gates.
+            if markets:
+                regime, detail = self._determine_regime_with_detail(
+                    currency,
+                    markets=markets,
+                    orderbook_cache=orderbook_cache,
+                )
+            elif dashboard_display:
                 regime, detail = self._determine_regime_for_dashboard(currency)
             else:
                 regime, detail = self._determine_regime_with_detail(
                     currency,
-                    markets=markets_by_currency[currency],
+                    markets=markets,
                     orderbook_cache=orderbook_cache,
                 )
             regime_by_currency[currency] = regime
@@ -371,6 +395,28 @@ class ManagementMixin:
                 cycle_no,
                 ",".join(a["action"] for a in topup_actions),
             )
+
+    def _entry_skip_reason(self, portfolio: dict[str, Any], *, candidates: list[Any]) -> str:
+        if portfolio.get("portfolio_wide_entry_halt"):
+            if portfolio.get("cooling_down"):
+                return "cooling_down"
+            return "halt_limit_reached"
+        if portfolio.get("hard_derisk"):
+            return "hard_derisk"
+        halted_by_ccy = portfolio.get("halt_new_entries_by_currency") or {}
+        if candidates:
+            blocked = sorted(
+                {
+                    (getattr(c, "currency", None) or (c.get("currency") if isinstance(c, dict) else "") or "").upper()
+                    for c in candidates
+                }
+                - {""}
+            )
+            if blocked and all(halted_by_ccy.get(ccy, True) for ccy in blocked):
+                return "currency_regime_or_crisis_halt"
+        if halted_by_ccy and all(halted_by_ccy.values()):
+            return "all_currencies_halted"
+        return "halt_limit_reached"
 
     def _cycle_log_signature(self, cycle_result: dict[str, Any]) -> tuple[Any, ...]:
         status = cycle_result["status"]
@@ -605,8 +651,8 @@ class ManagementMixin:
             return
         if not self._is_covered_call_group(group):
             return
-        native = group.realized_pnl_collateral_native
-        if native is None or native <= 0:
+        native = self._coin_profit_native_for_sweep(group)
+        if native is None:
             return
         group.profit_sweep_status = "pending"
         group.profit_sweep_reason = reason
@@ -620,6 +666,9 @@ class ManagementMixin:
     ) -> list[dict[str, Any]]:
         if not self.config.covered_call_profit_sweep_enabled:
             return []
+        if live:
+            self._reconcile_profit_sweep_quote_proceeds(context)
+            self._reconcile_profit_sweeps_from_exchange(context)
         actions: list[dict[str, Any]] = []
         for group in context.state.groups:
             if (
@@ -629,6 +678,49 @@ class ManagementMixin:
             ):
                 actions.append(self._execute_covered_call_profit_sweep(context, group, live=live))
         return actions
+
+    def _reconcile_profit_sweeps_from_exchange(self, context: RuntimeContext) -> None:
+        from ..trade_journal_backfill import reconcile_profit_sweep_from_exchange
+
+        for group in context.state.groups:
+            reconcile_profit_sweep_from_exchange(
+                group,
+                client=self.client,
+                order_label_prefix=self.config.order_label_prefix,
+            )
+
+    def _reconcile_profit_sweep_quote_proceeds(self, context: RuntimeContext) -> None:
+        from ..wallet_ops import spot_sell_quote_proceeds_from_trades
+
+        for group in context.state.groups:
+            if group.profit_sweep_status != "filled":
+                continue
+            if group.profit_sweep_quote_proceeds > 0:
+                continue
+            order_id = str(group.profit_sweep_order_id or "").strip()
+            if not order_id:
+                continue
+            try:
+                trades = self.client.get_user_trades_by_order(order_id)
+            except Exception:
+                LOGGER.exception(
+                    "profit_sweep: failed to load trades for order %s (group=%s)",
+                    order_id,
+                    group.group_id,
+                )
+                continue
+            proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
+            if proceeds > 0:
+                group.profit_sweep_quote_proceeds = proceeds
+
+    def _apply_profit_sweep_quote_proceeds(self, group: TradeGroup, response: dict[str, Any] | None) -> Decimal:
+        from ..wallet_ops import spot_sell_quote_proceeds_from_trades
+
+        trades = self._order_trades(response)
+        proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
+        if proceeds > 0:
+            group.profit_sweep_quote_proceeds = proceeds
+        return proceeds
 
     @staticmethod
     def _covered_call_profit_sweep_instrument(currency: str) -> str:
@@ -641,11 +733,10 @@ class ManagementMixin:
         *,
         live: bool,
     ) -> Decimal:
-        target = group.profit_sweep_amount
-        if target <= 0 and group.realized_pnl_collateral_native is not None:
-            target = group.realized_pnl_collateral_native
-        if target <= 0:
+        native_cap = self._coin_profit_native_for_sweep(group)
+        if native_cap is None:
             return Decimal("0")
+        target = native_cap
 
         summary = context.summaries.get(group.currency)
         if live:
@@ -659,9 +750,9 @@ class ManagementMixin:
         instrument_name = self._covered_call_profit_sweep_instrument(group.currency)
         contract_size, min_trade_amount = self._spot_min_trade_amount(instrument_name, group.currency)
         aligned = align_option_order_amount(target, contract_size, min_trade_amount)
-        if contract_size > 0 or min_trade_amount > 0:
-            return aligned
-        return target
+        if aligned <= 0:
+            return Decimal("0")
+        return min(aligned, native_cap)
 
     def _execute_covered_call_profit_sweep(
         self,
@@ -707,6 +798,9 @@ class ManagementMixin:
         if not live:
             return payload
 
+        native_cap = self._coin_profit_native_for_sweep(group)
+        if native_cap is not None and amount > native_cap:
+            amount = native_cap
         group.profit_sweep_status = "submitted"
         group.profit_sweep_amount = amount
         group.profit_sweep_instrument_name = instrument_name
@@ -755,8 +849,11 @@ class ManagementMixin:
             group.profit_sweep_status = "failed"
         else:
             group.profit_sweep_status = "filled"
+        proceeds = self._apply_profit_sweep_quote_proceeds(group, result.get("response"))
         payload["profit_sweep_status"] = group.profit_sweep_status
         payload["profit_sweep_order_id"] = group.profit_sweep_order_id or None
+        if proceeds > 0:
+            payload["profit_sweep_quote_proceeds"] = format_decimal(proceeds, 4)
         payload["response"] = result.get("response")
         return payload
 
@@ -824,6 +921,20 @@ class ManagementMixin:
             state.cooldown_until_ms_by_book.pop(ccy.upper(), None)
         if not any(not self._is_covered_call_group(group) for group in self._open_groups(state)):
             state.cooldown_until_ms = None
+
+    def _clear_stale_drawdown_cooldowns(
+        self,
+        state: StrategyState,
+        snapshot: PortfolioSnapshot,
+    ) -> None:
+        """Drop per-book cooldowns left over from a phantom drawdown breach."""
+        now_ms = utc_now_ms()
+        for book, ts in list(state.cooldown_until_ms_by_book.items()):
+            if not ts or ts <= now_ms:
+                continue
+            dd = snapshot.day_drawdown_pct_by_book.get(book, Decimal("0"))
+            if dd < self.config.halt_drawdown_pct:
+                state.cooldown_until_ms_by_book.pop(book, None)
 
     @staticmethod
     def _is_covered_call_group(group: TradeGroup) -> bool:
@@ -1041,8 +1152,25 @@ class ManagementMixin:
         #    ``min_book_equity_usdc`` on the reporting view are excluded
         #    entirely. Without this a few-cent BTC dust balance can produce
         #    >100% phantom drawdowns when the tiny balance is moved around.
-        per_book_drawdown: dict[str, Decimal] = {}
+        #
+        # 3. Cross-book spot swaps (e.g. USDT → BTC) are matched stable ↔
+        #    crypto so internal reallocations do not trip per-book drawdown.
         min_equity = self.config.min_book_equity_usdc
+        index_price_by_book = {
+            book: Decimal("1")
+            if book in ("USDC", "USDT", "USDE")
+            else self._currency_index_price(book, orderbook_cache)
+            for book in per_book_native_equities
+        }
+        cross_book_flow_native = cross_book_flow_adjustments_native(
+            per_book_native_equities=per_book_native_equities,
+            per_book_native_day_start=per_book_native_day_start,
+            day_net_flow_native_by_book=day_net_flow_native_by_book,
+            day_net_flow_usdc_by_book=day_net_flow_usdc_by_book,
+            index_price_by_book=index_price_by_book,
+            min_match_usdc=min_equity,
+        )
+        per_book_drawdown: dict[str, Decimal] = {}
         for book, equity in per_book_native_equities.items():
             start_usdc = per_book_day_start.get(book, Decimal("0"))
             if start_usdc <= min_equity:
@@ -1050,10 +1178,11 @@ class ManagementMixin:
             start = per_book_native_day_start.get(book, equity)
             if start <= 0:
                 continue
-            if book in ("USDC", "USDT"):
+            if book in ("USDC", "USDT", "USDE"):
                 net_flow = day_net_flow_usdc_by_book.get(book, Decimal("0"))
             else:
                 net_flow = day_net_flow_native_by_book.get(book, Decimal("0"))
+            net_flow += cross_book_flow_native.get(book, Decimal("0"))
             adjusted_start = start + net_flow
             per_book_drawdown[book] = safe_div(
                 max(adjusted_start - equity, Decimal("0")),
@@ -1082,9 +1211,12 @@ class ManagementMixin:
         legacy_cooling = bool(state.cooldown_until_ms and state.cooldown_until_ms > now_ms)
         cooling_down = legacy_cooling or any(cooling_by_book.values())
         open_groups = self._open_groups(state)
-        crisis_open_group = any(
-            regime_by_currency.get(group.currency, RiskRegime.CRISIS) is RiskRegime.CRISIS for group in open_groups
-        )
+        crisis_currencies_with_open_groups = {
+            group.currency.upper()
+            for group in open_groups
+            if regime_by_currency.get(group.currency, RiskRegime.CRISIS) is RiskRegime.CRISIS
+        }
+        crisis_open_group = bool(crisis_currencies_with_open_groups)
         crisis_derisk = self.config.hard_derisk_on_crisis_open_group and crisis_open_group
         hard_stop_groups = (
             [group for group in open_groups if not self._is_covered_call_group(group)]
@@ -1159,18 +1291,19 @@ class ManagementMixin:
         # ELEVATED with a detail line prefixed "data_unavailable". Treat that as a
         # halt signal so we don't open new risk while blind; but leave hard_derisk
         # clear so existing positions aren't liquidated on a data blip.
-        data_unavailable_regime = any(
-            any(note.startswith("data_unavailable") for note in regime_detail_by_currency.get(currency, ()))
-            for currency in regime_by_currency
+        portfolio_wide_entry_halt = (
+            legacy_cooling or open_max_loss_pct >= self.config.halt_open_max_loss_pct or hard_stop_open_group
         )
-        non_normal_regime = any(regime is not RiskRegime.NORMAL for regime in regime_by_currency.values())
-        halt_new_entries = (
-            cooling_down
-            or open_max_loss_pct >= self.config.halt_open_max_loss_pct
-            or hard_derisk
-            or non_normal_regime
-            or data_unavailable_regime
-            or any(halt_entries_by_book.values())
+        halt_new_entries_by_currency = build_halt_new_entries_by_currency(
+            managed_currencies=self.config.managed_currencies,
+            regime_by_currency=regime_by_currency,
+            regime_detail_by_currency=regime_detail_by_currency,
+            crisis_currencies_with_open_groups=crisis_currencies_with_open_groups,
+            hard_derisk_on_crisis_open_group=self.config.hard_derisk_on_crisis_open_group,
+            portfolio_blocks_all=portfolio_wide_entry_halt,
+        )
+        halt_new_entries = portfolio_wide_entry_halt or not any(
+            not halted for halted in halt_new_entries_by_currency.values()
         )
         halt_entry_reasons: list[str] = []
         if legacy_cooling:
@@ -1181,7 +1314,8 @@ class ManagementMixin:
                 f"({format_decimal(open_max_loss_pct, 8)} >= {format_decimal(self.config.halt_open_max_loss_pct, 6)})"
             )
         if crisis_derisk:
-            halt_entry_reasons.append("hard_derisk: open_trade_group_in_crisis_regime_currency")
+            halted = sorted(crisis_currencies_with_open_groups)
+            halt_entry_reasons.append("hard_derisk: open_trade_group_in_crisis_regime_currency: " + ", ".join(halted))
         if hard_stop_open_group:
             halt_entry_reasons.append("hard_derisk: open_group_hard_defense_or_stop_trigger")
         # Surface per-book halts so log lines still show which book triggered.
@@ -1190,20 +1324,20 @@ class ManagementMixin:
                 prefixed = f"book={book} {reason}"
                 if prefixed not in halt_entry_reasons:
                     halt_entry_reasons.append(prefixed)
-        if data_unavailable_regime:
-            affected = [
-                currency
-                for currency in sorted(regime_by_currency)
-                if any(note.startswith("data_unavailable") for note in regime_detail_by_currency.get(currency, ()))
-            ]
-            halt_entry_reasons.append("regime data_unavailable: " + ", ".join(affected))
-        elif non_normal_regime:
-            escalated = [
-                f"{currency}={regime.value}"
-                for currency, regime in sorted(regime_by_currency.items())
-                if regime is not RiskRegime.NORMAL
-            ]
-            halt_entry_reasons.append("regime non_normal: " + ", ".join(escalated))
+        for currency in sorted(halt_new_entries_by_currency):
+            if halt_new_entries_by_currency[currency]:
+                regime = regime_by_currency.get(currency, RiskRegime.CRISIS)
+                if regime is not RiskRegime.NORMAL:
+                    halt_entry_reasons.append(f"{currency}: regime={regime.value}")
+                detail = regime_detail_by_currency.get(currency, ())
+                if any(note.startswith("data_unavailable") for note in detail):
+                    halt_entry_reasons.append(f"{currency}: regime data_unavailable")
+        append_underlying_regime_halt_reasons_for_usdc_book(
+            halt_reasons_by_book,
+            scan_underlyings=self.config.scan_underlyings,
+            halt_new_entries_by_currency=halt_new_entries_by_currency,
+            regime_by_currency=regime_by_currency,
+        )
         if halt_new_entries and not halt_entry_reasons:
             halt_entry_reasons.append("halt_new_entries (composite; check portfolio flags)")
         return PortfolioSnapshot(
@@ -1221,6 +1355,8 @@ class ManagementMixin:
             target_progress_ratio=target_progress_ratio,
             regime=overall_regime,
             halt_new_entries=halt_new_entries,
+            halt_new_entries_by_currency=halt_new_entries_by_currency,
+            portfolio_wide_entry_halt=portfolio_wide_entry_halt,
             hard_derisk=hard_derisk,
             cooldown_until_ms=state.cooldown_until_ms,
             cooling_down=cooling_down,
@@ -1612,6 +1748,7 @@ class ManagementMixin:
                 group.entry_credit = group.entry_credit * ex_qty / old_q
                 group.original_entry_credit = group.original_entry_credit * ex_qty / old_q
                 group.entry_fee = group.entry_fee * ex_qty / old_q
+                group.entry_fee_collateral = group.entry_fee_collateral * ex_qty / old_q
                 LOGGER.info(
                     "naked group=%s quantity synced to exchange size=%s (was %s)",
                     group.group_id,
@@ -1688,50 +1825,72 @@ class ManagementMixin:
             abs(short_position.average_price) if short_position.average_price != 0 else short_book.mark_price
         )
         long_premium = abs(long_position.average_price) if long_position.average_price != 0 else long_book.mark_price
-        short_credit = self._premium_value_usdc(
-            premium=short_premium,
-            quantity=quantity,
-            index_price=idx,
-            instrument=short_instrument,
-        )
-        long_debit = self._premium_value_usdc(
-            premium=long_premium,
-            quantity=quantity,
-            index_price=idx,
-            instrument=long_instrument,
-        )
-        short_fee = self._option_fee_usdc(
-            premium=short_premium,
-            quantity=quantity,
-            index_price=idx,
-            base_currency=short_instrument.base_currency,
-            quote_currency=short_instrument.quote_currency,
-            settlement_currency=short_instrument.settlement_currency,
-        )
-        long_fee = self._option_fee_usdc(
-            premium=long_premium,
-            quantity=quantity,
-            index_price=idx,
-            base_currency=long_instrument.base_currency,
-            quote_currency=long_instrument.quote_currency,
-            settlement_currency=long_instrument.settlement_currency,
-        )
-        entry_fee = short_fee + long_fee
-        net_credit = short_credit - long_debit - entry_fee
-        width_usdc = max(short_instrument.strike - long_instrument.strike, Decimal("0")) * quantity
-        max_loss_usdc = max(width_usdc - net_credit, Decimal("0"))
         collateral = (
             "USDC"
             if short_instrument.quote_currency.upper() == "USDC"
             and short_instrument.settlement_currency.upper() == "USDC"
             else short_instrument.base_currency
         )
+        if collateral == "USDC":
+            short_credit = self._premium_value_usdc(
+                premium=short_premium,
+                quantity=quantity,
+                index_price=idx,
+                instrument=short_instrument,
+            )
+            long_debit = self._premium_value_usdc(
+                premium=long_premium,
+                quantity=quantity,
+                index_price=idx,
+                instrument=long_instrument,
+            )
+            short_fee = self._option_fee_usdc(
+                premium=short_premium,
+                quantity=quantity,
+                index_price=idx,
+                base_currency=short_instrument.base_currency,
+                quote_currency=short_instrument.quote_currency,
+                settlement_currency=short_instrument.settlement_currency,
+            )
+            long_fee = self._option_fee_usdc(
+                premium=long_premium,
+                quantity=quantity,
+                index_price=idx,
+                base_currency=long_instrument.base_currency,
+                quote_currency=long_instrument.quote_currency,
+                settlement_currency=long_instrument.settlement_currency,
+            )
+            entry_fee = short_fee + long_fee
+            net_credit = short_credit - long_debit - entry_fee
+            entry_fee_collateral = Decimal("0")
+        else:
+            short_fee_collateral = self._option_fee_native(
+                premium=short_premium,
+                quantity=quantity,
+                index_price=idx,
+                quote_currency=short_instrument.quote_currency,
+                settlement_currency=short_instrument.settlement_currency,
+            )
+            long_fee_collateral = self._option_fee_native(
+                premium=long_premium,
+                quantity=quantity,
+                index_price=idx,
+                quote_currency=long_instrument.quote_currency,
+                settlement_currency=long_instrument.settlement_currency,
+            )
+            entry_fee_collateral = short_fee_collateral + long_fee_collateral
+            gross_native = (short_premium - long_premium) * quantity
+            net_credit = (gross_native - entry_fee_collateral) * idx if idx > 0 else Decimal("0")
+            entry_fee = entry_fee_collateral * idx if idx > 0 else Decimal("0")
+        width_usdc = max(short_instrument.strike - long_instrument.strike, Decimal("0")) * quantity
+        max_loss_usdc = max(width_usdc - net_credit, Decimal("0"))
         estimated_im_collateral = (
             max_loss_usdc if collateral == "USDC" else (max_loss_usdc / idx if idx > 0 else Decimal("0"))
         )
         return {
             "entry_credit": net_credit,
             "entry_fee": entry_fee,
+            "entry_fee_collateral": entry_fee_collateral,
             "max_loss": max_loss_usdc,
             "estimated_im_collateral": estimated_im_collateral,
         }
@@ -1766,6 +1925,7 @@ class ManagementMixin:
         group.entry_credit = metrics["entry_credit"]
         group.original_entry_credit = metrics["entry_credit"]
         group.entry_fee = metrics["entry_fee"]
+        group.entry_fee_collateral = metrics.get("entry_fee_collateral", Decimal("0"))
         group.max_loss = metrics["max_loss"]
         group.estimated_im_collateral = metrics["estimated_im_collateral"]
         group.last_action = "adopted_bull_put_spread_from_exchange"
@@ -1922,24 +2082,37 @@ class ManagementMixin:
                 continue
 
             premium = abs(position.average_price) if position.average_price != 0 else mark
-            entry_fee = self._option_fee_usdc(
-                premium=premium,
-                quantity=qty,
-                index_price=idx,
-                base_currency=inst.base_currency,
-                quote_currency=inst.quote_currency,
-                settlement_currency=inst.settlement_currency,
-            )
-            gross = self._premium_value_usdc(
-                premium=premium,
-                quantity=qty,
-                index_price=idx,
-                instrument=inst,
-            )
-            net_credit = gross - entry_fee
-
             usdc_linear = inst.quote_currency.upper() == "USDC" and inst.settlement_currency.upper() == "USDC"
             collateral = "USDC" if usdc_linear else inst.base_currency
+            if usdc_linear:
+                entry_fee = self._option_fee_usdc(
+                    premium=premium,
+                    quantity=qty,
+                    index_price=idx,
+                    base_currency=inst.base_currency,
+                    quote_currency=inst.quote_currency,
+                    settlement_currency=inst.settlement_currency,
+                )
+                gross = self._premium_value_usdc(
+                    premium=premium,
+                    quantity=qty,
+                    index_price=idx,
+                    instrument=inst,
+                )
+                net_credit = gross - entry_fee
+                entry_fee_collateral = Decimal("0")
+            else:
+                entry_fee_collateral = self._option_fee_native(
+                    premium=premium,
+                    quantity=qty,
+                    index_price=idx,
+                    quote_currency=inst.quote_currency,
+                    settlement_currency=inst.settlement_currency,
+                )
+                gross_native = premium * qty
+                net_native = gross_native - entry_fee_collateral
+                net_credit = net_native * idx if idx > 0 else Decimal("0")
+                entry_fee = entry_fee_collateral * idx if idx > 0 else Decimal("0")
 
             if usdc_linear:
                 if option_type == "call":
@@ -2005,6 +2178,7 @@ class ManagementMixin:
                 estimated_im_collateral=estimated_im_collateral,
                 regime_at_entry=RiskRegime.NORMAL.value,
                 entry_fee=entry_fee,
+                entry_fee_collateral=entry_fee_collateral,
                 short_entry_average_price=premium,
                 entry_index_usd=idx,
                 short_label=labels["short"],
@@ -2045,6 +2219,7 @@ class ManagementMixin:
         option_positions: list[Position],
         orderbook_cache: dict[str, OrderBookSnapshot],
         markets_by_currency: dict[str, list[OptionInstrument]],
+        live: bool = False,
     ) -> StrategyState:
         self._sync_naked_open_groups_from_positions(state, option_positions)
         self._sync_bull_put_spread_groups_from_positions(
@@ -2084,19 +2259,9 @@ class ManagementMixin:
                 if expired and group.expiration_timestamp_ms > 0
                 else utc_now_ms()
             )
-            estimated_close_debit = self._estimate_reconcile_close_debit(
-                group,
-                orderbook_cache,
-                markets_by_currency=markets_by_currency,
-            )
+            estimated_close_debit: Decimal | None = None
             realized_pnl: Decimal | None = None
             realized_return_on_max_loss: Decimal | None = None
-            if estimated_close_debit is not None:
-                realized_pnl = group.entry_credit_net_usdc() - estimated_close_debit
-                realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss)
-            else:
-                realized_pnl = None
-                realized_return_on_max_loss = None
             close_index_usd: Decimal | None = None
             try:
                 short_book = self._get_orderbook(group.short_instrument_name, orderbook_cache)
@@ -2104,7 +2269,36 @@ class ManagementMixin:
                     close_index_usd = short_book.index_price
                     group.close_index_usd = close_index_usd
             except Exception:
+                short_book = None
                 close_index_usd = None
+            if group.is_coin_collateral() and short_book is not None:
+                try:
+                    short_instrument = self._find_or_fetch_instrument(
+                        markets_by_currency or {},
+                        group.short_instrument_name,
+                    )
+                    estimated_close_debit = self._reconcile_coin_close_ledger(
+                        group,
+                        short_book=short_book,
+                        short_instrument=short_instrument,
+                        closed_timestamp_ms=closed_timestamp_ms,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning(
+                        "reconcile coin close ledger failed group=%s: %s",
+                        group.group_id,
+                        exc,
+                    )
+                    estimated_close_debit = None
+            else:
+                estimated_close_debit = self._estimate_reconcile_close_debit(
+                    group,
+                    orderbook_cache,
+                    markets_by_currency=markets_by_currency,
+                )
+            if estimated_close_debit is not None:
+                realized_pnl = group.entry_credit_net_usdc() - estimated_close_debit
+                realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss)
             if (
                 self.config.covered_call_spot_exit_enabled
                 and not self.config.covered_call_robust_exit_enabled
@@ -2118,18 +2312,41 @@ class ManagementMixin:
                 )
                 group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
                 group.spot_exit_reason = "covered_call_settlement_exit"
-            group.backfill_realized_pnl_collateral_native()
+            journal_rows: list[dict[str, Any]] = []
+            try:
+                journal_rows = self._trade_journal().list_executions(
+                    self._journal_scope_key(),
+                    group_id=group.group_id,
+                    limit=50,
+                )
+            except Exception:  # noqa: BLE001
+                journal_rows = []
+            inferred_reason: str | None = None
+            if not expired and journal_rows:
+                from ..trade_journal_backfill import infer_bot_income_exit_close_reason
+
+                inferred_reason = infer_bot_income_exit_close_reason(
+                    journal_rows,
+                    order_label_prefix=self.config.order_label_prefix,
+                )
+                if inferred_reason:
+                    group.enrich_fill_prices_from_journal(journal_rows)
+            group.backfill_realized_pnl_collateral_native(journal_executions=journal_rows or None)
             group.backfill_realized_pnl_usdc()
+            close_reason = "reconciled_expiry" if expired else (inferred_reason or "reconciled_external")
             self._mark_group_closed(
                 group,
-                reason="reconciled_expiry" if expired else "reconciled_external",
+                reason=close_reason,
                 closed_timestamp_ms=closed_timestamp_ms,
-                realized_close_debit=estimated_close_debit,
+                realized_close_debit=group.realized_close_debit or estimated_close_debit,
+                realized_close_fee=group.realized_close_fee,
                 realized_pnl=group.realized_pnl or realized_pnl,
                 realized_return_on_max_loss=realized_return_on_max_loss,
                 index_price_usd=close_index_usd,
             )
             self._journal_reconcile_close(group, closed_timestamp_ms=closed_timestamp_ms)
+            if live and inferred_reason:
+                self._maybe_schedule_profit_sweep(group, reason=inferred_reason, live=live)
             if realized_pnl is not None:
                 LOGGER.info("reconcile group=%s estimated_pnl=%s", group.group_id, realized_pnl)
             else:
@@ -2175,6 +2392,18 @@ class ManagementMixin:
     ) -> Decimal:
         option_type = (group.option_type or "put").lower()
         settle = _intrinsic_settlement(short_instrument, shocked_spot=index_price, option_type=option_type)
+        if group.collateral_currency.upper() != "USDC" and not (
+            short_instrument.quote_currency.upper() == "USDC" and short_instrument.settlement_currency.upper() == "USDC"
+        ):
+            fee_collateral = self._option_fee_native(
+                premium=settle,
+                quantity=group.quantity,
+                index_price=index_price,
+                quote_currency=short_instrument.quote_currency,
+                settlement_currency=short_instrument.settlement_currency,
+            )
+            total_native = settle * group.quantity + fee_collateral
+            return max(total_native * index_price, Decimal("0")) if index_price > 0 else Decimal("0")
         close_debit = self._premium_value_usdc(
             premium=settle,
             quantity=group.quantity,
@@ -2239,7 +2468,7 @@ class ManagementMixin:
         markets = markets_by_currency or {}
         is_spread = self._is_bull_put_spread_group(group)
         spread_settlement = is_spread and group_uses_spread_settlement_pricing(group)
-        if group.current_debit > 0 and not spread_settlement:
+        if group.current_debit > 0 and not spread_settlement and not group.is_coin_collateral():
             debit = group.current_debit
             if is_spread:
                 return self._cap_spread_reconcile_close_debit(group, debit)
@@ -2362,7 +2591,7 @@ class ManagementMixin:
                         )
                     except Exception:
                         pass
-            if group.current_debit >= 0:
+            if group.current_debit >= 0 and not group.is_coin_collateral():
                 debit = group.current_debit
                 if is_spread:
                     return self._cap_spread_reconcile_close_debit(group, debit)
@@ -2395,15 +2624,33 @@ class ManagementMixin:
             ),
             Decimal("0"),
         )
-        group.current_close_fee = self._option_fee_usdc(
-            premium=close_premium,
-            quantity=group.quantity,
-            index_price=short_book.index_price,
-            base_currency=short_instrument.base_currency,
-            quote_currency=short_instrument.quote_currency,
-            settlement_currency=short_instrument.settlement_currency,
+        usdc_linear = (
+            short_instrument.quote_currency.upper() == "USDC" and short_instrument.settlement_currency.upper() == "USDC"
         )
-        group.current_debit += group.current_close_fee
+        idx = short_book.index_price
+        if usdc_linear or group.collateral_currency.upper() == "USDC":
+            group.current_close_fee = self._option_fee_usdc(
+                premium=close_premium,
+                quantity=group.quantity,
+                index_price=short_book.index_price,
+                base_currency=short_instrument.base_currency,
+                quote_currency=short_instrument.quote_currency,
+                settlement_currency=short_instrument.settlement_currency,
+            )
+            group.current_close_fee_collateral = Decimal("0")
+            group.current_debit += group.current_close_fee
+        else:
+            close_fee_collateral = self._option_fee_native(
+                premium=close_premium,
+                quantity=group.quantity,
+                index_price=short_book.index_price,
+                quote_currency=short_instrument.quote_currency,
+                settlement_currency=short_instrument.settlement_currency,
+            )
+            gross_native = close_premium * group.quantity
+            group.current_close_fee_collateral = close_fee_collateral
+            group.current_close_fee = close_fee_collateral * idx if idx > 0 else Decimal("0")
+            group.current_debit = (gross_native + close_fee_collateral) * idx if idx > 0 else group.current_debit
         if group.long_instrument_name:
             try:
                 long_book = self._get_orderbook(group.long_instrument_name, orderbook_cache)
@@ -2421,18 +2668,36 @@ class ManagementMixin:
                     index_price=long_book.index_price,
                     instrument=long_instrument,
                 )
-                long_close_fee = self._option_fee_usdc(
-                    premium=max(long_close_premium, Decimal("0")),
-                    quantity=group.quantity,
-                    index_price=long_book.index_price,
-                    base_currency=long_instrument.base_currency,
-                    quote_currency=long_instrument.quote_currency,
-                    settlement_currency=long_instrument.settlement_currency,
-                )
-                group.current_debit = max(
-                    group.current_debit - max(long_credit - long_close_fee, Decimal("0")), Decimal("0")
-                )
-                group.current_close_fee += long_close_fee
+                if usdc_linear or group.collateral_currency.upper() == "USDC":
+                    long_close_fee = self._option_fee_usdc(
+                        premium=max(long_close_premium, Decimal("0")),
+                        quantity=group.quantity,
+                        index_price=long_book.index_price,
+                        base_currency=long_instrument.base_currency,
+                        quote_currency=long_instrument.quote_currency,
+                        settlement_currency=long_instrument.settlement_currency,
+                    )
+                    group.current_debit = max(
+                        group.current_debit - max(long_credit - long_close_fee, Decimal("0")), Decimal("0")
+                    )
+                    group.current_close_fee += long_close_fee
+                else:
+                    long_fee_collateral = self._option_fee_native(
+                        premium=max(long_close_premium, Decimal("0")),
+                        quantity=group.quantity,
+                        index_price=long_book.index_price,
+                        quote_currency=long_instrument.quote_currency,
+                        settlement_currency=long_instrument.settlement_currency,
+                    )
+                    long_gross_native = max(long_close_premium, Decimal("0")) * group.quantity
+                    long_net_native = long_gross_native - long_fee_collateral
+                    idx_long = long_book.index_price if long_book.index_price > 0 else idx
+                    group.current_debit = max(
+                        group.current_debit - long_net_native * idx_long if idx_long > 0 else Decimal("0"),
+                        Decimal("0"),
+                    )
+                    group.current_close_fee += long_fee_collateral * idx_long if idx_long > 0 else Decimal("0")
+                    group.current_close_fee_collateral += long_fee_collateral
             except Exception as exc:
                 LOGGER.warning(
                     "refresh_group %s: unable to refresh long leg %s (%s)",

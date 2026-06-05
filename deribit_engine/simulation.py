@@ -170,7 +170,7 @@ class SimulatedDeribitClient:
         return [_instrument_to_dict(inst) for inst in instruments]
 
     def get_order_book(self, instrument_name: str, *, depth: int = 1) -> dict[str, Any]:
-        for ccy, insts in self._feed.instruments_by_currency.items():
+        for insts in self._feed.instruments_by_currency.values():
             for inst in insts:
                 if inst.instrument_name == instrument_name:
                     return self._feed.synthetic_order_book(inst)

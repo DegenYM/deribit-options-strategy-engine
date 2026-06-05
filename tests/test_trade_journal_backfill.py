@@ -10,7 +10,151 @@ from deribit_engine.trade_journal_backfill import (
     _backfill_group_from_state,
     _parse_bot_label,
     backfill_closed_group_stats_in_state,
+    infer_bot_income_exit_close_reason,
+    reconcile_profit_sweep_from_exchange,
+    repair_reconciled_bot_income_exit_group,
 )
+
+
+def test_infer_bot_income_exit_close_reason_from_journal():
+    executions = [
+        {
+            "event_type": "open",
+            "source_action": "backfill_state",
+            "label": "covered_call-spread-btc-0048-short",
+            "order_id": "",
+        },
+        {
+            "event_type": "close",
+            "source_action": "backfill_api",
+            "label": "covered_call-spread-btc-0048-short-close",
+            "order_id": "157671270848",
+            "reason": "deribit_user_trades",
+        },
+        {
+            "event_type": "close",
+            "source_action": "reconcile_external",
+            "label": "",
+            "order_id": "",
+            "reason": "reconciled_external",
+        },
+    ]
+    assert infer_bot_income_exit_close_reason(executions, order_label_prefix="covered_call") == "take_profit"
+    assert infer_bot_income_exit_close_reason(executions, order_label_prefix="naked_short") is None
+
+
+def test_repair_reconciled_bot_income_exit_group(tmp_path):
+    group = TradeGroup(
+        group_id="0048",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.1"),
+        covered_underlying_quantity=Decimal("0.1"),
+        entry_timestamp_ms=1,
+        expiration_timestamp_ms=2,
+        short_instrument_name="BTC-26JUN26-80000-C",
+        short_strike=Decimal("80000"),
+        entry_credit=Decimal("86"),
+        original_entry_credit=Decimal("86"),
+        max_loss=Decimal("0"),
+        regime_at_entry="normal",
+        short_entry_average_price=Decimal("0.012"),
+        strategy="covered_call",
+        option_type="call",
+        status="closed",
+        closed_timestamp_ms=3,
+        close_reason="reconciled_external",
+        realized_pnl=Decimal("32"),
+    )
+    executions = [
+        {
+            "event_type": "close",
+            "source_action": "backfill_api",
+            "leg": "short",
+            "instrument_name": "BTC-26JUN26-80000-C",
+            "direction": "buy",
+            "amount": "0.1",
+            "price": "0.0075",
+            "label": "covered_call-spread-btc-0048-short-close",
+            "order_id": "157671270848",
+            "reason": "deribit_user_trades",
+        },
+    ]
+    assert repair_reconciled_bot_income_exit_group(
+        group,
+        executions,
+        order_label_prefix="covered_call",
+        profit_sweep_enabled=True,
+    )
+    assert group.close_reason == "take_profit"
+    assert group.short_close_average_price == Decimal("0.0075")
+    assert group.profit_sweep_status == "pending"
+    assert group.realized_pnl_collateral_native is not None
+    assert group.realized_pnl_collateral_native > 0
+
+
+def test_reconcile_profit_sweep_from_exchange_pending_to_filled():
+    group = TradeGroup(
+        group_id="0048",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.1"),
+        covered_underlying_quantity=Decimal("0.1"),
+        entry_timestamp_ms=1,
+        expiration_timestamp_ms=2,
+        short_instrument_name="BTC-26JUN26-80000-C",
+        short_strike=Decimal("80000"),
+        entry_credit=Decimal("86"),
+        original_entry_credit=Decimal("86"),
+        max_loss=Decimal("0"),
+        regime_at_entry="normal",
+        short_entry_average_price=Decimal("0.012"),
+        strategy="covered_call",
+        option_type="call",
+        status="closed",
+        closed_timestamp_ms=3,
+        close_reason="take_profit",
+        profit_sweep_status="pending",
+        profit_sweep_amount=Decimal("0.00039"),
+        profit_sweep_reason="take_profit",
+    )
+
+    class SweepClient:
+        def get_order_state_by_label(self, currency, label):
+            assert label == "covered_call-profit-sweep-btc-0048"
+            return [
+                {
+                    "label": label,
+                    "order_id": "BTC_USDT-8336763035",
+                    "instrument_name": "BTC_USDT",
+                    "amount": Decimal("0.0003"),
+                    "filled_amount": Decimal("0.0003"),
+                    "average_price": Decimal("73015"),
+                    "order_state": "filled",
+                }
+            ]
+
+        def get_user_trades_by_order(self, order_id, *, historical=False):
+            assert order_id == "BTC_USDT-8336763035"
+            return [
+                {
+                    "direction": "sell",
+                    "amount": Decimal("0.0003"),
+                    "price": Decimal("73015"),
+                    "fee": Decimal("0"),
+                    "fee_currency": "USDT",
+                }
+            ]
+
+    assert reconcile_profit_sweep_from_exchange(
+        group,
+        client=SweepClient(),
+        order_label_prefix="covered_call",
+    )
+    assert group.profit_sweep_status == "filled"
+    assert group.profit_sweep_amount == Decimal("0.0003")
+    assert group.profit_sweep_order_id == "BTC_USDT-8336763035"
+    assert group.profit_sweep_quote_proceeds == Decimal("21.9045")
 
 
 def test_parse_bot_label():

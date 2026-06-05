@@ -13,7 +13,12 @@ from deribit_engine.exit_eval import (
 )
 from deribit_engine.models import OrderBookSnapshot, TradeGroup
 from deribit_engine.trade_apr import position_apr_capital_base, remaining_apr_for_group
-from deribit_engine.vol_metrics import iv_rank, passes_iv_entry_gate, realized_vol_annualized
+from deribit_engine.vol_metrics import (
+    dvol_iv_rank_from_daily_rows,
+    iv_rank,
+    passes_iv_entry_gate,
+    realized_vol_annualized,
+)
 
 
 def _group(**kwargs) -> TradeGroup:
@@ -124,6 +129,68 @@ def test_iv_rank_and_gate():
         min_iv_minus_rv=Decimal("0.02"),
         gate_enabled=True,
     )
+
+
+def test_dvol_iv_rank_from_daily_rows_uses_candle_high_low_range():
+    rows = [
+        [1_000, 40.0, 45.0, 35.0, 40.0],
+        [2_000, 50.0, 55.0, 45.0, 50.0],
+        [3_000, 60.0, 70.0, 50.0, 55.0],
+    ]
+    rank = dvol_iv_rank_from_daily_rows(rows, ts_ms=3_000, lookback_days=3)
+    # official high/low method: (55 - 35) / (70 - 35) = 20/35
+    assert rank == Decimal("20") / Decimal("35")
+    # Close-only ranks the latest close against close min/max only:
+    # (55 - 40) / (55 - 40) = 1, which overstates rank vs the high/low method.
+    close_only = iv_rank(Decimal("55"), lookback=[Decimal("40"), Decimal("50"), Decimal("55")])
+    assert close_only == Decimal("1")
+    assert close_only != rank
+
+
+def test_iv_entry_gate_fail_open_when_metrics_missing():
+    assert passes_iv_entry_gate(
+        iv_rank_value=None,
+        iv_minus_rv=None,
+        min_iv_rank=Decimal("0.35"),
+        max_iv_rank=Decimal("1"),
+        min_iv_minus_rv=Decimal("0.02"),
+        gate_enabled=True,
+    )
+    assert not passes_iv_entry_gate(
+        iv_rank_value=Decimal("0.10"),
+        iv_minus_rv=Decimal("0.05"),
+        min_iv_rank=Decimal("0.35"),
+        max_iv_rank=Decimal("1"),
+        min_iv_minus_rv=Decimal("0.02"),
+        gate_enabled=True,
+    )
+
+
+def test_iv_entry_gate_uses_currency_specific_bounds(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(
+        tmp_path,
+        enable_iv_entry_gate=True,
+        min_iv_rank=Decimal("0.30"),
+        btc_min_iv_rank=Decimal("0.25"),
+        eth_min_iv_rank=Decimal("0.18"),
+    )
+    selector = StrategySelector(config)
+    selector.update_vol_entry_context(
+        iv_rank_by_currency={"BTC": Decimal("0.22"), "ETH": Decimal("0.22")},
+        iv_minus_rv_by_currency={"BTC": Decimal("0.05"), "ETH": Decimal("0.05")},
+    )
+
+    assert selector._iv_entry_rejection_reason("BTC") == "iv_entry_gate"
+    assert selector._iv_entry_rejection_reason("ETH") is None
+
+
+def test_index_chart_close_series_accepts_two_column_rows():
+    from deribit_engine.vol_metrics import index_chart_close_series
+
+    series = index_chart_close_series([[1_700_000_000_000, 70000.5], [1_700_086_400_000, 71000.0]])
+    assert series == [(1_700_000_000_000, Decimal("70000.5")), (1_700_086_400_000, Decimal("71000.0"))]
 
 
 def test_realized_vol_positive():

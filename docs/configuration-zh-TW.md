@@ -4,7 +4,7 @@
 
 至少要設定：
 
-- `DERIBIT_ENV=testnet` 或 `mainnet`
+- `DERIBIT_ENV=mainnet`
 - `DERIBIT_CLIENT_ID`
 - `DERIBIT_CLIENT_SECRET`
 - `ENABLE_PERP_HEDGE=false` 可停用 perpetual hedge；目前預設即為關閉
@@ -46,8 +46,9 @@ logs/live/<investor_id>/<slug>.log
 
 1. `config/shared/defaults.env`（可選；`config/shared/.env.defaults` 為 legacy 別名，載入時會提示）
 2. `config/investors/<id>/.env.investor`（可選；`investor.env` 為 legacy 別名）
-3. `config/shared/strategies/.env.<OPTION_STRATEGY>`（或相容的 legacy 路徑，如 repo 根 `.env.<strategy>`）
-4. `accounts/.env.<slug>`（策略子帳；`accounts/<slug>.env` 為 legacy 別名）
+3. `config/shared/strategies/.env.<OPTION_STRATEGY>` — 策略骨架（市場、擔保幣、put/call 方向）
+4. `config/shared/strategies/tiers/<OPTION_STRATEGY>/.env.<tier>` — 風險分級參數（`low` | `medium` | `high`）
+5. `accounts/.env.<slug>`（策略子帳；`accounts/<slug>.env` 為 legacy 別名）
 
 若使用 repo 根目錄單一 `.env`（非 `config/investors/.../accounts/`），則仍為：defaults → 該 `.env` → 策略 profile（profile 優先於重疊鍵）。
 
@@ -55,9 +56,48 @@ logs/live/<investor_id>/<slug>.log
 
 ### 子帳 env 建議欄位
 
-`DERIBIT_*`、`OPTION_STRATEGY`、`ORDER_LABEL_PREFIX`、`STATE_FILE`、`REFERENCE_CAPITAL_USDC`、`TARGET_PORTFOLIO_APR`、`TOP_N`
+`DERIBIT_*`、`OPTION_STRATEGY`、`RISK_TIER`（`low` | `medium` | `high`，預設 `medium`）、`ORDER_LABEL_PREFIX`、`STATE_FILE`、`REFERENCE_CAPITAL_USDC`、`TARGET_PORTFOLIO_APR`、`TOP_N`
 
-共用參數（delta、風控、流動性門檻等）預設放在策略 profile 或 `defaults.env`；某子帳若要偏離預設，在該子帳的 `accounts/.env.<slug>` 寫入同名鍵即可覆蓋。
+### 風險分級（low / medium / high）
+
+每種策略在 `config/shared/strategies/tiers/<strategy>/` 下有 **`.env.low`、`.env.medium`、`.env.high`** 三份完整參數；策略骨架（`.env.<strategy>`）只放 `OPTION_STRATEGY`、市場 profile、擔保幣等與 tier 無關的設定。
+
+```
+config/shared/strategies/
+  .env.covered_call              # 骨架
+  tiers/covered_call/
+    .env.low
+    .env.medium
+    .env.high
+```
+
+投資人選擇方式（二擇一，建議用 manifest）：
+
+1. **`accounts.toml`** 每列加 `risk_tier = "low"`（或 `medium` / `high`）
+2. **子帳 env** 寫 `RISK_TIER=low`（init 時會自動寫入）
+
+新建投資人範例：
+
+```bash
+# 全部中風險（預設）
+./bot investor init alice --strategies naked,covered_call
+
+# 全部低風險
+./bot investor init alice --strategies naked,covered_call --risk-tier low
+
+# 各策略不同風險
+./bot investor init alice --strategies naked,covered_call,bull_put --risk-tiers naked:low,covered_call:high,bull_put:medium
+```
+
+子帳 env 仍可在最後一層覆寫任意鍵（例如只調 `REFERENCE_CAPITAL_USDC`）。
+
+| 分級 | 典型差異 |
+|------|----------|
+| **low** | 較低 delta、較高 `MIN_NET_APR`、較緊 IM/MM、較少 `MAX_GROUPS_PER_CURRENCY` |
+| **medium** | 標準進攻性（原策略 profile 數值） |
+| **high** | 較高 delta、較低 APR 門檻、較寬 IM 上限 |
+
+共用 pacing／流動性門檻在 `config/shared/.env.defaults`；某子帳若要偏離 tier 預設，在 `accounts/.env.<slug>` 寫入同名鍵即可覆蓋。
 
 建立本機投資人目錄：
 
@@ -129,13 +169,13 @@ python3 scripts/snapshot_investor_fee_nav.py --investor an
 
 ## 共用 env 範例
 
-以下參數以 `REFERENCE_CAPITAL_USDC=1000` 的小資金試跑為基準，預設偏保守。實際上線前先用 `testnet` 與 dry-run 觀察 `scan --json` 的候選數量、rejection reason 與成交價差；若候選太少，優先放寬 `MIN_LIQUID_EXPIRIES_REQUIRED`、流動性門檻或 DTE，不要先大幅提高 delta。
+以下參數以 `REFERENCE_CAPITAL_USDC=1000` 的小資金試跑為基準，預設偏保守。實際上線前先用 dry-run 觀察 `scan --json` 的候選數量、rejection reason 與成交價差；若候選太少，優先放寬 `MIN_LIQUID_EXPIRIES_REQUIRED`、流動性門檻或 DTE，不要先大幅提高 delta。
 
 `.env` 建議只放環境、憑證與所有策略共用的基礎參數：
 
 ```dotenv
 # --- Environment & credentials ---
-DERIBIT_ENV=testnet
+DERIBIT_ENV=mainnet
 DERIBIT_CLIENT_ID=
 DERIBIT_CLIENT_SECRET=
 
@@ -207,6 +247,11 @@ ENABLE_ADOPT_EXCHANGE_POSITIONS=true
 # --- Execution / state ---
 OPTION_FEE_RATE=0.0003
 OPTION_FEE_CAP_RATE=0.125
+# 帳戶 trading-fee 折扣（0.10 = 實付牌價 90%）。預設自註冊日起算 6 個月（`OPTION_FEE_DISCOUNT_ANCHOR=registration` + `OPTION_FEE_DISCOUNT_REGISTRATION_MS`）。
+# OPTION_FEE_DISCOUNT_RATE=0.10
+# OPTION_FEE_DISCOUNT_MONTHS=6
+# OPTION_FEE_DISCOUNT_ANCHOR=registration
+# OPTION_FEE_DISCOUNT_REGISTRATION_MS=0
 EXIT_BUFFER_RATIO=0.03
 SHORT_ENTRY_WAIT_SECONDS=120
 ORDER_POLL_SECONDS=10

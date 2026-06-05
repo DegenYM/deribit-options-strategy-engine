@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ..env_layout import find_repo_root
+from ..env_layout import KNOWN_RISK_TIERS, RISK_TIER_MEDIUM, find_repo_root
 from .common import render
 
 
@@ -21,13 +21,25 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         default="naked",
         help="Comma-separated strategy slugs: naked, bull_put, covered_call (default: naked)",
     )
+    inv_init.add_argument(
+        "--risk-tier",
+        default=RISK_TIER_MEDIUM,
+        choices=sorted(KNOWN_RISK_TIERS),
+        help="Default risk tier for all strategies: low, medium, high (default: medium)",
+    )
+    inv_init.add_argument(
+        "--risk-tiers",
+        default=None,
+        metavar="SPEC",
+        help="Per-strategy tiers: low | naked:low,covered_call:high (overrides --risk-tier for listed slugs)",
+    )
     inv_init.add_argument("--display-name", default=None, help="Display name for manifest/registry")
     inv_init.add_argument("--email", default=None, help="Dashboard Access email (stored in registry only)")
     inv_init.add_argument(
         "--deribit-env",
         default="mainnet",
-        choices=("mainnet", "testnet"),
-        help="DERIBIT_ENV written into scaffolded account env files (default: mainnet)",
+        choices=("mainnet",),
+        help="DERIBIT_ENV written into scaffolded account env files (mainnet only)",
     )
     inv_init.add_argument(
         "--no-register",
@@ -159,6 +171,7 @@ def dispatch(args: argparse.Namespace) -> int | None:
         import_handoff,
         investor_init,
         list_investors,
+        parse_risk_tier_map,
         parse_strategy_slugs,
         render_launchd_plists,
         render_systemd_units,
@@ -171,6 +184,11 @@ def dispatch(args: argparse.Namespace) -> int | None:
 
     if args.investor_command == "init":
         strategies = parse_strategy_slugs(args.strategies)
+        risk_tiers = parse_risk_tier_map(
+            strategies,
+            default_tier=args.risk_tier,
+            risk_tiers_raw=args.risk_tiers,
+        )
         result = investor_init(
             args.investor_id,
             strategies=strategies,
@@ -179,12 +197,14 @@ def dispatch(args: argparse.Namespace) -> int | None:
             deribit_env=args.deribit_env,
             register=not args.no_register,
             repo_root=repo_root,
+            risk_tiers=risk_tiers,
         )
         payload = {
             "action": "investor-init",
             "investor_id": result.investor_id,
             "investor_dir": str(result.investor_dir),
             "strategies": list(result.strategies),
+            "risk_tiers": risk_tiers,
             "frontend_port": result.frontend_port,
             "launchd_paths": [str(path) for path in result.launchd_paths],
             "systemd_paths": [str(path) for path in result.systemd_paths],

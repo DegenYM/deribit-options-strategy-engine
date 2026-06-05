@@ -419,7 +419,7 @@ def test_aggregate_status_prefetch_once_per_api_identity(tmp_path, monkeypatch):
 
         def status_with_exchange_prefetch(self, _prefetch: ExchangePrefetch, **_kwargs) -> dict:
             return {
-                "env": "testnet",
+                "env": "mainnet",
                 "portfolio": {"total_equity_usdc": Decimal("1000"), "equity_by_book": {"USDC": Decimal("1000")}},
                 "underlying_index_usd": {"BTC": "1", "ETH": "1"},
                 "accounts": {"USDC": {"equity": "1000"}},
@@ -649,7 +649,7 @@ def _write_ledger_row(root: Path, *, ts_ms: int, equity: str, client_suffix: str
         {
             "ts_ms": ts_ms,
             "account_name": f"acct-{client_suffix}",
-            "env": "testnet",
+            "env": "mainnet",
             "option_strategy": "naked_short",
             "total_equity_usdc": equity,
             "day_start_equity_usdc": str(Decimal(equity) - Decimal("10")),
@@ -711,7 +711,7 @@ def test_portfolio_snapshot_endpoint_no_deribit(tmp_path, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
     env_file = tmp_path / ".env.test"
-    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     cfg = make_config(tmp_path, state_file=tmp_path / "bot.json")
 
     def _no_deribit(*_args, **_kwargs):
@@ -747,7 +747,7 @@ def test_dashboard_bundle_endpoint_returns_sections(tmp_path, monkeypatch) -> No
     from fastapi.testclient import TestClient
 
     env_file = tmp_path / ".env.test"
-    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     cfg = make_config(tmp_path, state_file=tmp_path / "bot.json", client_id="cid", client_secret="sec")
     fake_status = {"portfolio": {"total_equity_usdc": "1000"}, "trade_groups": []}
     fake_groups = {"open": [], "closed": [], "underlying_index_usd": {}}
@@ -795,7 +795,7 @@ def test_dashboard_bundle_sections_subset(tmp_path, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
     env_file = tmp_path / ".env.test"
-    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     cfg = make_config(tmp_path, state_file=tmp_path / "bot.json", client_id="cid", client_secret="sec")
     fake_status = {"portfolio": {"total_equity_usdc": "1000"}, "trade_groups": []}
     fake_groups = {"open": [], "closed": [], "underlying_index_usd": {}}
@@ -842,7 +842,7 @@ def test_dashboard_bundle_endpoint_requires_private_creds(tmp_path, monkeypatch)
     from fastapi.testclient import TestClient
 
     env_file = tmp_path / ".env.test"
-    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     cfg = make_config(tmp_path, state_file=tmp_path / "bot.json", client_id="", client_secret="")
     monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
     app = frontend_server.create_app(
@@ -962,7 +962,7 @@ def test_dashboard_strategies_fallback_to_loaded_accounts(tmp_path, monkeypatch)
     from deribit_engine.frontend_server.helpers import _dashboard_strategies
 
     env_file = tmp_path / ".env.test"
-    env_file.write_text("DERIBIT_ENV=testnet\n", encoding="utf-8")
+    env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     cfg = make_config(
         tmp_path,
         state_file=tmp_path / "bot.json",
@@ -1025,7 +1025,7 @@ def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
             with lock:
                 in_flight -= 1
             return {
-                "env": "testnet",
+                "env": "mainnet",
                 "portfolio": {
                     "total_equity_usdc": Decimal("1000"),
                     "equity_by_book": {"USDC": Decimal("1000")},

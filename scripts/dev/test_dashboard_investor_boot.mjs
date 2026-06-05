@@ -95,7 +95,11 @@ const fixtures = {
     scheduler_running: true,
     snapshot_interval_sec: 300,
   },
-  "/api/spot": { BTC: 65000, ETH: 3500 },
+  "/api/spot": {
+    BTC: 65000,
+    ETH: 3500,
+    price_change_pct_24h: { BTC: 1.2, ETH: -0.8 },
+  },
   "/api/portfolio/snapshot": {
     source: "ledger",
     freshness_ms: 120000,

@@ -48,6 +48,7 @@ from .helpers import (
     _rolling_apr_series_from_store,
     _spot_index_decimals,
 )
+from .market_vol import fetch_index_price_change_24h_pct, fetch_iv_rank_snapshot
 from .types import (
     DashboardAccount,
     EquitySnapshotScheduler,
@@ -202,14 +203,21 @@ def create_app(
         eth_raw = client.get_index_price("eth_usd")
         btc_px = to_decimal(btc_raw.get("index_price") or 0)
         eth_px = to_decimal(eth_raw.get("index_price") or 0)
+        vol = fetch_iv_rank_snapshot(
+            client,
+            lookback_days=max(10, int(config_public.iv_rank_lookback_days)),
+        )
+        change_24h = fetch_index_price_change_24h_pct(client)
         return {
             "BTC": str(btc_px) if btc_px > 0 else None,
             "ETH": str(eth_px) if eth_px > 0 else None,
+            **vol,
+            "price_change_pct_24h": change_24h,
         }
 
     @app.get("/api/spot")
     def api_spot() -> dict[str, Any]:
-        """Public BTC/ETH USD index for dashboard header (no private auth)."""
+        """Public BTC/ETH USD index and IV rank for dashboard header (no private auth)."""
         try:
             return spot_cache.get_or_set("spot", _fetch_spot)
         except Exception as exc:  # noqa: BLE001
@@ -277,6 +285,7 @@ def create_app(
                     "name": account.name,
                     "env": account.config.env,
                     "option_strategy": account.config.option_strategy,
+                    "risk_tier": account.config.risk_tier,
                     "covered_call_profit_sweep_enabled": (
                         account.config.covered_call_profit_sweep_enabled
                         if account.config.option_strategy == "covered_call"

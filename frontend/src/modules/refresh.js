@@ -34,13 +34,133 @@ function invokeRenderDashboard() {
   (activeRenderDashboard ?? persistentRenderDashboard)?.();
 }
 
+function roundIvRankPctOneDecimal(pct) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return null;
+  return Math.round(pct * 10) / 10;
+}
+
+function formatIvRankPctText(pct) {
+  const rounded = roundIvRankPctOneDecimal(pct);
+  if (rounded === null) return null;
+  return rounded.toFixed(1);
+}
+
+export function resolveIvRankPct(spotPayload, symbol) {
+  const key = String(symbol || "").toUpperCase();
+  const rank = num(spotPayload?.iv_rank?.[key]);
+  if (rank !== null) {
+    if (rank >= 0 && rank <= 1) return roundIvRankPctOneDecimal(rank * 100);
+    if (rank > 1 && rank <= 100) return roundIvRankPctOneDecimal(rank);
+  }
+  const pctRaw = num(spotPayload?.iv_rank_pct?.[key]);
+  if (pctRaw !== null && pctRaw >= 0 && pctRaw <= 100) {
+    return roundIvRankPctOneDecimal(pctRaw);
+  }
+  return null;
+}
+
+function formatIvRankLabel(pct, symbol) {
+  const pctText = formatIvRankPctText(pct);
+  if (pctText === null) return null;
+  const rounded = roundIvRankPctOneDecimal(pct);
+  const dvol = num(STATE.lastDvol?.[symbol]);
+  const lookback = num(STATE.ivRankLookbackDays);
+  const detail =
+    dvol !== null && lookback !== null
+      ? i18n(
+          `IV Rank ${pctText}% (DVOL ${dvol}, ${lookback}d H/L range)`,
+          `IV Rank ${pctText}%（DVOL ${dvol}，${lookback} 日 K 高低區間）`
+        )
+      : i18n(`IV Rank ${pctText}%`, `IV Rank ${pctText}%`);
+  return { text: i18n(`IVR ${pctText}%`, `IVR ${pctText}%`), title: detail, pct: rounded };
+}
+
+function ivrLevelClass(pct) {
+  if (pct < 25) return "header-ivr--low";
+  if (pct < 60) return "header-ivr--mid";
+  return "header-ivr--high";
+}
+
+function formatPriceChange24hText(pct) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return null;
+  const rounded = Math.round(pct * 10) / 10;
+  const sign = rounded > 0 ? "+" : rounded < 0 ? "" : "";
+  return `${sign}${rounded.toFixed(1)}%`;
+}
+
+function priceChange24hClass(pct) {
+  if (pct === null || pct === undefined || !Number.isFinite(pct)) return "";
+  if (pct > 0) return "header-price-change--up";
+  if (pct < 0) return "header-price-change--down";
+  return "header-price-change--flat";
+}
+
+function updateHeaderMarketLine(symbol, spotUsd, ivRankPct, priceChangePct24h = null) {
+  const key = String(symbol || "").toUpperCase();
+  const priceEl = document.getElementById(`header-spot-${key.toLowerCase()}-price`);
+  const changeEl = document.getElementById(`header-spot-${key.toLowerCase()}-change`);
+  const ivrEl = document.getElementById(`header-spot-${key.toLowerCase()}-ivr`);
+  const legacyEl = document.getElementById(`header-spot-${key.toLowerCase()}`);
+  const priceText =
+    spotUsd !== null && spotUsd > 0 ? fmt.usd2.format(spotUsd) : "—";
+  const fullSpotPart =
+    spotUsd !== null && spotUsd > 0 ? `${key} ${priceText}` : `${key} —`;
+  if (priceEl) {
+    priceEl.textContent = priceText;
+  }
+  const changeText = formatPriceChange24hText(priceChangePct24h);
+  if (changeEl) {
+    changeEl.classList.remove(
+      "header-price-change--up",
+      "header-price-change--down",
+      "header-price-change--flat"
+    );
+    if (changeText) {
+      changeEl.hidden = false;
+      changeEl.textContent = changeText;
+      changeEl.title = i18n("24h price change", "24 小時漲跌幅");
+      changeEl.classList.add(priceChange24hClass(priceChangePct24h));
+    } else {
+      changeEl.hidden = true;
+      changeEl.textContent = "";
+      changeEl.removeAttribute("title");
+    }
+  }
+  const ivMeta = formatIvRankLabel(ivRankPct, key);
+  if (ivrEl) {
+    ivrEl.classList.remove("header-ivr--low", "header-ivr--mid", "header-ivr--high");
+    if (ivMeta) {
+      ivrEl.hidden = false;
+      ivrEl.textContent = ivMeta.text;
+      ivrEl.title = ivMeta.title;
+      ivrEl.dataset.ivrPct = String(ivMeta.pct);
+      ivrEl.classList.add(ivrLevelClass(ivMeta.pct));
+    } else {
+      ivrEl.hidden = true;
+      ivrEl.textContent = "";
+      ivrEl.removeAttribute("title");
+      delete ivrEl.dataset.ivrPct;
+    }
+  }
+  if (legacyEl && !priceEl) {
+    legacyEl.textContent = ivMeta ? `${fullSpotPart} · ${ivMeta.text}` : fullSpotPart;
+    legacyEl.title = ivMeta?.title || "";
+  }
+}
+
 export function updateHeaderSpotDom() {
-  const elBtc = document.getElementById("header-spot-btc");
-  const elEth = document.getElementById("header-spot-eth");
-  const b = STATE.lastSpotUsd.BTC;
-  const e = STATE.lastSpotUsd.ETH;
-  if (elBtc) elBtc.textContent = b !== null && b > 0 ? `BTC ${fmt.usd2.format(b)}` : "BTC —";
-  if (elEth) elEth.textContent = e !== null && e > 0 ? `ETH ${fmt.usd2.format(e)}` : "ETH —";
+  updateHeaderMarketLine(
+    "BTC",
+    STATE.lastSpotUsd.BTC,
+    STATE.lastIvRankPct.BTC,
+    STATE.lastPriceChangePct24h.BTC
+  );
+  updateHeaderMarketLine(
+    "ETH",
+    STATE.lastSpotUsd.ETH,
+    STATE.lastIvRankPct.ETH,
+    STATE.lastPriceChangePct24h.ETH
+  );
 }
 
 function waitForChartPanelLayout() {
@@ -207,6 +327,13 @@ export async function tickHeaderSpot({ renderDependentViews = true, updateDom = 
     const d = await fetchJson("/api/spot");
     STATE.lastSpotUsd.BTC = num(d.BTC);
     STATE.lastSpotUsd.ETH = num(d.ETH);
+    STATE.lastPriceChangePct24h.BTC = num(d?.price_change_pct_24h?.BTC);
+    STATE.lastPriceChangePct24h.ETH = num(d?.price_change_pct_24h?.ETH);
+    STATE.lastIvRankPct.BTC = resolveIvRankPct(d, "BTC");
+    STATE.lastIvRankPct.ETH = resolveIvRankPct(d, "ETH");
+    STATE.lastDvol.BTC = num(d?.dvol?.BTC);
+    STATE.lastDvol.ETH = num(d?.dvol?.ETH);
+    STATE.ivRankLookbackDays = num(d?.iv_rank_lookback_days);
     if (updateDom) {
       updateHeaderSpotDom();
       if (renderDependentViews && !STATE.refreshInFlight) {

@@ -15,6 +15,7 @@ config/handoff/*
 !config/handoff/handoff.template.toml
 .DS_Store
 .venv/
+.venv311/
 .pip_packages/
 .pytest_cache/
 .coverage

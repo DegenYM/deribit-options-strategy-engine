@@ -68,7 +68,7 @@ class ExecutionMixin:
         by_name = {item.instrument_name: item for item in open_positions}
         targets: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        context = self._load_runtime() if live else None
+        context = self._load_runtime(live=live) if live else None
 
         for instrument_name in requested:
             position = by_name.get(instrument_name)
@@ -277,7 +277,7 @@ class ExecutionMixin:
         }
 
     def panic_close(self, *, live: bool = False) -> dict[str, Any]:
-        context = self._load_runtime()
+        context = self._load_runtime(live=live)
         actions: list[dict[str, Any]] = []
         for order in context.open_orders:
             if live:
@@ -491,21 +491,18 @@ class ExecutionMixin:
             ]
         closed_timestamp_ms = utc_now_ms()
         short_close_price = short_result["average_price"]
-        realized_close_debit = self._premium_value_usdc(
+        short_trades = self._collect_close_trades(short_result, None).get("short_leg") or []
+        realized_close_debit, realized_close_fee, close_fee_collateral = self._close_short_ledger(
             premium=short_close_price,
             quantity=group.quantity,
             index_price=short_book.index_price,
+            trades=short_trades,
             instrument=short_instrument,
+            collateral_currency=group.collateral_currency,
+            at_timestamp_ms=closed_timestamp_ms,
         )
-        realized_close_fee = self._option_fee_usdc(
-            premium=short_close_price,
-            quantity=group.quantity,
-            index_price=short_book.index_price,
-            base_currency=short_instrument.base_currency,
-            quote_currency=short_instrument.quote_currency,
-            settlement_currency=short_instrument.settlement_currency,
-        )
-        realized_close_debit += realized_close_fee
+        group.close_fee_collateral = close_fee_collateral
+        group.current_close_fee_collateral = close_fee_collateral
         long_response = None
         long_close_price_for_native: Decimal | None = None
         long_instrument_for_native: OptionInstrument | None = None
@@ -536,22 +533,49 @@ class ExecutionMixin:
             long_close_price_for_native = long_close_price
             long_instrument_for_native = long_instrument
             long_book = self._get_orderbook(group.long_instrument_name, context.orderbook_cache)
-            long_credit = self._premium_value_usdc(
-                premium=long_close_price,
-                quantity=long_result["filled"],
-                index_price=long_book.index_price,
-                instrument=long_instrument,
+            long_trades = self._order_trades(long_response)
+            usdc_linear = (
+                long_instrument.quote_currency.upper() == "USDC"
+                and long_instrument.settlement_currency.upper() == "USDC"
             )
-            long_fee = self._option_fee_usdc(
-                premium=long_close_price,
-                quantity=long_result["filled"],
-                index_price=long_book.index_price,
-                base_currency=long_instrument.base_currency,
-                quote_currency=long_instrument.quote_currency,
-                settlement_currency=long_instrument.settlement_currency,
-            )
-            realized_close_debit -= max(long_credit - long_fee, Decimal("0"))
-            realized_close_fee += long_fee
+            if usdc_linear or group.collateral_currency.upper() == "USDC":
+                long_credit = self._premium_value_usdc(
+                    premium=long_close_price,
+                    quantity=long_result["filled"],
+                    index_price=long_book.index_price,
+                    instrument=long_instrument,
+                )
+                long_fee = self._option_fee_usdc(
+                    premium=long_close_price,
+                    quantity=long_result["filled"],
+                    index_price=long_book.index_price,
+                    base_currency=long_instrument.base_currency,
+                    quote_currency=long_instrument.quote_currency,
+                    settlement_currency=long_instrument.settlement_currency,
+                )
+                realized_close_debit -= max(long_credit - long_fee, Decimal("0"))
+                realized_close_fee += long_fee
+            else:
+                long_fee_collateral = self._sum_trade_fees_native(long_trades, group.collateral_currency)
+                if long_fee_collateral <= 0:
+                    long_fee_collateral = self._option_fee_native(
+                        premium=long_close_price,
+                        quantity=long_result["filled"],
+                        index_price=long_book.index_price,
+                        quote_currency=long_instrument.quote_currency,
+                        settlement_currency=long_instrument.settlement_currency,
+                    )
+                long_gross_native = long_close_price * long_result["filled"]
+                long_net_native = long_gross_native - long_fee_collateral
+                idx_long = long_book.index_price if long_book.index_price > 0 else short_book.index_price
+                realized_close_debit -= long_net_native * idx_long if idx_long > 0 else Decimal("0")
+                long_fee_usdc = long_fee_collateral * idx_long if idx_long > 0 else Decimal("0")
+                realized_close_fee += long_fee_usdc
+                close_fee_collateral += long_fee_collateral
+                group.close_fee_collateral = close_fee_collateral
+                group.current_close_fee_collateral = close_fee_collateral
+            group.long_close_average_price = long_close_price
+        group.short_close_average_price = short_close_price
         realized_pnl = group.entry_credit_net_usdc() - realized_close_debit
         realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss)
         self._finalize_close_collateral_native(

@@ -50,6 +50,13 @@ export function bookNativeSymbol(book) {
   return b;
 }
 
+/** Colored Deribit-style book glyph (use instead of bare ``bookNativeSymbol`` in HTML). */
+export function bookNativeSymbolHtml(book, extraClass = "") {
+  const b = String(book || "").toUpperCase();
+  const extra = extraClass ? ` ${extraClass}` : "";
+  return `<span class="native-book-symbol native-book-symbol--${b.toLowerCase()}${extra}">${bookNativeSymbol(b)}</span>`;
+}
+
 export function bookNativePlaces(book) {
   const b = String(book || "").toUpperCase();
   if (b === "BTC") return 5;
@@ -69,7 +76,11 @@ function deribitPricePlaces(collateralCurrency) {
 }
 
 function deribitSymbolHtml(collateralCurrency) {
-  return `<span class="text-slate-500">${bookNativeSymbol(collateralCurrency)}</span>`;
+  const c = String(collateralCurrency || "").toUpperCase();
+  if (!isKnownDeribitCollateral(c)) {
+    return `<span class="text-slate-500">${bookNativeSymbol(c)}</span>`;
+  }
+  return bookNativeSymbolHtml(c);
 }
 
 function portfolioHasEquity(portfolio) {
@@ -146,7 +157,9 @@ export function dataFreshnessBadgeHtml() {
 }
 
 export function renderDataFreshnessBadge() {
-  const host = document.getElementById("data-freshness-slot");
+  const host =
+    document.getElementById("overview-freshness-slot") ||
+    document.getElementById("data-freshness-slot");
   if (!host) return;
   host.innerHTML = dataFreshnessBadgeHtml();
 }
@@ -172,13 +185,14 @@ export function setRefreshControlsDisabled(disabled) {
 export function aggregateSkeletonHtml() {
   const cell = `<div class="skeleton-block h-16 rounded-lg"></div>`;
   const desktop = `<div class="overview-metrics-grid">${cell.repeat(8)}</div>`;
-  if (!INVESTOR) return desktop;
-  const mobile = `<div class="inv-dashboard">
+  const inner = INVESTOR
+    ? `<div class="investor-view-desktop">${desktop}</div><div class="investor-view-mobile"><div class="inv-dashboard">
       <div class="inv-panel skeleton-block" style="height:5.5rem"></div>
       <div class="inv-panel skeleton-block" style="height:4rem"></div>
       <div class="inv-panel skeleton-block" style="height:7rem"></div>
-    </div>`;
-  return `<div class="investor-view-desktop">${desktop}</div><div class="investor-view-mobile">${mobile}</div>`;
+    </div></div>`
+    : desktop;
+  return `<div class="overview-panel-inner">${inner}<div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
 }
 
 export function overviewMetricsGridHtml(ctx) {
@@ -195,10 +209,12 @@ export function overviewMetricsGridHtml(ctx) {
     sinceLine,
     lifetimePnl,
     lifetimeNativeByBook,
+    lifetimeProfitDisposition,
     closedCount,
     windowLabelDays,
     windowPnl,
     windowNativeByBook,
+    windowProfitDisposition,
     lifetimeApr,
     windowApr,
     equityNativeByBook,
@@ -241,7 +257,8 @@ export function overviewMetricsGridHtml(ctx) {
         <div class="text-xs text-slate-400">${i18n("Total profit (lifetime)", "累計已實現損益")}</div>
         <div class="text-2xl font-mono ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</div>
         <div class="overview-metric-meta">
-          ${summary ? `<div class="overview-metric-line">${fmtLifetimeRealizedNativeBreakdown(lifetimeNativeByBook)}</div>` : ""}
+          ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(lifetimeProfitDisposition?.heldNative ?? lifetimeNativeByBook)}</div>` : ""}
+          ${summary ? fmtProfitSwappedLine(lifetimeProfitDisposition) : ""}
           <div class="overview-metric-line">${summary ? `${closedCount ?? 0} ${i18n("closed groups", "筆已平倉部位")}` : ""}</div>
         </div>
       </div>
@@ -249,7 +266,8 @@ export function overviewMetricsGridHtml(ctx) {
         <div class="text-xs text-slate-400">${rollingWindowProfitLabel(windowLabelDays)}</div>
         <div class="text-2xl font-mono ${pnlClass(windowPnl)}">${summary ? fmtUsd(windowPnl) : "—"}</div>
         <div class="overview-metric-meta">
-          ${summary ? `<div class="overview-metric-line">${fmtLifetimeRealizedNativeBreakdown(windowNativeByBook)}</div>` : ""}
+          ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(windowProfitDisposition?.heldNative ?? windowNativeByBook)}</div>` : ""}
+          ${summary ? fmtProfitSwappedLine(windowProfitDisposition) : ""}
           <div class="overview-metric-line">${summary ? rollingWindowPnlHint(windowLabelDays) : ""}</div>
         </div>
       </div>
@@ -270,12 +288,17 @@ export function overviewMetricsGridHtml(ctx) {
     </div>`;
 }
 
-export function investorNativeChipsHtml(byBook, { pnl = false, places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 } } = {}) {
-  return CORE_BOOKS.map((book) => {
+export function investorNativeChipsHtml(byBook, { pnl = false, places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 }, books = CORE_BOOKS } = {}) {
+  return books
+    .filter((book) => {
+      const n = num(byBook?.[book]);
+      return n !== null && n !== 0;
+    })
+    .map((book) => {
       const n = num(byBook[book]);
       const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
       const tone = pnl ? pnlClass(byBook[book]) : "";
-      return `<span class="inv-chip ${tone}"><span class="inv-chip-sym">${bookNativeSymbol(book)}</span><span class="inv-chip-val font-mono tabular-nums">${text}</span></span>`;
+      return `<span class="inv-chip"><span class="inv-chip-sym">${bookNativeSymbolHtml(book)}</span><span class="inv-chip-val font-mono tabular-nums ${tone}">${text}</span></span>`;
     })
     .join("");
 }
@@ -305,10 +328,12 @@ export function investorOverviewHtml(ctx) {
     sinceLine,
     lifetimePnl,
     lifetimeNativeByBook,
+    lifetimeProfitDisposition,
     closedCount,
     windowLabelDays,
     windowPnl,
     windowNativeByBook,
+    windowProfitDisposition,
     lifetimeApr,
     windowApr,
     equityNativeByBook,
@@ -362,13 +387,19 @@ export function investorOverviewHtml(ctx) {
         <div class="inv-compare-col">
           <span class="inv-compare-tag">${i18n("Lifetime", "存續")}</span>
           <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</span>
-          <div class="inv-chips-row inv-chips-row--compact">${summary ? investorNativeChipsHtml(lifetimeNativeByBook, { pnl: true }) : ""}</div>
+          <div class="inv-profit-detail">
+            ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(lifetimeProfitDisposition?.heldNative ?? lifetimeNativeByBook)}</div>` : ""}
+            ${summary ? fmtProfitSwappedLine(lifetimeProfitDisposition) : ""}
+          </div>
           <span class="inv-kpi-foot">${summary ? `${closedCount ?? 0} ${i18n("closed", "筆平倉")}` : ""}</span>
         </div>
         <div class="inv-compare-col">
           <span class="inv-compare-tag">${i18n("Last", "近")} ${windowLabelDays}${INVESTOR_ZH ? " 日" : "d"}</span>
           <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(windowPnl)}">${summary ? fmtUsd(windowPnl) : "—"}</span>
-          <div class="inv-chips-row inv-chips-row--compact">${summary ? investorNativeChipsHtml(windowNativeByBook, { pnl: true }) : ""}</div>
+          <div class="inv-profit-detail">
+            ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(windowProfitDisposition?.heldNative ?? windowNativeByBook)}</div>` : ""}
+            ${summary ? fmtProfitSwappedLine(windowProfitDisposition) : ""}
+          </div>
           <span class="inv-kpi-foot">${summary ? rollingWindowPnlHint(windowLabelDays) : ""}</span>
         </div>
       </div>
@@ -891,7 +922,15 @@ export function openRowDisplayNativeUnrealizedValue(g, status, groups) {
 export function fmtNum(value, places = 4) {
   const n = num(value);
   if (n === null) return "—";
-  return (places >= 8 ? fmt.num8 : fmt.num4).format(n);
+  if (places >= 8) return fmt.num8.format(n);
+  if (places === 4) return fmt.num4.format(n);
+  if (places === 5) {
+    if (!fmt.num5) {
+      fmt.num5 = new Intl.NumberFormat("en-US", { maximumFractionDigits: 5 });
+    }
+    return fmt.num5.format(n);
+  }
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: places }).format(n);
 }
 
 export function escapeHtml(s) {
@@ -1029,13 +1068,121 @@ export function fmtNativeBookBreakdown(byBook, { places = { BTC: 5, ETH: 4, USDC
     const n = num(byBook[book]);
     const text = n === null ? "—" : fmtNum(n, places[book] ?? 4);
     const cls = pnl ? ` ${pnlClass(byBook[book])}` : "";
-    return `<span class="native-book-item"><span class="native-book-symbol text-slate-500 native-book-symbol--${book.toLowerCase()}">${bookNativeSymbol(book)}</span> <span class="font-mono tabular-nums${cls}">${text}</span></span>`;
+    return `<span class="native-book-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums${cls}">${text}</span></span>`;
   });
   return `<span class="native-book-breakdown">${items.join("")}</span>`;
 }
 
 export function fmtLifetimeRealizedNativeBreakdown(byBook) {
   return fmtNativeBookBreakdown(byBook, { pnl: true });
+}
+
+const PROFIT_HELD_BOOKS = ["BTC", "ETH", "USDC"];
+
+/** Per closed group: held spot profit vs profit-sweep disposition (coin books only). */
+export function profitDispositionForGroup(g, status) {
+  const book = tradeGroupAprBook(g);
+  const native = realizedPnlInAprBookNative(g, status);
+  if (native === null || native === 0) return null;
+  if (book === "USDC") {
+    return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book: "USDC" };
+  }
+  if (book !== "BTC" && book !== "ETH") return null;
+  if (native <= 0) {
+    return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book };
+  }
+  const sweep = String(g?.profit_sweep_status || "").toLowerCase();
+  const sweepAmtRaw = num(g?.profit_sweep_amount);
+  const sweepAmt = sweepAmtRaw !== null && sweepAmtRaw > 0 ? sweepAmtRaw : native;
+  const sweptUsdt = num(g?.profit_sweep_quote_proceeds) ?? 0;
+  const sweptNativeDisplay =
+    sweepAmt !== null && native !== null && native > 0
+      ? Math.min(sweepAmt, native)
+      : sweepAmt;
+  if (sweep === "filled") {
+    return { held: 0, pending: 0, sweptNative: sweptNativeDisplay, sweptUsdt, book };
+  }
+  if (sweep === "pending" || sweep === "submitted") {
+    return {
+      held: Math.max(0, native - sweepAmt),
+      pending: sweepAmt,
+      sweptNative: 0,
+      sweptUsdt: 0,
+      book,
+    };
+  }
+  return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book };
+}
+
+export function emptyProfitDisposition() {
+  return {
+    heldNative: { BTC: 0, ETH: 0, USDC: 0 },
+    pendingSweepNative: { BTC: 0, ETH: 0 },
+    sweptNativeRef: { BTC: 0, ETH: 0 },
+    sweptUsdt: 0,
+  };
+}
+
+export function fmtHeldProfitBreakdown(heldNative) {
+  const places = { BTC: 5, ETH: 4, USDC: 2 };
+  const items = PROFIT_HELD_BOOKS.filter((book) => {
+    const n = num(heldNative?.[book]);
+    return n !== null && n !== 0;
+  }).map((book) => {
+    const n = heldNative[book];
+    const text = fmtNum(n, places[book] ?? 4);
+    const cls = pnlClass(n);
+    return `<span class="native-book-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums ${cls}">${text}</span></span>`;
+  });
+  if (!items.length) {
+    return `<span class="text-slate-500">${i18n("—", "—")}</span>`;
+  }
+  return `<span class="native-book-breakdown">${items.join("")}</span>`;
+}
+
+export function fmtProfitSwappedLine(disposition) {
+  if (!disposition) return "";
+  const { sweptUsdt, sweptNativeRef, pendingSweepNative } = disposition;
+  const places = { BTC: 5, ETH: 4 };
+  const sweptUsdtNum = num(sweptUsdt);
+  const pendingBooks = ["BTC", "ETH"].filter((book) => {
+    const n = num(pendingSweepNative?.[book]);
+    return n !== null && n > 0;
+  });
+  const sweptBooks = ["BTC", "ETH"].filter((book) => {
+    const n = num(sweptNativeRef?.[book]);
+    return n !== null && n > 0;
+  });
+  if ((sweptUsdtNum === null || sweptUsdtNum <= 0) && !pendingBooks.length) return "";
+
+  const nativeLineBooks = pendingBooks.length ? pendingBooks : sweptBooks;
+  const nativeByBook = Object.fromEntries(
+    nativeLineBooks.map((book) => {
+      const raw = pendingBooks.length ? pendingSweepNative[book] : sweptNativeRef[book];
+      return [book, raw];
+    })
+  );
+  const nativeItems = nativeLineBooks
+    .map((book) => {
+      const n = num(nativeByBook[book]);
+      const out = n === null ? null : -Math.abs(n);
+      const text = fmtNum(out, places[book] ?? 4);
+      const cls = out === null ? "" : pnlClass(out);
+      return `<span class="native-book-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums ${cls}">${text}</span></span>`;
+    })
+    .join("");
+  const nativeLine = nativeItems
+    ? `<div class="overview-metric-line profit-swapped-native-line"><span class="native-book-breakdown">${nativeItems}</span></div>`
+    : "";
+
+  const usdtLine =
+    sweptUsdtNum !== null && sweptUsdtNum > 0
+      ? `<div class="overview-metric-line profit-swapped-line"><span class="profit-swapped-label">${i18n("Profit swapped", "獲利已兌")}</span> <span class="native-book-item">${bookNativeSymbolHtml("USDT")} <span class="font-mono tabular-nums pnl-pos">${fmtUsd(sweptUsdtNum)}</span></span></div>`
+      : pendingBooks.length
+      ? `<div class="overview-metric-line profit-swapped-line"><span class="text-slate-500">${i18n("Profit swapped", "獲利已兌")}</span> <span class="font-mono tabular-nums text-amber-200/90">${i18n("pending", "待兌")}</span></div>`
+      : "";
+
+  return `<div class="profit-swapped-block">${usdtLine}${nativeLine}</div>`;
 }
 
 export function fmtBookEquityNativeBreakdown(byBook) {
@@ -1050,7 +1197,7 @@ export function fmtBookEquityDualBreakdown(nativeByBook, usdByBook, _totalEquity
       const usd = num(usdByBook?.[book]);
       const isStable = book === "USDC" || book === "USDT";
       const usdVal = usd ?? native ?? 0;
-      const sym = `<span class="native-book-symbol text-slate-500 native-book-symbol--${book.toLowerCase()}">${bookNativeSymbol(book)}</span>`;
+      const sym = bookNativeSymbolHtml(book);
       const usdStr = fmtUsd(usdVal);
       if (isStable) {
         return `<span class="native-book-item equity-book-item">
@@ -1275,6 +1422,9 @@ const TRADE_GROUP_ENRICH_KEYS = [
   "realized_close_debit",
   "realized_close_fee",
   "entry_fee",
+  "entry_fee_collateral",
+  "close_fee_collateral",
+  "current_close_fee_collateral",
   "entry_credit",
   "collateral_currency",
   "strategy",
@@ -1286,6 +1436,12 @@ const TRADE_GROUP_ENRICH_KEYS = [
   "realized_pnl",
   "contract_size",
   "short_strike",
+  "profit_sweep_status",
+  "profit_sweep_amount",
+  "profit_sweep_instrument_name",
+  "profit_sweep_order_id",
+  "profit_sweep_quote_proceeds",
+  "profit_sweep_reason",
 ];
 
 export function hasTradeGroupValue(v) {
@@ -1587,51 +1743,169 @@ export function collateralBookSpotUsd(g, status) {
   );
 }
 
+const DEFAULT_OPTION_FEE_RATE = 0.0003;
+const DEFAULT_OPTION_FEE_CAP_RATE = 0.125;
+
+/** Deribit inverse options: min(fee_rate, fee_cap_rate × premium) per contract (coin). */
+export function inverseOptionFeeNativePerContract(
+  premium,
+  feeRate = DEFAULT_OPTION_FEE_RATE,
+  feeCapRate = DEFAULT_OPTION_FEE_CAP_RATE,
+) {
+  const p = num(premium);
+  if (p === null || p <= 0) return null;
+  return Math.min(feeRate, feeCapRate * p);
+}
+
+/** Entry fee in collateral coin; prefers stored native fee over USDC round-trip. */
+export function coinCollateralEntryFeeNative(g) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return null;
+  const stored = num(g?.entry_fee_collateral);
+  if (stored !== null && stored > 0) return stored;
+  const prem = num(g?.short_entry_average_price);
+  const longPrem = num(g?.long_entry_average_price);
+  const qty = num(g?.quantity);
+  if (prem === null || prem <= 0 || qty === null || qty <= 0) return null;
+  let fee = (inverseOptionFeeNativePerContract(prem) ?? 0) * qty;
+  if (longPrem !== null && longPrem > 0 && g?.long_instrument_name) {
+    fee += (inverseOptionFeeNativePerContract(longPrem) ?? 0) * qty;
+  }
+  return fee > 0 ? fee : null;
+}
+
+/** Gross entry premium in collateral coin (short − long for spreads). */
+export function coinCollateralGrossPremiumNative(g) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return null;
+  const prem = num(g?.short_entry_average_price);
+  const longPrem = num(g?.long_entry_average_price);
+  const qty = num(g?.quantity);
+  if (prem === null || prem <= 0 || qty === null || qty <= 0) return null;
+  let gross = prem * qty;
+  if (longPrem !== null && longPrem > 0 && g?.long_instrument_name) {
+    gross -= longPrem * qty;
+  }
+  return gross;
+}
+
+/** Net entry credit in collateral coin (gross premium − native fee). */
+export function coinCollateralNetEntryCreditNative(g) {
+  const gross = coinCollateralGrossPremiumNative(g);
+  const fee = coinCollateralEntryFeeNative(g);
+  if (gross === null || fee === null) return null;
+  return gross - fee;
+}
+
+/** Close fee in collateral coin; prefers stored native fee over USDC round-trip. */
+export function coinCollateralCloseFeeNative(g, status) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return null;
+  const stored = num(g?.close_fee_collateral);
+  if (stored !== null && stored > 0) return stored;
+  const openEst = num(g?.current_close_fee_collateral);
+  if (openEst !== null && openEst > 0 && !isClosedTradeGroup(g)) return openEst;
+  const prem = num(g?.short_close_average_price) ?? closedRowLegExitPremium(g, "short");
+  const longPrem = num(g?.long_close_average_price) ?? closedRowLegExitPremium(g, "long");
+  const qty = num(g?.quantity);
+  if (prem === null || prem <= 0 || qty === null || qty <= 0) return null;
+  let fee = (inverseOptionFeeNativePerContract(prem) ?? 0) * qty;
+  if (longPrem !== null && longPrem > 0 && g?.long_instrument_name) {
+    fee += (inverseOptionFeeNativePerContract(longPrem) ?? 0) * qty;
+  }
+  return fee > 0 ? fee : null;
+}
+
+/** Gross exit premium in collateral coin (buy-back short − sell long for spreads). */
+export function coinCollateralGrossExitPremiumNative(g) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return null;
+  const prem = num(g?.short_close_average_price) ?? closedRowLegExitPremium(g, "short");
+  const longPrem = num(g?.long_close_average_price) ?? closedRowLegExitPremium(g, "long");
+  const qty = num(g?.quantity);
+  if (prem === null || prem <= 0 || qty === null || qty <= 0) return null;
+  let gross = prem * qty;
+  if (longPrem !== null && longPrem > 0 && g?.long_instrument_name) {
+    gross -= longPrem * qty;
+  }
+  return gross;
+}
+
+/** All-in close debit in collateral coin (exit premium + close fee). */
+export function coinCollateralCloseDebitNative(g, status) {
+  const gross = coinCollateralGrossExitPremiumNative(g);
+  const fee = coinCollateralCloseFeeNative(g, status);
+  if (gross === null || fee === null) return null;
+  return gross + fee;
+}
+
 /** 逆線期權：幣本位已實現損益 = entry_amount − exit_amount − fee（ETH/BTC）。 */
 export function realizedPnlCoinNative(g, status) {
-  const stored = num(g?.realized_pnl_collateral_native);
-  if (stored !== null) return stored;
   const book = tradeGroupAprBook(g);
   if (book === "USDC") return num(g?.realized_pnl);
   const qty = num(g?.quantity);
   if (qty === null || qty <= 0) return null;
   let idxEntry = num(g?.entry_index_usd);
   let idxClose = num(g?.close_index_usd) ?? idxEntry;
-  const entryFee = num(g?.entry_fee) ?? 0;
-  const closeFee = num(g?.realized_close_fee) ?? 0;
   let entryAmount = null;
   let exitAmount = null;
   const entryPx = num(g?.short_entry_average_price);
-  const closePx = num(g?.short_close_average_price);
+  let closePx = num(g?.short_close_average_price) ?? closedRowLegExitPremium(g, "short");
   const entryCredit = num(g?.entry_credit);
-  let closeDebit = num(g?.realized_close_debit);
   if (entryPx !== null && entryPx > 0) {
     entryAmount = entryPx * qty;
+    const longPrem = num(g?.long_entry_average_price);
+    if (longPrem !== null && longPrem > 0 && g?.long_instrument_name) {
+      entryAmount -= longPrem * qty;
+    }
+    const entryFee = num(g?.entry_fee) ?? 0;
     if ((idxEntry === null || idxEntry <= 0) && entryCredit !== null) {
       idxEntry = (entryCredit + entryFee) / (entryPx * qty);
     }
   } else if (entryCredit !== null && idxEntry !== null && idxEntry > 0) {
+    const entryFee = num(g?.entry_fee) ?? 0;
     entryAmount = (entryCredit + entryFee) / idxEntry;
   }
   if (closePx !== null && closePx > 0) {
     exitAmount = closePx * qty;
-    if ((idxClose === null || idxClose <= 0) && closeDebit !== null) {
-      idxClose = Math.max(0, closeDebit - closeFee) / (closePx * qty);
+    const longClosePrem = num(g?.long_close_average_price) ?? closedRowLegExitPremium(g, "long");
+    if (longClosePrem !== null && longClosePrem > 0 && g?.long_instrument_name) {
+      exitAmount -= longClosePrem * qty;
     }
-  } else if (closeDebit !== null && idxClose !== null && idxClose > 0) {
-    exitAmount = Math.max(0, closeDebit - closeFee) / idxClose;
+    const closeDebit = num(g?.realized_close_debit);
+    const closeFeeUsd = num(g?.realized_close_fee) ?? 0;
+    if ((idxClose === null || idxClose <= 0) && closeDebit !== null) {
+      idxClose = Math.max(0, closeDebit - closeFeeUsd) / (closePx * qty);
+    }
+  } else {
+    exitAmount = coinCollateralGrossExitPremiumNative(g);
   }
-  if (entryAmount === null || exitAmount === null) return null;
-  let fees = 0;
-  if (entryFee > 0) {
-    if (idxEntry === null || idxEntry <= 0) return null;
-    fees += entryFee / idxEntry;
+  if (exitAmount === null) {
+    const closeDebit = num(g?.realized_close_debit);
+    if (closeDebit !== null && idxClose !== null && idxClose > 0) {
+      const closeFeeUsd = num(g?.realized_close_fee) ?? 0;
+      exitAmount = Math.max(0, closeDebit - closeFeeUsd) / idxClose;
+    }
   }
-  if (closeFee > 0) {
-    if (idxClose === null || idxClose <= 0) return null;
-    fees += closeFee / idxClose;
+  if (entryAmount !== null && exitAmount !== null) {
+    let fees = coinCollateralEntryFeeNative(g);
+    const closeFeeNative = coinCollateralCloseFeeNative(g, status);
+    if (closeFeeNative !== null) {
+      fees = (fees ?? 0) + closeFeeNative;
+    } else {
+      const closeFee = num(g?.realized_close_fee) ?? 0;
+      if (closeFee > 0) {
+        if (idxClose === null || idxClose <= 0) return null;
+        fees = (fees ?? 0) + closeFee / idxClose;
+      }
+    }
+    if (fees !== null) {
+      return entryAmount - exitAmount - fees;
+    }
   }
-  return entryAmount - exitAmount - fees;
+  const stored = num(g?.realized_pnl_collateral_native);
+  if (stored !== null) return stored;
+  return null;
 }
 
 export function isInverseCoinBookGroup(g) {
@@ -1639,31 +1913,41 @@ export function isInverseCoinBookGroup(g) {
   return book === "BTC" || book === "ETH";
 }
 
-/** 逆線：USDC 標記 = 幣本位 × 現價（不用平倉指數）；USDC 帳本直接用 stored USDC。 */
+/** 逆線：USDC 標記 = 幣本位 × 現價（不用平倉指數）；USDC 帳本直接用 stored USDC。
+ *  幣本位獲利若已 swap 成 USDT，以實際兌換所得計（不再用現價重估已賣現貨）。 */
 export function realizedPnlDisplayUsdc(g, status) {
   const book = tradeGroupAprBook(g);
   if (book === "USDC") return num(g?.realized_pnl);
-  const native = realizedPnlCoinNative(g, status);
   const spot = collateralBookSpotUsd(g, status);
+  const disp = profitDispositionForGroup(g, status);
+  if (disp) {
+    const sweptUsdt = num(disp.sweptUsdt) ?? 0;
+    if (sweptUsdt > 0) {
+      const held = num(disp.held) ?? 0;
+      if (held > 0 && spot !== null && spot > 0) {
+        return sweptUsdt + held * spot;
+      }
+      return sweptUsdt;
+    }
+    const held = num(disp.held) ?? 0;
+    const pending = num(disp.pending) ?? 0;
+    const totalNative = held + pending;
+    if (totalNative !== 0 && spot !== null && spot > 0) {
+      return totalNative * spot;
+    }
+  }
+  const native = realizedPnlCoinNative(g, status);
   if (native !== null && spot !== null && spot > 0) return native * spot;
   return null;
 }
 
-/** 已實現損益換成 APR 帳本原生單位（優先幣本位，legacy 才 ÷ 指數）。 */
+/** 已實現損益換成 APR 帳本原生單位（幣本位：premium−fee，不用 USDC÷指數 回推）。 */
 export function realizedPnlInAprBookNative(g, status) {
   const book = tradeGroupAprBook(g);
   if (book === "USDC") return num(g?.realized_pnl);
-  const native = realizedPnlCoinNative(g, status);
-  if (native !== null) return native;
-  const pnlUsd = num(g?.realized_pnl);
-  if (pnlUsd === null) return null;
-  const idx =
-    num(g?.close_index_usd) ??
-    num(status?.underlying_index_usd?.[book]) ??
-    num(STATE.groups?.underlying_index_usd?.[book]) ??
-    num(STATE.lastSpotUsd?.[book]);
-  if (idx === null || idx <= 0) return null;
-  return pnlUsd / idx;
+  const stored = num(g?.realized_pnl_collateral_native);
+  if (stored !== null) return stored;
+  return realizedPnlCoinNative(g, status);
 }
 
 /** APR 分母：每張合約名目（與 trade_apr.opened_contract_amount_per_contract 一致）。 */
@@ -1861,10 +2145,14 @@ export function activityAmountDisplay(g, status, groups = null) {
 }
 
 export function groupEntryNetCreditAtOpen(g, status) {
+  const book = tradeGroupAprBook(g);
+  if (book !== "USDC") {
+    const native = coinCollateralNetEntryCreditNative(g);
+    if (native !== null) return native;
+  }
   const credit = num(g?.entry_credit);
   if (credit === null) return null;
   const fee = num(g?.entry_fee) ?? 0;
-  const book = tradeGroupAprBook(g);
   const prem = num(g?.short_entry_average_price);
   const qty = num(g?.quantity);
   const idx = entryIndexUsdForGroup(g, status);
@@ -1902,6 +2190,10 @@ export function groupEntryFeeUsd(g) {
 }
 
 export function groupEntryFeeNative(g, status) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return null;
+  const native = coinCollateralEntryFeeNative(g);
+  if (native !== null) return native;
   return nativeFromUsdAtIndex(groupEntryFeeUsd(g), entryIndexUsdForGroup(g, status));
 }
 
@@ -1912,6 +2204,10 @@ export function groupCloseFeeUsd(g) {
 }
 
 export function groupCloseFeeNative(g, status) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return null;
+  const native = coinCollateralCloseFeeNative(g, status);
+  if (native !== null) return native;
   const openEst = num(g?.current_close_fee);
   const index = openEst !== null && openEst > 0 ? collateralBookSpotUsd(g, status) : closeIndexUsdForGroup(g, status);
   return nativeFromUsdAtIndex(groupCloseFeeUsd(g), index);
@@ -1922,6 +2218,10 @@ export function groupEntryCreditUsd(g, status, groups) {
 }
 
 export function groupEntryCreditNative(g, status) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return num(g?.entry_credit);
+  const native = coinCollateralNetEntryCreditNative(g);
+  if (native !== null) return native;
   return nativeFromUsdAtIndex(num(g?.entry_credit), entryIndexUsdForGroup(g, status));
 }
 
@@ -1951,20 +2251,39 @@ export function activityOpenRows(status, groups) {
 export function profitSweepMetaLine(g) {
   const status = String(g?.profit_sweep_status || "").toLowerCase();
   if (!status) return null;
+  const inst = String(g?.profit_sweep_instrument_name || "");
+  const base = inst.split("_")[0] || String(g?.currency || "").toUpperCase() || "—";
+  const amt = g?.profit_sweep_amount;
+  const amtDisplay = amt !== undefined && amt !== null && amt !== "" ? String(amt) : "—";
   if (status === "filled") {
-    const inst = String(g?.profit_sweep_instrument_name || "");
-    const base = inst.split("_")[0] || String(g?.currency || "").toUpperCase() || "—";
-    const amt = g?.profit_sweep_amount;
-    const amtDisplay = amt !== undefined && amt !== null && amt !== "" ? String(amt) : "—";
+    const quoteRaw = g?.profit_sweep_quote_proceeds;
+    const quoteNum = quoteRaw !== undefined && quoteRaw !== null && quoteRaw !== "" ? Number(quoteRaw) : NaN;
+    const quoteDisplay = Number.isFinite(quoteNum) && quoteNum > 0 ? fmtNum(quoteNum, 2) : null;
     return [
-      i18n("Profit sweep", "獲利兌 USDT"),
-      `${amtDisplay} ${base} → USDT`,
+      i18n("Profit swapped", "獲利已兌"),
+      quoteDisplay
+        ? `${amtDisplay} ${base} → ${quoteDisplay} USDT`
+        : `${amtDisplay} ${base} → USDT`,
+    ];
+  }
+  if (status === "pending" || status === "submitted") {
+    return [
+      i18n("Profit swapped", "獲利已兌"),
+      amtDisplay !== "—"
+        ? `${amtDisplay} ${base} → USDT (${i18n("pending", "待兌")})`
+        : i18n("pending", "待兌"),
     ];
   }
   if (status === "skipped") {
     return [
       i18n("Profit sweep", "獲利兌 USDT"),
       i18n("below min size, skipped", "低於最小成交單位，未兌換"),
+    ];
+  }
+  if (status === "failed") {
+    return [
+      i18n("Profit sweep", "獲利兌 USDT"),
+      i18n("failed", "兌換失敗"),
     ];
   }
   return null;
@@ -2142,6 +2461,10 @@ export function activityLifecycleCardHtml(g, status, groups) {
     isBullPutClosed && longInst
       ? `${escapeHtml(g.short_instrument_name || "")}<br>${escapeHtml(longInst)}`
       : escapeHtml(g.short_instrument_name || "");
+  const groupId = String(g?.group_id || "").trim();
+  const groupIdSuffix = groupId
+    ? `<span class="activity-card-group-id" title="group_id"> · #${escapeHtml(groupId)}</span>`
+    : "";
   return `
     <li class="activity-card">
       <div class="activity-card-head">
@@ -2150,7 +2473,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
         <span class="text-[11px] text-slate-500">${escapeHtml(book)}</span>
         ${acct ? `<span class="text-[11px] text-slate-500">${escapeHtml(acct)}</span>` : ""}
       </div>
-      <div class="activity-card-instrument">${instrumentBlock}</div>
+      <div class="activity-card-instrument">${instrumentBlock}${groupIdSuffix}</div>
       <div class="activity-lifecycle">
         <div class="activity-phase activity-phase-entry">
           <div class="activity-phase-label">${i18n("Entry", "進場")}</div>

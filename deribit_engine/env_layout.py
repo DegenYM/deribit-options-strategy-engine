@@ -3,7 +3,8 @@
 Layout (canonical)::
 
     config/shared/.env.defaults         # optional shared fallbacks
-    config/shared/strategies/.env.<strategy>  # strategy tuning (no secrets)
+    config/shared/strategies/.env.<strategy>  # strategy identity (markets, collaterals, side)
+    config/shared/strategies/tiers/<strategy>/.env.<tier>  # low | medium | high risk tuning
     config/investors/<id>/accounts.toml  # manifest (investor id + ≤ few sub-accounts)
     config/investors/<id>/accounts/.env.<slug>  # sub-account credentials + sizing + optional overrides
 
@@ -51,13 +52,35 @@ def _warn_legacy_strategy_profile(profile: Path, repo_root: Path | None) -> None
 
 CONFIG_SHARED = Path("config/shared")
 CONFIG_STRATEGIES = CONFIG_SHARED / "strategies"
+CONFIG_STRATEGY_TIERS = CONFIG_STRATEGIES / "tiers"
 CONFIG_INVESTORS = Path("config/investors")
 ACCOUNTS_MANIFEST = "accounts.toml"
+RISK_TIER_MEDIUM = "medium"
+KNOWN_RISK_TIERS = frozenset({"low", RISK_TIER_MEDIUM, "high"})
 EXAMPLE_INVESTOR_ID = "_example"
 FEE_ACCOUNT_SLUG = "fee"
 MAIN_ACCOUNT_SLUG = "main"
 ACCOUNT_ROLE_FEE = "fee"
 ACCOUNT_ROLE_MAIN = "main"
+
+
+def normalize_risk_tier(raw: str | None, *, default: str = RISK_TIER_MEDIUM) -> str:
+    """Return ``low`` | ``medium`` | ``high`` (default ``medium``)."""
+    tier = (raw or default).strip().lower()
+    if tier not in KNOWN_RISK_TIERS:
+        known = ", ".join(sorted(KNOWN_RISK_TIERS))
+        raise ConfigurationError(f"Unknown risk tier {tier!r}; known: {known}")
+    return tier
+
+
+def risk_tier_profile_path(
+    repo_root: Path,
+    base_strategy: str,
+    risk_tier: str,
+) -> Path:
+    """Path to tier env: ``config/shared/strategies/tiers/<strategy>/.env.<tier>``."""
+    tier = normalize_risk_tier(risk_tier)
+    return (Path(repo_root).resolve() / CONFIG_STRATEGY_TIERS / base_strategy / f".env.{tier}").resolve()
 
 
 @dataclass(frozen=True)
@@ -68,6 +91,7 @@ class InvestorAccountSpec:
     enabled: bool = True
     live_enabled: bool = True
     display_name: str | None = None
+    risk_tier: str = RISK_TIER_MEDIUM
 
 
 @dataclass(frozen=True)
@@ -327,6 +351,7 @@ def load_investor_manifest(
         enabled = bool(row.get("enabled", True))
         live_enabled = bool(row.get("live_enabled", True))
         account_display = row.get("display_name")
+        risk_tier = normalize_risk_tier(row.get("risk_tier"))
         accounts.append(
             InvestorAccountSpec(
                 slug=slug,
@@ -335,6 +360,7 @@ def load_investor_manifest(
                 enabled=enabled,
                 live_enabled=live_enabled,
                 display_name=str(account_display).strip() if account_display else None,
+                risk_tier=risk_tier,
             )
         )
 
@@ -371,17 +397,22 @@ def strategy_profile_search_paths(
     return tuple(paths)
 
 
-def _read_account_role(account_env: Path) -> str:
+def _read_env_key(account_env: Path, key: str) -> str:
     if not account_env.is_file():
         return ""
+    target = key.strip()
     for line in account_env.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
-        key, value = stripped.split("=", 1)
-        if key.strip() == "ACCOUNT_ROLE":
-            return value.strip().lower()
+        row_key, value = stripped.split("=", 1)
+        if row_key.strip() == target:
+            return value.strip()
     return ""
+
+
+def _read_account_role(account_env: Path) -> str:
+    return _read_env_key(account_env, "ACCOUNT_ROLE").lower()
 
 
 def _is_fee_account_env_file(account_env: Path) -> bool:
@@ -470,10 +501,18 @@ def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
     )
     if profile is not None:
         _warn_legacy_strategy_profile(profile, root)
+    risk_tier = normalize_risk_tier(_read_env_key(account_env, "RISK_TIER"))
+    tier_profile: Path | None = None
+    if root is not None:
+        candidate = risk_tier_profile_path(root, base_strategy, risk_tier)
+        if candidate.is_file():
+            tier_profile = candidate
     sub_account_layout = investor_dir is not None
     if sub_account_layout:
         if profile is not None:
             layers.append(profile)
+        if tier_profile is not None:
+            layers.append(tier_profile)
         if account_env.is_file():
             layers.append(account_env)
     else:
@@ -481,4 +520,6 @@ def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
             layers.append(account_env)
         if profile is not None:
             layers.append(profile)
+        if tier_profile is not None:
+            layers.append(tier_profile)
     return tuple(layers)

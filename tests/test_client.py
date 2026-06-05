@@ -10,15 +10,17 @@ from deribit_engine.exceptions import ExchangeError, TransientExchangeError
 
 @pytest.fixture(autouse=True)
 def _disable_exchange_throttle(monkeypatch):
-    from deribit_engine.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
+    from deribit_engine.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE, reset_public_read_cache
 
     with _AUTH_CACHE_LOCK:
         _AUTH_TOKEN_CACHE.clear()
+    reset_public_read_cache()
     monkeypatch.setattr("deribit_engine.client.pace_exchange_request", lambda identity=None: None)
     monkeypatch.setenv("DERIBIT_MIN_REQUEST_INTERVAL_SEC", "0")
     yield
     with _AUTH_CACHE_LOCK:
         _AUTH_TOKEN_CACHE.clear()
+    reset_public_read_cache()
 
 
 class FakeResponse:
@@ -564,6 +566,61 @@ def test_get_instruments_uses_process_cache(tmp_path, monkeypatch):
     assert second == rows
     instrument_calls = [c for c in session.calls if c["json"]["method"] == "public/get_instruments"]
     assert len(instrument_calls) == 1
+
+
+def test_get_index_price_uses_short_ttl_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("DERIBIT_INDEX_PRICE_CACHE_TTL_SEC", "30")
+    session = FakeSession(
+        [
+            FakeResponse(_ok_body({"index_price": 70000})),
+            FakeResponse(_ok_body({"index_price": 71000})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    first = client.get_index_price("btc_usd")
+    second = client.get_index_price("btc_usd")
+
+    assert first == {"index_price": 70000}
+    assert second == {"index_price": 70000}
+    price_calls = [c for c in session.calls if c["json"]["method"] == "public/get_index_price"]
+    assert len(price_calls) == 1
+
+
+def test_get_index_price_cache_disabled_with_zero_ttl(tmp_path, monkeypatch):
+    monkeypatch.setenv("DERIBIT_INDEX_PRICE_CACHE_TTL_SEC", "0")
+    session = FakeSession(
+        [
+            FakeResponse(_ok_body({"index_price": 70000})),
+            FakeResponse(_ok_body({"index_price": 71000})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    assert client.get_index_price("btc_usd") == {"index_price": 70000}
+    assert client.get_index_price("btc_usd") == {"index_price": 71000}
+    price_calls = [c for c in session.calls if c["json"]["method"] == "public/get_index_price"]
+    assert len(price_calls) == 2
+
+
+def test_get_volatility_index_data_buckets_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("DERIBIT_MACRO_CACHE_TTL_SEC", "60")
+    session = FakeSession(
+        [
+            FakeResponse(_ok_body({"data": [[1, 2, 3, 4, 5]]})),
+            FakeResponse(_ok_body({"data": [[9, 9, 9, 9, 9]]})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    # Two near-simultaneous calls with timestamps a few ms apart fall in the same
+    # 60s bucket and must hit the cache once.
+    a = client.get_volatility_index_data("BTC", start_timestamp=1_000_000, end_timestamp=2_000_000)
+    b = client.get_volatility_index_data("BTC", start_timestamp=1_000_010, end_timestamp=2_000_010)
+
+    assert a == b == {"data": [[1, 2, 3, 4, 5]]}
+    dvol_calls = [c for c in session.calls if c["json"]["method"] == "public/get_volatility_index_data"]
+    assert len(dvol_calls) == 1
 
 
 def test_get_subaccounts_jsonrpc_params(tmp_path):

@@ -239,6 +239,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="With --investor: backfill every enabled account in accounts.toml",
     )
     backfill_parser.add_argument(
+        "--all-investors",
+        action="store_true",
+        help="Backfill every investor under config/investors/ (implies --all-accounts)",
+    )
+    backfill_parser.add_argument(
         "--no-api",
         action="store_true",
         help="Skip Deribit get_user_trades (state-only synthetic rows)",
@@ -273,7 +278,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _dispatch_backfill(args: argparse.Namespace) -> int:
-    from ..trade_journal_backfill import backfill_account, backfill_investor
+    from ..trade_journal_backfill import backfill_account, backfill_all_investors, backfill_investor
 
     kwargs = {
         "use_api": not args.no_api,
@@ -283,6 +288,13 @@ def _dispatch_backfill(args: argparse.Namespace) -> int:
         "start_timestamp_ms": args.start_timestamp_ms,
         "skip_state_if_group_has_journal": not args.force_state,
     }
+    if getattr(args, "all_investors", False):
+        summaries = backfill_all_investors(**kwargs)
+        render(
+            {"action": "backfill-trade-journal", "investors": "all", "accounts": [s.to_dict() for s in summaries]},
+            args.json,
+        )
+        return 0
     if args.investor and (args.all_accounts or not args.account):
         summaries = backfill_investor(args.investor, **kwargs)
         render(

@@ -118,6 +118,8 @@ class EquitySnapshotScheduler:
                 "delta_totals_by_currency": {k: str(v) for k, v in snapshot.delta_totals_by_currency.items()},
                 "regime_by_currency": {k: v.value for k, v in snapshot.regime_by_currency.items()},
                 "halt_new_entries": snapshot.halt_new_entries,
+                "halt_new_entries_by_currency": dict(snapshot.halt_new_entries_by_currency),
+                "portfolio_wide_entry_halt": snapshot.portfolio_wide_entry_halt,
                 "hard_derisk": snapshot.hard_derisk,
             }
             _append_ledger(self._ledger_root, row)

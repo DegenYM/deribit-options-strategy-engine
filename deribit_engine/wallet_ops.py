@@ -26,6 +26,38 @@ DEFAULT_FEE_SUBACCOUNT_NAME = "fee_acc"
 SPOT_BASE_CURRENCIES = frozenset({"BTC", "ETH"})
 SPOT_QUOTE_CURRENCIES = frozenset({"USDC", "USDT", "USDE"})
 TRANSFER_CURRENCIES = frozenset({"BTC", "ETH", "USDC", "USDT", "USDE"})
+_STABLE_QUOTE_CURRENCIES = frozenset({"USDC", "USDT", "USDE"})
+
+
+def spot_sell_quote_proceeds_from_trades(
+    trades: list[dict[str, Any]],
+    *,
+    quote_currency: str = "USDT",
+) -> Decimal:
+    """Net quote received from spot sell fills (gross notional minus fees in quote terms)."""
+    quote = quote_currency.upper()
+    total = Decimal("0")
+    for trade in trades:
+        direction = str(trade.get("direction") or "sell").lower()
+        if direction != "sell":
+            continue
+        amount = to_decimal(trade.get("amount"))
+        price = to_decimal(trade.get("price"))
+        if amount <= 0 or price <= 0:
+            continue
+        proceeds = amount * price
+        fee = to_decimal(trade.get("fee"))
+        if fee > 0:
+            fee_ccy = str(trade.get("fee_currency") or quote).upper()
+            if fee_ccy in _STABLE_QUOTE_CURRENCIES:
+                proceeds -= fee
+            elif fee_ccy in SPOT_BASE_CURRENCIES:
+                proceeds -= fee * price
+            else:
+                idx = to_decimal(trade.get("index_price"))
+                proceeds -= fee * idx if idx > 0 else fee * price
+        total += proceeds
+    return max(total, Decimal("0"))
 
 
 @dataclass(frozen=True)

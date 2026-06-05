@@ -12,7 +12,6 @@ from ..models import (
 )
 from ..utils import (
     format_decimal,
-    utc_now_ms,
 )
 from .context import (
     _MAX_SCAN_REJECTION_EXAMPLE_LOG_LINES,
@@ -210,7 +209,7 @@ class ScannerMixin:
     ) -> list[str]:
         blockers: list[str] = []
         snap = context.snapshot
-        if snap.halt_new_entries:
+        if snap.portfolio_wide_entry_halt:
             blockers.extend(list(snap.halt_entry_reasons))
             return blockers
         active_strategies = self._active_scan_strategy_keys()
@@ -246,9 +245,15 @@ class ScannerMixin:
         if not include_scan_diagnostics:
             blockers: list[str] = []
             snap = context.snapshot
-            if snap.halt_new_entries:
+            if snap.portfolio_wide_entry_halt:
                 return list(snap.halt_entry_reasons)
             for currency in selected_currencies:
+                if snap.halt_new_entries_by_currency.get(currency.upper(), False):
+                    regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
+                    detail = snap.regime_detail_by_currency.get(currency, ())
+                    if regime is not RiskRegime.NORMAL:
+                        blockers.append(f"{currency}: regime={regime.value} — {'; '.join(detail)}")
+                    continue
                 regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
                 if regime is RiskRegime.CRISIS:
                     detail = snap.regime_detail_by_currency.get(currency, ())
@@ -619,13 +624,8 @@ class ScannerMixin:
         # every enabled book halted) still short-circuit the scan. Per-book
         # halts are handled inside the per-currency loop so one halted book
         # can't silently sink the others.
-        global_blockers = (
-            bool(snapshot.cooldown_until_ms and snapshot.cooldown_until_ms > utc_now_ms())
-            or snapshot.open_max_loss_pct >= self.config.halt_open_max_loss_pct
-            or any(
-                any(note.startswith("data_unavailable") for note in notes)
-                for notes in snapshot.regime_detail_by_currency.values()
-            )
+        global_blockers = snapshot.portfolio_wide_entry_halt or (
+            snapshot.open_max_loss_pct >= self.config.halt_open_max_loss_pct
         )
         if global_blockers:
             return []
@@ -657,7 +657,10 @@ class ScannerMixin:
                 if self._strategy_at_currency_limit(context.state, "covered_call", currency):
                     continue
             regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
-            if regime is RiskRegime.CRISIS:
+            if regime is not RiskRegime.NORMAL:
+                continue
+            currency_detail = snapshot.regime_detail_by_currency.get(currency, ())
+            if any(note.startswith("data_unavailable") for note in currency_detail):
                 continue
             index_price = self._currency_index_price(currency, orderbook_cache)
             markets_by_collateral: dict[str, list[OptionInstrument]] = {}
@@ -665,6 +668,9 @@ class ScannerMixin:
                 coll = "USDC" if self._linear_usdc_mode() else (market.settlement_currency or currency)
                 markets_by_collateral.setdefault(coll, []).append(market)
             for collateral_ccy, collateral_markets in sorted(markets_by_collateral.items()):
+                # ETH-USDC / BTC-USDC: underlying regime gates entry before book IM/drawdown.
+                if self._underlying_entry_halted(context, currency):
+                    continue
                 # Skip candidates routed to a book that is currently halted
                 # (drawdown, cooldown, or hard IM/MM breach) while still
                 # evaluating other books for the same underlying.

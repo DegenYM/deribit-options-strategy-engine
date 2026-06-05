@@ -11,10 +11,26 @@ cd deribit-options-strategy-engine
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-cp .env.example .env
 ```
 
 僅部署 bot / frontend 時可只裝 `pip install -r requirements.txt`。
+
+## 建立投資人設定
+
+設定放在 `config/investors/<id>/`，子帳憑證在 `accounts/.env.<slug>`（見 [`config/investors/_example/`](../config/investors/_example/)）。**不要**再用 repo 根目錄單一 `.env`。
+
+```bash
+# 手動複製範本，或使用 CLI：
+# ./bot investor init youming --strategies naked,bull_put_spread
+cp -R config/investors/_example config/investors/youming
+
+# 依 accounts/.env.<slug>.example 建立子帳 env 並填入 API key
+cp config/investors/youming/accounts/.env.naked.example \
+   config/investors/youming/accounts/.env.naked
+# 編輯 .env.naked：DERIBIT_CLIENT_ID、DERIBIT_CLIENT_SECRET 等
+
+export INVESTOR=youming
+```
 
 ## 開發：測試與 lint
 
@@ -26,27 +42,29 @@ ruff format --check deribit_engine tests scripts
 
 ## 最小設定
 
-至少要設定：
+每個子帳 `accounts/.env.<slug>` 至少要設定：
 
-- `DERIBIT_ENV=testnet` 或 `mainnet`
+- `DERIBIT_ENV=mainnet`
 - `DERIBIT_CLIENT_ID`
 - `DERIBIT_CLIENT_SECRET`
 - `OPTION_STRATEGY`：`naked_short`、`bull_put_spread` 或 `covered_call`
 - `ENABLE_PERP_HEDGE=false`（預設即關閉）
 
-其餘參數見 [`.env.example`](../.env.example) 與 [設定與環境變數](configuration-zh-TW.md)。
+投資人層級費率等可選設定見 `config/investors/<id>/.env.investor`；共用 fallback 見 `config/shared/.env.defaults`。其餘參數見 [設定與環境變數](configuration-zh-TW.md)。
 
 ## 第一次執行
 
 ```bash
+export INVESTOR=youming
+
 # 連線測試（可不帶私有憑證）
-./bot ping
+./bot --investor $INVESTOR --account naked ping
 
 # 掃描候選（dry-run，預設行為）
-./bot scan --currencies BTC,ETH --json
+./bot --investor $INVESTOR --account naked scan --currencies BTC,ETH --json
 ```
 
-使用投資人子帳 layout 時，見 [CLI 指令](cli-zh-TW.md)。
+更多子命令見 [CLI 指令](cli-zh-TW.md)。
 
 ## 測試
 

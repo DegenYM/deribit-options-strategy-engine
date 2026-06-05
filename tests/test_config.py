@@ -12,7 +12,7 @@ def test_load_config_parses_strategy_fields(tmp_path: Path):
     env_file.write_text(
         "\n".join(
             [
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "MANAGED_CURRENCIES=btc,eth",
                 "TOP_N=3",
                 "REFERENCE_CAPITAL_USDC=1500",
@@ -29,7 +29,7 @@ def test_load_config_parses_strategy_fields(tmp_path: Path):
 
     config = load_config(env_file, require_private=False)
 
-    assert config.env == "testnet"
+    assert config.env == "mainnet"
     assert config.managed_currencies == ("BTC", "ETH")
     assert config.top_n == 3
     assert str(config.reference_capital_usdc) == "1500"
@@ -52,7 +52,7 @@ def test_regime_entry_option_sides_by_strategy(tmp_path: Path):
     covered.write_text(
         "\n".join(
             [
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "OPTION_STRATEGY=covered_call",
                 "SHORT_OPTION_SIDE=call",
             ]
@@ -62,7 +62,7 @@ def test_regime_entry_option_sides_by_strategy(tmp_path: Path):
     naked_call.write_text(
         "\n".join(
             [
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "OPTION_STRATEGY=naked_short",
                 "SHORT_OPTION_SIDE=call",
             ]
@@ -72,7 +72,7 @@ def test_regime_entry_option_sides_by_strategy(tmp_path: Path):
     naked_both.write_text(
         "\n".join(
             [
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "OPTION_STRATEGY=naked_short",
                 "SHORT_OPTION_SIDE=both",
             ]
@@ -107,6 +107,27 @@ def test_load_config_parses_currency_specific_min_open_interest(tmp_path: Path):
     assert config.liquidity_gates("linear", "ETH")[0] == Decimal("5")
     assert config.liquidity_gates("reversed", "SOL")[0] == Decimal("20")
     assert config.liquidity_gates("linear", "SOL")[0] == Decimal("8")
+
+
+def test_load_config_parses_currency_specific_iv_rank(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "MIN_IV_RANK=0.30",
+                "MAX_IV_RANK=0.90",
+                "BTC_MIN_IV_RANK=0.25",
+                "ETH_MIN_IV_RANK=0.18",
+                "ETH_MAX_IV_RANK=0.85",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.iv_rank_bounds("BTC") == (Decimal("0.25"), Decimal("0.90"))
+    assert config.iv_rank_bounds("ETH") == (Decimal("0.18"), Decimal("0.85"))
+    assert config.iv_rank_bounds("SOL") == (Decimal("0.30"), Decimal("0.90"))
 
 
 def test_short_option_side_both_overrides_legacy_flags(tmp_path: Path):
@@ -309,7 +330,7 @@ def test_fee_account_skips_strategy_profile(tmp_path: Path, monkeypatch):
     accounts = investor / "accounts"
     accounts.mkdir(parents=True)
     fee_env = accounts / ".env.fee"
-    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=testnet\n")
+    fee_env.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=mainnet\n")
     monkeypatch.chdir(repo)
 
     config = load_config(fee_env, require_private=False)
@@ -320,10 +341,18 @@ def test_fee_account_skips_strategy_profile(tmp_path: Path, monkeypatch):
 
 def test_assert_trading_account_rejects_fee_wallet(tmp_path: Path):
     env_file = tmp_path / ".env.fee"
-    env_file.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=testnet\n")
+    env_file.write_text("ACCOUNT_ROLE=fee\nDERIBIT_ENV=mainnet\n")
     config = load_config(env_file, require_private=False)
 
     with pytest.raises(ConfigurationError, match="Fee collection account"):
         from deribit_engine.config import assert_trading_account
 
         assert_trading_account(config)
+
+
+def test_load_config_rejects_testnet(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("DERIBIT_ENV=testnet\n")
+
+    with pytest.raises(ConfigurationError, match="testnet is no longer supported"):
+        load_config(env_file, require_private=False)

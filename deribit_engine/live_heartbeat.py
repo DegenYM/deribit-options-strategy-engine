@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .env_layout import CONFIG_INVESTORS, default_state_file, load_investor_manifest
 from .utils import json_default, ms_to_datetime, utc_now_ms

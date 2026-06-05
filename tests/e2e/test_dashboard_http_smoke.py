@@ -23,7 +23,7 @@ def dashboard_client(tmp_path, monkeypatch) -> TestClient:
     env_file.write_text(
         "\n".join(
             [
-                "DERIBIT_ENV=testnet",
+                "DERIBIT_ENV=mainnet",
                 "DERIBIT_CLIENT_ID=smoke",
                 "DERIBIT_CLIENT_SECRET=smoke",
                 "",

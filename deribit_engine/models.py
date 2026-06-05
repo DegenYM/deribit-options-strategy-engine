@@ -554,6 +554,8 @@ class TradeGroup:
     # collateral is coin-based.
     estimated_im_collateral: Decimal = Decimal("0")
     entry_fee: Decimal = Decimal("0")
+    #: Entry fee in collateral book units (BTC/ETH); USDC rows stay 0.
+    entry_fee_collateral: Decimal = Decimal("0")
     #: Short-leg average fill price at entry (option premium in coin for inverse).
     short_entry_average_price: Decimal = Decimal("0")
     #: Long-leg average fill price at entry (bull put spread).
@@ -570,6 +572,8 @@ class TradeGroup:
     hedge_size_base: Decimal = Decimal("0")
     current_debit: Decimal = Decimal("0")
     current_close_fee: Decimal = Decimal("0")
+    #: Estimated close fee in collateral book units (open positions).
+    current_close_fee_collateral: Decimal = Decimal("0")
     short_delta: Decimal = Decimal("0")
     profit_capture: Decimal = Decimal("0")
     status: str = "open"
@@ -579,6 +583,8 @@ class TradeGroup:
     close_reason: str = ""
     realized_close_debit: Decimal | None = None
     realized_close_fee: Decimal | None = None
+    #: Realized close fee in collateral book units.
+    close_fee_collateral: Decimal | None = None
     #: Short-leg average fill price at close (buy-to-close for short options).
     short_close_average_price: Decimal | None = None
     #: Index (USD) at close.
@@ -609,6 +615,7 @@ class TradeGroup:
     profit_sweep_amount: Decimal = Decimal("0")
     profit_sweep_instrument_name: str = ""
     profit_sweep_order_id: str = ""
+    profit_sweep_quote_proceeds: Decimal = Decimal("0")
     profit_sweep_reason: str = ""
 
     @property
@@ -698,7 +705,8 @@ class TradeGroup:
         extra = row.get("extra")
         if not isinstance(extra, dict):
             extra = {}
-        if extra.get("source") == "deribit_api" or str(row.get("source_action") or "") == "backfill_api":
+        source_action = str(row.get("source_action") or "")
+        if extra.get("source") == "deribit_api" or source_action in {"backfill_api", "backfill_api_instrument"}:
             return 0
         if extra.get("synthetic") or str(row.get("source_action") or "") == "backfill_state":
             return 10
@@ -860,21 +868,222 @@ class TradeGroup:
             return short
         return short - long
 
+    def resolved_entry_fee_collateral(self) -> Decimal | None:
+        """Entry fee in collateral coin; prefers stored native fee over USDC round-trip."""
+        if not self.is_coin_collateral():
+            return None
+        if self.entry_fee_collateral > 0:
+            return self.entry_fee_collateral
+        qty = self.quantity
+        if qty <= 0:
+            return None
+        from .fees import inverse_option_fee_native_per_contract
+
+        fee_rate = Decimal("0.0003")
+        fee_cap_rate = Decimal("0.125")
+        total = Decimal("0")
+        if self.short_entry_average_price > 0:
+            total += (
+                inverse_option_fee_native_per_contract(
+                    premium=self.short_entry_average_price,
+                    fee_rate=fee_rate,
+                    fee_cap_rate=fee_cap_rate,
+                )
+                * qty
+            )
+        if self.long_instrument_name and self.long_entry_average_price > 0:
+            total += (
+                inverse_option_fee_native_per_contract(
+                    premium=self.long_entry_average_price,
+                    fee_rate=fee_rate,
+                    fee_cap_rate=fee_cap_rate,
+                )
+                * qty
+            )
+        return total if total > 0 else None
+
+    def resolved_close_fee_collateral(self) -> Decimal | None:
+        """Close fee in collateral coin; prefers stored native fee over USDC round-trip."""
+        if not self.is_coin_collateral():
+            return None
+        if self.close_fee_collateral is not None and self.close_fee_collateral > 0:
+            return self.close_fee_collateral
+        if self.status == "open" and self.current_close_fee_collateral > 0:
+            return self.current_close_fee_collateral
+        qty = self.quantity
+        if qty <= 0:
+            return None
+        from .fees import inverse_option_fee_native_total
+
+        fee_rate = Decimal("0.0003")
+        fee_cap_rate = Decimal("0.125")
+        total = Decimal("0")
+        short_px = self.resolved_short_close_price()
+        if short_px > 0:
+            total += inverse_option_fee_native_total(
+                premium=short_px,
+                quantity=qty,
+                fee_rate=fee_rate,
+                fee_cap_rate=fee_cap_rate,
+            )
+        long_px = self.long_close_average_price
+        if long_px is not None and long_px > 0 and self.long_instrument_name:
+            total += inverse_option_fee_native_total(
+                premium=long_px,
+                quantity=qty,
+                fee_rate=fee_rate,
+                fee_cap_rate=fee_cap_rate,
+            )
+        return total if total > 0 else None
+
+    def _coin_gross_entry_native(self) -> Decimal | None:
+        if self.short_entry_average_price <= 0 or self.quantity <= 0:
+            return None
+        gross = self.short_entry_average_price * self.quantity
+        if self.long_instrument_name and self.long_entry_average_price > 0:
+            gross -= self.long_entry_average_price * self.quantity
+        return gross
+
+    def _coin_gross_exit_native(self) -> Decimal | None:
+        short_px = self.resolved_short_close_price()
+        if short_px <= 0 or self.quantity <= 0:
+            return None
+        gross = short_px * self.quantity
+        long_px = self.long_close_average_price
+        if long_px is not None and long_px > 0 and self.long_instrument_name:
+            gross -= long_px * self.quantity
+        return gross
+
+    def apply_coin_close_from_native(
+        self,
+        *,
+        short_close_premium: Decimal,
+        index_usd: Decimal,
+        close_fee_collateral: Decimal | None = None,
+    ) -> bool:
+        """Set close fill + USDC ledger from coin-native premium (native → USDC once).
+
+        Does not infer coin premium from ``realized_close_debit``; callers must supply
+        the per-contract premium in collateral coin.
+        """
+        if not self.is_coin_collateral() or short_close_premium <= 0 or self.quantity <= 0:
+            return False
+        from .fees import inverse_option_fee_native_total
+
+        fee_rate = Decimal("0.0003")
+        fee_cap_rate = Decimal("0.125")
+        if close_fee_collateral is None:
+            close_fee_collateral = inverse_option_fee_native_total(
+                premium=short_close_premium,
+                quantity=self.quantity,
+                fee_rate=fee_rate,
+                fee_cap_rate=fee_cap_rate,
+            )
+        if close_fee_collateral is None or close_fee_collateral < 0:
+            return False
+        if index_usd <= 0:
+            idx = self._resolved_index_usd(self.close_index_usd, self.entry_index_usd)
+            if idx is None or idx <= 0:
+                return False
+            index_usd = idx
+        gross_native = short_close_premium * self.quantity
+        if self.long_instrument_name:
+            long_px = self.long_close_average_price
+            if long_px is not None and long_px > 0:
+                gross_native -= long_px * self.quantity
+        new_debit = (gross_native + close_fee_collateral) * index_usd
+        new_fee = close_fee_collateral * index_usd
+        changed = False
+        if self.short_close_average_price != short_close_premium:
+            self.short_close_average_price = short_close_premium
+            changed = True
+        if self.close_index_usd != index_usd:
+            self.close_index_usd = index_usd
+            changed = True
+        if self.close_fee_collateral != close_fee_collateral:
+            self.close_fee_collateral = close_fee_collateral
+            changed = True
+        if self.realized_close_fee != new_fee:
+            self.realized_close_fee = new_fee
+            changed = True
+        if self.realized_close_debit != new_debit:
+            self.realized_close_debit = new_debit
+            changed = True
+        if self.current_close_fee != new_fee:
+            self.current_close_fee = new_fee
+            changed = True
+        if self.current_close_fee_collateral != close_fee_collateral:
+            self.current_close_fee_collateral = close_fee_collateral
+            changed = True
+        if self.current_debit != new_debit:
+            self.current_debit = new_debit
+            changed = True
+        return changed
+
+    def backfill_coin_collateral_ledger(self) -> bool:
+        """Recompute coin-native fees and USDC ledger from fill prices (legacy round-trip fix)."""
+        if not self.is_coin_collateral():
+            return False
+        qty = self.quantity
+        if qty <= 0:
+            return False
+        changed = False
+        idx_entry = self.entry_index_usd
+
+        gross_entry = self._coin_gross_entry_native()
+        entry_fee_native = self.resolved_entry_fee_collateral()
+        if gross_entry is not None and entry_fee_native is not None and entry_fee_native > 0:
+            if self.entry_fee_collateral != entry_fee_native:
+                self.entry_fee_collateral = entry_fee_native
+                changed = True
+            if idx_entry > 0:
+                net_native = gross_entry - entry_fee_native
+                new_credit = net_native * idx_entry
+                new_fee = entry_fee_native * idx_entry
+                if self.entry_credit != new_credit:
+                    self.entry_credit = new_credit
+                    changed = True
+                if self.original_entry_credit != new_credit:
+                    self.original_entry_credit = new_credit
+                    changed = True
+                if self.entry_fee != new_fee:
+                    self.entry_fee = new_fee
+                    changed = True
+
+        idx_mark = self._resolved_index_usd(self.close_index_usd, idx_entry)
+        short_px = self.resolved_short_close_price()
+        if short_px > 0 and idx_mark is not None and idx_mark > 0:
+            if self.apply_coin_close_from_native(
+                short_close_premium=short_px,
+                index_usd=idx_mark,
+                close_fee_collateral=self.resolved_close_fee_collateral(),
+            ):
+                changed = True
+        return changed
+
     def fees_native(self, *, index_fallback_usd: Decimal | None = None) -> Decimal | None:
         """Entry + close fees in collateral coin."""
         idx_close = self._resolved_index_usd(self.close_index_usd, index_fallback_usd)
         idx_entry = self._resolved_index_usd(self.entry_index_usd, idx_close, index_fallback_usd)
         total = Decimal("0")
-        entry_fee = self.entry_fee or Decimal("0")
-        if entry_fee > 0:
-            if idx_entry is None:
-                return None
-            total += entry_fee / idx_entry
-        close_fee = self.realized_close_fee or Decimal("0")
-        if close_fee > 0:
-            if idx_close is None:
-                return None
-            total += close_fee / idx_close
+        entry_fee_collateral = self.resolved_entry_fee_collateral()
+        if entry_fee_collateral is not None:
+            total += entry_fee_collateral
+        else:
+            entry_fee = self.entry_fee or Decimal("0")
+            if entry_fee > 0:
+                if idx_entry is None:
+                    return None
+                total += entry_fee / idx_entry
+        close_fee_collateral = self.resolved_close_fee_collateral()
+        if close_fee_collateral is not None:
+            total += close_fee_collateral
+        else:
+            close_fee = self.realized_close_fee or Decimal("0")
+            if close_fee > 0:
+                if idx_close is None:
+                    return None
+                total += close_fee / idx_close
         return total
 
     def compute_realized_pnl_native(self, *, index_fallback_usd: Decimal | None = None) -> Decimal | None:
@@ -904,6 +1113,8 @@ class TradeGroup:
     def resolved_short_close_price(self) -> Decimal:
         if self.short_close_average_price is not None and self.short_close_average_price > 0:
             return self.short_close_average_price
+        if self.is_coin_collateral():
+            return Decimal("0")
         idx = self.close_index_usd or self.entry_index_usd
         if idx is None or idx <= 0 or self.quantity <= 0 or self.realized_close_debit is None:
             return Decimal("0")
@@ -948,11 +1159,17 @@ class TradeGroup:
 
     def entry_net_credit_collateral(self) -> Decimal | None:
         """Actual entry credit net of entry fee, in collateral book units."""
+        if self.collateral_book() == "USDC":
+            net_usdc = self.entry_credit_net_usdc()
+            return net_usdc if net_usdc > 0 else None
+        gross = self.entry_amount_native()
+        fee = self.resolved_entry_fee_collateral()
+        if gross is not None and fee is not None:
+            net = gross - fee
+            return net if net > 0 else None
         net_usdc = self.entry_credit_net_usdc()
         if net_usdc <= 0:
             return None
-        if self.collateral_book() == "USDC":
-            return net_usdc
         idx = self._resolved_index_usd(self.entry_index_usd, self.close_index_usd)
         if idx is None or idx <= 0:
             return None
@@ -1013,6 +1230,34 @@ class TradeGroup:
             return
         self.realized_pnl = self.entry_credit_net_usdc() - close_total
 
+    def compute_coin_profit_native(self, *, allow_ledger_spot_infer: bool = False) -> Decimal | None:
+        """Fee-aware coin profit from option premiums (never USDC ÷ index)."""
+        if not self.is_coin_collateral():
+            return None
+        self.backfill_coin_collateral_ledger()
+        native = self.compute_realized_pnl_native()
+        if native is not None:
+            return native
+        if not allow_ledger_spot_infer:
+            return None
+        idx = self._resolved_index_usd(self.close_index_usd, self.entry_index_usd)
+        if idx is None or idx <= 0:
+            return None
+        self.enrich_fill_prices_from_ledger_spot(idx)
+        return self.compute_realized_pnl_native()
+
+    def sync_coin_profit_native(self, *, spot_index_usd: Decimal | None = None) -> Decimal | None:
+        """Persist ``realized_pnl_collateral_native`` from premiums; derive USDC from native × index."""
+        if self.status != "closed" or not self.is_coin_collateral():
+            return None
+        spot = spot_index_usd if spot_index_usd is not None and spot_index_usd > 0 else None
+        native = self.compute_coin_profit_native(allow_ledger_spot_infer=spot is not None)
+        if native is None:
+            return None
+        self.realized_pnl_collateral_native = native
+        self.backfill_realized_pnl_usdc(spot_index_usd=spot)
+        return native
+
     def backfill_realized_pnl_collateral_native(
         self,
         *,
@@ -1025,16 +1270,17 @@ class TradeGroup:
         spot = spot_index_usd if spot_index_usd is not None and spot_index_usd > 0 else None
         if journal_executions:
             self.enrich_fill_prices_from_journal(journal_executions)
-        if spot is not None and (
-            self.short_entry_average_price <= 0
-            or self.short_close_average_price is None
-            or self.short_close_average_price <= 0
-        ):
-            self.enrich_fill_prices_from_ledger_spot(spot)
         self.infer_indices_from_fill_prices()
-        self.realized_pnl_collateral_native = None
-        native = self.compute_realized_pnl_native(index_fallback_usd=spot)
+        native = self.compute_coin_profit_native(
+            allow_ledger_spot_infer=spot is not None
+            and (
+                self.short_entry_average_price <= 0
+                or self.short_close_average_price is None
+                or self.short_close_average_price <= 0
+            )
+        )
         if native is None:
+            self.realized_pnl_collateral_native = None
             return
         self.realized_pnl_collateral_native = native
         self.backfill_realized_pnl_usdc(spot_index_usd=spot)
@@ -1054,6 +1300,7 @@ class TradeGroup:
             "entry_credit": self.entry_credit,
             "original_entry_credit": self.original_entry_credit,
             "entry_fee": self.entry_fee,
+            "entry_fee_collateral": self.entry_fee_collateral,
             "short_entry_average_price": self.short_entry_average_price,
             "long_entry_average_price": self.long_entry_average_price,
             "long_close_average_price": self.long_close_average_price,
@@ -1067,6 +1314,7 @@ class TradeGroup:
             "hedge_size_base": self.hedge_size_base,
             "current_debit": self.current_debit,
             "current_close_fee": self.current_close_fee,
+            "current_close_fee_collateral": self.current_close_fee_collateral,
             "short_delta": self.short_delta,
             "profit_capture": self.profit_capture,
             "status": self.status,
@@ -1076,6 +1324,7 @@ class TradeGroup:
             "close_reason": self.close_reason,
             "realized_close_debit": self.realized_close_debit,
             "realized_close_fee": self.realized_close_fee,
+            "close_fee_collateral": self.close_fee_collateral,
             "short_close_average_price": self.short_close_average_price,
             "close_index_usd": self.close_index_usd,
             "realized_pnl_collateral_native": self.realized_pnl_collateral_native,
@@ -1113,6 +1362,8 @@ class TradeGroup:
             payload["profit_sweep_instrument_name"] = self.profit_sweep_instrument_name
         if self.profit_sweep_order_id:
             payload["profit_sweep_order_id"] = self.profit_sweep_order_id
+        if self.profit_sweep_quote_proceeds > 0:
+            payload["profit_sweep_quote_proceeds"] = self.profit_sweep_quote_proceeds
         if self.profit_sweep_reason:
             payload["profit_sweep_reason"] = self.profit_sweep_reason
         return payload
@@ -1158,6 +1409,7 @@ class TradeGroup:
             entry_credit=to_decimal(payload.get("entry_credit")),
             original_entry_credit=to_decimal(payload.get("original_entry_credit") or payload.get("entry_credit")),
             entry_fee=to_decimal(payload.get("entry_fee")),
+            entry_fee_collateral=to_decimal(payload.get("entry_fee_collateral")),
             short_entry_average_price=to_decimal(payload.get("short_entry_average_price")),
             long_entry_average_price=to_decimal(payload.get("long_entry_average_price")),
             long_close_average_price=to_decimal(payload.get("long_close_average_price"))
@@ -1173,6 +1425,7 @@ class TradeGroup:
             hedge_size_base=to_decimal(payload.get("hedge_size_base")),
             current_debit=to_decimal(payload.get("current_debit")),
             current_close_fee=to_decimal(payload.get("current_close_fee")),
+            current_close_fee_collateral=to_decimal(payload.get("current_close_fee_collateral")),
             short_delta=to_decimal(payload.get("short_delta")),
             profit_capture=to_decimal(payload.get("profit_capture")),
             status=str(payload.get("status") or "open"),
@@ -1187,6 +1440,9 @@ class TradeGroup:
             else None,
             realized_close_fee=to_decimal(payload.get("realized_close_fee"))
             if payload.get("realized_close_fee") is not None
+            else None,
+            close_fee_collateral=to_decimal(payload.get("close_fee_collateral"))
+            if payload.get("close_fee_collateral") is not None
             else None,
             short_close_average_price=to_decimal(payload.get("short_close_average_price"))
             if payload.get("short_close_average_price") is not None
@@ -1227,6 +1483,7 @@ class TradeGroup:
             profit_sweep_amount=to_decimal(payload.get("profit_sweep_amount")),
             profit_sweep_instrument_name=str(payload.get("profit_sweep_instrument_name") or ""),
             profit_sweep_order_id=str(payload.get("profit_sweep_order_id") or ""),
+            profit_sweep_quote_proceeds=to_decimal(payload.get("profit_sweep_quote_proceeds")),
             profit_sweep_reason=str(payload.get("profit_sweep_reason") or ""),
         )
 
@@ -1306,6 +1563,10 @@ class PortfolioSnapshot:
     hard_derisk_by_book: dict[str, bool] = field(default_factory=dict)
     halt_entries_by_book: dict[str, bool] = field(default_factory=dict)
     halt_entry_reasons_by_book: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Per underlying (BTC / ETH): False means that currency may open new groups.
+    halt_new_entries_by_currency: dict[str, bool] = field(default_factory=dict)
+    # Legacy portfolio-wide cooldown, open-max-loss cap, or hard-stop on a group.
+    portfolio_wide_entry_halt: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1323,6 +1584,8 @@ class PortfolioSnapshot:
             "target_progress_ratio": self.target_progress_ratio,
             "regime": self.regime.value,
             "halt_new_entries": self.halt_new_entries,
+            "halt_new_entries_by_currency": dict(self.halt_new_entries_by_currency),
+            "portfolio_wide_entry_halt": self.portfolio_wide_entry_halt,
             "hard_derisk": self.hard_derisk,
             "cooldown_until_ms": self.cooldown_until_ms,
             "cooling_down": self.cooling_down,

@@ -80,12 +80,16 @@ globalThis.luxon = {
 const fixtures = {
   "/api/health": {
     ok: true,
-    env: "testnet",
+    env: "mainnet",
     has_private_creds: true,
     accounts: [{ name: "naked_short", env_file: ".env.naked_short" }],
     scheduler_running: false,
   },
-  "/api/spot": { BTC: 65000, ETH: 3500 },
+  "/api/spot": {
+    BTC: 65000,
+    ETH: 3500,
+    price_change_pct_24h: { BTC: 1.2, ETH: -0.8 },
+  },
   "/api/groups": { open: [], closed: [], underlying_index_usd: { BTC: 65000, ETH: 3500 } },
   "/api/dashboard_bundle?days=30": null,
   "/api/status": {

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal
-from typing import Sequence
+from typing import Any
 
 from .utils import safe_div, to_decimal
 
@@ -53,6 +54,21 @@ def realized_vol_annualized(
     return daily_std * Decimal(str(math.sqrt(252.0)))
 
 
+def index_chart_close_series(
+    payload: Sequence[list[Any] | tuple[Any, ...]],
+) -> list[tuple[int, Decimal]]:
+    """Normalize ``public/get_index_chart_data`` rows to ``(ts_ms, close)``."""
+    out: list[tuple[int, Decimal]] = []
+    for row in payload or []:
+        if not isinstance(row, list | tuple) or len(row) < 2:
+            continue
+        close_raw = row[4] if len(row) >= 5 else row[1]
+        close = to_decimal(close_raw)
+        if close > 0:
+            out.append((int(row[0]), close))
+    return out
+
+
 def realized_vol_annualized_from_index_series(
     series: Sequence[tuple[int, Decimal | float | str]],
     *,
@@ -75,13 +91,48 @@ def iv_minus_rv_spread(*, iv: Decimal, rv: Decimal) -> Decimal | None:
     return iv - rv
 
 
+def dvol_iv_rank_from_daily_rows(
+    rows: Sequence[Sequence[Any] | tuple[Any, ...]],
+    *,
+    ts_ms: int,
+    lookback_days: int = 365,
+) -> Decimal | None:
+    """IV rank from DVOL daily candles (Deribit official method).
+
+    Uses the last ``lookback_days`` candles with ``ts <= ts_ms``:
+    range = min(low) .. max(high), current = last close.
+    See https://insights.deribit.com/education/iv-rank-and-iv-percentile/
+    """
+    candles: list[tuple[int, Decimal, Decimal, Decimal]] = []
+    for row in rows or []:
+        if not isinstance(row, list | tuple) or len(row) < 5:
+            continue
+        ts = int(row[0])
+        if ts > ts_ms:
+            break
+        high = to_decimal(row[2])
+        low = to_decimal(row[3])
+        close = to_decimal(row[4])
+        if high > 0 and low > 0 and close > 0:
+            candles.append((ts, high, low, close))
+    if not candles:
+        return None
+    window = candles[-lookback_days:]
+    current = window[-1][3]
+    yr_lo = min(c[2] for c in window)
+    yr_hi = max(c[1] for c in window)
+    if yr_hi <= yr_lo:
+        return None
+    return safe_div(current - yr_lo, yr_hi - yr_lo)
+
+
 def dvol_iv_rank_at_ts(
     dvol_series: Sequence[tuple[int, Decimal | float | str]],
     *,
     ts_ms: int,
-    lookback_days: int = 252,
+    lookback_days: int = 365,
 ) -> Decimal | None:
-    """IV rank using DVOL closes as IV proxy."""
+    """IV rank using DVOL closes only (fallback when OHLC rows are unavailable)."""
     points: list[tuple[int, Decimal]] = []
     for ts, val in dvol_series:
         if int(ts) > ts_ms:
@@ -109,12 +160,12 @@ def passes_iv_entry_gate(
     if not gate_enabled:
         return True
     if min_iv_rank > 0:
-        if iv_rank_value is None or iv_rank_value < min_iv_rank:
+        if iv_rank_value is not None and iv_rank_value < min_iv_rank:
             return False
     if max_iv_rank > 0 and max_iv_rank < ONE:
         if iv_rank_value is not None and iv_rank_value > max_iv_rank:
             return False
     if min_iv_minus_rv > 0:
-        if iv_minus_rv is None or iv_minus_rv < min_iv_minus_rv:
+        if iv_minus_rv is not None and iv_minus_rv < min_iv_minus_rv:
             return False
     return True

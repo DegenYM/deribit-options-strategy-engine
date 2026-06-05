@@ -459,6 +459,7 @@ class TradeJournalStore:
         close_debit_usdc: Decimal | None,
         closed_timestamp_ms: int,
         realized_pnl: Decimal | None = None,
+        close_premium_native: Decimal | None = None,
     ) -> None:
         """Log an exchange-side close detected without live bot order fills."""
         extra = {
@@ -466,7 +467,10 @@ class TradeJournalStore:
             "realized_pnl_usdc": str(realized_pnl) if realized_pnl is not None else None,
             "synthetic": True,
         }
-        price = safe_div(close_debit_usdc or Decimal("0"), quantity)
+        if close_premium_native is not None and close_premium_native > 0:
+            price = close_premium_native
+        else:
+            price = safe_div(close_debit_usdc or Decimal("0"), quantity)
         self.record_fill(
             scope_key=scope_key,
             event_type="close",

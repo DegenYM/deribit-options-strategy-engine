@@ -57,6 +57,14 @@ def parse_exchange_price_band_limit(message: str) -> Decimal | None:
     return limit if limit > 0 else None
 
 
+_POST_ONLY_REJECT_RE = re.compile(r"post_only_reject|(?:\bcode=|\"code\":\s*)11054", re.IGNORECASE)
+
+
+def is_post_only_reject(exc: Exception) -> bool:
+    """True when Deribit rejected a post-only limit because it would cross the book."""
+    return bool(_POST_ONLY_REJECT_RE.search(str(exc)))
+
+
 def decimal_gcd(a: Decimal, b: Decimal) -> Decimal:
     a, b = abs(a), abs(b)
     if a == 0:
