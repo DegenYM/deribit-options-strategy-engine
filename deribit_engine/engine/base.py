@@ -55,6 +55,7 @@ from ..vol_metrics import (
     index_chart_close_series,
     iv_minus_rv_spread,
     realized_vol_annualized_from_index_series,
+    trend_signal_from_index_series,
 )
 from .context import (
     LOGGER,
@@ -889,13 +890,26 @@ class EngineBase:
 
     def _load_perpetual_markets(self) -> dict[str, OptionInstrument]:
         markets: dict[str, OptionInstrument] = {}
-        for currency in self.config.managed_currencies:
-            perp_name = self._perp_instrument(currency)
-            for row in self.client.get_instruments(currency, kind="future", expired=False):
+        # Map each wanted perp to the currency bucket it is listed under:
+        # linear USDC perps are returned by ``get_instruments(currency="USDC")``,
+        # inverse perps under their coin.
+        wanted = {self._perp_instrument(currency) for currency in self.config.managed_currencies}
+        query_currencies: set[str] = set()
+        for perp_name in wanted:
+            if perp_name.endswith("_USDC-PERPETUAL"):
+                query_currencies.add("USDC")
+            else:
+                query_currencies.add(perp_name.split("-", 1)[0])
+        for query_currency in query_currencies:
+            try:
+                rows = self.client.get_instruments(query_currency, kind="future", expired=False)
+            except Exception as exc:
+                LOGGER.warning("failed to load future instruments for %s (%s)", query_currency, exc)
+                continue
+            for row in rows:
                 instrument = OptionInstrument.from_api(row)
-                if instrument.instrument_name == perp_name:
+                if instrument.instrument_name in wanted:
                     markets[instrument.instrument_name] = instrument
-                    break
         return markets
 
     def _get_orderbook(self, instrument_name: str, cache: dict[str, OrderBookSnapshot]) -> OrderBookSnapshot:
@@ -1353,50 +1367,73 @@ class EngineBase:
         return underlying_entry_halted(context.snapshot, underlying)
 
     def _refresh_vol_entry_context(self) -> None:
-        if not self.config.enable_iv_entry_gate:
+        need_vol = self.config.enable_iv_entry_gate or self.config.enable_dynamic_target_delta
+        need_trend = self.config.enable_trend_side_bias
+        if not need_vol and not need_trend:
             self.strategy.update_vol_entry_context()
             return
         iv_rank_by_currency: dict[str, Decimal] = {}
         iv_minus_rv_by_currency: dict[str, Decimal] = {}
+        trend_by_currency: dict[str, Decimal] = {}
         end_timestamp = utc_now_ms()
         start_timestamp = end_timestamp - (self.config.iv_rank_lookback_days * 24 * 3600 * 1000)
         for currency in self.config.managed_currencies:
             ccy = currency.upper()
-            try:
-                dvol_payload = self.client.get_volatility_index_data(
-                    ccy,
-                    start_timestamp=start_timestamp,
-                    end_timestamp=end_timestamp,
-                    resolution="1D",
-                )
-                dvol_rows = dvol_payload.get("data") or []
-                rank = dvol_iv_rank_from_daily_rows(
-                    dvol_rows,
-                    ts_ms=end_timestamp,
-                    lookback_days=self.config.iv_rank_lookback_days,
-                )
-                if rank is not None:
-                    iv_rank_by_currency[ccy] = rank
-                current_iv = to_decimal(dvol_rows[-1][4]) if dvol_rows else Decimal("0")
-            except Exception:
-                current_iv = Decimal("0")
+            current_iv = Decimal("0")
+            if need_vol:
+                try:
+                    dvol_payload = self.client.get_volatility_index_data(
+                        ccy,
+                        start_timestamp=start_timestamp,
+                        end_timestamp=end_timestamp,
+                        resolution="1D",
+                    )
+                    dvol_rows = dvol_payload.get("data") or []
+                    rank = dvol_iv_rank_from_daily_rows(
+                        dvol_rows,
+                        ts_ms=end_timestamp,
+                        lookback_days=self.config.iv_rank_lookback_days,
+                    )
+                    if rank is not None:
+                        iv_rank_by_currency[ccy] = rank
+                    current_iv = to_decimal(dvol_rows[-1][4]) if dvol_rows else Decimal("0")
+                except Exception:
+                    current_iv = Decimal("0")
+            index_series: list[tuple[int, Decimal]] = []
             try:
                 index_payload = self.client.get_index_chart_data(f"{ccy.lower()}_usd", range_name="1y")
                 index_series = index_chart_close_series(index_payload)
-                rv = realized_vol_annualized_from_index_series(
-                    index_series,
-                    end_ts_ms=end_timestamp,
-                    window=self.config.rv_lookback_days,
-                )
-                if current_iv > 0 and rv is not None:
-                    spread = iv_minus_rv_spread(iv=current_iv / Decimal("100"), rv=rv)
-                    if spread is not None:
-                        iv_minus_rv_by_currency[ccy] = spread
             except Exception:
-                pass
+                index_series = []
+            if need_vol and index_series:
+                try:
+                    rv = realized_vol_annualized_from_index_series(
+                        index_series,
+                        end_ts_ms=end_timestamp,
+                        window=self.config.rv_lookback_days,
+                    )
+                    if current_iv > 0 and rv is not None:
+                        spread = iv_minus_rv_spread(iv=current_iv / Decimal("100"), rv=rv)
+                        if spread is not None:
+                            iv_minus_rv_by_currency[ccy] = spread
+                except Exception:
+                    pass
+            if need_trend and index_series:
+                try:
+                    trend = trend_signal_from_index_series(
+                        index_series,
+                        end_ts_ms=end_timestamp,
+                        ma_window=self.config.trend_ma_days,
+                        ref_pct=self.config.trend_side_ref_pct,
+                    )
+                    if trend is not None:
+                        trend_by_currency[ccy] = trend
+                except Exception:
+                    pass
         self.strategy.update_vol_entry_context(
             iv_rank_by_currency=iv_rank_by_currency,
             iv_minus_rv_by_currency=iv_minus_rv_by_currency,
+            trend_by_currency=trend_by_currency,
         )
 
     def _reserved_covered_call_quantity(self, state: StrategyState, currency: str) -> Decimal:
@@ -1518,7 +1555,18 @@ class EngineBase:
         return f"{self.config.order_label_prefix}-hedge-{currency.lower()}-{suffix}"
 
     def _perp_instrument(self, currency: str) -> str:
-        return f"{currency.upper()}-PERPETUAL"
+        # Linear USDC-margined perp matches the USDC option collateral book.
+        # (Inverse ``{CCY}-PERPETUAL`` would settle in the coin and live in a
+        # different margin book.)
+        return f"{currency.upper()}_USDC-PERPETUAL"
+
+    def _perp_uses_base_amount(self, currency: str) -> bool:
+        """True when the hedge perp sizes orders in base (coin) units.
+
+        Linear USDC perps take ``amount`` in the base currency (e.g. BTC);
+        inverse coin-margined perps take ``amount`` as a USD notional.
+        """
+        return self._perp_instrument(currency).endswith("_USDC-PERPETUAL")
 
     def _day_start_ms_from_key(self, day_key: str) -> int:
         """Convert a ``YYYY-MM-DD`` key back to its UTC-midnight epoch ms.

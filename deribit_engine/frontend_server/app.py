@@ -22,6 +22,7 @@ from .aggregation import (
     _resolve_apr_effective_capital_usdc,
 )
 from .constants import (
+    DEFAULT_BUNDLE_WARM_INTERVAL_SEC,
     DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC,
     DEFAULT_SNAPSHOT_INTERVAL_SEC,
     DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC,
@@ -50,6 +51,7 @@ from .helpers import (
 )
 from .market_vol import fetch_index_price_change_24h_pct, fetch_iv_rank_snapshot
 from .types import (
+    BundleWarmScheduler,
     DashboardAccount,
     EquitySnapshotScheduler,
     TradeJournalSyncScheduler,
@@ -131,10 +133,12 @@ def create_app(
         )
     )
     status_ttl = investor_status_ttl if investor_portal else STATUS_CACHE_TTL_SEC
-    status_cache = _TtlCache(status_ttl)
+    # Serve stale live data instantly while refreshing in the background so a slow
+    # Deribit prefetch never blocks the Snapshot→Live flip on the dashboard.
+    status_cache = _TtlCache(status_ttl, stale_while_revalidate=True)
     report_cache = _TtlCache(REPORT_CACHE_TTL_SEC)
     groups_cache = _TtlCache(GROUPS_CACHE_TTL_SEC)
-    bundle_cache = _TtlCache(status_ttl)
+    bundle_cache = _TtlCache(status_ttl, stale_while_revalidate=True)
     exchange_prefetch_cache = _TtlCache(status_ttl)
     spot_cache = _TtlCache(SPOT_CACHE_TTL_SEC)
     stress_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
@@ -439,6 +443,48 @@ def create_app(
                 summary,
             )
 
+    def _warm_dashboard_bundle() -> None:
+        """Background warm: refresh the Deribit prefetch and reseed live caches.
+
+        Keeps ``/api/dashboard_bundle`` (and the status/groups/prefetch caches it
+        depends on) hot so the dashboard flips Snapshot→Live without paying a cold
+        Deribit prefetch. Seeds the ``override=None`` keys the browser uses on first
+        paint; the warmed prefetch also makes any other cache key cheap to compute.
+        """
+        import deribit_engine.frontend_server as pkg
+
+        if not any(_has_private_creds(account.config) for account in accounts):
+            return
+        try:
+            pkg._force_refresh_prefetch_all(accounts, cache=exchange_prefetch_cache)
+        except Exception as exc:  # noqa: BLE001 — fall back to cached prefetch below.
+            LOGGER.warning("bundle warm prefetch refresh failed: %s", exc)
+        days = 30
+        override: Decimal | None = None
+        ledger_key = _ledger_equity_cache_key(accounts)
+        closed_key = _closed_groups_cache_key(accounts)
+        for sections in (
+            frozenset({"status", "groups"}),
+            frozenset({"status", "groups", "realized_summary"}),
+        ):
+            cache_key = (
+                "dashboard_bundle",
+                days,
+                "",
+                ledger_key,
+                closed_key,
+                ",".join(sorted(sections)),
+            )
+            payload = _locked_compute_dashboard_bundle(days=days, override=override, sections=sections)
+            _seed_bundle_component_caches(
+                status=payload.get("status"),
+                groups=payload.get("groups"),
+                summary=payload.get("realized_summary"),
+                days=days,
+                override=override,
+            )
+            bundle_cache.seed(cache_key, payload)
+
     def _finalize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         out = copy.deepcopy(payload)
         try:
@@ -503,6 +549,21 @@ def create_app(
     register_bundle_routes(app, route_ctx)
     register_groups_routes(app, route_ctx)
     register_stress_routes(app, route_ctx)
+
+    # Keep the investor live caches warm so Snapshot→Live is near-instant. Only the
+    # investor portal uses a long status TTL, so warming the ops dashboard (15s TTL)
+    # would add load without helping; gate it accordingly.
+    if investor_portal:
+        bundle_warm_interval = int(
+            os.environ.get("FRONTEND_BUNDLE_WARM_INTERVAL_SEC", DEFAULT_BUNDLE_WARM_INTERVAL_SEC)
+        )
+        background_schedulers.append(
+            BundleWarmScheduler(
+                warm_fn=_warm_dashboard_bundle,
+                interval_sec=bundle_warm_interval,
+                has_private_creds=lambda: any(_has_private_creds(account.config) for account in accounts),
+            )
+        )
 
     @app.get("/api/equity_series")
     def api_equity_series(days: int = Query(default=30, ge=1, le=3650)) -> Any:

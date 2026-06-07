@@ -38,6 +38,12 @@ class StrategySelector:
         self.config = config
         self._iv_rank_by_currency: dict[str, Decimal] = {}
         self._iv_minus_rv_by_currency: dict[str, Decimal] = {}
+        # Per-underlying risk reversal (put_IV - call_IV) recomputed each ranking
+        # pass from the current candidate set; consumed by skew side selection.
+        self._skew_by_currency: dict[str, Decimal] = {}
+        # Per-underlying trend signal (price vs MA) in [-1, 1]; refreshed each
+        # manage cycle from index chart data.
+        self._trend_by_currency: dict[str, Decimal] = {}
         self.fee_discount = FeeDiscountContext.from_config(config)
 
     @property
@@ -59,9 +65,123 @@ class StrategySelector:
         *,
         iv_rank_by_currency: dict[str, Decimal] | None = None,
         iv_minus_rv_by_currency: dict[str, Decimal] | None = None,
+        trend_by_currency: dict[str, Decimal] | None = None,
     ) -> None:
         self._iv_rank_by_currency = dict(iv_rank_by_currency or {})
         self._iv_minus_rv_by_currency = dict(iv_minus_rv_by_currency or {})
+        if trend_by_currency is not None:
+            self._trend_by_currency = dict(trend_by_currency)
+        elif not self.config.enable_trend_side_bias:
+            self._trend_by_currency = {}
+
+    def _preferred_target_delta(self, currency: str, option_type: str) -> Decimal:
+        """Target |delta| inside the preferred band used by candidate scoring.
+
+        Static midpoint by default. When ``enable_dynamic_target_delta`` is set
+        and a VRP (IV-RV) reading is available for ``currency``, the target is
+        shifted within the band: rich vol (VRP above the reference) moves it
+        toward the lower-delta / further-OTM edge; thin vol moves it toward the
+        higher-delta edge. The shift is clamped to the preferred band.
+        """
+        pdmin, pdmax = self.config.preferred_delta_bounds(currency, option_type)
+        center = (pdmin + pdmax) / Decimal("2")
+        if not self.config.enable_dynamic_target_delta:
+            return center
+        vrp = self._iv_minus_rv_by_currency.get(currency.upper())
+        if vrp is None:
+            return center
+        ref = self.config.dynamic_target_delta_vrp_ref
+        if ref <= 0:
+            return center
+        # signal in [-1, 1]: 0 at ref, +1 at >=2*ref (rich), -1 at <=0 (thin).
+        signal = (vrp - ref) / ref
+        signal = max(Decimal("-1"), min(Decimal("1"), signal))
+        half = (pdmax - pdmin) / Decimal("2")
+        target = center - signal * self.config.dynamic_target_delta_strength * half
+        return max(pdmin, min(pdmax, target))
+
+    def _refresh_skew_by_currency(self, candidates: list[NakedPutCandidate]) -> None:
+        """Recompute per-underlying risk reversal from the candidate set.
+
+        ``rr = put_IV - call_IV`` taken from the candidate whose short-leg delta
+        sits closest to the preferred-delta midpoint on each side. Only currencies
+        that have both a put and a call candidate (with positive IV) get an entry;
+        everything else falls back to a zero (neutral) tilt at scoring time.
+        """
+        self._skew_by_currency = {}
+        if not self.config.enable_skew_side_selection:
+            return
+        by_ccy: dict[str, dict[str, list[NakedPutCandidate]]] = {}
+        for cand in candidates:
+            if cand.short_iv <= 0:
+                continue
+            side = cand.option_type or "put"
+            if side not in ("put", "call"):
+                continue
+            by_ccy.setdefault(cand.currency.upper(), {}).setdefault(side, []).append(cand)
+        for ccy, sides in by_ccy.items():
+            puts = sides.get("put") or []
+            calls = sides.get("call") or []
+            if not puts or not calls:
+                continue
+            put_iv = self._representative_side_iv(ccy, "put", puts)
+            call_iv = self._representative_side_iv(ccy, "call", calls)
+            if put_iv is None or call_iv is None:
+                continue
+            self._skew_by_currency[ccy] = put_iv - call_iv
+
+    def _representative_side_iv(
+        self,
+        currency: str,
+        option_type: str,
+        candidates: list[NakedPutCandidate],
+    ) -> Decimal | None:
+        """IV of the candidate whose |delta| is nearest the preferred midpoint."""
+        pdmin, pdmax = self.config.preferred_delta_bounds(currency, option_type)
+        target = (pdmin + pdmax) / Decimal("2")
+        best: tuple[Decimal, Decimal] | None = None
+        for cand in candidates:
+            if cand.short_iv <= 0:
+                continue
+            distance = abs(abs(cand.short_leg.delta) - target)
+            if best is None or distance < best[0]:
+                best = (distance, cand.short_iv)
+        return best[1] if best is not None else None
+
+    def _skew_score_term(self, candidate: NakedPutCandidate) -> Decimal:
+        """Score bonus/penalty steering side selection toward the richer wing."""
+        if not self.config.enable_skew_side_selection:
+            return Decimal("0")
+        rr = self._skew_by_currency.get(candidate.currency.upper())
+        if rr is None:
+            return Decimal("0")
+        if abs(rr) < self.config.skew_side_min_rr:
+            return Decimal("0")
+        side_sign = Decimal("1") if (candidate.option_type or "put") == "put" else Decimal("-1")
+        return self.config.score_weight_skew * side_sign * rr
+
+    def _trend_signal(self, currency: str) -> Decimal | None:
+        if not self.config.enable_trend_side_bias:
+            return None
+        return self._trend_by_currency.get(currency.upper())
+
+    def _trend_side_sort_tier(self, candidate: NakedPutCandidate) -> int:
+        """Lexicographic tie-breaker: 0 = trend-aligned side, 1 = counter-trend."""
+        signal = self._trend_signal(candidate.currency)
+        if signal is None or abs(signal) < self.config.trend_side_min_signal:
+            return 0
+        is_put = (candidate.option_type or "put") == "put"
+        if signal > 0:
+            return 0 if is_put else 1
+        return 0 if not is_put else 1
+
+    def _trend_score_term(self, candidate: NakedPutCandidate) -> Decimal:
+        """Score bonus/penalty steering side selection with the tape."""
+        signal = self._trend_signal(candidate.currency)
+        if signal is None or abs(signal) < self.config.trend_side_min_signal:
+            return Decimal("0")
+        side_sign = Decimal("1") if (candidate.option_type or "put") == "put" else Decimal("-1")
+        return self.config.score_weight_trend * side_sign * signal
 
     def _iv_entry_rejection_reason(self, currency: str) -> str | None:
         if not self.config.enable_iv_entry_gate:
@@ -605,9 +725,8 @@ class StrategySelector:
 
     def naked_put_candidate_score(self, candidate: NakedPutCandidate) -> Decimal:
         option_type = candidate.option_type or "put"
-        pdmin, pdmax = self.config.preferred_delta_bounds(candidate.currency, option_type)
         pomin, pomax = self.config.preferred_otm_bounds(candidate.currency, option_type)
-        target_delta = (pdmin + pdmax) / Decimal("2")
+        target_delta = self._preferred_target_delta(candidate.currency, option_type)
         target_otm = (pomin + pomax) / Decimal("2")
         otm = candidate._otm_ratio()
         spread = self.short_spread_ratio_or_zero(candidate)
@@ -617,6 +736,8 @@ class StrategySelector:
             - self.config.score_weight_spread * spread
             - self.config.score_weight_delta_distance * abs(abs(candidate.short_leg.delta) - target_delta)
             - self.config.score_weight_otm_distance * abs(otm - target_otm)
+            + self._skew_score_term(candidate)
+            + self._trend_score_term(candidate)
         )
         if candidate.in_target_apr_band:
             score += Decimal("0.01")
@@ -628,7 +749,7 @@ class StrategySelector:
         option_type = candidate.option_type or "put"
         pdmin, pdmax = self.config.preferred_delta_bounds(candidate.currency, option_type)
         pomin, pomax = self.config.preferred_otm_bounds(candidate.currency, option_type)
-        target_delta = (pdmin + pdmax) / Decimal("2")
+        target_delta = self._preferred_target_delta(candidate.currency, option_type)
         target_otm = (pomin + pomax) / Decimal("2")
         in_band = candidate.in_target_apr_band
         preferred_delta = pdmin <= abs(candidate.short_leg.delta) <= pdmax
@@ -636,6 +757,7 @@ class StrategySelector:
         preferred_otm = pomin <= otm <= pomax
         return (
             0 if in_band else 1,
+            self._trend_side_sort_tier(candidate),
             0 if preferred_delta else 1,
             0 if preferred_otm else 1,
             abs(abs(candidate.short_leg.delta) - target_delta),
@@ -662,6 +784,7 @@ class StrategySelector:
         """
         if limit <= 0 or not candidates:
             return []
+        self._refresh_skew_by_currency(candidates)
         return sorted(candidates, key=self.naked_put_sort_key)[:limit]
 
     @staticmethod
@@ -1032,6 +1155,7 @@ class StrategySelector:
                 preferred_otm=preferred_otm,
                 in_target_apr_band=in_band,
                 option_type=option_type,
+                short_iv=book.iv if book.iv > 0 else Decimal("0"),
             ),
             None,
         )

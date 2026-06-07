@@ -48,6 +48,31 @@ def _prefetch_all_accounts(
     return prefetches
 
 
+def _force_refresh_prefetch_all(
+    accounts: list[DashboardAccount],
+    *,
+    cache: _TtlCache,
+) -> dict[str, ExchangePrefetch | None]:
+    """Fetch a fresh Deribit prefetch per API identity and seed ``cache``.
+
+    Unlike :func:`_prefetch_all_accounts` this bypasses the TTL and always hits the
+    exchange, so a background warmer can keep live marks fresh ahead of expiry.
+    """
+    import deribit_engine.frontend_server as pkg
+
+    prefetches: dict[str, ExchangePrefetch | None] = {}
+    for account in accounts:
+        if not _has_private_creds(account.config):
+            continue
+        key = _live_api_identity(account)
+        if key in prefetches:
+            continue
+        prefetch = pkg._bot_for_account(account, require_private=True).fetch_exchange_prefetch()
+        cache.seed(key, prefetch)
+        prefetches[key] = prefetch
+    return prefetches
+
+
 def _status_payload_for_account(
     account: DashboardAccount,
     *,

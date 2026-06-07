@@ -18,6 +18,7 @@ from deribit_engine.vol_metrics import (
     iv_rank,
     passes_iv_entry_gate,
     realized_vol_annualized,
+    trend_signal_vs_ma,
 )
 
 
@@ -254,3 +255,198 @@ def test_weighted_scoring_prefers_higher_apr(tmp_path):
     low = leg(Decimal("0.12"), Decimal("0.02"))
     ranked = sorted([low, high], key=selector.naked_put_sort_key)
     assert ranked[0] is high
+
+
+def _naked_candidate(
+    *,
+    option_type: str,
+    delta: Decimal,
+    iv: Decimal,
+    apr: Decimal = Decimal("0.20"),
+    currency: str = "BTC",
+    strike: Decimal | None = None,
+    index_price: Decimal = Decimal("70000"),
+):
+    from deribit_engine.models import NakedPutCandidate, RiskRegime, SpreadLeg
+
+    if strike is None:
+        strike = Decimal("63000") if option_type == "put" else Decimal("77000")
+    suffix = "C" if option_type == "call" else "P"
+    short = SpreadLeg(
+        instrument_name=f"{currency}_USDC-30JUN26-{int(strike)}-{suffix}",
+        strike=strike,
+        quantity=Decimal("1"),
+        min_trade_amount=Decimal("0.01"),
+        contract_size=Decimal("0.01"),
+        entry_price=Decimal("500"),
+        target_price=Decimal("500"),
+        best_bid_price=Decimal("500"),
+        best_ask_price=Decimal("505"),
+        delta=delta,
+        tick_size=Decimal("2.5"),
+        tick_size_steps=(),
+        expiration_timestamp_ms=1_800_000_000_000,
+        index_price=index_price,
+        quote_currency="USDC",
+        settlement_currency="USDC",
+        instrument_type="linear",
+    )
+    return NakedPutCandidate(
+        currency=currency,
+        collateral_currency="USDC",
+        quantity=Decimal("1"),
+        dte_days=Decimal("14"),
+        short_leg=short,
+        screening_bid=Decimal("500"),
+        screening_mark=Decimal("500"),
+        target_limit_price=Decimal("500"),
+        net_premium_native=Decimal("500"),
+        fee_native=Decimal("1"),
+        net_apr=apr,
+        margin_efficiency=Decimal("0.2"),
+        estimated_im_total=Decimal("2000"),
+        estimated_mm_total=Decimal("1500"),
+        regime=RiskRegime.NORMAL,
+        preferred_delta=True,
+        preferred_otm=True,
+        in_target_apr_band=True,
+        option_type=option_type,
+        short_iv=iv,
+    )
+
+
+def test_dynamic_target_delta_shifts_with_vrp(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(
+        tmp_path,
+        enable_dynamic_target_delta=True,
+        dynamic_target_delta_vrp_ref=Decimal("0.05"),
+        dynamic_target_delta_strength=Decimal("1"),
+    )
+    selector = StrategySelector(config)
+    pdmin, pdmax = config.preferred_put_delta_bounds("BTC")
+    center = (pdmin + pdmax) / Decimal("2")
+
+    # No VRP reading -> static midpoint.
+    assert selector._preferred_target_delta("BTC", "put") == center
+
+    # Rich vol (VRP above reference) pushes the target toward the lower-delta edge.
+    selector.update_vol_entry_context(iv_minus_rv_by_currency={"BTC": Decimal("0.10")})
+    rich = selector._preferred_target_delta("BTC", "put")
+    assert rich < center
+    assert rich >= pdmin
+
+    # Thin vol (VRP below reference) pushes the target toward the higher-delta edge.
+    selector.update_vol_entry_context(iv_minus_rv_by_currency={"BTC": Decimal("0.0")})
+    thin = selector._preferred_target_delta("BTC", "put")
+    assert thin > center
+    assert thin <= pdmax
+
+
+def test_dynamic_target_delta_disabled_is_static(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(tmp_path)  # enable_dynamic_target_delta defaults to False
+    selector = StrategySelector(config)
+    selector.update_vol_entry_context(iv_minus_rv_by_currency={"BTC": Decimal("0.10")})
+    pdmin, pdmax = config.preferred_put_delta_bounds("BTC")
+    assert selector._preferred_target_delta("BTC", "put") == (pdmin + pdmax) / Decimal("2")
+
+
+def test_skew_side_selection_prefers_richer_wing(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(
+        tmp_path,
+        enable_weighted_candidate_scoring=True,
+        enable_skew_side_selection=True,
+        score_weight_skew=Decimal("10"),
+        skew_side_min_rr=Decimal("0.02"),
+    )
+    selector = StrategySelector(config)
+    put_pref = sum(config.preferred_put_delta_bounds("BTC")) / Decimal("2")
+    call_pref = sum(config.preferred_call_delta_bounds("BTC")) / Decimal("2")
+
+    # Puts priced richer than calls (positive risk reversal) -> put should win.
+    put = _naked_candidate(option_type="put", delta=-put_pref, iv=Decimal("0.80"))
+    call = _naked_candidate(option_type="call", delta=call_pref, iv=Decimal("0.60"))
+    ranked = selector.take_top_scan_candidates([call, put], limit=5)
+    assert ranked[0] is put
+
+    # Flip the skew: calls richer -> call should win.
+    put2 = _naked_candidate(option_type="put", delta=-put_pref, iv=Decimal("0.60"))
+    call2 = _naked_candidate(option_type="call", delta=call_pref, iv=Decimal("0.80"))
+    ranked2 = selector.take_top_scan_candidates([put2, call2], limit=5)
+    assert ranked2[0] is call2
+
+
+def test_skew_side_selection_disabled_no_tilt(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(tmp_path, enable_weighted_candidate_scoring=True)
+    selector = StrategySelector(config)
+    put = _naked_candidate(option_type="put", delta=Decimal("-0.11"), iv=Decimal("0.80"))
+    assert selector._skew_score_term(put) == Decimal("0")
+
+
+def test_trend_signal_vs_ma_bullish_and_bearish():
+    base = [Decimal("100")] * 19
+    bullish = trend_signal_vs_ma(base + [Decimal("106")], ma_window=20, ref_pct=Decimal("0.05"))
+    assert bullish is not None
+    assert bullish > Decimal("0.5")
+    bearish = trend_signal_vs_ma(base + [Decimal("94")], ma_window=20, ref_pct=Decimal("0.05"))
+    assert bearish is not None
+    assert bearish < Decimal("-0.5")
+
+
+def test_trend_side_bias_prefers_put_in_bullish_tape(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(tmp_path, enable_trend_side_bias=True, score_weight_trend=Decimal("10"))
+    selector = StrategySelector(config)
+    selector.update_vol_entry_context(trend_by_currency={"BTC": Decimal("0.8")})
+    put = _naked_candidate(option_type="put", delta=Decimal("-0.11"), iv=Decimal("0.70"))
+    call = _naked_candidate(option_type="call", delta=Decimal("0.11"), iv=Decimal("0.70"))
+    ranked = selector.take_top_scan_candidates([call, put], limit=5)
+    assert ranked[0] is put
+
+
+def test_trend_side_bias_prefers_call_in_bearish_tape(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(tmp_path, enable_trend_side_bias=True, score_weight_trend=Decimal("10"))
+    selector = StrategySelector(config)
+    selector.update_vol_entry_context(trend_by_currency={"BTC": Decimal("-0.8")})
+    put = _naked_candidate(option_type="put", delta=Decimal("-0.11"), iv=Decimal("0.70"))
+    call = _naked_candidate(option_type="call", delta=Decimal("0.11"), iv=Decimal("0.70"))
+    ranked = selector.take_top_scan_candidates([put, call], limit=5)
+    assert ranked[0] is call
+
+
+def test_trend_side_bias_lexicographic_sort(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(tmp_path, enable_trend_side_bias=True, enable_weighted_candidate_scoring=False)
+    selector = StrategySelector(config)
+    selector.update_vol_entry_context(trend_by_currency={"BTC": Decimal("0.8")})
+    put = _naked_candidate(option_type="put", delta=Decimal("-0.11"), iv=Decimal("0.70"))
+    call = _naked_candidate(option_type="call", delta=Decimal("0.11"), iv=Decimal("0.70"))
+    ranked = sorted([call, put], key=selector.naked_put_sort_key)
+    assert ranked[0] is put
+
+
+def test_trend_side_bias_disabled_is_neutral(tmp_path):
+    from deribit_engine.strategy import StrategySelector
+
+    config = make_config(tmp_path, enable_trend_side_bias=False)
+    selector = StrategySelector(config)
+    selector.update_vol_entry_context(trend_by_currency={"BTC": Decimal("0.8")})
+    put = _naked_candidate(option_type="put", delta=Decimal("-0.11"), iv=Decimal("0.70"))
+    assert selector._trend_score_term(put) == Decimal("0")
+    assert selector._trend_side_sort_tier(put) == 0
+
+
+def test_config_defaults_trend_side_bias_on(tmp_path):
+    config = make_config(tmp_path)
+    assert config.enable_trend_side_bias is True

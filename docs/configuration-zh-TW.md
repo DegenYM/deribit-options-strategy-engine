@@ -223,6 +223,11 @@ EARLY_EXIT_MAX_SPREAD_RATIO=0.06
 TIME_EXIT_DTE=4
 SOFT_DEFENSE_LOSS_PCT=0.30
 HARD_STOP_LOSS_PCT=0.45
+# 防守確認窗：delta/虧損觸發需連續 N 個 cycle 成立才平倉（1=立即，舊行為）。
+# 調高可避免被單一快照尖峰「砍在谷底」；建議 2~3。
+DEFENSE_CONFIRM_CYCLES=1
+# 以 mark 公允價（而非 best-ask）判斷虧損型止損，避免 IV/價差瞬間擴大假觸發。
+DEFENSE_TRIGGER_USE_MARK=true
 
 # --- Regime / circuit breakers ---
 INDEX_DRAWDOWN_ELEVATED_PCT=0.035
@@ -236,6 +241,15 @@ HARD_DERISK_ON_CRISIS_OPEN_GROUP=false
 
 # --- Hedging / pacing ---
 ENABLE_PERP_HEDGE=false
+# Hedge-first：hard 觸發時用 perp 對沖中性化並 hold，不在谷底認賠（需 ENABLE_PERP_HEDGE=true，
+# 僅 naked_short / bull_put_spread 生效）。HEDGE_GIVEUP_LOSS_PCT 為災難回補底線（0=不設）。
+HEDGE_FIRST_ON_HARD=false
+HEDGE_GIVEUP_LOSS_PCT=0
+# Per-position 對沖：每個 position 各自對沖自身 delta（soft 對沖 SOFT_HEDGE_NEUTRALIZE_PCT、
+# hard 對沖 100%），引擎再把同幣種所有 group 的目標加總成單一 perp 委託；反彈時隨 delta
+# 縮小自動回補、連續 RECOVERY_NORMAL_CYCLES 輪未觸發就解除。false=沿用幣種淨 delta 對沖。
+PER_POSITION_HEDGE=false
+SOFT_HEDGE_NEUTRALIZE_PCT=0.7
 MAX_CONCURRENT_GROUPS=6
 MAX_GROUPS_PER_CURRENCY=3
 ENTRY_COOLDOWN_MINUTES=20
@@ -420,6 +434,9 @@ COVERED_CALL_SPOT_EXIT_ENABLED=false
 COVERED_CALL_ROBUST_EXIT_ENABLED=false
 COVERED_CALL_ROBUST_EXIT_DTE=0.5
 COVERED_CALL_ITM_BUFFER_PCT=0
+# ITM robust exit 的確認窗（cycle 數）；留空 = 沿用 DEFENSE_CONFIRM_CYCLES。
+# 避免 index 短暫戳破 strike 的 wick 就買回 call + 賣 spot 賣在頂點。
+# COVERED_CALL_ITM_CONFIRM_CYCLES=
 COVERED_CALL_SPOT_ORDER_TYPE=market
 
 MAX_GROUPS_PER_CURRENCY=3

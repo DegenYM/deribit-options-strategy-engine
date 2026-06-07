@@ -147,6 +147,50 @@ def dvol_iv_rank_at_ts(
     return iv_rank(current, lookback=lookback)
 
 
+def trend_signal_vs_ma(
+    closes: Sequence[Decimal],
+    *,
+    ma_window: int = 20,
+    ref_pct: Decimal = Decimal("0.05"),
+) -> Decimal | None:
+    """Price-vs-MA trend signal in [-1, 1].
+
+    +1 means spot is ``ref_pct`` or more above the simple moving average
+    (bullish); -1 means at or below ``-ref_pct`` (bearish). Used to tilt naked
+    short side selection: bullish -> favor short puts, bearish -> favor calls.
+    """
+    if ma_window < 2 or len(closes) < ma_window:
+        return None
+    price = closes[-1]
+    if price <= 0:
+        return None
+    window = closes[-ma_window:]
+    ma = sum(window) / Decimal(len(window))
+    if ma <= 0 or ref_pct <= 0:
+        return None
+    deviation = (price - ma) / ma
+    signal = deviation / ref_pct
+    return max(Decimal("-1"), min(Decimal("1"), signal))
+
+
+def trend_signal_from_index_series(
+    series: Sequence[tuple[int, Decimal | float | str]],
+    *,
+    end_ts_ms: int,
+    ma_window: int = 20,
+    ref_pct: Decimal = Decimal("0.05"),
+) -> Decimal | None:
+    """Trend signal from ``(ts_ms, close)`` index series up to ``end_ts_ms``."""
+    closes: list[Decimal] = []
+    for ts, val in series:
+        if int(ts) > end_ts_ms:
+            break
+        close = to_decimal(val)
+        if close > 0:
+            closes.append(close)
+    return trend_signal_vs_ma(closes, ma_window=ma_window, ref_pct=ref_pct)
+
+
 def passes_iv_entry_gate(
     *,
     iv_rank_value: Decimal | None,

@@ -386,6 +386,36 @@ def test_covered_call_robust_exit_dry_run_previews_call_close_and_spot_sell(tmp_
     assert actions[1]["amount"] == "0.1"
 
 
+def test_covered_call_itm_confirm_cycles_delays_robust_exit(tmp_path):
+    client = FakeClient(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        time_exit_dte=0,
+        hard_defense_delta=Decimal("1"),
+        soft_defense_delta=Decimal("1"),
+        hard_defense_delta_call=Decimal("1"),
+        soft_defense_delta_call=Decimal("1"),
+        covered_call_spot_exit_enabled=True,
+        covered_call_robust_exit_enabled=True,
+        covered_call_robust_exit_dte=Decimal("1"),
+        covered_call_itm_confirm_cycles=2,
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    group = _covered_call_group()
+    state.groups.append(group)
+    engine.state_store.save(state)
+    client.positions = [_short_call_position(group)]
+
+    first = engine.manage(live=False)
+    assert all(action.get("reason") != "covered_call_robust_exit" for action in first["actions"])
+
+    second = engine.manage(live=False)
+    assert any(action.get("reason") == "covered_call_robust_exit" for action in second["actions"])
+
+
 def test_covered_call_robust_exit_live_sells_spot_after_call_close(tmp_path):
     client = FakeClient(btc_book_equity="0.5")
     config = make_config(
@@ -1505,6 +1535,415 @@ def test_refresh_group_ignores_outlier_ask_for_loss_pct(tmp_path, fake_client):
     assert group.loss_pct_of_max_loss < Decimal("0.60")
     soft_delta, hard_delta = engine._defense_delta_thresholds(group)
     assert group.short_delta < hard_delta
+
+
+def test_confirm_defense_triggers_requires_consecutive_cycles(tmp_path, fake_client):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc", defense_confirm_cycles=2)
+    engine = DeribitOptionTrialBot(config, fake_client)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P")
+
+    soft1, hard1 = engine._confirm_defense_triggers(group, raw_soft=True, raw_hard=True)
+    assert (soft1, hard1) == (False, False)
+    assert group.hard_defense_streak == 1
+    assert group.soft_defense_streak == 1
+
+    soft2, hard2 = engine._confirm_defense_triggers(group, raw_soft=True, raw_hard=True)
+    assert hard2 is True
+    assert soft2 is True
+    assert group.hard_defense_streak == 2
+
+    # Condition clears -> both streaks reset so a later spike must reconfirm.
+    engine._confirm_defense_triggers(group, raw_soft=False, raw_hard=False)
+    assert group.hard_defense_streak == 0
+    assert group.soft_defense_streak == 0
+
+
+def test_defense_confirm_streak_resets_when_condition_clears(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        enable_early_exit=False,
+        time_exit_dte=0,
+        hard_defense_delta=Decimal("0.30"),
+        defense_confirm_cycles=2,
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", dte_days=14)
+    group.current_debit = group.entry_credit
+    ctx = SimpleNamespace(orderbook_cache={})
+
+    group.short_delta = Decimal("0.40")
+    assert engine._manage_group(ctx, group, live=False) == []
+    assert group.hard_defense_streak == 1
+
+    group.short_delta = Decimal("0.05")  # spike mean-reverts below threshold
+    assert engine._manage_group(ctx, group, live=False) == []
+    assert group.hard_defense_streak == 0
+
+    group.short_delta = Decimal("0.40")  # one cycle is not enough to fire
+    assert engine._manage_group(ctx, group, live=False) == []
+    assert group.hard_defense_streak == 1
+
+
+def test_hedge_first_on_hard_holds_instead_of_closing(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        enable_early_exit=False,
+        time_exit_dte=0,
+        hard_defense_delta=Decimal("0.30"),
+        enable_perp_hedge=True,
+        hedge_first_on_hard=True,
+        hedge_giveup_loss_pct=Decimal("0"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", dte_days=14)
+    group.current_debit = group.entry_credit  # no profit-capture, loss below threshold
+    group.short_delta = Decimal("0.40")  # hard trigger via delta
+    ctx = SimpleNamespace(
+        orderbook_cache={},
+        snapshot=SimpleNamespace(delta_totals_by_currency={}, total_equity_usdc=Decimal("100000")),
+        future_positions=[],
+    )
+
+    actions = engine._manage_group(ctx, group, live=False)
+
+    assert all(action.get("action") != "close_group_preview" for action in actions)
+    assert group.status == "open"
+
+
+def test_orphan_hedge_closed_when_no_open_option_remains(tmp_path, fake_client):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc", enable_perp_hedge=True)
+    engine = DeribitOptionTrialBot(config, fake_client)
+    perp = Position(
+        instrument_name=engine._perp_instrument("BTC"),
+        direction="sell",
+        kind="future",
+        size=Decimal("0.5"),
+        size_currency=Decimal("0.5"),
+        mark_price=Decimal("70000"),
+        average_price=Decimal("70000"),
+        floating_profit_loss=Decimal("0"),
+        delta=Decimal("0"),
+    )
+    ctx = SimpleNamespace(state=StrategyState(), future_positions=[perp])
+
+    action = engine._maybe_close_orphan_hedge(ctx, currency="BTC", live=False)
+
+    assert action is not None
+    assert action["reason"] == "orphan_hedge_no_open_options"
+    assert action["instrument_name"] == "BTC_USDC-PERPETUAL"
+
+
+def test_orphan_hedge_not_closed_while_option_open(tmp_path, fake_client):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc", enable_perp_hedge=True)
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    state.groups.append(_build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", currency="BTC"))
+    perp = Position(
+        instrument_name=engine._perp_instrument("BTC"),
+        direction="sell",
+        kind="future",
+        size=Decimal("0.5"),
+        size_currency=Decimal("0.5"),
+        mark_price=Decimal("70000"),
+        average_price=Decimal("70000"),
+        floating_profit_loss=Decimal("0"),
+        delta=Decimal("0"),
+    )
+    ctx = SimpleNamespace(state=state, future_positions=[perp])
+
+    assert engine._maybe_close_orphan_hedge(ctx, currency="BTC", live=False) is None
+
+
+def test_hedge_plan_uses_usdc_linear_perp_and_base_amount(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        enable_perp_hedge=True,
+        hard_hedge_delta_cap_pct=Decimal("0.05"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    ctx = SimpleNamespace(
+        snapshot=SimpleNamespace(
+            delta_totals_by_currency={"BTC": Decimal("0.5")},  # net +0.5 BTC delta
+            total_equity_usdc=Decimal("1000000"),
+        ),
+        orderbook_cache={},
+        future_positions=[],
+        future_markets_by_name=engine._load_perpetual_markets(),
+    )
+
+    plan = engine._build_hedge_plan(ctx, "BTC", mode="hard", target_pct=Decimal("0"))
+
+    assert plan is not None
+    assert plan.instrument_name == "BTC_USDC-PERPETUAL"
+    assert plan.side == "sell"  # short perp to neutralize positive (short-put) delta
+    # Full neutralization of +0.5 BTC delta => sell 0.5 BTC, sized in BASE units
+    # (not the ~35000 USD notional an inverse perp would use).
+    assert plan.order_amount == Decimal("0.5")
+    assert plan.target_hedge_base == Decimal("-0.5")
+
+
+def test_hedge_plan_buys_perp_to_neutralize_short_call(tmp_path, fake_client):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc", enable_perp_hedge=True)
+    engine = DeribitOptionTrialBot(config, fake_client)
+    ctx = SimpleNamespace(
+        snapshot=SimpleNamespace(
+            delta_totals_by_currency={"BTC": Decimal("-0.5")},  # short call => negative delta
+            total_equity_usdc=Decimal("1000000"),
+        ),
+        orderbook_cache={},
+        future_positions=[],
+        future_markets_by_name=engine._load_perpetual_markets(),
+    )
+
+    plan = engine._build_hedge_plan(ctx, "BTC", mode="hard", target_pct=Decimal("0"))
+
+    assert plan is not None
+    assert plan.side == "buy"  # long perp offsets the short-call negative delta
+    assert plan.order_amount == Decimal("0.5")
+    assert plan.target_hedge_base == Decimal("0.5")
+
+
+def _make_per_position_engine(tmp_path, fake_client, **overrides):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        enable_perp_hedge=True,
+        per_position_hedge=True,
+        soft_hedge_neutralize_pct=Decimal("0.5"),
+        **overrides,
+    )
+    return DeribitOptionTrialBot(config, fake_client)
+
+
+def test_per_position_hard_targets_full_position_delta(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", quantity=Decimal("1"))
+    group.short_delta = Decimal("0.5")  # ATM short put => +0.5 delta per coin
+
+    engine._update_position_hedge(group, raw_soft=True, raw_hard=True, soft_trigger=True, hard_trigger=True)
+
+    assert group.hedge_mode == "hard"
+    # Neutralize the position's OWN delta (+0.5 * size 1) => short 0.5 perp.
+    assert group.hedge_size_base == Decimal("-0.5")
+
+
+def test_per_position_soft_targets_partial_delta(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", quantity=Decimal("1"))
+    group.short_delta = Decimal("0.4")
+
+    engine._update_position_hedge(group, raw_soft=True, raw_hard=False, soft_trigger=True, hard_trigger=False)
+
+    assert group.hedge_mode == "soft"
+    # soft neutralizes 50% of +0.4 delta => short 0.2 perp.
+    assert group.hedge_size_base == Decimal("-0.2")
+
+
+def test_per_position_short_call_targets_long_perp(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-70000-C", quantity=Decimal("1"))
+    group.option_type = "call"
+    group.short_delta = Decimal("0.5")  # short call => -0.5 delta per coin
+
+    engine._update_position_hedge(group, raw_soft=True, raw_hard=True, soft_trigger=True, hard_trigger=True)
+
+    # Offset a short-call's negative delta by going LONG the perp.
+    assert group.hedge_size_base == Decimal("0.5")
+
+
+def test_per_position_auto_unwinds_after_recovery_cycles(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client, recovery_normal_cycles=3)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", quantity=Decimal("1"))
+    group.short_delta = Decimal("0.5")
+    engine._update_position_hedge(group, raw_soft=True, raw_hard=True, soft_trigger=True, hard_trigger=True)
+    assert group.hedge_size_base == Decimal("-0.5")
+
+    # Two clean cycles: hedge still on (streak < recovery_normal_cycles).
+    for _ in range(2):
+        engine._update_position_hedge(group, raw_soft=False, raw_hard=False, soft_trigger=False, hard_trigger=False)
+        assert group.hedge_mode == "hard"
+        assert group.hedge_size_base == Decimal("-0.5")
+
+    # Third clean cycle: fully removed.
+    engine._update_position_hedge(group, raw_soft=False, raw_hard=False, soft_trigger=False, hard_trigger=False)
+    assert group.hedge_mode == ""
+    assert group.hedge_size_base == Decimal("0")
+
+
+def test_per_position_holds_while_raw_elevated_not_confirmed(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client, recovery_normal_cycles=3)
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", quantity=Decimal("1"))
+    group.short_delta = Decimal("0.5")
+    engine._update_position_hedge(group, raw_soft=True, raw_hard=True, soft_trigger=True, hard_trigger=True)
+
+    # Still elevated (raw) but not confirmed: do not start unwinding.
+    for _ in range(5):
+        engine._update_position_hedge(group, raw_soft=False, raw_hard=True, soft_trigger=False, hard_trigger=False)
+    assert group.hedge_mode == "hard"
+    assert group.hedge_recovery_streak == 0
+    assert group.hedge_size_base == Decimal("-0.5")
+
+
+def test_per_position_reconcile_sums_group_targets_into_one_order(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    state = StrategyState()
+    g1 = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", currency="BTC")
+    g1.hedge_size_base = Decimal("-0.04")
+    g2 = _build_group(short_instrument_name="BTC_USDC-14APR30-60000-P", currency="BTC")
+    g2.group_id = "0002"
+    g2.hedge_size_base = Decimal("-0.06")
+    state.groups.extend([g1, g2])
+    ctx = SimpleNamespace(
+        state=state,
+        future_positions=[],
+        orderbook_cache={},
+        future_markets_by_name=engine._load_perpetual_markets(),
+    )
+
+    actions = engine._reconcile_position_hedges(ctx, live=False)
+
+    btc_actions = [a for a in actions if a["currency"] == "BTC"]
+    assert len(btc_actions) == 1
+    action = btc_actions[0]
+    assert action["instrument_name"] == "BTC_USDC-PERPETUAL"
+    assert action["side"] == "sell"  # short 0.10 BTC to offset two long-delta short puts
+    assert Decimal(action["amount"]) == Decimal("0.10")
+    assert action["reduce_only"] is False
+
+
+def test_per_position_reconcile_flattens_orphan_perp(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    perp = Position(
+        instrument_name=engine._perp_instrument("BTC"),
+        direction="sell",
+        kind="future",
+        size=Decimal("0.5"),
+        size_currency=Decimal("0.5"),
+        mark_price=Decimal("70000"),
+        average_price=Decimal("70000"),
+        floating_profit_loss=Decimal("0"),
+        delta=Decimal("0"),
+    )
+    state = StrategyState()  # no open groups want a hedge => target 0
+    ctx = SimpleNamespace(
+        state=state,
+        future_positions=[perp],
+        orderbook_cache={},
+        future_markets_by_name=engine._load_perpetual_markets(),
+    )
+
+    actions = engine._reconcile_position_hedges(ctx, live=False)
+
+    btc_actions = [a for a in actions if a["currency"] == "BTC"]
+    assert len(btc_actions) == 1
+    action = btc_actions[0]
+    assert action["side"] == "buy"  # buy back the 0.5 short to flatten
+    assert Decimal(action["amount"]) == Decimal("0.5")
+    assert action["reduce_only"] is True
+
+
+def test_per_position_manage_group_holds_and_sets_hedge_on_hard(tmp_path, fake_client):
+    engine = _make_per_position_engine(
+        tmp_path,
+        fake_client,
+        enable_early_exit=False,
+        time_exit_dte=0,
+        hard_defense_delta=Decimal("0.30"),
+        hedge_first_on_hard=True,
+    )
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", dte_days=14, quantity=Decimal("1"))
+    group.current_debit = group.entry_credit
+    group.short_delta = Decimal("0.40")  # hard trigger via delta
+    ctx = SimpleNamespace(
+        orderbook_cache={},
+        snapshot=SimpleNamespace(delta_totals_by_currency={}, total_equity_usdc=Decimal("100000")),
+        future_positions=[],
+    )
+
+    actions = engine._manage_group(ctx, group, live=False)
+
+    assert all(action.get("action") != "close_group_preview" for action in actions)
+    assert group.status == "open"
+    assert group.hedge_mode == "hard"
+    assert group.hedge_size_base == Decimal("-0.40")  # full neutralize +0.40 delta
+
+
+def test_hedge_giveup_backstop_breaches_above_threshold(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        enable_perp_hedge=True,
+        hedge_first_on_hard=True,
+        hedge_giveup_loss_pct=Decimal("0.80"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    group = _build_group(
+        short_instrument_name="BTC_USDC-14APR30-63000-P",
+        entry_credit=Decimal("10"),
+        max_loss=Decimal("100"),
+    )
+
+    group.current_debit = Decimal("85")  # mark loss 75 / 100 = 0.75 < 0.80 -> hold
+    assert engine._hedge_giveup_breached(group) is False
+
+    group.current_debit = Decimal("100")  # mark loss 90 / 100 = 0.90 >= 0.80 -> force close
+    assert engine._hedge_giveup_breached(group) is True
+
+
+def test_hedge_giveup_disabled_never_breaches(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        enable_perp_hedge=True,
+        hedge_first_on_hard=True,
+        hedge_giveup_loss_pct=Decimal("0"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    group = _build_group(
+        short_instrument_name="BTC_USDC-14APR30-63000-P",
+        entry_credit=Decimal("10"),
+        max_loss=Decimal("100"),
+    )
+    group.current_debit = Decimal("999")  # huge loss, but backstop disabled
+    assert engine._hedge_giveup_breached(group) is False
+
+
+def test_refresh_group_uses_mark_not_ask_for_loss_trigger(tmp_path, fake_client):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        early_exit_max_spread_ratio=Decimal("0.12"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    short = "BTC_USDC-14APR30-63000-P"
+    group = _build_group(
+        short_instrument_name=short,
+        entry_credit=Decimal("26"),
+        max_loss=Decimal("415"),
+        quantity=Decimal("0.05"),
+    )
+    # Sane book where the ask sits above mark: ask-based debit overstates loss.
+    book = OrderBookSnapshot(
+        instrument_name=short,
+        best_bid_price=Decimal("620"),
+        best_bid_amount=Decimal("1"),
+        best_ask_price=Decimal("680"),
+        best_ask_amount=Decimal("1"),
+        mark_price=Decimal("640"),
+        index_price=Decimal("95000"),
+        delta=Decimal("0.14"),
+        iv=Decimal("0.5"),
+        open_interest=Decimal("100"),
+    )
+    markets = engine._load_supported_option_markets()
+
+    engine._refresh_group(context_markets=markets, group=group, orderbook_cache={short: book})
+
+    assert group.mark_debit < group.current_debit
+    assert group.mark_loss_pct_of_max_loss < group.loss_pct_of_max_loss
 
 
 def test_submit_option_close_limit_clamps_price_too_high(tmp_path, fake_client):

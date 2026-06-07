@@ -38,7 +38,9 @@ class CoveredCallMixin:
         live: bool,
     ) -> list[dict[str, Any]]:
         """Covered calls: OTM uses income exits (TP / early / time); ITM uses spot exit."""
-        if self._covered_call_itm(group, context):
+        itm = self._covered_call_itm(group, context)
+        group.itm_defense_streak = group.itm_defense_streak + 1 if itm else 0
+        if itm:
             robust_exit_actions = self._maybe_covered_call_robust_spot_exit(context, group, live=live)
             if robust_exit_actions is not None:
                 return robust_exit_actions
@@ -77,6 +79,14 @@ class CoveredCallMixin:
         if group.dte_days > self.config.covered_call_robust_exit_dte:
             return None
         if not self._covered_call_itm(group, context):
+            return None
+        # Confirmation window: require ITM to hold for a few cycles before
+        # buying back the call + dumping spot, so a brief wick above the strike
+        # does not crystallize the loss at a local top.
+        confirm = self.config.covered_call_itm_confirm_cycles
+        if confirm is None:
+            confirm = self.config.defense_confirm_cycles
+        if group.itm_defense_streak < max(confirm, 1):
             return None
 
         actions = self._close_group(context, group, reason="covered_call_robust_exit", live=live)

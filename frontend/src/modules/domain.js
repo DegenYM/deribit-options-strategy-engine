@@ -461,6 +461,102 @@ export function openRowPositionSignedSizeForDisplay(p) {
   return sz;
 }
 
+/**
+ * Perp 避險合約名稱（與後端 ``_perp_instrument`` 一致：線性 USDC 永續）。
+ * 例：``BTC`` → ``BTC_USDC-PERPETUAL``。
+ */
+export function hedgePerpInstrumentForCurrency(currency) {
+  const cur = String(currency || "").toUpperCase();
+  if (!cur) return "";
+  return `${cur}_USDC-PERPETUAL`;
+}
+
+/**
+ * 彙整某幣別的避險 perp 部位（跨帳戶合計）。無部位時回 ``null``。
+ * 避險是以「幣別」為單位中和整個帳本淨 delta，故同帳多筆合併計算。
+ */
+export function hedgePerpAggregateForCurrency(status, currency) {
+  const name = hedgePerpInstrumentForCurrency(currency);
+  if (!name) return null;
+  const rows = status?.positions || [];
+  let signedSize = 0;
+  let notionalUsd = 0;
+  let pnlUsd = 0;
+  let hasPnl = false;
+  let markPrice = null;
+  let matched = 0;
+  for (const p of rows) {
+    if (String(p.instrument_name || "") !== name) continue;
+    const sz = openRowPositionSignedSizeForDisplay(p);
+    if (sz === null) continue;
+    matched += 1;
+    signedSize += sz;
+    const mark = num(p.mark_price);
+    if (mark !== null && mark > 0) {
+      markPrice = mark;
+      notionalUsd += sz * mark;
+    }
+    const fpl = num(p.floating_profit_loss_usd);
+    if (fpl !== null) {
+      pnlUsd += fpl;
+      hasPnl = true;
+    }
+  }
+  if (!matched || signedSize === 0) return null;
+  return {
+    currency: String(currency || "").toUpperCase(),
+    instrumentName: name,
+    signedSize,
+    notionalUsd,
+    markPrice,
+    pnlUsd: hasPnl ? pnlUsd : null,
+    side: signedSize < 0 ? "short" : "long",
+  };
+}
+
+/**
+ * 目前開倉部位涉及、且有實際避險 perp 的幣別彙總列。
+ * 每列含：避險 perp 部位、該幣別選擇權合計未實現 PnL，以及「含避險淨額」
+ * （選擇權 PnL + perp PnL，依需求把避險損益併入該幣別策略合計）。
+ */
+export function activeHedgeSummaryRows(status, openRows, groups = null) {
+  const ctx = groups ?? STATE.groups;
+  const rows = openRows || [];
+  const byCurrency = new Map();
+  for (const g of rows) {
+    const cur = String(g.currency || "").toUpperCase();
+    if (!cur) continue;
+    if (!byCurrency.has(cur)) byCurrency.set(cur, []);
+    byCurrency.get(cur).push(g);
+  }
+  const out = [];
+  for (const [cur, groupRows] of byCurrency) {
+    const hedge = hedgePerpAggregateForCurrency(status, cur);
+    if (!hedge) continue;
+    let optionsPnlUsd = 0;
+    let hasOptionsPnl = false;
+    for (const g of groupRows) {
+      const v = openRowDisplayUnrealizedUsd(g, status, ctx);
+      if (v !== null && v !== undefined) {
+        optionsPnlUsd += v;
+        hasOptionsPnl = true;
+      }
+    }
+    const perpPnl = hedge.pnlUsd;
+    const hasNet = hasOptionsPnl || perpPnl !== null;
+    out.push({
+      ...hedge,
+      optionGroupCount: groupRows.length,
+      optionsPnlUsd: hasOptionsPnl ? optionsPnlUsd : null,
+      netPnlUsd: hasNet
+        ? (hasOptionsPnl ? optionsPnlUsd : 0) + (perpPnl !== null ? perpPnl : 0)
+        : null,
+    });
+  }
+  out.sort((a, b) => a.currency.localeCompare(b.currency));
+  return out;
+}
+
 /** Short option amount: negative qty (Deribit Amount column). */
 export function fmtShortAmountDisplay(g, status, groups = null) {
   const ctx = groups ?? STATE.groups;

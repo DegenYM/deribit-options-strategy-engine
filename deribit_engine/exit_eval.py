@@ -31,6 +31,7 @@ class ExitEvalContext:
     tp_capture_pct_dte_short: Decimal
     tp_dte_long_threshold: Decimal
     tp_dte_short_threshold: Decimal
+    defense_trigger_use_mark: bool = True
 
 
 def exit_eval_context_from_config(config: BotConfig) -> ExitEvalContext:
@@ -50,6 +51,7 @@ def exit_eval_context_from_config(config: BotConfig) -> ExitEvalContext:
         tp_capture_pct_dte_short=config.tp_capture_pct_dte_short,
         tp_dte_long_threshold=config.tp_dte_long_threshold,
         tp_dte_short_threshold=config.tp_dte_short_threshold,
+        defense_trigger_use_mark=config.defense_trigger_use_mark,
     )
 
 
@@ -115,8 +117,9 @@ def evaluate_defense_triggers(
     hard_delta: Decimal,
     ctx: ExitEvalContext,
 ) -> tuple[bool, bool]:
-    hard = group.short_delta >= hard_delta or group.loss_pct_of_max_loss >= ctx.hard_stop_loss_pct
-    soft = group.short_delta >= soft_delta or group.loss_pct_of_max_loss >= ctx.soft_defense_loss_pct
+    loss_pct = group.mark_loss_pct_of_max_loss if ctx.defense_trigger_use_mark else group.loss_pct_of_max_loss
+    hard = group.short_delta >= hard_delta or loss_pct >= ctx.hard_stop_loss_pct
+    soft = group.short_delta >= soft_delta or loss_pct >= ctx.soft_defense_loss_pct
     return soft, hard
 
 

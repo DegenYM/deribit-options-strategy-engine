@@ -217,11 +217,76 @@ class TradeJournalSyncScheduler:
             self.state.last_error = str(exc)
 
 
-class _TtlCache:
-    """Trivial TTL cache — just enough to avoid hammering Deribit."""
+class BundleWarmScheduler:
+    """Periodically warms the live dashboard caches in the background.
 
-    def __init__(self, ttl_seconds: float) -> None:
+    The dominant Snapshot→Live latency is the on-demand Deribit prefetch behind
+    ``/api/dashboard_bundle`` / ``/api/status``. By refreshing the exchange
+    prefetch and reseeding the bundle/status caches on a cadence shorter than the
+    cache TTL, browser requests (first paint and auto-refresh alike) hit a warm
+    cache and flip to ``Live`` near-instantly.
+    """
+
+    def __init__(
+        self,
+        *,
+        warm_fn: Callable[[], None],
+        interval_sec: int,
+        has_private_creds: Callable[[], bool],
+    ) -> None:
+        self._warm_fn = warm_fn
+        self._interval_sec = max(15, int(interval_sec))
+        self._has_private_creds = has_private_creds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.state = SnapshotState()
+
+    def start(self) -> None:
+        if not self._has_private_creds():
+            LOGGER.info("bundle warm scheduler disabled: no private creds in env")
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="bundle-warm", daemon=True)
+        self.state.running = True
+        self._thread.start()
+        LOGGER.info("bundle warm scheduler started (interval=%ss)", self._interval_sec)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        self.state.running = False
+
+    def _loop(self) -> None:
+        self._tick()
+        while not self._stop.wait(self._interval_sec):
+            self._tick()
+
+    def _tick(self) -> None:
+        self.state.last_attempt_ms = utc_now_ms()
+        try:
+            self._warm_fn()
+            self.state.last_success_ms = utc_now_ms()
+            self.state.last_error = None
+        except Exception as exc:  # noqa: BLE001 — warmer must not crash the server.
+            LOGGER.warning("bundle warm tick failed: %s", exc)
+            self.state.last_error = str(exc)
+
+
+class _TtlCache:
+    """Trivial TTL cache — just enough to avoid hammering Deribit.
+
+    When ``stale_while_revalidate`` is set, an expired-but-present entry is served
+    immediately while a single background thread recomputes it. This keeps user
+    requests fast (no blocking on a slow Deribit prefetch) once any value exists;
+    only the very first cold compute for a key blocks.
+    """
+
+    def __init__(self, ttl_seconds: float, *, stale_while_revalidate: bool = False) -> None:
         self._ttl = ttl_seconds
+        self._swr = stale_while_revalidate
         self._lock = threading.Lock()
         self._store: dict[Any, tuple[float, Any]] = {}
         self._inflight: dict[Any, threading.Event] = {}
@@ -231,6 +296,19 @@ class _TtlCache:
         with self._lock:
             cached = self._store.get(key)
             if cached is not None and (now - cached[0]) < self._ttl:
+                return cached[1]
+            # Expired but present: serve stale and refresh in the background so the
+            # caller never blocks on the slow factory (single-flight per key).
+            if self._swr and cached is not None:
+                if key not in self._inflight:
+                    event = threading.Event()
+                    self._inflight[key] = event
+                    threading.Thread(
+                        target=self._background_refresh,
+                        args=(key, factory, event),
+                        name="ttl-cache-swr",
+                        daemon=True,
+                    ).start()
                 return cached[1]
             event = self._inflight.get(key)
             if event is None:
@@ -256,6 +334,18 @@ class _TtlCache:
                 done = self._inflight.pop(key, None)
             if done is not None:
                 done.set()
+
+    def _background_refresh(self, key: Any, factory: Callable[[], Any], event: threading.Event) -> None:
+        try:
+            value = factory()
+            with self._lock:
+                self._store[key] = (time.monotonic(), value)
+        except Exception as exc:  # noqa: BLE001 — keep serving stale on refresh failure.
+            LOGGER.warning("ttl cache background refresh failed for %r: %s", key, exc)
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            event.set()
 
     def try_get(self, key: Any) -> Any | None:
         """Return cached value when present and fresh; otherwise ``None``."""

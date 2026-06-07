@@ -162,6 +162,42 @@ class BotConfig:
     score_weight_spread: Decimal = Decimal("1")
     score_weight_delta_distance: Decimal = Decimal("1")
     score_weight_otm_distance: Decimal = Decimal("0.5")
+    # --- Dynamic target delta (VRP-aware strike selection) -------------------
+    # When enabled, the preferred-delta target used by candidate scoring is no
+    # longer the static midpoint of the preferred band. Instead it shifts
+    # within [pref_min, pref_max] based on the current IV-minus-RV (VRP) for the
+    # underlying: rich vol (high VRP) pushes the target toward the lower-delta
+    # (further-OTM) edge, so we collect the fat premium from safer strikes;
+    # thin vol pulls it toward the higher-delta edge. Requires the VRP context
+    # (auto-refreshed when this or the IV entry gate is enabled).
+    enable_dynamic_target_delta: bool = False
+    # VRP (IV-RV, annualized decimal) that maps to "no tilt". It also doubles as
+    # the normalization scale for the signal: VRP == 2*ref -> full tilt.
+    dynamic_target_delta_vrp_ref: Decimal = Decimal("0.05")
+    # Fraction of the preferred half-band to shift at full signal (0..1).
+    dynamic_target_delta_strength: Decimal = Decimal("0.5")
+    # --- Skew-aware side selection (risk reversal) ---------------------------
+    # When enabled (weighted scoring only), a per-underlying risk reversal
+    # rr = put_IV(near pref delta) - call_IV(near pref delta) tilts the score so
+    # the richer side ranks higher: rr > 0 (puts richer) favors short puts,
+    # rr < 0 (calls richer) favors short calls. Lets the bot lean into whichever
+    # wing the market is overpaying for instead of a static put-first policy.
+    enable_skew_side_selection: bool = False
+    score_weight_skew: Decimal = Decimal("4")
+    # Deadband: |rr| below this is treated as zero (no side tilt).
+    skew_side_min_rr: Decimal = Decimal("0.02")
+    # --- Trend side bias (price vs MA) ---------------------------------------
+    # When enabled, a per-underlying trend signal (spot vs SMA) tilts ranking
+    # toward the side that fits the tape: bullish (price above MA) favors short
+    # puts; bearish favors short calls. Works in both lexicographic and weighted
+    # scoring modes. Index chart data is refreshed each manage cycle.
+    enable_trend_side_bias: bool = True
+    trend_ma_days: int = 20
+    # Spot deviation from MA that maps to full signal (+/-1).
+    trend_side_ref_pct: Decimal = Decimal("0.05")
+    # Deadband: |signal| below this is treated as neutral (no side tilt).
+    trend_side_min_signal: Decimal = Decimal("0.02")
+    score_weight_trend: Decimal = Decimal("3")
     # Dynamic take-profit thresholds by DTE.
     enable_dynamic_tp: bool = False
     tp_capture_pct_dte_long: Decimal = Decimal("0.40")
@@ -186,6 +222,42 @@ class BotConfig:
     # Call-side defence thresholds (short put uses hard_defense_delta / hard_stop_loss_pct).
     soft_defense_delta_call: Decimal = Decimal("0.18")
     hard_defense_delta_call: Decimal = Decimal("0.24")
+    # --- "Cut at the bottom" mitigations for defense stops --------------------
+    # Require a soft/hard defense trigger (delta OR loss) to hold for this many
+    # consecutive manage cycles before acting. 1 = act immediately (legacy).
+    # Higher values filter single-snapshot spikes that mean-revert (whipsaws),
+    # at the cost of reacting a few cycles slower to a genuine breach.
+    defense_confirm_cycles: int = 1
+    # Also require the covered-call ITM robust spot exit to hold for
+    # ``defense_confirm_cycles`` cycles before buying back the call + selling
+    # spot. Defaults to mirroring the defense confirm window.
+    covered_call_itm_confirm_cycles: int | None = None
+    # Evaluate the loss-based defense trigger off mark (fair value) instead of
+    # the spread-inflated best-ask buy-to-close cost, so an IV/spread spike does
+    # not spuriously trip the stop. Execution still crosses the spread (taker).
+    defense_trigger_use_mark: bool = True
+    # Hedge-first on hard stop: instead of crystallizing the loss at a local
+    # extreme, neutralize the position delta with a perp hedge and HOLD the
+    # option (income / time / expiry exits still apply; recovery unwinds the
+    # hedge once the regime normalizes). Requires ENABLE_PERP_HEDGE=true.
+    hedge_first_on_hard: bool = False
+    # Catastrophic backstop while holding a hedged hard-stop position: force a
+    # close once mark loss reaches this fraction of max_loss. 0 = disabled
+    # (rely on time_exit + portfolio hard_derisk instead).
+    hedge_giveup_loss_pct: Decimal = Decimal("0")
+    # Per-position hedging: instead of one currency-net delta hedge sized off a
+    # capital % cap, each open group hedges its OWN option delta and the engine
+    # reconciles the per-currency perp to the sum of every group's intended
+    # hedge. soft trigger neutralizes ``soft_hedge_neutralize_pct`` of the
+    # group's delta; hard neutralizes 100%. As price recovers the per-group
+    # target shrinks with delta (auto-unwind) and is fully removed once the
+    # group's defense trigger has stayed clear for ``recovery_normal_cycles``
+    # cycles. Requires ENABLE_PERP_HEDGE=true. When false, legacy currency-net
+    # hedging (soft/hard_hedge_delta_cap_pct) is used.
+    per_position_hedge: bool = False
+    # Fraction of a position's own delta to neutralize on a soft defense
+    # trigger when ``per_position_hedge`` is on (hard always neutralizes 100%).
+    soft_hedge_neutralize_pct: Decimal = Decimal("0.7")
     # Raw SCAN_ASSETS override kept alongside managed_currencies for future use.
     scan_assets: tuple[str, ...] = ()
     # --- Collateral routing (Stage C: decouple scan vs book management) -----
@@ -839,6 +911,17 @@ def load_config(
         score_weight_spread=to_decimal(_optional(values, "SCORE_WEIGHT_SPREAD", "1")),
         score_weight_delta_distance=to_decimal(_optional(values, "SCORE_WEIGHT_DELTA_DISTANCE", "1")),
         score_weight_otm_distance=to_decimal(_optional(values, "SCORE_WEIGHT_OTM_DISTANCE", "0.5")),
+        enable_dynamic_target_delta=_to_bool(_optional(values, "ENABLE_DYNAMIC_TARGET_DELTA", "false"), default=False),
+        dynamic_target_delta_vrp_ref=to_decimal(_optional(values, "DYNAMIC_TARGET_DELTA_VRP_REF", "0.05")),
+        dynamic_target_delta_strength=to_decimal(_optional(values, "DYNAMIC_TARGET_DELTA_STRENGTH", "0.5")),
+        enable_skew_side_selection=_to_bool(_optional(values, "ENABLE_SKEW_SIDE_SELECTION", "false"), default=False),
+        score_weight_skew=to_decimal(_optional(values, "SCORE_WEIGHT_SKEW", "4")),
+        skew_side_min_rr=to_decimal(_optional(values, "SKEW_SIDE_MIN_RR", "0.02")),
+        enable_trend_side_bias=_to_bool(_optional(values, "ENABLE_TREND_SIDE_BIAS", "true"), default=True),
+        trend_ma_days=max(2, int(_optional(values, "TREND_MA_DAYS", "20"))),
+        trend_side_ref_pct=to_decimal(_optional(values, "TREND_SIDE_REF_PCT", "0.05")),
+        trend_side_min_signal=to_decimal(_optional(values, "TREND_SIDE_MIN_SIGNAL", "0.02")),
+        score_weight_trend=to_decimal(_optional(values, "SCORE_WEIGHT_TREND", "3")),
         enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "false"), default=False),
         tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.40")),
         tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.60")),
@@ -868,6 +951,17 @@ def load_config(
         hard_defense_delta_call=to_decimal(
             _optional(values, "HARD_DEFENSE_DELTA_CALL", _optional(values, "HARD_DEFENSE_DELTA", "0.24"))
         ),
+        defense_confirm_cycles=max(1, int(_optional(values, "DEFENSE_CONFIRM_CYCLES", "1"))),
+        covered_call_itm_confirm_cycles=(
+            max(1, int(values["COVERED_CALL_ITM_CONFIRM_CYCLES"]))
+            if str(values.get("COVERED_CALL_ITM_CONFIRM_CYCLES") or "").strip()
+            else None
+        ),
+        defense_trigger_use_mark=_to_bool(_optional(values, "DEFENSE_TRIGGER_USE_MARK", "true")),
+        hedge_first_on_hard=_to_bool(_optional(values, "HEDGE_FIRST_ON_HARD", "false")),
+        hedge_giveup_loss_pct=to_decimal(_optional(values, "HEDGE_GIVEUP_LOSS_PCT", "0")),
+        per_position_hedge=_to_bool(_optional(values, "PER_POSITION_HEDGE", "false")),
+        soft_hedge_neutralize_pct=to_decimal(_optional(values, "SOFT_HEDGE_NEUTRALIZE_PCT", "0.7")),
         scan_assets=scan_assets,
         scan_underlyings=scan_underlyings,
         traded_collaterals=traded_collaterals,

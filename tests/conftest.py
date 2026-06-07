@@ -184,6 +184,33 @@ class FakeClient:
     def get_instruments(self, currency, *, kind="option", expired=False):
         currency = currency.upper()
         if kind == "future":
+            if currency == "USDC":
+                return [
+                    {
+                        "instrument_name": "BTC_USDC-PERPETUAL",
+                        "base_currency": "BTC",
+                        "quote_currency": "USDC",
+                        "settlement_currency": "USDC",
+                        "instrument_type": "linear",
+                        "kind": "future",
+                        "tick_size": "0.5",
+                        "min_trade_amount": "0.0001",
+                        "contract_size": "0.0001",
+                        "instrument_state": "open",
+                    },
+                    {
+                        "instrument_name": "ETH_USDC-PERPETUAL",
+                        "base_currency": "ETH",
+                        "quote_currency": "USDC",
+                        "settlement_currency": "USDC",
+                        "instrument_type": "linear",
+                        "kind": "future",
+                        "tick_size": "0.05",
+                        "min_trade_amount": "0.001",
+                        "contract_size": "0.001",
+                        "instrument_state": "open",
+                    },
+                ]
             if currency == "BTC":
                 return [
                     {

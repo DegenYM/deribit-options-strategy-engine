@@ -157,7 +157,7 @@ globalThis.fetch = async (url) => {
 
 const errors = [];
 try {
-  const { initDashboard } = await import("../frontend/src/dashboard.js");
+  const { initDashboard } = await import("../../frontend/src/dashboard.js");
   initDashboard();
   await new Promise((r) => setTimeout(r, 1500));
 } catch (err) {

@@ -11,6 +11,7 @@ from ..entry_gates import (
 from ..exceptions import TransientExchangeError
 from ..exit_eval import (
     dynamic_tp_capture_pct,
+    evaluate_defense_triggers,
     evaluate_early_exit_reason,
     exit_eval_context_from_config,
 )
@@ -96,11 +97,26 @@ class ManagementMixin:
 
         self._clear_stale_drawdown_cooldowns(context.state, context.snapshot)
 
-        if self.config.enable_perp_hedge and context.snapshot.regime is RiskRegime.NORMAL:
-            for currency in self.config.managed_currencies:
-                unwind = self._maybe_unwind_hedge(context, currency=currency, live=live)
-                if unwind is not None:
-                    actions.append(unwind)
+        if self.config.enable_perp_hedge:
+            if self.config.per_position_hedge:
+                # Per-position hedging: drive each currency's perp to the sum of
+                # every open group's intended hedge. This subsumes orphan-close
+                # (closed groups drop out of the sum) and unwind (recovered
+                # groups shrink their target), so it runs every cycle.
+                actions.extend(self._reconcile_position_hedges(context, live=live))
+            else:
+                # Legacy currency-net hedging. Flatten orphaned hedges (option leg
+                # gone) every cycle regardless of regime, so we never sit on an
+                # unintended naked perp.
+                for currency in self.config.managed_currencies:
+                    orphan = self._maybe_close_orphan_hedge(context, currency=currency, live=live)
+                    if orphan is not None:
+                        actions.append(orphan)
+                if context.snapshot.regime is RiskRegime.NORMAL:
+                    for currency in self.config.managed_currencies:
+                        unwind = self._maybe_unwind_hedge(context, currency=currency, live=live)
+                        if unwind is not None:
+                            actions.append(unwind)
 
         if live:
             self._persist_trade_journal_actions(actions)
@@ -483,22 +499,74 @@ class ManagementMixin:
             candidate.get("short_instrument_name"),
         )
 
+    def _confirm_defense_triggers(
+        self,
+        group: TradeGroup,
+        *,
+        raw_soft: bool,
+        raw_hard: bool,
+    ) -> tuple[bool, bool]:
+        """Apply the confirmation window to raw defense triggers.
+
+        A trigger only fires once its condition has held for
+        ``DEFENSE_CONFIRM_CYCLES`` consecutive manage cycles, so a single
+        snapshot spike (delta or loss) that mean-reverts does not stop us out
+        at a local extreme. Streaks reset the moment the condition clears.
+        """
+        group.hard_defense_streak = group.hard_defense_streak + 1 if raw_hard else 0
+        group.soft_defense_streak = group.soft_defense_streak + 1 if raw_soft else 0
+        need = max(self.config.defense_confirm_cycles, 1)
+        confirmed_hard = raw_hard and group.hard_defense_streak >= need
+        confirmed_soft = raw_soft and group.soft_defense_streak >= need
+        return confirmed_soft, confirmed_hard
+
     def _manage_group(self, context: RuntimeContext, group: TradeGroup, *, live: bool) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
         if self._is_covered_call_group(group):
             return self._manage_covered_call_group(context, group, live=live)
         soft_delta, hard_delta = self._defense_delta_thresholds(group)
-        hard_trigger = group.short_delta >= hard_delta or group.loss_pct_of_max_loss >= self.config.hard_stop_loss_pct
-        soft_trigger = (
-            group.short_delta >= soft_delta or group.loss_pct_of_max_loss >= self.config.soft_defense_loss_pct
+        raw_soft, raw_hard = evaluate_defense_triggers(
+            group,
+            soft_delta=soft_delta,
+            hard_delta=hard_delta,
+            ctx=exit_eval_context_from_config(self.config),
         )
-        if hard_trigger:
-            if self.config.enable_perp_hedge:
+        soft_trigger, hard_trigger = self._confirm_defense_triggers(group, raw_soft=raw_soft, raw_hard=raw_hard)
+        per_position = self.config.enable_perp_hedge and self.config.per_position_hedge
+        hold_on_hard = (
+            hard_trigger
+            and self.config.enable_perp_hedge
+            and self.config.hedge_first_on_hard
+            and not self._hedge_giveup_breached(group)
+        )
+        if per_position:
+            # Refresh this group's intended per-position hedge every cycle
+            # (soft=partial, hard=full, auto-unwind on recovery). The perp order
+            # itself is reconciled once per currency after the group loop.
+            self._update_position_hedge(
+                group,
+                raw_soft=raw_soft,
+                raw_hard=raw_hard,
+                soft_trigger=soft_trigger,
+                hard_trigger=hard_trigger,
+            )
+        if hard_trigger and not hold_on_hard:
+            if self.config.enable_perp_hedge and not per_position:
                 hedge_plan = self._build_hedge_plan(context, group.currency, mode="hard")
                 if hedge_plan is not None:
                     actions.append(self._execute_hedge_plan(context, hedge_plan, live=live))
             actions.extend(self._close_group(context, group, reason="hard_stop", live=live))
             return actions
+        if hold_on_hard and not per_position:
+            # Hedge-first (legacy currency-net): neutralize the position delta and
+            # HOLD the option instead of crystallizing the loss at a local
+            # extreme. Income / time / expiry exits below can still close it; the
+            # soft defense close is skipped (we are already fully hedged this
+            # cycle). Under per-position hedging the hold target is set by
+            # _update_position_hedge instead.
+            hedge_plan = self._build_hedge_plan(context, group.currency, mode="hard", target_pct=Decimal("0"))
+            if hedge_plan is not None:
+                actions.append(self._execute_hedge_plan(context, hedge_plan, live=live))
         if group.profit_capture >= dynamic_tp_capture_pct(group.dte_days, exit_eval_context_from_config(self.config)):
             actions.extend(self._close_group(context, group, reason="take_profit", live=live))
             return actions
@@ -512,8 +580,12 @@ class ManagementMixin:
         if group.dte_days <= self.config.time_exit_dte:
             actions.extend(self._close_group(context, group, reason="time_exit", live=live))
             return actions
-        if soft_trigger:
-            if self.config.enable_perp_hedge:
+        if soft_trigger and not hold_on_hard:
+            if per_position:
+                # Hedge target already set by _update_position_hedge; hold the
+                # option and let the reconcile place the partial perp hedge.
+                pass
+            elif self.config.enable_perp_hedge:
                 hedge_plan = self._build_hedge_plan(context, group.currency, mode="soft")
                 if hedge_plan is not None:
                     actions.append(self._execute_hedge_plan(context, hedge_plan, live=live))
@@ -522,6 +594,11 @@ class ManagementMixin:
             else:
                 actions.extend(self._close_group(context, group, reason="soft_stop", live=live))
         return actions
+
+    def _hedge_giveup_breached(self, group: TradeGroup) -> bool:
+        """True when a hedged hard-stop position has lost enough to force a close."""
+        giveup = self.config.hedge_giveup_loss_pct
+        return giveup > 0 and group.mark_loss_pct_of_max_loss >= giveup
 
     def _maybe_early_exit_reason(self, context: RuntimeContext, group: TradeGroup) -> str | None:
         """Decide whether to close a short option leg early."""
@@ -543,6 +620,30 @@ class ManagementMixin:
             exit_eval_context_from_config(self.config),
         )
 
+    def _maybe_close_orphan_hedge(self, context: RuntimeContext, *, currency: str, live: bool) -> dict[str, Any] | None:
+        """Flatten a perp hedge left behind once no option needs it.
+
+        When the last open option group in a currency closes (time exit, TP,
+        etc.) while a hedge is still on, the perp becomes a naked directional
+        bet. Close it immediately, regardless of regime, so we are not left
+        holding an unintended position until recovery unwinds it.
+        """
+        perp_name = self._perp_instrument(currency)
+        if any(group.currency == currency for group in self._open_groups(context.state)):
+            return None
+        position = next(
+            (pos for pos in context.future_positions if pos.instrument_name == perp_name and pos.size != 0),
+            None,
+        )
+        if position is None:
+            return None
+        closed = self._close_perp_position(position, live=live)
+        if closed is None:
+            return None
+        closed["reason"] = "orphan_hedge_no_open_options"
+        closed["currency"] = currency
+        return closed
+
     def _maybe_unwind_hedge(self, context: RuntimeContext, *, currency: str, live: bool) -> dict[str, Any] | None:
         recovery_count = context.state.normal_recovery_counts.get(currency, 0)
         if recovery_count < self.config.recovery_normal_cycles:
@@ -554,14 +655,18 @@ class ManagementMixin:
         if unwind_base <= 0:
             return None
         index_price = self._currency_index_price(currency, context.orderbook_cache)
+        uses_base = self._perp_uses_base_amount(currency)
+        if not uses_base and index_price <= 0:
+            return None
+        raw_amount = unwind_base if uses_base else unwind_base * index_price
         amount = self._align_future_order_amount(
             context,
             instrument_name=self._perp_instrument(currency),
-            amount=unwind_base * index_price,
+            amount=raw_amount,
         )
         if amount <= 0:
             return None
-        unwind_base = amount / index_price
+        unwind_base = amount if uses_base else amount / index_price
         action = {
             "action": "hedge_unwind",
             "currency": currency,
@@ -580,6 +685,128 @@ class ManagementMixin:
             )
             action["response"] = response
         return action
+
+    def _group_option_delta(self, group: TradeGroup) -> Decimal:
+        """Signed option delta of a single group in base (coin) units.
+
+        +ve = long-delta (short put), -ve = short-delta (short call).
+        """
+        option_type = getattr(group, "option_type", "put") or "put"
+        option_sign = Decimal("-1") if option_type == "call" else Decimal("1")
+        return option_sign * group.short_delta * group.quantity
+
+    def _update_position_hedge(
+        self,
+        group: TradeGroup,
+        *,
+        raw_soft: bool,
+        raw_hard: bool,
+        soft_trigger: bool,
+        hard_trigger: bool,
+    ) -> None:
+        """Refresh a group's intended per-position perp hedge (signed base units).
+
+        soft (confirmed) neutralizes ``soft_hedge_neutralize_pct`` of the group's
+        own option delta; hard (confirmed) neutralizes 100%. While a hedge is
+        active the target is recomputed from the live delta every cycle, so it
+        scales down automatically as price recovers. Once the raw defense
+        trigger has stayed clear for ``recovery_normal_cycles`` cycles the hedge
+        is fully removed. The actual perp order is placed once per currency in
+        ``_reconcile_position_hedges``.
+        """
+        soft_frac = self.config.soft_hedge_neutralize_pct
+        if hard_trigger:
+            group.hedge_mode = "hard"
+            group.hedge_recovery_streak = 0
+            frac = Decimal("1")
+        elif soft_trigger:
+            # Never downgrade an already-on hard hedge to soft on a fresh soft.
+            if group.hedge_mode != "hard":
+                group.hedge_mode = "soft"
+            group.hedge_recovery_streak = 0
+            frac = Decimal("1") if group.hedge_mode == "hard" else soft_frac
+        elif group.hedge_mode:
+            # Active hedge, no confirmed trigger this cycle.
+            if raw_soft or raw_hard:
+                # Still elevated (just not confirmed) -> hold, do not start unwind.
+                group.hedge_recovery_streak = 0
+            else:
+                group.hedge_recovery_streak += 1
+                if group.hedge_recovery_streak >= max(self.config.recovery_normal_cycles, 1):
+                    group.hedge_mode = ""
+                    group.hedge_recovery_streak = 0
+                    group.hedge_size_base = Decimal("0")
+                    return
+            frac = Decimal("1") if group.hedge_mode == "hard" else soft_frac
+        else:
+            group.hedge_size_base = Decimal("0")
+            return
+        # The perp offsets the option delta, hence the opposite sign.
+        group.hedge_size_base = -self._group_option_delta(group) * frac
+
+    def _reconcile_position_hedges(self, context: RuntimeContext, *, live: bool) -> list[dict[str, Any]]:
+        """Drive each currency's perp to the sum of every open group's intended hedge.
+
+        Under per-position hedging the exchange still holds a single perp per
+        currency, so we net every group's ``hedge_size_base`` and place one
+        market order to close the gap. Closed groups drop out of the sum, which
+        also flattens orphaned hedges and unwinds recovered positions without a
+        separate code path.
+        """
+        actions: list[dict[str, Any]] = []
+        open_groups = self._open_groups(context.state)
+        for currency in self.config.managed_currencies:
+            target_base = sum(
+                (group.hedge_size_base for group in open_groups if group.currency == currency),
+                Decimal("0"),
+            )
+            current_base = self._current_hedge_base(context.future_positions, currency)
+            diff = target_base - current_base
+            if abs(diff) <= Decimal("0.0001"):
+                continue
+            perp_name = self._perp_instrument(currency)
+            uses_base = self._perp_uses_base_amount(currency)
+            index_price = self._currency_index_price(currency, context.orderbook_cache)
+            if not uses_base and index_price <= 0:
+                continue
+            raw_amount = abs(diff) if uses_base else abs(diff) * index_price
+            order_amount = self._align_future_order_amount(
+                context,
+                instrument_name=perp_name,
+                amount=raw_amount,
+            )
+            if order_amount <= 0:
+                continue
+            realized_base = order_amount if uses_base else order_amount / index_price
+            side = "buy" if diff > 0 else "sell"
+            signed_change = realized_base if side == "buy" else -realized_base
+            new_base = current_base + signed_change
+            # reduce_only only when shrinking magnitude without flipping sign,
+            # so we never block a genuine open and never overshoot into a flip.
+            reduce_only = abs(target_base) < abs(current_base) and current_base * target_base >= 0
+            action = {
+                "action": "hedge_position_reconcile",
+                "currency": currency,
+                "instrument_name": perp_name,
+                "side": side,
+                "amount": format_decimal(order_amount, 8),
+                "target_hedge_base": format_decimal(target_base, 8),
+                "current_hedge_base": format_decimal(current_base, 8),
+                "new_hedge_base": format_decimal(new_base, 8),
+                "reduce_only": reduce_only,
+                "live": live,
+            }
+            if live:
+                action["response"] = self.client.place_order(
+                    direction=side,
+                    instrument_name=perp_name,
+                    amount=order_amount,
+                    label=self._hedge_label(currency, "position"),
+                    order_type="market",
+                    reduce_only=reduce_only,
+                )
+            actions.append(action)
+        return actions
 
     def _build_portfolio_snapshot(
         self,
@@ -989,13 +1216,23 @@ class ManagementMixin:
         regime, _ = self._determine_regime_with_detail(currency, markets=markets, orderbook_cache=orderbook_cache)
         return regime
 
-    def _build_hedge_plan(self, context: RuntimeContext, currency: str, *, mode: str) -> HedgePlan | None:
+    def _build_hedge_plan(
+        self,
+        context: RuntimeContext,
+        currency: str,
+        *,
+        mode: str,
+        target_pct: Decimal | None = None,
+    ) -> HedgePlan | None:
         current_delta = context.snapshot.delta_totals_by_currency.get(currency, Decimal("0"))
         index_price = self._currency_index_price(currency, context.orderbook_cache)
         if index_price <= 0:
             return None
         effective_capital = self._effective_capital(context.snapshot.total_equity_usdc)
-        target_pct = self.config.hard_hedge_delta_cap_pct if mode == "hard" else self.config.soft_hedge_delta_cap_pct
+        if target_pct is None:
+            target_pct = (
+                self.config.hard_hedge_delta_cap_pct if mode == "hard" else self.config.soft_hedge_delta_cap_pct
+            )
         target_cap_base = (effective_capital * target_pct) / index_price
         current_hedge = self._current_hedge_base(context.future_positions, currency)
         option_delta = current_delta - current_hedge
@@ -1009,16 +1246,19 @@ class ManagementMixin:
         if abs(delta_change_base) <= Decimal("0.0001"):
             return None
         side = "sell" if delta_change_base < 0 else "buy"
+        # Linear USDC perps size the order in base (coin) units; inverse perps
+        # use a USD notional. Convert accordingly so we hedge the right size.
+        uses_base = self._perp_uses_base_amount(currency)
+        raw_amount = abs(delta_change_base) if uses_base else abs(delta_change_base) * index_price
         order_amount = self._align_future_order_amount(
             context,
             instrument_name=self._perp_instrument(currency),
-            amount=abs(delta_change_base) * index_price,
+            amount=raw_amount,
         )
         if order_amount <= 0:
             return None
-        delta_change_base = order_amount / index_price
-        if side == "sell":
-            delta_change_base *= Decimal("-1")
+        realized_base = order_amount if uses_base else order_amount / index_price
+        delta_change_base = -realized_base if side == "sell" else realized_base
         target_hedge_base = current_hedge + delta_change_base
         return HedgePlan(
             currency=currency,
@@ -1229,6 +1469,46 @@ class ManagementMixin:
         }
         return state
 
+    def _short_close_debit_usdc(
+        self,
+        *,
+        premium: Decimal,
+        quantity: Decimal,
+        short_book: OrderBookSnapshot,
+        short_instrument: OptionInstrument,
+        usdc_path: bool,
+        idx: Decimal,
+    ) -> Decimal:
+        """USDC buy-to-close cost of the short leg (incl. fee) for a given premium."""
+        value = max(
+            self._premium_value_usdc(
+                premium=premium,
+                quantity=quantity,
+                index_price=short_book.index_price,
+                instrument=short_instrument,
+            ),
+            Decimal("0"),
+        )
+        if usdc_path:
+            fee = self._option_fee_usdc(
+                premium=premium,
+                quantity=quantity,
+                index_price=short_book.index_price,
+                base_currency=short_instrument.base_currency,
+                quote_currency=short_instrument.quote_currency,
+                settlement_currency=short_instrument.settlement_currency,
+            )
+            return value + fee
+        fee_collateral = self._option_fee_native(
+            premium=premium,
+            quantity=quantity,
+            index_price=short_book.index_price,
+            quote_currency=short_instrument.quote_currency,
+            settlement_currency=short_instrument.settlement_currency,
+        )
+        gross_native = premium * quantity
+        return (gross_native + fee_collateral) * idx if idx > 0 else value
+
     def _refresh_group(
         self,
         *,
@@ -1259,7 +1539,30 @@ class ManagementMixin:
             short_instrument.quote_currency.upper() == "USDC" and short_instrument.settlement_currency.upper() == "USDC"
         )
         idx = short_book.index_price
-        if usdc_linear or group.collateral_currency.upper() == "USDC":
+        usdc_path = usdc_linear or group.collateral_currency.upper() == "USDC"
+        # Capture the ask-based short-leg debit so we can derive a mark-based
+        # variant (mark_debit) without re-running the long-leg subtraction: the
+        # long credit cancels out, so mark_debit = current_debit + (mark - ask)
+        # short-leg delta. mark_debit drives the loss-based defense stop so an
+        # IV/spread spike on the short ask does not stop us out at a local peak.
+        short_debit_ask = self._short_close_debit_usdc(
+            premium=close_premium,
+            quantity=group.quantity,
+            short_book=short_book,
+            short_instrument=short_instrument,
+            usdc_path=usdc_path,
+            idx=idx,
+        )
+        mark_premium = short_book.mark_price if short_book.mark_price > 0 else close_premium
+        short_debit_mark = self._short_close_debit_usdc(
+            premium=mark_premium,
+            quantity=group.quantity,
+            short_book=short_book,
+            short_instrument=short_instrument,
+            usdc_path=usdc_path,
+            idx=idx,
+        )
+        if usdc_path:
             group.current_close_fee = self._option_fee_usdc(
                 premium=close_premium,
                 quantity=group.quantity,
@@ -1336,6 +1639,7 @@ class ManagementMixin:
                     group.long_instrument_name,
                     exc,
                 )
+        group.mark_debit = max(group.current_debit + (short_debit_mark - short_debit_ask), Decimal("0"))
         group.profit_capture = safe_div(max(group.entry_credit - group.current_debit, Decimal("0")), group.entry_credit)
         group.short_delta = abs(short_book.delta)
 

@@ -506,6 +506,10 @@ class NakedPutCandidate:
     strategy: str = ""
     long_leg: SpreadLeg | None = None
     covered_underlying_quantity: Decimal = Decimal("0")
+    # Mark IV (annualized decimal) of the short leg at screening time. Used by
+    # skew-aware side selection to compare put vs call richness. Defaults to 0
+    # for backward compatibility with serialized candidates.
+    short_iv: Decimal = Decimal("0")
 
     def to_dict(self) -> dict[str, Any]:
         strategy = normalize_strategy_name(self.strategy, default="naked_short")
@@ -536,6 +540,7 @@ class NakedPutCandidate:
             "in_target_apr_band": self.in_target_apr_band,
             "regime": self.regime.value,
             "covered_underlying_quantity": self.covered_underlying_quantity,
+            "short_iv": self.short_iv,
         }
         if self.long_leg is not None:
             payload.update(
@@ -597,8 +602,22 @@ class TradeGroup:
     #: Book equity (native unit) snapshotted at open — used for entry APR, not live equity.
     entry_book_equity: Decimal = Decimal("0")
     hedge_instrument_name: str = ""
+    #: Signed perp base (coin) units this group currently wants hedged. Negative
+    #: = short perp (offsetting a long-delta short put), positive = long perp
+    #: (offsetting a short-delta short call). Under per-position hedging the
+    #: engine reconciles the live perp to the sum of every group's value.
     hedge_size_base: Decimal = Decimal("0")
+    #: Active per-position hedge mode: "" (none), "soft" or "hard".
+    hedge_mode: str = ""
+    #: Consecutive manage cycles the defense trigger has stayed clear while a
+    #: per-position hedge is still active. Used to auto-unwind the hedge after
+    #: ``recovery_normal_cycles`` clean cycles.
+    hedge_recovery_streak: int = 0
     current_debit: Decimal = Decimal("0")
+    #: Mark-based buy-to-close cost (fair value, ignoring spread). Used to
+    #: evaluate the loss-based defense stop so an IV/spread spike does not
+    #: spuriously trip the stop. Falls back to ``current_debit`` when unset.
+    mark_debit: Decimal = Decimal("0")
     current_close_fee: Decimal = Decimal("0")
     #: Estimated close fee in collateral book units (open positions).
     current_close_fee_collateral: Decimal = Decimal("0")
@@ -607,6 +626,12 @@ class TradeGroup:
     status: str = "open"
     last_action: str = ""
     close_incomplete_streak: int = 0
+    #: Consecutive manage cycles the hard / soft / covered-call-ITM defense
+    #: condition has held. Used by the confirmation window so a single
+    #: snapshot spike does not stop us out at a local extreme.
+    hard_defense_streak: int = 0
+    soft_defense_streak: int = 0
+    itm_defense_streak: int = 0
     closed_timestamp_ms: int | None = None
     close_reason: str = ""
     realized_close_debit: Decimal | None = None
@@ -657,6 +682,16 @@ class TradeGroup:
     @property
     def loss_pct_of_max_loss(self) -> Decimal:
         return safe_div(self.loss_amount, self.max_loss)
+
+    @property
+    def mark_loss_amount(self) -> Decimal:
+        """Unrealized loss using mark (fair value) close cost, with ask fallback."""
+        debit = self.mark_debit if self.mark_debit > 0 else self.current_debit
+        return max(debit - self.entry_credit, Decimal("0"))
+
+    @property
+    def mark_loss_pct_of_max_loss(self) -> Decimal:
+        return safe_div(self.mark_loss_amount, self.max_loss)
 
     @property
     def holding_days(self) -> Decimal:
@@ -1356,7 +1391,10 @@ class TradeGroup:
             "regime_at_entry": self.regime_at_entry,
             "hedge_instrument_name": self.hedge_instrument_name,
             "hedge_size_base": self.hedge_size_base,
+            "hedge_mode": self.hedge_mode,
+            "hedge_recovery_streak": self.hedge_recovery_streak,
             "current_debit": self.current_debit,
+            "mark_debit": self.mark_debit,
             "current_close_fee": self.current_close_fee,
             "current_close_fee_collateral": self.current_close_fee_collateral,
             "short_delta": self.short_delta,
@@ -1364,6 +1402,9 @@ class TradeGroup:
             "status": self.status,
             "last_action": self.last_action,
             "close_incomplete_streak": self.close_incomplete_streak,
+            "hard_defense_streak": self.hard_defense_streak,
+            "soft_defense_streak": self.soft_defense_streak,
+            "itm_defense_streak": self.itm_defense_streak,
             "closed_timestamp_ms": self.closed_timestamp_ms,
             "close_reason": self.close_reason,
             "realized_close_debit": self.realized_close_debit,
@@ -1467,7 +1508,10 @@ class TradeGroup:
             regime_at_entry=str(payload.get("regime_at_entry") or RiskRegime.NORMAL.value),
             hedge_instrument_name=str(payload.get("hedge_instrument_name") or ""),
             hedge_size_base=to_decimal(payload.get("hedge_size_base")),
+            hedge_mode=str(payload.get("hedge_mode") or ""),
+            hedge_recovery_streak=int(payload.get("hedge_recovery_streak") or 0),
             current_debit=to_decimal(payload.get("current_debit")),
+            mark_debit=to_decimal(payload.get("mark_debit")),
             current_close_fee=to_decimal(payload.get("current_close_fee")),
             current_close_fee_collateral=to_decimal(payload.get("current_close_fee_collateral")),
             short_delta=to_decimal(payload.get("short_delta")),
@@ -1475,6 +1519,9 @@ class TradeGroup:
             status=str(payload.get("status") or "open"),
             last_action=str(payload.get("last_action") or ""),
             close_incomplete_streak=int(payload.get("close_incomplete_streak") or 0),
+            hard_defense_streak=int(payload.get("hard_defense_streak") or 0),
+            soft_defense_streak=int(payload.get("soft_defense_streak") or 0),
+            itm_defense_streak=int(payload.get("itm_defense_streak") or 0),
             closed_timestamp_ms=int(payload["closed_timestamp_ms"])
             if payload.get("closed_timestamp_ms") is not None
             else None,

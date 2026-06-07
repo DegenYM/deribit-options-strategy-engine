@@ -12,7 +12,12 @@ from .aggregation import (
     _resolve_apr_effective_capital_usdc,
 )
 from .app import create_app, serve
-from .exchange import _bot_for_account, _exchange_prefetch_for_account, _prefetch_all_accounts
+from .exchange import (
+    _bot_for_account,
+    _exchange_prefetch_for_account,
+    _force_refresh_prefetch_all,
+    _prefetch_all_accounts,
+)
 from .groups_service import (
     _aggregate_groups,
     _closed_groups_cache_key,
@@ -67,6 +72,7 @@ __all__ = [
     "_enrich_groups_payload_open_unrealized",
     "_ensure_realized_apr_on_equity",
     "_exchange_prefetch_for_account",
+    "_force_refresh_prefetch_all",
     "_group_strike",
     "_has_private_creds",
     "_journal_executions_for_group",

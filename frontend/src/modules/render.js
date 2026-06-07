@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, isDashboardStrategy, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, isDashboardStrategy, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { bookEquityNativeByBook, aggregateProfitDisposition, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
@@ -974,6 +974,54 @@ export function strategyOpenGroupHtml(id, rows, status, groups) {
     </div>`;
 }
 
+/** One per-currency perp-hedge row: shared across that book's option groups. */
+function hedgeSummaryRowHtml(h) {
+  const cur = h.currency;
+  const isShort = h.side === "short";
+  const sideChip = isShort
+    ? `<span class="chip chip-warn">${cur} ${i18n("Short", "空")}</span>`
+    : `<span class="chip chip-ok">${cur} ${i18n("Long", "多")}</span>`;
+  const groupNote = i18n(
+    `hedging ${h.optionGroupCount} option group${h.optionGroupCount === 1 ? "" : "s"}`,
+    `對沖 ${h.optionGroupCount} 個選擇權群組`
+  );
+  return `
+    <div class="rounded-xl border border-slate-800 bg-slate-800/30 p-3">
+      <div class="flex flex-wrap items-center justify-between gap-2 min-w-0">
+        <div class="flex items-center gap-2 min-w-0">
+          ${sideChip}
+          <span class="font-mono text-sm text-slate-300 truncate">${escapeHtml(h.instrumentName)}</span>
+        </div>
+        <span class="text-[11px] text-slate-500">${escapeHtml(groupNote)}</span>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 mt-3">
+        <div class="kv"><span class="k">${i18n("Hedge size", "避險部位")}</span><span class="v font-mono tabular-nums">${fmtNum(h.signedSize, 4)} ${cur}</span></div>
+        <div class="kv"><span class="k">${i18n("Notional", "名目")}</span><span class="v font-mono tabular-nums">${fmtUsd(h.notionalUsd)}</span></div>
+        <div class="kv"><span class="k">${i18n("Hedge PnL", "避險損益")}</span><span class="v font-mono tabular-nums ${pnlClass(h.pnlUsd)}">${h.pnlUsd === null ? "—" : fmtUsd(h.pnlUsd)}</span></div>
+        <div class="kv"><span class="k">${i18n("Net incl. hedge", "含避險淨額")}</span><span class="v font-mono tabular-nums ${pnlClass(h.netPnlUsd)}">${h.netPnlUsd === null ? "—" : fmtUsd(h.netPnlUsd)}</span></div>
+      </div>
+    </div>`;
+}
+
+/** Perp-hedge rollup appended below the open-position groups (one row per hedged book). */
+export function hedgeSummaryBlockHtml(status, openRows, groups) {
+  const rows = activeHedgeSummaryRows(status, openRows, groups);
+  if (!rows.length) return "";
+  return `
+    <div class="rounded-2xl border border-amber-500/30 bg-slate-900/60 shadow overflow-hidden mt-4">
+      <div class="flex flex-wrap items-baseline justify-between gap-3 px-4 py-3 border-b border-slate-800 bg-slate-950/40">
+        <h3 class="text-sm font-semibold text-slate-200">${i18n("Perp hedge", "永續避險")}</h3>
+        <span class="text-xs text-slate-500">${i18n(
+          "Shared per book · PnL merged into book strategy total",
+          "依幣別共用 · 損益併入該幣別策略合計"
+        )}</span>
+      </div>
+      <div class="p-4 space-y-3">
+        ${rows.map(hedgeSummaryRowHtml).join("")}
+      </div>
+    </div>`;
+}
+
 function countActiveStrategyIds(openRows, report, groups) {
   const ids = new Set();
   for (const g of openRows) {
@@ -1036,10 +1084,11 @@ export function renderStrategyGroups(status, report, groups) {
     if (!byStrategy.has(id)) byStrategy.set(id, []);
     byStrategy.get(id).push(g);
   }
-  openRoot.innerHTML = strategyOrder(ids)
+  const groupsHtml = strategyOrder(ids)
     .filter((id) => byStrategy.has(id))
     .map((id) => strategyOpenGroupHtml(id, byStrategy.get(id), status, groups))
     .join("");
+  openRoot.innerHTML = groupsHtml + hedgeSummaryBlockHtml(status, openRows, groups);
 }
 export function renderRecentActivityList(root, rows, status, groups, emptyLabel) {
   if (!root) return;

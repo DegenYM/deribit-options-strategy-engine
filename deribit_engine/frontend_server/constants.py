@@ -9,7 +9,13 @@ _active_metrics_db_path: Path | None = None
 DEFAULT_SNAPSHOT_INTERVAL_SEC = 300
 DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC = 300
 STATUS_CACHE_TTL_SEC = 15
-DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC = 120
+# Investor portal: keep the live status/bundle cache TTL at least as long as the
+# frontend auto-refresh interval (180s) so scheduled refreshes hit a warm cache
+# instead of paying a full Deribit prefetch every time.
+DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC = 180
+# Background warm cadence for the live dashboard bundle / exchange prefetch. Must
+# be shorter than the cache TTL so the cache never goes cold for a user request.
+DEFAULT_BUNDLE_WARM_INTERVAL_SEC = 90
 REPORT_CACHE_TTL_SEC = 15
 GROUPS_CACHE_TTL_SEC = 30
 SPOT_CACHE_TTL_SEC = 10
