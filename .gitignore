@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !config/shared/strategies/.env.*
+!config/shared/strategies/tiers/**/.env.*
 !config/investors/_example/**/.env.*
 config/shared/.env.defaults
 config/investors/*
