@@ -143,7 +143,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         p.add_argument(
             "--no-supervisor-check",
             action="store_true",
-            help="Skip waiting for logs/live/<id>/supervisor.log started pid=",
+            help="Skip waiting for ~/Library/Logs/deribit/live/<id>/supervisor.log started pid=",
         )
         p.add_argument("--json", action="store_true", help="Emit JSON")
 

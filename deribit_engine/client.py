@@ -29,6 +29,8 @@ _AUTH_TOKEN_CACHE: dict[str, _CachedAuthTokens] = {}
 _AUTH_CACHE_LOCK = threading.Lock()
 _INSTRUMENTS_CACHE: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
 _INSTRUMENTS_CACHE_LOCK = threading.Lock()
+_ORDER_BOOK_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+_ORDER_BOOK_CACHE_LOCK = threading.Lock()
 
 # Short-TTL cache for public, read-only macro feeds (index price / chart / DVOL).
 # These are queried many times per cycle (e.g. ``_currency_index_price`` is hit
@@ -45,6 +47,10 @@ def _instruments_cache_ttl_seconds() -> float:
         return max(float(raw), 0.0)
     except (TypeError, ValueError):
         return 300.0
+
+
+def _order_book_cache_ttl_seconds() -> float:
+    return _env_float("DERIBIT_ORDER_BOOK_CACHE_TTL_SEC", 3.0)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -91,9 +97,11 @@ def _copy_cached(value: Any) -> Any:
 
 
 def reset_public_read_cache() -> None:
-    """Clear the macro read cache (intended for tests)."""
+    """Clear process-global read caches (intended for tests)."""
     with _PUBLIC_READ_CACHE_LOCK:
         _PUBLIC_READ_CACHE.clear()
+    with _ORDER_BOOK_CACHE_LOCK:
+        _ORDER_BOOK_CACHE.clear()
 
 
 class DeribitClient:
@@ -107,7 +115,7 @@ class DeribitClient:
 
     RETRYABLE_STATUS_CODES = {408, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
     RATE_LIMIT_STATUS = 429
-    IDEMPOTENT_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+    IDEMPOTENT_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
     AUTH_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
     UNSAFE_CONNECTION_RETRIES = 1
     TOKEN_REFRESH_SAFETY_SECONDS = 30
@@ -600,7 +608,25 @@ class DeribitClient:
         return result or {}
 
     def get_order_book(self, instrument_name: str, *, depth: int = 1) -> dict[str, Any]:
-        return self._request("public/get_order_book", params={"instrument_name": instrument_name, "depth": depth}) or {}
+        key = (instrument_name, int(depth))
+        ttl = _order_book_cache_ttl_seconds()
+        if ttl > 0:
+            now = time.monotonic()
+            with _ORDER_BOOK_CACHE_LOCK:
+                cached = _ORDER_BOOK_CACHE.get(key)
+                if cached is not None and (now - cached[0]) < ttl:
+                    return dict(cached[1])
+        result = (
+            self._request(
+                "public/get_order_book",
+                params={"instrument_name": instrument_name, "depth": depth},
+            )
+            or {}
+        )
+        if ttl > 0 and result:
+            with _ORDER_BOOK_CACHE_LOCK:
+                _ORDER_BOOK_CACHE[key] = (time.monotonic(), dict(result))
+        return result
 
     def get_book_summary_by_currency(self, currency: str, *, kind: str = "option") -> list[dict[str, Any]]:
         """Per-instrument quote summary (bid/ask/mark/underlying/OI) for a whole currency in one call.

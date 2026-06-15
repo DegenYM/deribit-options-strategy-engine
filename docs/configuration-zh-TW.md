@@ -24,7 +24,7 @@
 ## Investor / Sub-account Layout（建議）
 
 ```text
-config/shared/defaults.env              # 可選：全投資人共用 fallback
+config/shared/.env.defaults             # 可選：全投資人共用 fallback（gitignore）
 config/shared/strategies/.env.<strategy>  # 策略參數（無 API key）
 config/platform/fee-payout-addresses.toml  # 管理方外部收款地址（投資人季結算付費）
 config/investors/<investor_id>/
@@ -37,6 +37,8 @@ config/investors/<investor_id>/
 .state/investors/<investor_id>/<slug>.trade_journal.db
 data/frontend_ledger/<investor_id>/[<slug>/]equity_*.jsonl
 data/frontend_ledger/<investor_id>/metrics.db
+data/frontend_ledger/<investor_id>/portal_snapshots.db
+data/frontend_ledger/_shared/market.db          # 全 repo 共用 spot / IVR 快照
 logs/live/<investor_id>/<slug>.log
 ```
 
@@ -44,19 +46,21 @@ logs/live/<investor_id>/<slug>.log
 
 低 → 高；**子帳 env 最後**，可覆蓋 shared 策略檔：
 
-1. `config/shared/defaults.env`（可選；`config/shared/.env.defaults` 為 legacy 別名，載入時會提示）
+1. `config/shared/.env.defaults`（可選；`config/shared/defaults.env` 為 legacy 別名，載入時會提示）
 2. `config/investors/<id>/.env.investor`（可選；`investor.env` 為 legacy 別名）
 3. `config/shared/strategies/.env.<OPTION_STRATEGY>` — 策略骨架（市場、擔保幣、put/call 方向）
 4. `config/shared/strategies/tiers/<OPTION_STRATEGY>/.env.<tier>` — 風險分級參數（`low` | `medium` | `high`）
 5. `accounts/.env.<slug>`（策略子帳；`accounts/<slug>.env` 為 legacy 別名）
 
-若使用 repo 根目錄單一 `.env`（非 `config/investors/.../accounts/`），則仍為：defaults → 該 `.env` → 策略 profile（profile 優先於重疊鍵）。
+若使用 repo 根目錄單一 `.env`（非 `config/investors/.../accounts/`），則仍為：`.env.defaults` → 該 `.env` → 策略 profile（profile 優先於重疊鍵）。
 
 **季結算付費地址**：複製 `config/platform/fee-payout-addresses.toml.example` 為 `fee-payout-addresses.toml` 並填入 USDC／USDT／USDE 鏈上地址；`./bot investor validate` 若缺少此檔會 warning。
 
 ### 子帳 env 建議欄位
 
-`DERIBIT_*`、`OPTION_STRATEGY`、`RISK_TIER`（`low` | `medium` | `high`，預設 `medium`）、`ORDER_LABEL_PREFIX`、`STATE_FILE`、`REFERENCE_CAPITAL_USDC`、`TARGET_PORTFOLIO_APR`、`TOP_N`
+`DERIBIT_*`、`ORDER_LABEL_PREFIX`、`STATE_FILE`、`REFERENCE_CAPITAL_USDC`、`TARGET_PORTFOLIO_APR`、`TOP_N`
+
+策略與風險分級由 **`accounts.toml`** 的 `strategy` / `risk_tier` 決定（`risk_tier` 預設 `medium`）；子帳 env 不再填 `OPTION_STRATEGY` 或 `RISK_TIER`。
 
 ### 風險分級（low / medium / high）
 
@@ -71,10 +75,7 @@ config/shared/strategies/
     .env.high
 ```
 
-投資人選擇方式（二擇一，建議用 manifest）：
-
-1. **`accounts.toml`** 每列加 `risk_tier = "low"`（或 `medium` / `high`）
-2. **子帳 env** 寫 `RISK_TIER=low`（init 時會自動寫入）
+投資人選擇方式：在 **`accounts.toml`** 每列加 `risk_tier = "low"` 或 `"high"`（省略則預設 `medium`）。
 
 新建投資人範例：
 
@@ -93,9 +94,9 @@ config/shared/strategies/
 
 | 分級 | 典型差異 |
 |------|----------|
-| **low** | 較低 delta、較高 `MIN_NET_APR`、較緊 IM/MM、較少 `MAX_GROUPS_PER_CURRENCY` |
-| **medium** | 標準進攻性（原策略 profile 數值） |
-| **high** | 較高 delta、較低 APR 門檻、較寬 IM 上限 |
+| **low** | 較低 delta（深 OTM）、**較低** `MIN_NET_APR`（安全 strike 可接受薄 premium）、較緊 IM/MM、較少 `MAX_GROUPS_PER_CURRENCY` |
+| **medium** | 標準 delta 與 APR 門檻 |
+| **high** | 較高 delta（近 strike）、**較高** `MIN_NET_APR`（高風險必須高權利金補償）、較寬 IM 上限 |
 
 共用 pacing／流動性門檻在 `config/shared/.env.defaults`；某子帳若要偏離 tier 預設，在 `accounts/.env.<slug>` 寫入同名鍵即可覆蓋。
 
@@ -111,7 +112,7 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 ## 同 repo 多投資人（frontend / live 隔離）
 
 - **策略狀態**：`STATE_FILE` 建議設為 `.state/investors/<investor_id>/<slug>.json`（範本已採此格式）。
-- **Dashboard**：`./bot --investor <id> frontend` 會自動寫入 `data/frontend_ledger/<investor_id>/`；多子帳時再分子目錄 `<slug>/`。`metrics.db` 為 `data/frontend_ledger/<investor_id>/metrics.db`。
+- **Dashboard**：`./bot --investor <id> frontend` 會自動寫入 `data/frontend_ledger/<investor_id>/`；多子帳時再分子目錄 `<slug>/`。`metrics.db` 為 `data/frontend_ledger/<investor_id>/metrics.db`；投資人 portal 預組 bundle 為 `portal_snapshots.db`；BTC/ETH spot 與 IVR 共用 `data/frontend_ledger/_shared/market.db`。
 - **Live 監督**：`python scripts/run_live_profiles.py --investor <id> --restart-failed` 只跑 `accounts.toml` 內 **`enabled = true` 且 `live_enabled = true`**（預設 true）且有 API 的子帳；日誌在 `logs/live/<investor_id>/<slug>.log`。若要 dashboard 繼續追蹤某策略但不自動下單，在該列設 `live_enabled = false`（仍須 `enabled = true`）。429 等暫時性 API 錯誤 bot 會退避重試，子程序異常退出時監督腳本會自動重啟該 profile。macOS 常駐範本：[`live-profiles-launchd-zh-TW.md`](live-profiles-launchd-zh-TW.md)。
 - **不可混用**：同一個 `frontend` 行程不要同時載入兩位投資人的 env；請各開一個 `--port`（對外 Tunnel 亦一人一路）。
 - **覆寫路徑**（進階）：`FRONTEND_LEDGER_DIR`、`FRONTEND_METRICS_DB`；live 則用 `--log-dir`。
@@ -141,10 +142,13 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 ```bash
 ./bot --investor an fee-snapshot          # 立即快照
 ./bot --investor an fee-status            # 查看 HWM / 最近快照 / 歷史結算
-./bot --investor an fee-settle --period 2026-Q1 --net-flow-usdc 0
+./bot --investor an fee-settle --period 2026-Q1
 
 # 自訂區間結算 + 報表（PDF/MD/CSV）；淨申赎預設自 Deribit 流水計算
+./bot --investor an fee-flow-report --from 2026-05-01 --to 2026-05-21   # 結算前預覽入金/提領
 ./bot --investor an fee-settle-period --from 2026-05-01 --to 2026-05-21
+# 投資人從 Deribit 提領去付外部績效費（非贖回本金）時，排除該筆對 NAV 的影響：
+./bot --investor an fee-settle-period --from 2026-05-01 --to 2026-05-21 --fee-payment-usdc 1500
 ./bot --investor an fee-settle-period --to now                    # --to 之前最近一筆快照 → 現在
 ./bot --investor an fee-settle-period --to 2026-05-21 --no-persist  # 試算，不寫入 HWM
 ./bot --investor an fee-report --kind settlement --period 20260501T000000Z_20260521T235959Z

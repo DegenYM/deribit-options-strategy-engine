@@ -6,12 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Fixed
-
-- Dashboard static file path after `frontend_server/` package split (`parents[2]/frontend`).
-
 ### Added
 
+- Portal snapshot cache: `portal_snapshots.db` per investor, shared `market.db`, background schedulers, and investor portal `source=portal_cache` bundle API.
+- Covered call profit sweep (`COVERED_CALL_PROFIT_SWEEP_ENABLED`), `./bot profit-sweep`, and ops repair scripts (`align_premium_swap`, `reconcile_premium_proceeds`, `repair_double_profit_sweep`).
+- Frontend ledger `equity_native_by_book` backfill (`scripts/backfill_ledger_equity_native.py`).
+- Investor portal browser cache (`frontend/src/modules/investor-cache.js`) and design tokens (`frontend/tokens.css`).
 - Dashboard frontend ES module sources (`frontend/src/`) with esbuild bundle to `app.js`.
 - Playwright smoke tests and pytest HTTP smoke tests for dashboard pages and `/api/dashboard_bundle`.
 - [`docs/cloudflare-access-checklist-zh-TW.md`](docs/cloudflare-access-checklist-zh-TW.md) for Zero Trust policy rollout.
@@ -23,8 +23,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `pyproject.toml` with project metadata and tool configuration.
 - `requirements-dev.txt` for development dependencies (pytest, ruff).
 
+### Changed
+
+- Canonical shared env file is `config/shared/.env.defaults` (`defaults.env` remains as a deprecated alias).
+
 ### Fixed
 
+- Dashboard static file path after `frontend_server/` package split (`parents[2]/frontend`).
 - USDC book drawdown now uses `day_net_flow_usdc_by_book` (withdrawal/deposit adjustment).
 - Fee snapshot tests use lowercase investor id (`demo`) to match manifest normalization.
 - Covered-call drawdown shield test keeps exchange position in reconcile.

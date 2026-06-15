@@ -30,6 +30,7 @@ BOT_COMMANDS = frozenset(
         "panic-close",
         "close-position",
         "cancel",
+        "profit-sweep",
         "stress-current",
     }
 )
@@ -109,6 +110,28 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     add_env_file_after_subcommand(manage_parser)
     manage_parser.add_argument("--live", action="store_true", help="Actually place hedge/exit/roll orders")
     manage_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    profit_sweep_parser = subparsers.add_parser(
+        "profit-sweep",
+        help="Sell remaining covered-call spot profit (BTC/ETH) to USDT and update state",
+    )
+    add_env_file_after_subcommand(profit_sweep_parser)
+    profit_sweep_parser.add_argument(
+        "--group-id",
+        default=None,
+        help="Sweep one closed trade group only",
+    )
+    profit_sweep_parser.add_argument(
+        "--reconcile-only",
+        action="store_true",
+        help="Only sync profit_sweep_* from Deribit order labels; do not place orders",
+    )
+    profit_sweep_parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Submit spot sell orders; default is dry-run preview",
+    )
+    profit_sweep_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     run_parser = subparsers.add_parser("run", help="Run repeated manage+enter cycles")
     add_env_file_after_subcommand(run_parser)
@@ -531,6 +554,19 @@ def _dispatch_bot_commands(args: argparse.Namespace) -> int:
             return 0
         if args.command == "manage":
             render(bot.manage(live=args.live), args.json)
+            return 0
+        if args.command == "profit-sweep":
+            from ..profit_sweep_ops import run_remaining_profit_sweeps
+
+            if bot.config.option_strategy != "covered_call":
+                raise SystemExit(f"profit-sweep requires covered_call strategy (got {bot.config.option_strategy!r})")
+            summary = run_remaining_profit_sweeps(
+                bot,
+                live=args.live,
+                group_id=getattr(args, "group_id", None),
+                reconcile_only=bool(getattr(args, "reconcile_only", False)),
+            )
+            render(summary.to_dict(), args.json)
             return 0
         if args.command == "run":
             render(

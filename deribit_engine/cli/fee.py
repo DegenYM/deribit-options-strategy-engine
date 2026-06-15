@@ -58,8 +58,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     fee_settle_parser.add_argument(
         "--net-flow-usdc",
-        default="0",
-        help="Net subscription adjustment for the quarter (positive=deposit, negative=withdrawal)",
+        default=None,
+        help="Override net subscription for the quarter (default: Deribit transaction log)",
+    )
+    fee_settle_parser.add_argument(
+        "--fee-payment-usdc",
+        default=None,
+        help=(
+            "Deribit withdrawals that paid fees off-exchange (USDC); excluded from capital "
+            "redemption when net flow is auto-fetched from transaction log"
+        ),
     )
     fee_settle_parser.add_argument(
         "--force",
@@ -90,6 +98,14 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--net-flow-usdc",
         default=None,
         help="Override net subscription for the window (default: Deribit transaction log)",
+    )
+    fee_period_parser.add_argument(
+        "--fee-payment-usdc",
+        default=None,
+        help=(
+            "Deribit withdrawals that paid fees off-exchange (USDC); excluded from capital "
+            "redemption when net flow is auto-fetched from transaction log"
+        ),
     )
     fee_period_parser.add_argument(
         "--no-persist",
@@ -133,6 +149,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Show deposit/withdrawal breakdown from Deribit transaction log (read-only)",
     )
     add_env_file_after_subcommand(fee_flow_parser)
+    fee_flow_parser.add_argument(
+        "--from",
+        dest="from_ts",
+        default=None,
+        metavar="WHEN",
+        help="Period start for line-by-line preview (same formats as fee-settle-period --from)",
+    )
+    fee_flow_parser.add_argument(
+        "--to",
+        dest="to_ts",
+        default=None,
+        metavar="WHEN",
+        help="Period end for line-by-line preview (default: now when --from is set)",
+    )
     fee_flow_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     fee_report_parser = subparsers.add_parser(
@@ -217,10 +247,13 @@ def dispatch(args: argparse.Namespace) -> int | None:
         repo_root = find_repo_root(Path.cwd())
         if repo_root is None:
             raise SystemExit("Cannot locate repository root")
+        net_flow = to_decimal(args.net_flow_usdc) if args.net_flow_usdc is not None else None
+        fee_payment = to_decimal(args.fee_payment_usdc) if args.fee_payment_usdc is not None else None
         result = settle_quarter(
             args.investor,
             args.period,
-            net_flow_usdc=to_decimal(args.net_flow_usdc),
+            net_flow_usdc=net_flow,
+            fee_payment_usdc=fee_payment,
             repo_root=repo_root,
             force=bool(args.force),
         )
@@ -238,6 +271,7 @@ def dispatch(args: argparse.Namespace) -> int | None:
         end_ms = parse_fee_timestamp(args.to, boundary="end")
         start_ms = parse_fee_timestamp(args.from_ts, boundary="start") if args.from_ts else None
         net_flow = to_decimal(args.net_flow_usdc) if args.net_flow_usdc is not None else None
+        fee_payment = to_decimal(args.fee_payment_usdc) if args.fee_payment_usdc is not None else None
         write_pdf = args.format in {"both", "all", "pdf"}
         write_md = args.format in {"both", "all", "md"}
         write_csv = args.format in {"all", "csv"}
@@ -246,6 +280,7 @@ def dispatch(args: argparse.Namespace) -> int | None:
             end_ms=end_ms,
             start_ms=start_ms,
             net_flow_usdc=net_flow,
+            fee_payment_usdc=fee_payment,
             repo_root=repo_root,
             persist=not args.no_persist,
             force=bool(args.force),
@@ -299,8 +334,14 @@ def dispatch(args: argparse.Namespace) -> int | None:
         )
 
     if args.command == "fee-flow-report":
-        from ..investor_cash_flow import fetch_cumulative_net_flow_usdc, flow_report_dict
-        from ..investor_nav_snapshot import capture_investor_nav
+        from ..investor_cash_flow import (
+            fetch_cumulative_net_flow_usdc,
+            fetch_subscription_flow_lines,
+            flow_report_dict,
+            period_flow_report_dict,
+        )
+        from ..investor_nav_snapshot import capture_investor_nav, parse_fee_timestamp
+        from ..utils import utc_now_ms
 
         if not args.investor:
             raise SystemExit("fee-flow-report requires --investor <ID>")
@@ -314,19 +355,35 @@ def dispatch(args: argparse.Namespace) -> int | None:
             "ETH": capture.index_eth_usd,
             "USDC": to_decimal("1"),
         }
-        flow = fetch_cumulative_net_flow_usdc(
-            manifest.root,
-            repo_root=repo_root,
-            index_by_ccy=index_by_ccy,
-        )
-        render(
-            {
+        if args.from_ts is not None:
+            start_ms = parse_fee_timestamp(args.from_ts, boundary="start")
+            end_ms = parse_fee_timestamp(args.to_ts, boundary="end") if args.to_ts is not None else utc_now_ms()
+            lines = fetch_subscription_flow_lines(
+                manifest.root,
+                repo_root=repo_root,
+                index_by_ccy=index_by_ccy,
+                start_timestamp_ms=start_ms,
+                end_timestamp_ms=end_ms,
+            )
+            payload = {
                 "action": "fee-flow-report",
+                "mode": "period",
+                "investor_id": manifest.investor_id,
+                **period_flow_report_dict(lines, start_timestamp_ms=start_ms, end_timestamp_ms=end_ms),
+            }
+        else:
+            flow = fetch_cumulative_net_flow_usdc(
+                manifest.root,
+                repo_root=repo_root,
+                index_by_ccy=index_by_ccy,
+            )
+            payload = {
+                "action": "fee-flow-report",
+                "mode": "cumulative",
                 "investor_id": manifest.investor_id,
                 **flow_report_dict(flow, index_by_ccy=index_by_ccy),
-            },
-            args.json,
-        )
+            }
+        render(payload, args.json)
         return 0
 
     if args.command == "fee-report":

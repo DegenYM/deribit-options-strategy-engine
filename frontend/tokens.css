@@ -1,0 +1,179 @@
+/* Deribit Dashboard Design System v3 — Obsidian Terminal */
+
+:root {
+  /* Primitives — warm charcoal family, desaturated semantics */
+  --primitive-charcoal-950: #08090c;
+  --primitive-charcoal-900: #111318;
+  --primitive-charcoal-800: #1a1d26;
+  --primitive-charcoal-700: #252932;
+  --primitive-charcoal-600: #363b47;
+  --primitive-charcoal-500: #5c6370;
+  --primitive-charcoal-400: #8b919d;
+  --primitive-charcoal-300: #b4b8c2;
+  --primitive-charcoal-200: #d8dbe2;
+  --primitive-charcoal-100: #eef0f4;
+
+  --primitive-accent-500: #2eb8a8;
+  --primitive-accent-400: #3dd6c8;
+  --primitive-accent-300: #6ee7db;
+  --primitive-accent-200: #a7f3ec;
+
+  --primitive-emerald-500: #22a06b;
+  --primitive-emerald-300: #5cc99a;
+  --primitive-emerald-200: #9ee4c4;
+
+  --primitive-amber-500: #c9922a;
+  --primitive-amber-300: #e0b04a;
+  --primitive-amber-200: #f0d48a;
+
+  --primitive-rose-500: #d44a62;
+  --primitive-rose-300: #e88898;
+  --primitive-rose-200: #f5c2cb;
+
+  --primitive-orange-400: #d4843a;
+  --primitive-orange-300: #e8a86a;
+
+  --primitive-indigo-400: #7a8fd4;
+  --primitive-indigo-300: #a3b2e4;
+
+  --primitive-sky-400: #4da8d4;
+  --primitive-sky-300: #7ec4e8;
+
+  --primitive-emerald-400: #3cb882;
+  --primitive-white: #ffffff;
+
+  /* RGB channels (for rgba(var(--rgb-*), alpha)) */
+  --rgb-canvas: 8, 9, 12;
+  --rgb-surface: 17, 19, 24;
+  --rgb-accent: 46, 184, 168;
+  --rgb-asset-btc: 212, 132, 58;
+  --rgb-asset-usdc: 77, 168, 212;
+  --rgb-semantic-success: 34, 160, 107;
+
+  /* Semantic colors */
+  --color-bg-canvas: var(--primitive-charcoal-950);
+  --color-bg-surface: var(--primitive-charcoal-900);
+  --color-bg-surface-elevated: var(--primitive-charcoal-800);
+  --color-bg-overlay: var(--primitive-charcoal-900);
+  --color-border-default: var(--primitive-charcoal-700);
+  --color-border-subtle: var(--primitive-charcoal-600);
+  --color-text-primary: var(--primitive-charcoal-100);
+  --color-text-secondary: var(--primitive-charcoal-400);
+  --color-text-muted: var(--primitive-charcoal-500);
+  --color-accent: var(--primitive-accent-400);
+  --color-accent-teal: var(--primitive-accent-400);
+  --color-accent-soft: var(--primitive-accent-300);
+  --color-semantic-success: var(--primitive-emerald-500);
+  --color-semantic-success-text: var(--primitive-emerald-200);
+  --color-semantic-warning: var(--primitive-amber-500);
+  --color-semantic-warning-text: var(--primitive-amber-200);
+  --color-semantic-danger: var(--primitive-rose-500);
+  --color-semantic-danger-text: var(--primitive-rose-200);
+  --color-asset-btc: var(--primitive-orange-400);
+  --color-asset-eth: var(--primitive-indigo-400);
+  --color-asset-usdc: var(--primitive-sky-400);
+  --color-asset-usdt: var(--primitive-emerald-400);
+  --color-semantic-info: var(--primitive-accent-400);
+  --color-semantic-info-text: var(--primitive-accent-200);
+  --color-focus-ring: var(--primitive-accent-400);
+  --color-text-soft: var(--primitive-charcoal-300);
+  --color-toast-danger-text: #fce8eb;
+
+  /* Investor portal — warm gold accent on shared base */
+  --color-investor-accent: var(--primitive-amber-300);
+  --color-investor-accent-soft: rgb(224 176 74 / 0.88);
+
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 20px;
+  --spacing-2xl: 28px;
+  --spacing-3xl: 32px;
+  --spacing-4xl: 48px;
+
+  /* Radius — tighter inner, softer outer */
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-2xl: 20px;
+  --radius-3xl: 22px;
+  --radius-section: 24px;
+  --radius-full: 9999px;
+
+  /* Typography */
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-display-weight: 600;
+  --font-body-weight: 400;
+  --font-medium-weight: 500;
+
+  /* Surfaces (alpha) */
+  --surface-card: rgb(17 19 24 / 0.72);
+  --surface-card-border: rgb(37 41 50 / 0.85);
+  --surface-header: rgb(8 9 12 / 0.88);
+  --surface-hover: rgb(26 29 38 / 0.55);
+  --surface-table: color-mix(in srgb, var(--color-bg-surface) 65%, transparent);
+  --surface-inset: color-mix(in srgb, var(--color-bg-canvas) 50%, transparent);
+  --surface-empty: color-mix(in srgb, var(--color-bg-surface) 52%, transparent);
+  --surface-pill: color-mix(in srgb, var(--color-bg-surface) 68%, transparent);
+
+  /* Effects */
+  --shadow-section: 0 1px 0 rgb(255 255 255 / 0.04) inset, 0 20px 50px rgb(8 9 12 / 0.45);
+  --shadow-position: 0 16px 40px rgb(8 9 12 / 0.38);
+  --shadow-overlay: 0 28px 56px rgb(0 0 0 / 0.42);
+  --shadow-panel-inset: inset 0 1px 0 rgb(255 255 255 / 0.045);
+  --shadow-btn: 0 1px 2px rgb(8 9 12 / 0.35);
+  --glow-accent: rgb(61 214 200 / 0.07);
+  --glow-warm: rgb(224 176 74 / 0.05);
+  --gradient-progress: linear-gradient(
+    90deg,
+    var(--color-accent),
+    color-mix(in srgb, var(--color-accent) 70%, var(--color-investor-accent))
+  );
+  --gradient-load-card: linear-gradient(
+    165deg,
+    color-mix(in srgb, var(--color-bg-surface) 97%, transparent),
+    color-mix(in srgb, var(--color-bg-surface-elevated) 90%, transparent)
+  );
+  --gradient-canvas: radial-gradient(
+      ellipse 80% 50% at 12% -8%,
+      var(--glow-accent),
+      transparent 55%
+    ),
+    radial-gradient(
+      ellipse 60% 40% at 88% 0%,
+      var(--glow-warm),
+      transparent 50%
+    ),
+    var(--color-bg-canvas);
+  --surface-overlay: color-mix(in srgb, var(--color-bg-canvas) 94%, transparent);
+  --surface-overlay-light: color-mix(in srgb, var(--color-bg-canvas) 78%, transparent);
+  --surface-canvas-35: color-mix(in srgb, var(--color-bg-canvas) 35%, transparent);
+  --surface-canvas-34: color-mix(in srgb, var(--color-bg-canvas) 34%, transparent);
+  --surface-canvas-38: color-mix(in srgb, var(--color-bg-canvas) 38%, transparent);
+  --surface-canvas-42: color-mix(in srgb, var(--color-bg-canvas) 42%, transparent);
+  --surface-surface-35: color-mix(in srgb, var(--color-bg-surface) 35%, transparent);
+  --surface-surface-40: color-mix(in srgb, var(--color-bg-surface) 40%, transparent);
+  --surface-surface-52: color-mix(in srgb, var(--color-bg-surface) 52%, transparent);
+  --surface-surface-58: color-mix(in srgb, var(--color-bg-surface) 58%, transparent);
+  --surface-surface-65: color-mix(in srgb, var(--color-bg-surface) 65%, transparent);
+  --surface-surface-72: color-mix(in srgb, var(--color-bg-surface) 72%, transparent);
+  --surface-surface-75: color-mix(in srgb, var(--color-bg-surface) 75%, transparent);
+  --surface-surface-88: color-mix(in srgb, var(--color-bg-surface) 88%, transparent);
+  --surface-surface-94: color-mix(in srgb, var(--color-bg-surface) 94%, transparent);
+  --surface-success-muted: color-mix(in srgb, var(--color-semantic-success) 18%, transparent);
+  --surface-danger-muted: color-mix(in srgb, var(--color-semantic-danger) 16%, transparent);
+  --surface-danger-hover: color-mix(in srgb, var(--color-semantic-danger) 28%, transparent);
+  --surface-skeleton: color-mix(in srgb, var(--color-border-default) 42%, transparent);
+  --surface-progress-track: color-mix(in srgb, var(--color-border-default) 50%, transparent);
+  --border-dashed-subtle: color-mix(in srgb, var(--color-text-secondary) 24%, transparent);
+  --chart-grid-line: color-mix(in srgb, var(--color-border-default) 24%, transparent);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-fast: 150ms;
+  --duration-normal: 220ms;
+}

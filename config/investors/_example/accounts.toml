@@ -1,5 +1,6 @@
 # Investor manifest: one row per Deribit sub-account (typically ≤ 3 strategies).
 # Copy _example/ to config/investors/<your_id>/ and fill accounts/.env.<slug> from *.example.
+# risk_tier defaults to medium; set risk_tier = "low" | "high" only when needed.
 
 [investor]
 id = "demo"
@@ -9,7 +10,6 @@ display_name = "Demo Investor"
 slug = "covered_call"
 strategy = "covered_call"
 display_name = "Covered call (BTC/ETH inventory)"
-risk_tier = "medium"
 enabled = true
 # live_enabled = false  # optional: keep on dashboard but skip run_live_profiles / launchd live
 
@@ -17,12 +17,10 @@ enabled = true
 slug = "naked"
 strategy = "naked_short"
 display_name = "Naked short (USDC linear)"
-risk_tier = "medium"
 enabled = true
 
 [[accounts]]
 slug = "bull_put"
 strategy = "bull_put_spread"
 display_name = "Bull put spread"
-risk_tier = "medium"
 enabled = true

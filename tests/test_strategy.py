@@ -71,6 +71,69 @@ def test_orderbook_buy_close_premium_ignores_outlier_ask():
     assert book.buy_close_premium(max_spread_ratio=Decimal("0.08")) == Decimal("640")
 
 
+def test_income_exit_close_premium_rejects_mark_only_wide_spread(tmp_path):
+    from deribit_engine.exit_eval import exit_eval_context_from_config, income_exit_close_premium
+
+    config = make_config(tmp_path, income_exit_max_spread_ratio=Decimal("0.50"))
+    ctx = exit_eval_context_from_config(config)
+    book = OrderBookSnapshot(
+        instrument_name="BTC-19JUN26-67000-C",
+        best_bid_price=Decimal("0.0015"),
+        best_bid_amount=Decimal("0.1"),
+        best_ask_price=Decimal("0.0037"),
+        best_ask_amount=Decimal("0.1"),
+        mark_price=Decimal("0.0020"),
+        index_price=Decimal("62992.05"),
+        delta=Decimal("0.075"),
+        iv=Decimal("0.5"),
+        open_interest=Decimal("10"),
+    )
+
+    assert book.quote_sane_for_close(max_spread_ratio=ctx.income_exit_max_spread_ratio) is False
+    assert income_exit_close_premium(book, ctx) is None
+
+
+def test_take_profit_requires_executable_close_debit(tmp_path):
+    from conftest import future_expiry
+
+    from deribit_engine.exit_eval import (
+        exit_eval_context_from_config,
+        profit_capture_from_close_debit,
+        take_profit_triggered,
+    )
+    from deribit_engine.models import TradeGroup
+
+    config = make_config(tmp_path, tp_capture_pct=Decimal("0.55"))
+    ctx = exit_eval_context_from_config(config)
+    group = TradeGroup(
+        group_id="0016",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.1"),
+        entry_timestamp_ms=1_700_000_000_000,
+        expiration_timestamp_ms=future_expiry(7),
+        short_instrument_name="BTC-19JUN26-67000-C",
+        short_strike=Decimal("67000"),
+        entry_credit=Decimal("26.4052278"),
+        original_entry_credit=Decimal("26.4052278"),
+        max_loss=Decimal("0"),
+        regime_at_entry="normal",
+        option_type="call",
+        strategy="covered_call",
+    )
+    mark_implied_debit = Decimal("12.75589012")
+    actual_close_debit = Decimal("25.19682")
+
+    assert profit_capture_from_close_debit(group.entry_credit, mark_implied_debit) == Decimal(
+        "0.5169180051535097909664691474"
+    )
+    assert profit_capture_from_close_debit(group.entry_credit, actual_close_debit) < Decimal("0.10")
+    assert take_profit_triggered(group, close_debit_usdc=Decimal("11.88235251"), ctx=ctx) is True
+    assert take_profit_triggered(group, close_debit_usdc=mark_implied_debit, ctx=ctx) is False
+    assert take_profit_triggered(group, close_debit_usdc=actual_close_debit, ctx=ctx) is False
+    assert take_profit_triggered(group, close_debit_usdc=None, ctx=ctx) is False
+
+
 def test_income_exit_close_buy_price_uses_ask_on_wide_but_sane_spread(tmp_path):
     config = make_config(
         tmp_path,

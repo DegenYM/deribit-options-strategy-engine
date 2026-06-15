@@ -8,6 +8,7 @@ import pytest
 
 from deribit_engine.client import DeribitClient
 from deribit_engine.investor_cash_flow import (
+    cash_flow_scan_currencies,
     default_fee_flow_start_ms,
     effective_fee_flow_start_ms,
     fetch_cumulative_net_flow_usdc,
@@ -21,6 +22,61 @@ def test_parse_fee_flow_start_ms() -> None:
     assert effective_fee_flow_start_ms(1_700_000_000_000) == 1_700_000_000_000
     ms = parse_fee_flow_start_ms({"FEE_FLOW_START_DATE": "2025-06-01"})
     assert ms == int(datetime(2025, 6, 1, tzinfo=UTC).timestamp() * 1000)
+
+
+def test_cash_flow_scan_currencies_adds_usdt_for_inverse_books() -> None:
+    assert cash_flow_scan_currencies(("BTC", "ETH")) == ("BTC", "ETH", "USDT")
+    assert cash_flow_scan_currencies(("BTC",)) == ("BTC", "USDT")
+    assert cash_flow_scan_currencies(("USDC",)) == ("USDC",)
+    assert cash_flow_scan_currencies(("BTC", "ETH", "USDT")) == ("BTC", "ETH", "USDT")
+
+
+def test_fetch_cumulative_net_flow_includes_usdt_withdrawal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    investor_dir = tmp_path / "config" / "investors" / "demo"
+    accounts_dir = investor_dir / "accounts"
+    accounts_dir.mkdir(parents=True)
+    (investor_dir / "accounts.toml").write_text(
+        """
+[investor]
+id = "Demo"
+display_name = "Demo"
+
+[[accounts]]
+slug = "covered_call"
+strategy = "covered_call"
+enabled = true
+""".strip(),
+        encoding="utf-8",
+    )
+    (accounts_dir / ".env.covered_call").write_text(
+        "DERIBIT_ENV=mainnet\nDERIBIT_CLIENT_ID=id\nDERIBIT_CLIENT_SECRET=sec\nTRADED_COLLATERALS=BTC,ETH\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / ".env.example").write_text("", encoding="utf-8")
+
+    logs_by_currency = {
+        "BTC": [],
+        "ETH": [],
+        "USDC": [],
+        "USDT": [
+            {"timestamp": 1000, "type": "withdrawal", "currency": "USDT", "change": "-600"},
+        ],
+    }
+
+    def _iter_transaction_log(self, **kwargs):
+        yield from logs_by_currency.get(kwargs["currency"], [])
+
+    monkeypatch.setattr(DeribitClient, "iter_transaction_log", _iter_transaction_log)
+
+    flow = fetch_cumulative_net_flow_usdc(
+        investor_dir,
+        repo_root=tmp_path,
+        index_by_ccy={"BTC": Decimal("60000"), "ETH": Decimal("3000"), "USDC": Decimal("1"), "USDT": Decimal("1")},
+    )
+    assert flow.net_flow_native_by_book["USDT"] == Decimal("-600")
+    assert flow.cumulative_net_flow_usdc == Decimal("-600")
+    assert flow.entry_count == 1
 
 
 def test_fetch_cumulative_net_flow_usdc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,6 +159,8 @@ enabled = true
     ]
 
     def _iter_transaction_log(self, **kwargs):
+        if kwargs["currency"] != "USDC":
+            return
         yield from logs
 
     monkeypatch.setattr(DeribitClient, "iter_transaction_log", _iter_transaction_log)
@@ -265,6 +323,8 @@ enabled = true
 
     def _iter_transaction_log(self, **kwargs):
         cid = self.config.client_id
+        if kwargs["currency"] != "USDC":
+            return
         yield from logs_by_client.get(cid, [])
 
     monkeypatch.setattr(DeribitClient, "iter_transaction_log", _iter_transaction_log)

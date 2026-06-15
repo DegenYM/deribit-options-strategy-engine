@@ -363,7 +363,8 @@ def _aggregate_status(
 
     active_accounts = [account for account in accounts if account.name in payload_by_name]
     equity_statuses = _dedupe_statuses_for_equity_aggregate(active_accounts, statuses)
-    return {
+    fill_stats = _aggregate_premium_sweep_fill_stats(statuses)
+    aggregated: dict[str, Any] = {
         "env": "multi" if len(accounts) > 1 else accounts[0].config.env,
         "portfolio": _aggregate_portfolios(active_accounts, statuses, equity_statuses=equity_statuses),
         "underlying_index_usd": underlying_index_usd,
@@ -394,6 +395,84 @@ def _aggregate_status(
             if (payload := payload_by_name.get(account.name)) is not None
         ],
     }
+    if fill_stats:
+        aggregated["premium_sweep_fill_stats_by_book"] = fill_stats
+    return aggregated
+
+
+_FILL_STAT_SUM_KEYS = (
+    "gross_native_sold",
+    "gross_usdt",
+    "buyback_native",
+    "buyback_usdt",
+    "net_native_sold",
+    "net_usdt",
+    "unlabeled_native_sold",
+    "unlabeled_usdt",
+)
+
+
+def _aggregate_premium_sweep_fill_stats(
+    statuses: list[dict[str, Any]],
+) -> dict[str, dict[str, str]] | None:
+    from ..utils import format_decimal
+
+    merged: dict[str, dict[str, Decimal]] = {}
+    for payload in statuses:
+        for book, row in (payload.get("premium_sweep_fill_stats_by_book") or {}).items():
+            book_key = str(book).upper()
+            if book_key not in merged:
+                merged[book_key] = {key: Decimal("0") for key in _FILL_STAT_SUM_KEYS}
+            for key in _FILL_STAT_SUM_KEYS:
+                merged[book_key][key] += _dec(row.get(key))
+    if not merged:
+        return None
+    out: dict[str, dict[str, str]] = {}
+    for book, totals in merged.items():
+        gross_native = totals["gross_native_sold"]
+        gross_usdt = totals["gross_usdt"]
+        net_native = totals["net_native_sold"]
+        net_usdt = totals["net_usdt"]
+        unlabeled_native = totals["unlabeled_native_sold"]
+        unlabeled_usdt = totals["unlabeled_usdt"]
+        display_native = net_native + unlabeled_native
+        display_usdt = net_usdt + unlabeled_usdt
+        out[book] = {
+            "gross_native_sold": format_decimal(gross_native, 8),
+            "gross_usdt": format_decimal(gross_usdt, 4),
+            "gross_avg_price_usd": format_decimal(gross_usdt / gross_native, 2) if gross_native > 0 else "0",
+            "buyback_native": format_decimal(totals["buyback_native"], 8),
+            "buyback_usdt": format_decimal(totals["buyback_usdt"], 4),
+            "net_native_sold": format_decimal(net_native, 8),
+            "net_usdt": format_decimal(net_usdt, 4),
+            "net_avg_price_usd": format_decimal(net_usdt / net_native, 2) if net_native > 0 else "0",
+            "unlabeled_native_sold": format_decimal(unlabeled_native, 8),
+            "unlabeled_usdt": format_decimal(unlabeled_usdt, 4),
+            "display_native_sold": format_decimal(display_native, 8),
+            "display_usdt": format_decimal(display_usdt, 4),
+            "display_avg_price_usd": format_decimal(display_usdt / display_native, 2) if display_native > 0 else "0",
+        }
+    return out
+
+
+FILL_STATS_CACHE_KEY = "premium_sweep_fill_stats"
+
+
+def attach_cached_premium_sweep_fill_stats(
+    status: dict[str, Any],
+    cache: _TtlCache,
+) -> dict[str, Any]:
+    """Keep last successful exchange VWAP stats when a live status fetch omits them."""
+    fill_stats = status.get("premium_sweep_fill_stats_by_book")
+    if fill_stats:
+        cache.seed(FILL_STATS_CACHE_KEY, fill_stats)
+        return status
+    cached = cache.get_stale(FILL_STATS_CACHE_KEY)
+    if not cached:
+        return status
+    out = dict(status)
+    out["premium_sweep_fill_stats_by_book"] = cached
+    return out
 
 
 def _all_closed_group_rows(

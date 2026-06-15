@@ -10,12 +10,13 @@ from ..entry_gates import (
 )
 from ..exceptions import TransientExchangeError
 from ..exit_eval import (
-    dynamic_tp_capture_pct,
     evaluate_defense_triggers,
     evaluate_early_exit_reason,
     exit_eval_context_from_config,
+    income_exit_close_premium,
+    take_profit_triggered,
 )
-from ..investor_cash_flow import sum_external_flow_native_in_window
+from ..investor_cash_flow import cash_flow_scan_currencies, sum_external_flow_native_in_window
 from ..models import (
     AccountSummary,
     HedgePlan,
@@ -243,8 +244,10 @@ class ManagementMixin:
 
     def _load_runtime(self, *, live: bool = False) -> RuntimeContext:
         if self.config.has_private_credentials:
-            return self._load_runtime_from_exchange(self.fetch_exchange_prefetch(), live=live)
-        return self._load_runtime_from_exchange(None, live=live)
+            context, _ = self._load_runtime_from_exchange(self.fetch_exchange_prefetch(), live=live)
+            return context
+        context, _ = self._load_runtime_from_exchange(None, live=live)
+        return context
 
     def _load_runtime_from_exchange(
         self,
@@ -252,7 +255,7 @@ class ManagementMixin:
         *,
         dashboard_display: bool = False,
         live: bool = False,
-    ) -> RuntimeContext:
+    ) -> tuple[RuntimeContext, bool]:
         state = self.state_store.load()
         if self._repair_reconciled_bot_income_exits_in_state(state) and not dashboard_display:
             self.state_store.save(state)
@@ -279,7 +282,7 @@ class ManagementMixin:
             # from Deribit's transaction log so drawdown is measured against
             # trading P&L only, not user-initiated balance changes.
             self._refresh_cash_flows_by_book(state, orderbook_cache, summaries=summaries)
-        state = self._reconcile_state(
+        state, reconcile_closed = self._reconcile_state(
             state,
             option_positions=option_positions,
             orderbook_cache=orderbook_cache,
@@ -324,18 +327,21 @@ class ManagementMixin:
         )
         if not dashboard_display:
             self._prefetch_scan_book_summaries(markets_by_currency, orderbook_cache)
-        return RuntimeContext(
-            state=state,
-            summaries=summaries,
-            open_orders=open_orders,
-            positions=positions,
-            option_positions=option_positions,
-            future_positions=future_positions,
-            future_markets_by_name=future_markets_by_name,
-            markets_by_currency=markets_by_currency,
-            orderbook_cache=orderbook_cache,
-            regime_by_currency=regime_by_currency,
-            snapshot=snapshot,
+        return (
+            RuntimeContext(
+                state=state,
+                summaries=summaries,
+                open_orders=open_orders,
+                positions=positions,
+                option_positions=option_positions,
+                future_positions=future_positions,
+                future_markets_by_name=future_markets_by_name,
+                markets_by_currency=markets_by_currency,
+                orderbook_cache=orderbook_cache,
+                regime_by_currency=regime_by_currency,
+                snapshot=snapshot,
+            ),
+            reconcile_closed,
         )
 
     def _log_cycle_update(self, cycle_no: int, cycle_result: dict[str, Any], *, live: bool) -> None:
@@ -567,7 +573,7 @@ class ManagementMixin:
             hedge_plan = self._build_hedge_plan(context, group.currency, mode="hard", target_pct=Decimal("0"))
             if hedge_plan is not None:
                 actions.append(self._execute_hedge_plan(context, hedge_plan, live=live))
-        if group.profit_capture >= dynamic_tp_capture_pct(group.dte_days, exit_eval_context_from_config(self.config)):
+        if self._take_profit_triggered(context, group):
             actions.extend(self._close_group(context, group, reason="take_profit", live=live))
             return actions
         early_exit_reason = self._maybe_early_exit_reason(context, group)
@@ -619,6 +625,103 @@ class ManagementMixin:
             short_book,
             exit_eval_context_from_config(self.config),
         )
+
+    def _take_profit_triggered(self, context: RuntimeContext, group: TradeGroup) -> bool:
+        close_debit = self._income_exit_close_debit(context, group)
+        return take_profit_triggered(
+            group,
+            close_debit_usdc=close_debit,
+            ctx=exit_eval_context_from_config(self.config),
+        )
+
+    def _income_exit_close_debit(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+    ) -> Decimal | None:
+        """Executable buy-to-close debit (incl. fees) for income-exit evaluation."""
+        ctx = exit_eval_context_from_config(self.config)
+        try:
+            short_book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
+        except Exception:
+            LOGGER.debug(
+                "income_exit: orderbook unavailable for %s",
+                group.short_instrument_name,
+            )
+            return None
+        close_premium = income_exit_close_premium(short_book, ctx)
+        if close_premium is None:
+            return None
+        markets = getattr(context, "markets_by_currency", None) or {}
+        try:
+            short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
+        except Exception:
+            LOGGER.debug(
+                "income_exit: instrument metadata unavailable for %s",
+                group.short_instrument_name,
+            )
+            return None
+        usdc_linear = (
+            short_instrument.quote_currency.upper() == "USDC" and short_instrument.settlement_currency.upper() == "USDC"
+        )
+        idx = short_book.index_price
+        usdc_path = usdc_linear or group.collateral_currency.upper() == "USDC"
+        close_debit = self._short_close_debit_usdc(
+            premium=close_premium,
+            quantity=group.quantity,
+            short_book=short_book,
+            short_instrument=short_instrument,
+            usdc_path=usdc_path,
+            idx=idx,
+        )
+        if not group.long_instrument_name:
+            return close_debit
+        try:
+            long_book = self._get_orderbook(group.long_instrument_name, context.orderbook_cache)
+            long_instrument = self._find_or_fetch_instrument(markets, group.long_instrument_name)
+            long_close_premium = long_book.sell_close_premium(
+                max_spread_ratio=ctx.income_exit_max_spread_ratio,
+            )
+            if long_close_premium <= 0:
+                long_close_premium = long_book.best_bid_price if long_book.best_bid_price > 0 else long_book.mark_price
+            if usdc_linear or group.collateral_currency.upper() == "USDC":
+                long_credit = self._premium_value_usdc(
+                    premium=max(long_close_premium, Decimal("0")),
+                    quantity=group.quantity,
+                    index_price=long_book.index_price,
+                    instrument=long_instrument,
+                )
+                long_fee = self._option_fee_usdc(
+                    premium=max(long_close_premium, Decimal("0")),
+                    quantity=group.quantity,
+                    index_price=long_book.index_price,
+                    base_currency=long_instrument.base_currency,
+                    quote_currency=long_instrument.quote_currency,
+                    settlement_currency=long_instrument.settlement_currency,
+                )
+                return max(close_debit - max(long_credit - long_fee, Decimal("0")), Decimal("0"))
+            long_fee_collateral = self._option_fee_native(
+                premium=max(long_close_premium, Decimal("0")),
+                quantity=group.quantity,
+                index_price=long_book.index_price,
+                quote_currency=long_instrument.quote_currency,
+                settlement_currency=long_instrument.settlement_currency,
+            )
+            long_gross_native = max(long_close_premium, Decimal("0")) * group.quantity
+            long_net_native = long_gross_native - long_fee_collateral
+            idx_long = long_book.index_price if long_book.index_price > 0 else idx
+            return max(
+                close_debit - long_net_native * idx_long if idx_long > 0 else close_debit,
+                Decimal("0"),
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "income_exit: unable to net long leg %s for group=%s (%s)",
+                group.long_instrument_name,
+                group.group_id,
+                exc,
+            )
+            return None
 
     def _maybe_close_orphan_hedge(self, context: RuntimeContext, *, currency: str, live: bool) -> dict[str, Any] | None:
         """Flatten a perp hedge left behind once no option needs it.
@@ -847,11 +950,12 @@ class ManagementMixin:
         # ------------------------------------------------------------------
         # ``day_net_flow_usdc_by_book`` is refreshed from Deribit's transaction log
         # and tracks external cash flow since UTC day-start.
+        flow_books = self._cash_flow_books_for_snapshot(per_book_equities)
         day_net_flow_usdc_by_book: dict[str, Decimal] = {
-            book: state.day_net_flow_usdc_by_book.get(book, Decimal("0")) for book in per_book_equities
+            book: state.day_net_flow_usdc_by_book.get(book, Decimal("0")) for book in flow_books
         }
         day_net_flow_native_by_book: dict[str, Decimal] = {
-            book: state.day_net_flow_native_by_book.get(book, Decimal("0")) for book in per_book_equities
+            book: state.day_net_flow_native_by_book.get(book, Decimal("0")) for book in flow_books
         }
         day_pnl_usdc_ex_flow_by_book: dict[str, Decimal] = {
             book: per_book_equities.get(book, Decimal("0"))
@@ -1328,39 +1432,15 @@ class ManagementMixin:
         now_ms = utc_now_ms()
         interval_ms = max(self.config.cash_flow_query_interval_seconds, 1) * 1000
 
-        for collateral_raw in self.config.traded_collaterals:
-            collateral = collateral_raw.upper()
-            flow_start_ms = self._flow_query_start_ms(state, collateral)
-            if flow_start_ms <= 0:
-                continue
-            last_query = state.last_flow_query_ms_by_book.get(collateral, 0)
-            if not force and last_query and (now_ms - last_query) < interval_ms:
-                continue
-
-            try:
-                net_native = sum_external_flow_native_in_window(
-                    self.client,
-                    currency=collateral,
-                    start_timestamp_ms=flow_start_ms,
-                    end_timestamp_ms=now_ms,
-                )
-            except Exception as exc:
-                LOGGER.warning(
-                    "cash_flow_refresh_failed currency=%s err=%s",
-                    collateral,
-                    exc,
-                )
-                continue
-
-            if collateral in ("USDC", "USDT"):
-                net_usdc = net_native
-            else:
-                index_price = self._currency_index_price(collateral, orderbook_cache)
-                net_usdc = net_native * index_price
-
-            state.day_net_flow_usdc_by_book[collateral] = net_usdc
-            state.day_net_flow_native_by_book[collateral] = net_native
-            state.last_flow_query_ms_by_book[collateral] = now_ms
+        for collateral_raw in cash_flow_scan_currencies(self.config.traded_collaterals):
+            self._refresh_cash_flow_for_currency(
+                state,
+                orderbook_cache,
+                collateral=collateral_raw.upper(),
+                now_ms=now_ms,
+                force=force,
+                interval_ms=interval_ms,
+            )
 
         if summaries:
             self._heal_cash_flow_after_large_equity_move(
@@ -1395,35 +1475,69 @@ class ManagementMixin:
             equity_delta,
             flow_usdc,
         )
-        for collateral_raw in self.config.traded_collaterals:
-            collateral = collateral_raw.upper()
-            flow_start_ms = self._flow_query_start_ms(state, collateral)
-            if flow_start_ms <= 0:
-                continue
-            try:
-                net_native = sum_external_flow_native_in_window(
-                    self.client,
-                    currency=collateral,
-                    start_timestamp_ms=flow_start_ms,
-                    end_timestamp_ms=now_ms,
-                )
-            except Exception as exc:
-                LOGGER.warning("cash_flow_heal_failed currency=%s err=%s", collateral, exc)
-                continue
-            if collateral in ("USDC", "USDT"):
-                net_usdc = net_native
-            else:
-                index_price = self._currency_index_price(collateral, orderbook_cache)
-                net_usdc = net_native * index_price
-            state.day_net_flow_usdc_by_book[collateral] = net_usdc
-            state.day_net_flow_native_by_book[collateral] = net_native
-            state.last_flow_query_ms_by_book[collateral] = now_ms
+        for collateral_raw in cash_flow_scan_currencies(self.config.traded_collaterals):
+            self._refresh_cash_flow_for_currency(
+                state,
+                orderbook_cache,
+                collateral=collateral_raw.upper(),
+                now_ms=now_ms,
+                force=True,
+                interval_ms=0,
+            )
+
+    def _cash_flow_books_for_snapshot(self, per_book_equities: dict[str, Decimal]) -> list[str]:
+        """Equity books plus any extra flow-only books (e.g. USDT on inverse subs)."""
+        books = list(per_book_equities.keys())
+        for book in cash_flow_scan_currencies(self.config.traded_collaterals):
+            if book not in books:
+                books.append(book)
+        return books
+
+    def _refresh_cash_flow_for_currency(
+        self,
+        state: StrategyState,
+        orderbook_cache: dict[str, OrderBookSnapshot],
+        *,
+        collateral: str,
+        now_ms: int,
+        force: bool,
+        interval_ms: int,
+    ) -> None:
+        flow_start_ms = self._flow_query_start_ms(state, collateral)
+        if flow_start_ms <= 0:
+            return
+        last_query = state.last_flow_query_ms_by_book.get(collateral, 0)
+        if not force and last_query and (now_ms - last_query) < interval_ms:
+            return
+        try:
+            net_native = sum_external_flow_native_in_window(
+                self.client,
+                currency=collateral,
+                start_timestamp_ms=flow_start_ms,
+                end_timestamp_ms=now_ms,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "cash_flow_refresh_failed currency=%s err=%s",
+                collateral,
+                exc,
+            )
+            return
+        if collateral in ("USDC", "USDT"):
+            net_usdc = net_native
+        else:
+            index_price = self._currency_index_price(collateral, orderbook_cache)
+            net_usdc = net_native * index_price
+        state.day_net_flow_usdc_by_book[collateral] = net_usdc
+        state.day_net_flow_native_by_book[collateral] = net_native
+        state.last_flow_query_ms_by_book[collateral] = now_ms
 
     def _reset_daily_state(self, state: StrategyState, summaries: dict[str, AccountSummary]) -> StrategyState:
         today_key = utc_now().strftime("%Y-%m-%d")
         total_equity = self._total_equity_usdc(summaries, {})
         per_book = self._book_equities_usdc(summaries, {})
         per_book_native = self._book_equities_native(summaries)
+        flow_books = self._cash_flow_books_for_snapshot(per_book)
         now_ms = utc_now_ms()
         if state.day_key != today_key:
             state.day_key = today_key
@@ -1432,8 +1546,8 @@ class ManagementMixin:
             state.day_start_equity_native_by_book = dict(per_book_native)
             # New UTC day → flow tallies reset to zero and query timestamps
             # cleared so the next cycle re-queries from the fresh day-start.
-            state.day_net_flow_usdc_by_book = {book: Decimal("0") for book in per_book}
-            state.day_net_flow_native_by_book = {book: Decimal("0") for book in per_book_native}
+            state.day_net_flow_usdc_by_book = {book: Decimal("0") for book in flow_books}
+            state.day_net_flow_native_by_book = {book: Decimal("0") for book in flow_books}
             state.last_flow_query_ms_by_book = {}
             state.day_equity_anchor_ms_by_book = {book: now_ms for book in per_book}
         else:
@@ -1460,6 +1574,9 @@ class ManagementMixin:
                     state.day_equity_anchor_ms_by_book.setdefault(book, now_ms)
                 else:
                     state.day_net_flow_native_by_book.setdefault(book, Decimal("0"))
+            for book in flow_books:
+                state.day_net_flow_usdc_by_book.setdefault(book, Decimal("0"))
+                state.day_net_flow_native_by_book.setdefault(book, Decimal("0"))
         state.last_equity_usdc = total_equity
         state.last_equity_by_book = dict(per_book)
         state.last_equity_native_by_book = dict(per_book_native)

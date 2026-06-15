@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from .fees import annualized_return
 from .trade_apr import position_apr_capital_base, remaining_apr_for_group
+from .utils import safe_div
 
 if TYPE_CHECKING:
     from .config import BotConfig
@@ -31,6 +32,7 @@ class ExitEvalContext:
     tp_capture_pct_dte_short: Decimal
     tp_dte_long_threshold: Decimal
     tp_dte_short_threshold: Decimal
+    income_exit_max_spread_ratio: Decimal
     defense_trigger_use_mark: bool = True
 
 
@@ -51,6 +53,7 @@ def exit_eval_context_from_config(config: BotConfig) -> ExitEvalContext:
         tp_capture_pct_dte_short=config.tp_capture_pct_dte_short,
         tp_dte_long_threshold=config.tp_dte_long_threshold,
         tp_dte_short_threshold=config.tp_dte_short_threshold,
+        income_exit_max_spread_ratio=config.income_exit_max_spread_ratio,
         defense_trigger_use_mark=config.defense_trigger_use_mark,
     )
 
@@ -67,6 +70,41 @@ def dynamic_tp_capture_pct(
     if dte_days <= ctx.tp_dte_short_threshold:
         return ctx.tp_capture_pct_dte_short
     return ctx.tp_capture_pct
+
+
+def income_exit_close_premium(
+    short_book: OrderBookSnapshot,
+    ctx: ExitEvalContext,
+) -> Decimal | None:
+    """Conservative buy-to-close premium for income exits.
+
+    Returns ``None`` when bid/ask are missing or the spread is too wide to trust
+    executable pricing (avoids mark-only take-profit on illiquid books).
+    """
+    if short_book.best_ask_price <= 0 or short_book.best_bid_price <= 0:
+        return None
+    ratio = ctx.income_exit_max_spread_ratio
+    if not short_book.quote_sane_for_close(max_spread_ratio=ratio):
+        return None
+    premium = short_book.buy_close_premium(max_spread_ratio=ratio)
+    return premium if premium > 0 else None
+
+
+def profit_capture_from_close_debit(entry_credit: Decimal, close_debit: Decimal) -> Decimal:
+    return safe_div(max(entry_credit - close_debit, Decimal("0")), entry_credit)
+
+
+def take_profit_triggered(
+    group: TradeGroup,
+    *,
+    close_debit_usdc: Decimal | None,
+    ctx: ExitEvalContext,
+) -> bool:
+    """True when executable close cost implies profit capture meets the TP threshold."""
+    if close_debit_usdc is None or group.entry_credit <= 0:
+        return False
+    capture = profit_capture_from_close_debit(group.entry_credit, close_debit_usdc)
+    return capture >= dynamic_tp_capture_pct(group.dte_days, ctx)
 
 
 def evaluate_early_exit_reason(
@@ -127,10 +165,18 @@ def evaluate_income_exit_reason(
     group: TradeGroup,
     short_book: OrderBookSnapshot | None,
     ctx: ExitEvalContext,
+    *,
+    income_exit_close_debit_usdc: Decimal | None = None,
 ) -> str | None:
     """Income-path exits only (TP, early exit, time exit). Defense handled separately."""
+    if take_profit_triggered(
+        group,
+        close_debit_usdc=income_exit_close_debit_usdc,
+        ctx=ctx,
+    ):
+        return "take_profit"
     tp_threshold = dynamic_tp_capture_pct(group.dte_days, ctx)
-    if group.profit_capture >= tp_threshold:
+    if income_exit_close_debit_usdc is None and short_book is None and group.profit_capture >= tp_threshold:
         return "take_profit"
     if short_book is not None:
         early = evaluate_early_exit_reason(group, short_book, ctx)

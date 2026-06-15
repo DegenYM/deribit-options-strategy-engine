@@ -40,6 +40,44 @@ def test_realized_pnl_usdc_at_spot_uses_usdt_when_profit_swept() -> None:
     assert at_live == Decimal("146.2")
 
 
+def test_profit_sweep_lifetime_uses_quote_usdt_not_option_pnl() -> None:
+    row = {
+        "status": "closed",
+        "collateral_currency": "BTC",
+        "currency": "BTC",
+        "realized_pnl": "38",
+        "realized_pnl_collateral_native": "0.00048072",
+        "profit_sweep_status": "filled",
+        "profit_sweep_amount": "0.00048072",
+        "profit_sweep_quote_proceeds": "0.08355164",
+        "profit_sweep_quote_proceeds_lifetime": "0.08355164",
+        "profit_sweep_reason": "proceeds_reconciled",
+        "closed_timestamp_ms": 1_700_000_000_000,
+        "entry_timestamp_ms": 1_699_000_000_000,
+    }
+    at_live = realized_pnl_usdc_at_spot(row, {"BTC": Decimal("120000")})
+    assert at_live == Decimal("0.08355164")
+
+
+def test_profit_sweep_realized_usdt_prefers_fill_quote_over_lifetime() -> None:
+    row = {
+        "status": "closed",
+        "collateral_currency": "BTC",
+        "currency": "BTC",
+        "realized_pnl": "1.26",
+        "realized_pnl_collateral_native": "0.00002",
+        "profit_sweep_status": "filled",
+        "profit_sweep_amount": "0.00002",
+        "profit_sweep_quote_proceeds": "0.90955257",
+        "profit_sweep_quote_proceeds_lifetime": "1.23016371",
+        "profit_sweep_reason": "take_profit; dust_pool_sweep; proceeds_reconciled",
+        "closed_timestamp_ms": 1_700_000_000_000,
+        "entry_timestamp_ms": 1_699_000_000_000,
+    }
+    at_live = realized_pnl_usdc_at_spot(row, {"BTC": Decimal("120000")})
+    assert at_live == Decimal("0.90955257")
+
+
 def test_realized_summary_from_closed_sums_at_spot() -> None:
     rows = [
         {

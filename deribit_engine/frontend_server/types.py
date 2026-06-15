@@ -92,6 +92,8 @@ class EquitySnapshotScheduler:
             bot = self._bot_factory()
             context = bot._load_runtime()
             snapshot = context.snapshot
+            index_btc = bot._currency_index_price("BTC", context.orderbook_cache)
+            index_eth = bot._currency_index_price("ETH", context.orderbook_cache)
             row = {
                 "ts_ms": utc_now_ms(),
                 "account_name": self._account_name,
@@ -109,6 +111,9 @@ class EquitySnapshotScheduler:
                 "initial_margin_ratio": str(snapshot.initial_margin_ratio),
                 "maintenance_margin_ratio": str(snapshot.maintenance_margin_ratio),
                 "equity_by_book": {k: str(v) for k, v in snapshot.equity_by_book.items()},
+                "equity_native_by_book": {k: str(v) for k, v in context.state.last_equity_native_by_book.items()},
+                "index_btc_usd": str(index_btc) if index_btc > 0 else None,
+                "index_eth_usd": str(index_eth) if index_eth > 0 else None,
                 "day_start_equity_by_book": {k: str(v) for k, v in snapshot.day_start_equity_by_book.items()},
                 "day_net_flow_usdc_by_book": {k: str(v) for k, v in snapshot.day_net_flow_usdc_by_book.items()},
                 "day_pnl_usdc_ex_flow_by_book": {k: str(v) for k, v in snapshot.day_pnl_usdc_ex_flow_by_book.items()},

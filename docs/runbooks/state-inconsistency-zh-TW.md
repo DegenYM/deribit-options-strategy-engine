@@ -10,7 +10,7 @@
 
 1. `./bot status --env-file config/investors/<id>/accounts/.env.<slug>` 對照 Deribit UI
 2. 看 state 檔：`.state/investors/<id>/<slug>.json`
-3. 確認 `ENABLE_ADOPT_EXCHANGE_POSITIONS` 是否符合預期（`defaults.env` 或子帳 env）
+3. 確認 `ENABLE_ADOPT_EXCHANGE_POSITIONS` 是否符合預期（`config/shared/.env.defaults` 或子帳 env）
 
 ## 處理步驟
 

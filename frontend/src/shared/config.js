@@ -45,6 +45,9 @@ export const INVESTOR_OVERLAY_MAX_MS = 6_000;
 export const FETCH_JSON_RETRYABLE_STATUS = new Set([502, 503, 504]);
 export const FETCH_JSON_MAX_RETRIES = 2;
 export const FETCH_JSON_RETRY_BASE_MS = 450;
+/** Extra attempts when the browser reports a network error (e.g. server restart). */
+export const FETCH_JSON_NETWORK_MAX_RETRIES = 3;
+export const FETCH_JSON_NETWORK_RETRY_BASE_MS = 500;
 export const ACTIVITY_PAGE_SIZE = 10;
 
 export const STRATEGIES = [

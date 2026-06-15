@@ -14,8 +14,8 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, isDashboardStrategy, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewMetricsGridHtml, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
-import { bookEquityNativeByBook, aggregateProfitDisposition, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
+import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
   if (!INVESTOR || !health) return;
@@ -35,6 +35,14 @@ export function renderInvestorHeaderIdentity(health) {
     investorId && investorId !== name
       ? `${i18n("Investor id", "投資人 ID")}: ${investorId} · ${base}`
       : base;
+}
+
+/** Compact investor header chip: label · value on one line, no awkward wrapping. */
+function setInvestorChip(el, label, value, tone = "neutral") {
+  if (!el) return;
+  el.hidden = false;
+  el.innerHTML = `<span class="inv-chip__label">${escapeHtml(label)}</span><span class="inv-chip__value">${escapeHtml(value)}</span>`;
+  el.className = `inv-chip inv-chip--${tone}`;
 }
 
 /** Ops dashboard: rose on mainnet = live-funds warning. Investor portal: neutral tones (not an error). */
@@ -59,30 +67,48 @@ export function renderTopBar(health) {
   const env = (health.env || "").toLowerCase();
   const envBadge = document.getElementById("env-badge");
   if (envBadge) {
-    envBadge.textContent = INVESTOR
-      ? env === "mainnet"
-        ? i18n("Network: Mainnet", "網路：主網")
-        : env === "multi"
-        ? i18n("Network: Multi-account", "網路：多帳戶")
-        : env === "test"
-        ? i18n("Network: Test", "網路：測試")
-        : `${i18n("Network:", "網路：")} ${env || "—"}`
-      : `env: ${env || "?"}`;
-    envBadge.className =
-      "text-xs px-2 py-0.5 rounded-full border " + envBadgeToneClass(env);
+    if (INVESTOR) {
+      const envValue =
+        env === "mainnet"
+          ? i18n("Mainnet", "主網")
+          : env === "multi"
+          ? i18n("Multi-acct", "多帳戶")
+          : env === "test"
+          ? i18n("Test", "測試")
+          : env || "—";
+      const envTone =
+        env === "mainnet" ? "info" : env === "test" ? "warning" : "neutral";
+      setInvestorChip(envBadge, i18n("Network", "網路"), envValue, envTone);
+    } else {
+      envBadge.textContent = `env: ${env || "?"}`;
+      envBadge.className =
+        "text-xs px-2 py-0.5 rounded-full border " + envBadgeToneClass(env);
+    }
   }
 
   const strategyBadge = document.getElementById("strategy-badge");
   if (strategyBadge) {
     const strategy = normalizeStrategyId(health.option_strategy || "");
     const accountCount = health.accounts?.length || 0;
-    strategyBadge.textContent = health.multi_account
-      ? i18n(`strategy: multi (${accountCount} accounts)`, `策略：多帳戶（${accountCount}）`)
-      : INVESTOR
-      ? `${i18n("Strategy:", "策略：")} ${strategy ? strategyTitle(strategy) : "—"}`
-      : `strategy: ${strategy ? strategyTitle(strategy) : "?"}`;
-    strategyBadge.className =
-      "text-xs px-2 py-0.5 rounded-full border border-sky-500/50 bg-sky-500/10 text-sky-200";
+    if (INVESTOR) {
+      const strategyValue = health.multi_account
+        ? i18n(`Multi · ${accountCount}`, `多帳戶 · ${accountCount}`)
+        : strategy
+        ? strategyTitle(strategy)
+        : "—";
+      setInvestorChip(
+        strategyBadge,
+        i18n("Strategy", "策略"),
+        strategyValue,
+        "info"
+      );
+    } else {
+      strategyBadge.textContent = health.multi_account
+        ? i18n(`strategy: multi (${accountCount} accounts)`, `策略：多帳戶（${accountCount}）`)
+        : `strategy: ${strategy ? strategyTitle(strategy) : "?"}`;
+      strategyBadge.className =
+        "text-xs px-2 py-0.5 rounded-full border border-sky-500/50 bg-sky-500/10 text-sky-200";
+    }
   }
 
   const profitSweepBadge = document.getElementById("profit-sweep-badge");
@@ -95,16 +121,25 @@ export function renderTopBar(health) {
           (a) => a.option_strategy === "covered_call" && a.covered_call_profit_sweep_enabled
         ));
     if (showSweep) {
-      profitSweepBadge.hidden = false;
       const enabled = !!health.covered_call_profit_sweep_enabled;
-      profitSweepBadge.textContent = enabled
-        ? i18n("Profit → USDT: on", "獲利兌 USDT：開啟")
-        : i18n("Profit → USDT: off", "獲利兌 USDT：關閉");
-      profitSweepBadge.className =
-        "text-xs px-2 py-0.5 rounded-full border " +
-        (enabled
-          ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
-          : "border-slate-600 bg-slate-700/30 text-slate-300");
+      if (INVESTOR) {
+        setInvestorChip(
+          profitSweepBadge,
+          i18n("Sweep", "兌 USDT"),
+          enabled ? i18n("On", "開啟") : i18n("Off", "關閉"),
+          enabled ? "success" : "neutral"
+        );
+      } else {
+        profitSweepBadge.hidden = false;
+        profitSweepBadge.textContent = enabled
+          ? i18n("Profit → USDT: on", "獲利兌 USDT：開啟")
+          : i18n("Profit → USDT: off", "獲利兌 USDT：關閉");
+        profitSweepBadge.className =
+          "text-xs px-2 py-0.5 rounded-full border " +
+          (enabled
+            ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
+            : "border-slate-600 bg-slate-700/30 text-slate-300");
+      }
     } else {
       profitSweepBadge.hidden = true;
     }
@@ -146,9 +181,20 @@ export function renderRegime(status) {
   const regKey = String(regime).toLowerCase();
   const regZh = { normal: "正常", elevated: "偏高", crisis: "警戒" };
   const regEn = { normal: "Normal", elevated: "Elevated", crisis: "Crisis" };
-  badge.textContent = INVESTOR
-    ? `${i18n("Risk posture:", "風控狀態：")} ${INVESTOR_ZH ? regZh[regKey] || regime : regEn[regKey] || regime}`
-    : `regime: ${regime}`;
+  if (INVESTOR) {
+    const regValue = INVESTOR_ZH ? regZh[regKey] || regime : regEn[regKey] || regime;
+    const tone =
+      regime === "normal"
+        ? "success"
+        : regime === "elevated"
+        ? "warning"
+        : regime === "crisis"
+        ? "danger"
+        : "neutral";
+    setInvestorChip(badge, i18n("Risk", "風控"), regValue, tone);
+    return;
+  }
+  badge.textContent = `regime: ${regime}`;
   const cls =
     regime === "normal"
       ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-200"
@@ -268,7 +314,7 @@ export function bookCardHtml(book, status) {
         ${equityNative !== null ? fmtNum(equityNative, nativePlaces) + " " + book : ""}
         ${dayStartUsdc !== null ? "· day-start " + fmtUsd(dayStartUsdc) : ""}
       </div>
-      <div class="kv"><span class="k">Day P&amp;L</span><span class="v ${pnlClass(
+      <div class="kv"><span class="k">Day change</span><span class="v ${pnlClass(
         dayPnlUsdc
       )}">${fmtUsd(dayPnlUsdc)}</span></div>
       <div class="kv"><span class="k">Day drawdown</span><span class="v ${pnlClass(
@@ -380,7 +426,7 @@ export function renderAccountCards(health, status) {
               <div class="value">${fmtUsd(totalEquity)}</div>
             </div>
             <div class="stat-tile">
-              <div class="label">Day P&amp;L</div>
+              <div class="label">Day change</div>
               <div class="value ${pnlClass(dayPnl)}">${fmtUsd(dayPnl)}</div>
             </div>
             <div class="stat-tile">
@@ -403,6 +449,13 @@ export function renderAccountCards(health, status) {
 export function renderAggregate(status, report) {
   const root = document.getElementById("aggregate-card");
   if (!root) return;
+
+  if (INVESTOR && !isInvestorOverviewDisplayReady()) {
+    root.innerHTML = aggregateSkeletonHtml();
+    renderDataFreshnessBadge();
+    return;
+  }
+
   const { portfolio, source } = resolvedPortfolio();
   const summary = report?.summary;
 
@@ -433,7 +486,8 @@ export function renderAggregate(status, report) {
 
   const lifetimePnlAtSpot = sumLifetimeRealizedPnlUsdcAtSpot(report, STATE.groups, status);
   const lifetimePnl = lifetimePnlAtSpot ?? num(summary?.realized_pnl_usdc);
-  const lifetimeApr = num(summary?.lifetime_realized_apr);
+  const lifetimeAprAtSpot = computeLifetimeRealizedApr(report, STATE.groups, status, summary);
+  const lifetimeApr = lifetimeAprAtSpot ?? num(summary?.lifetime_realized_apr);
   const winRate = num(summary?.realized_win_rate);
   const avgHolding = num(summary?.avg_holding_days);
   const closedCount = num(summary?.realized_closed_group_count);
@@ -446,7 +500,14 @@ export function renderAggregate(status, report) {
     windowLabelDaysForPnl
   );
   const windowPnl = windowPnlAtSpot ?? num(summary?.window_realized_pnl_usdc);
-  const windowApr = num(summary?.window_realized_apr);
+  const windowAprAtSpot = computeWindowRealizedApr(
+    report,
+    STATE.groups,
+    status,
+    summary,
+    windowLabelDaysForPnl
+  );
+  const windowApr = windowAprAtSpot ?? num(summary?.window_realized_apr);
   const lifetimeStartMs = summary ? lifetimePerformanceStartMs(report, STATE.groups) : null;
   const lifetimeNativeByBook = summary
     ? sumLifetimeRealizedPnlNativeByBook(report, STATE.groups, status)
@@ -458,11 +519,13 @@ export function renderAggregate(status, report) {
   const lifetimeProfitDisposition = summary
     ? aggregateProfitDisposition(report, STATE.groups, status)
     : null;
+  const profitComposition = summary
+    ? profitCompositionByBook(report, STATE.groups, status)
+    : null;
   const windowProfitDisposition = summary
     ? aggregateProfitDisposition(report, STATE.groups, status, { windowDays: windowLabelDays })
     : null;
-  const equityNativeByBook = bookEquityNativeByBook(status);
-  const equityUsdByBook = bookEquityUsdByBook(status);
+  const { equityNativeByBook, equityUsdByBook } = overviewEquityBreakdown(portfolio, status);
   const sinceLine =
     lifetimeStartMs !== null
       ? `${i18n("since", "自")} ${fmtDate(lifetimeStartMs)}`
@@ -481,6 +544,7 @@ export function renderAggregate(status, report) {
     sinceLine,
     lifetimePnl,
     lifetimeNativeByBook,
+    profitCompositionByBook: profitComposition,
     lifetimeProfitDisposition,
     closedCount,
     windowLabelDays,
@@ -492,16 +556,16 @@ export function renderAggregate(status, report) {
     equityNativeByBook,
     equityUsdByBook,
   };
-  const desktopOverview = overviewMetricsGridHtml(overviewCtx);
+  const contentHtml = overviewDesktopContentHtml(overviewCtx);
   const overviewWrap = (inner) =>
     `<div class="overview-panel-inner">${inner}<div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
 
   if (INVESTOR) {
     root.innerHTML = overviewWrap(`
-      <div class="investor-view-desktop">${desktopOverview}</div>
+      <div class="investor-view-desktop">${contentHtml}</div>
       <div class="investor-view-mobile">${investorOverviewHtml(overviewCtx)}</div>`);
   } else {
-    root.innerHTML = overviewWrap(desktopOverview);
+    root.innerHTML = overviewWrap(contentHtml);
   }
   renderDataFreshnessBadge();
 }
@@ -1309,4 +1373,182 @@ export function renderStress(stress) {
       For bull put spread, long option legs are netted when present; for covered call, BTC/ETH spot cover drawdown is included.
     </p>
   `;
+}
+
+function transferDirectionLabel(direction) {
+  const d = String(direction || "").toLowerCase();
+  if (d === "in") return i18n("In", "轉入");
+  if (d === "out") return i18n("Out", "轉出");
+  return "—";
+}
+
+function parseTransferInfoMeta(raw) {
+  const text = String(raw || "").trim();
+  if (!text.startsWith("{") || !text.endsWith("}")) return null;
+  const pick = (field) => {
+    const quoted = text.match(new RegExp(`['"]${field}['"]\\s*:\\s*['"]([^'"]*)['"]`, "i"));
+    if (quoted) return quoted[1];
+    const bare = text.match(new RegExp(`['"]${field}['"]\\s*:\\s*([^,}\\s]+)`, "i"));
+    if (bare) return String(bare[1]).replace(/^['"]|['"]$/g, "");
+    return "";
+  };
+  const meta = {
+    note: pick("note"),
+    otherUser: pick("other_user"),
+    otherUserId: pick("other_user_id"),
+    transferType: pick("transfer_type"),
+  };
+  if (!meta.note && !meta.otherUser && !meta.otherUserId && !meta.transferType) return null;
+  return meta;
+}
+
+function transferInfoLabel(raw, direction) {
+  const info = String(raw || "").trim();
+  const d = String(direction || "").toLowerCase();
+  const meta = parseTransferInfoMeta(info);
+  if (meta) {
+    const peer = String(meta.otherUser || "").trim();
+    const extra = String(meta.note || "").trim();
+    const peerId = String(meta.otherUserId || "").trim();
+    let label = "";
+    if (peer) {
+      if (d === "in") label = i18n(`From “${peer}”`, `來自「${peer}」`);
+      else if (d === "out") label = i18n(`To “${peer}”`, `轉至「${peer}」`);
+      else label = i18n(`With “${peer}”`, `與「${peer}」劃轉`);
+    } else if (peerId) {
+      if (d === "in") label = i18n(`From sub-account #${peerId}`, `來自子帳戶 #${peerId}`);
+      else if (d === "out") label = i18n(`To sub-account #${peerId}`, `轉至子帳戶 #${peerId}`);
+      else label = i18n(`Sub-account transfer #${peerId}`, `子帳戶劃轉 #${peerId}`);
+    } else if (String(meta.transferType || "").toLowerCase() === "user") {
+      if (d === "in") label = i18n("From another sub-account", "來自其他子帳戶");
+      else if (d === "out") label = i18n("To another sub-account", "轉至其他子帳戶");
+      else label = i18n("Sub-account transfer", "子帳戶劃轉");
+    }
+    if (label) {
+      if (extra) return i18n(`${label} — ${extra}`, `${label}（${extra}）`);
+      return label;
+    }
+  }
+  if (!info || info === "in" || info === "out") {
+    if (d === "in") return i18n("Received into this account", "資金轉入此帳戶");
+    if (d === "out") return i18n("Sent from this account", "資金從此帳戶轉出");
+    return i18n("Internal transfer", "內部劃轉");
+  }
+  const lower = info.toLowerCase();
+  if (/sub[- ]?account|subaccount/.test(lower)) {
+    return i18n("Moved between sub-accounts", "子帳戶之間移動");
+  }
+  if (/main[- ]?account|\bmain account\b/.test(lower)) {
+    return i18n("Moved with the main account", "與主帳戶之間移動");
+  }
+  if (/sweep|profit/.test(lower)) {
+    return i18n("Profit sweep or internal move", "獲利兌換或內部移轉");
+  }
+  if (/\bfee\b/.test(lower)) {
+    return i18n("Moved to or from the fee account", "與手續費帳戶之間移動");
+  }
+  if (/margin|cross[- ]?book|currency swap|book transfer/.test(lower)) {
+    return i18n("Moved between margin books on the same account", "同一帳戶跨保證金帳本移轉");
+  }
+  if (/withdraw|deposit/.test(lower)) {
+    return i18n("Linked to a deposit or withdrawal flow", "與入金／出金流程相關");
+  }
+  if (info.startsWith("{") && info.endsWith("}")) {
+    return d === "in"
+      ? i18n("Received into this account", "資金轉入此帳戶")
+      : d === "out"
+        ? i18n("Sent from this account", "資金從此帳戶轉出")
+        : i18n("Internal transfer", "內部劃轉");
+  }
+  if (info.length <= 24 && !/\s/.test(info)) {
+    return i18n(`Exchange note: ${info}`, `交易所備註：${info}`);
+  }
+  return info;
+}
+
+function transferAccountCardHtml(accountRow, payload) {
+  const name = String(accountRow?.name || "account");
+  const env = String(accountRow?.env || "");
+  const strategy = String(accountRow?.option_strategy || "");
+  const books = (accountRow?.books_scanned || accountRow?.traded_collaterals || []).join(", ");
+  const transfers = Array.isArray(accountRow?.transfers) ? accountRow.transfers : [];
+  const totalCount = num(accountRow?.transfer_count) ?? transfers.length;
+  const days = num(payload?.days_requested) ?? 90;
+  const truncated = totalCount > transfers.length;
+  const rowsHtml = transfers
+    .map((row) => {
+      const book = String(row?.book || "").toUpperCase();
+      const native = num(row?.amount_native);
+      const note = transferInfoLabel(row?.info, row?.direction);
+      return `
+        <tr>
+          <td class="px-3 py-2 whitespace-nowrap text-slate-300">${escapeHtml(fmtDate(row?.timestamp_ms))}<span class="block text-[11px] text-slate-500">${escapeHtml(fmtTime(row?.timestamp_ms))}</span></td>
+          <td class="px-3 py-2"><span class="transfer-book-chip transfer-book-chip--${book.toLowerCase()}">${escapeHtml(book)}</span></td>
+          <td class="px-3 py-2">${escapeHtml(transferDirectionLabel(row?.direction))}</td>
+          <td class="px-3 py-2 text-right font-mono ${pnlClass(native)}">${escapeHtml(fmtNativeBookAmount(native, book))}</td>
+          <td class="px-3 py-2 text-slate-300 text-xs leading-relaxed">${escapeHtml(note)}</td>
+        </tr>`;
+    })
+    .join("");
+  return `
+    <article class="transfer-account-card rounded-2xl border border-slate-800 bg-slate-900/60 shadow overflow-hidden">
+      <header class="transfer-account-card-head px-4 py-3 border-b border-slate-800/80">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0">
+            <h3 class="text-sm font-semibold tracking-wide text-slate-100">${escapeHtml(name)}</h3>
+            <p class="text-xs text-slate-500 mt-1 break-all">${escapeHtml(env)}</p>
+          </div>
+          <div class="flex flex-wrap justify-end gap-1">${strategy ? strategyChipHtml(strategy) : ""}</div>
+        </div>
+        <p class="text-xs text-slate-500 mt-2">
+          ${i18n("Tracked assets", "追蹤資產")}: ${escapeHtml(books || "—")}
+          · ${i18n(`${totalCount} transfer${totalCount === 1 ? "" : "s"} in ${days}d`, `${days} 日內 ${totalCount} 筆劃轉`)}
+          ${truncated ? i18n(` (showing ${transfers.length})`, `（顯示 ${transfers.length} 筆）`) : ""}
+        </p>
+      </header>
+      <div class="overflow-x-auto">
+        <table class="transfer-table w-full text-sm">
+          <thead class="text-xs uppercase tracking-wide text-slate-500 bg-slate-950/40">
+            <tr>
+              <th class="text-left px-3 py-2">${i18n("Time", "時間")}</th>
+              <th class="text-left px-3 py-2">${i18n("Asset", "資產")}</th>
+              <th class="text-left px-3 py-2">${i18n("Direction", "方向")}</th>
+              <th class="text-right px-3 py-2">${i18n("Amount", "數量")}</th>
+              <th class="text-left px-3 py-2">${i18n("Note", "說明")}</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800">
+            ${rowsHtml || `<tr><td colspan="5" class="px-3 py-4 text-center text-slate-500">${i18n("No transfers in this window.", "此期間無劃轉紀錄。")}</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  `;
+}
+
+export function renderTransferCards(payload) {
+  const root = document.getElementById("transfer-cards");
+  if (!root) return;
+  if (!document.getElementById("transfers-section")?.open) return;
+  const data = payload ?? STATE.transfers;
+  if (!data) {
+    if (STATE.transfersLoadInFlight || STATE.health?.has_private_creds) {
+      root.innerHTML = `<p class="text-slate-500 text-sm">${i18n("Loading transfer history…", "正在載入劃轉紀錄…")}</p>`;
+    } else {
+      root.innerHTML = `<p class="text-sm text-slate-400">${i18n(
+        "Set DERIBIT_CLIENT_ID and DERIBIT_CLIENT_SECRET to load transfer history.",
+        "請設定 DERIBIT_CLIENT_ID 與 DERIBIT_CLIENT_SECRET 以載入劃轉紀錄。"
+      )}</p>`;
+    }
+    return;
+  }
+  const accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  if (!accounts.length) {
+    root.innerHTML = `<div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 text-slate-400 text-sm">${i18n(
+      "No dashboard accounts with API credentials.",
+      "尚無具 API 憑證的儀表板帳戶。"
+    )}</div>`;
+    return;
+  }
+  root.innerHTML = accounts.map((row) => transferAccountCardHtml(row, data)).join("");
 }

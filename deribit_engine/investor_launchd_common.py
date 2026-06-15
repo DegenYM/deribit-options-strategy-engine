@@ -16,6 +16,27 @@ def launch_agents_dir() -> Path:
     return Path.home() / "Library" / "LaunchAgents"
 
 
+def investor_launchd_log_dir(service: str, investor_id: str) -> Path:
+    """LaunchAgent stdout/stderr under ~/Library/Logs (avoids macOS Desktop TCC)."""
+    return Path.home() / "Library" / "Logs" / "deribit" / service / investor_id
+
+
+def investor_live_launchd_log_paths(investor_id: str) -> tuple[Path, Path]:
+    log_dir = investor_launchd_log_dir("live", investor_id)
+    return log_dir / "supervisor.log", log_dir / "supervisor.err.log"
+
+
+def investor_frontend_launchd_log_paths(investor_id: str) -> tuple[Path, Path]:
+    log_dir = investor_launchd_log_dir("frontend", investor_id)
+    return log_dir / "frontend.log", log_dir / "frontend.err.log"
+
+
+def ensure_investor_launchd_log_dir(service: str, investor_id: str) -> Path:
+    log_dir = investor_launchd_log_dir(service, investor_id)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
 def launchd_gui_domain() -> str:
     return f"gui/{os.getuid()}"
 

@@ -19,7 +19,7 @@
 ## Telegram token
 
 1. BotFather `/revoke`
-2. 更新 `config/shared/defaults.env` 的 `TELEGRAM_BOT_TOKEN`
+2. 更新 `config/shared/.env.defaults` 的 `TELEGRAM_BOT_TOKEN`
 3. `./bot telegram-test`
 
 ## 注意

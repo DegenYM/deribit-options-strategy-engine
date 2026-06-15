@@ -19,6 +19,7 @@ class RouteContext:
     exchange_prefetch_cache: _TtlCache
     spot_cache: _TtlCache
     stress_cache: _TtlCache
+    transfers_cache: _TtlCache
     series_cache: _TtlCache
     heavy_portfolio_lock: Any
     fetch_spot: Callable[[], dict[str, Any]]
@@ -26,5 +27,6 @@ class RouteContext:
     locked_aggregate_report: Callable[[int], dict[str, Any]]
     locked_compute_dashboard_bundle: Callable[..., dict[str, Any]]
     locked_aggregate_stress: Callable[[list[Decimal]], dict[str, Any]]
+    locked_aggregate_transfers: Callable[..., dict[str, Any]]
     seed_bundle_component_caches: Callable[..., None]
     finalize_dashboard_bundle: Callable[[dict[str, Any]], dict[str, Any]]

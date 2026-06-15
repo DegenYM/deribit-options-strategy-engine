@@ -543,7 +543,8 @@ class StateReconcileMixin:
         orderbook_cache: dict[str, OrderBookSnapshot],
         markets_by_currency: dict[str, list[OptionInstrument]],
         live: bool = False,
-    ) -> StrategyState:
+    ) -> tuple[StrategyState, bool]:
+        closed_any = False
         self._sync_naked_open_groups_from_positions(state, option_positions)
         self._sync_bull_put_spread_groups_from_positions(
             state,
@@ -614,11 +615,32 @@ class StateReconcileMixin:
                     )
                     estimated_close_debit = None
             else:
-                estimated_close_debit = self._estimate_reconcile_close_debit(
-                    group,
-                    orderbook_cache,
-                    markets_by_currency=markets_by_currency,
-                )
+                estimated_close_debit = None
+                if short_book is not None:
+                    try:
+                        short_instrument = self._find_or_fetch_instrument(
+                            markets_by_currency or {},
+                            group.short_instrument_name,
+                        )
+                        estimated_close_debit = self._reconcile_usdc_close_debit_from_trades(
+                            group,
+                            short_book=short_book,
+                            short_instrument=short_instrument,
+                            closed_timestamp_ms=closed_timestamp_ms,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.warning(
+                            "reconcile usdc close trades failed group=%s: %s",
+                            group.group_id,
+                            exc,
+                        )
+                        estimated_close_debit = None
+                if estimated_close_debit is None:
+                    estimated_close_debit = self._estimate_reconcile_close_debit(
+                        group,
+                        orderbook_cache,
+                        markets_by_currency=markets_by_currency,
+                    )
             if estimated_close_debit is not None:
                 realized_pnl = group.entry_credit_net_usdc() - estimated_close_debit
                 realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss)
@@ -668,13 +690,14 @@ class StateReconcileMixin:
                 index_price_usd=close_index_usd,
             )
             self._journal_reconcile_close(group, closed_timestamp_ms=closed_timestamp_ms)
+            closed_any = True
             if live and inferred_reason:
                 self._maybe_schedule_profit_sweep(group, reason=inferred_reason, live=live)
             if realized_pnl is not None:
                 LOGGER.info("reconcile group=%s estimated_pnl=%s", group.group_id, realized_pnl)
             else:
                 LOGGER.warning("reconcile group=%s could not estimate PnL", group.group_id)
-        return state
+        return state, closed_any
 
     def _group_is_expired(self, group: TradeGroup, *, now_ms: int | None = None) -> bool:
         exp = int(group.expiration_timestamp_ms or 0)
@@ -763,6 +786,42 @@ class StateReconcileMixin:
         except Exception:
             pass
         return long_instrument_for_spread_reconcile(group, short_instrument, markets)
+
+    def _reconcile_usdc_close_debit_from_trades(
+        self,
+        group: TradeGroup,
+        *,
+        short_book: OrderBookSnapshot,
+        short_instrument: OptionInstrument,
+        closed_timestamp_ms: int,
+    ) -> Decimal | None:
+        """Prefer actual buy-to-close fills for USDC / linear books (manual exchange closes)."""
+        close_premium = self._reconcile_buy_close_premium_native(
+            group,
+            short_book=short_book,
+            closed_timestamp_ms=closed_timestamp_ms,
+        )
+        if close_premium <= 0:
+            return None
+        index_price = short_book.index_price if short_book.index_price > 0 else group.entry_index_usd
+        if index_price <= 0:
+            return None
+        close_fee = self._option_fee_usdc(
+            premium=close_premium,
+            quantity=group.quantity,
+            index_price=index_price,
+            base_currency=short_instrument.base_currency,
+            quote_currency=short_instrument.quote_currency,
+            settlement_currency=short_instrument.settlement_currency,
+        )
+        gross = self._premium_value_usdc(
+            premium=close_premium,
+            quantity=group.quantity,
+            index_price=index_price,
+            instrument=short_instrument,
+        )
+        group.short_close_average_price = close_premium
+        return gross + close_fee
 
     def _spread_reconcile_close_debit_at_index(
         self,

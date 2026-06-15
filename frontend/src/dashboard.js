@@ -1,17 +1,18 @@
-import { INVESTOR } from "./shared/context.js";
+import { INVESTOR, i18n } from "./shared/context.js";
 import { FRONTEND_REFRESH_INTERVAL_MS } from "./shared/config.js";
 import { STATE } from "./shared/state.js";
 import * as domain from "./modules/domain.js";
 import * as charts from "./modules/charts.js";
 import * as render from "./modules/render.js";
 import * as refresh from "./modules/refresh.js";
+import * as investorCache from "./modules/investor-cache.js";
 import { loadChartJs } from "./modules/chart-vendor.js";
 import { aggregateSkeletonHtml } from "./modules/domain.js";
 
 function ensureAggregateSkeleton() {
   const root = document.getElementById("aggregate-card");
   if (!root) return;
-  if (root.querySelector(".overview-metrics-grid, .inv-dashboard, .overview-metric-cell")) return;
+  if (root.querySelector(".overview-headline, .overview-composition-grid, .overview-metrics-grid, .overview-stack, .inv-dashboard, .overview-metric-cell")) return;
   root.innerHTML = aggregateSkeletonHtml();
 }
 
@@ -24,6 +25,7 @@ export function renderDashboard() {
     render.renderAccountCards(STATE.health, STATE.status);
     render.renderBookCards(STATE.status);
   }
+  render.renderTransferCards(STATE.transfers);
   render.renderAggregate(STATE.status, STATE.report);
   render.renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
   refresh.renderPerformanceCharts().catch((err) => {
@@ -45,13 +47,23 @@ function setBookFilter(book) {
   }
   loadChartJs()
     .then(() => {
-      charts.renderBookEquityChart();
-      charts.renderCumulativePnlChart();
-      charts.renderDailyPnlChart();
+      for (const fn of [
+        charts.renderCumulativeSpotPnlChart,
+        charts.renderCumulativePnlChart,
+        charts.renderDailyPnlChart,
+      ]) {
+        try {
+          fn();
+        } catch (err) {
+          console.error("chart render failed", err);
+        }
+      }
       charts.scheduleChartResizeAll();
     })
     .catch((err) =>
-      domain.showToast(`charts: ${err.message}`, { retry: () => setBookFilter(book) })
+      domain.showToast(`${i18n("charts", "圖表")}: ${domain.formatFetchError(err)}`, {
+        retry: () => setBookFilter(book),
+      })
     );
 }
 
@@ -96,7 +108,9 @@ function attachControls() {
       await loadChartJs();
       STATE.aprSeries = await domain.fetchJson(charts.aprSeriesUrl());
     } catch (err) {
-      domain.showToast(`apr series: ${err.message}`, { retry: reloadAprSeries });
+      domain.showToast(`${i18n("apr series", "APR 序列")}: ${domain.formatFetchError(err)}`, {
+        retry: reloadAprSeries,
+      });
     }
     charts.renderAprChart();
   };
@@ -121,6 +135,12 @@ function attachChartHoverPrefetch() {
 function attachStressHoverPrefetch() {
   attachSectionHoverPrefetch("stress-section", () => {
     refresh.loadStressIfNeeded().catch(() => {});
+  });
+}
+
+function attachTransfersHoverPrefetch() {
+  attachSectionHoverPrefetch("transfers-section", () => {
+    refresh.loadTransfersIfNeeded().catch(() => {});
   });
 }
 
@@ -174,6 +194,12 @@ function attachExpandableSections() {
         render.renderBookCards(STATE.status);
         return;
       }
+      if (details.id === "transfers-section") {
+        refresh.loadTransfersIfNeeded().catch((err) => {
+          console.error("transfers load failed", err);
+        });
+        return;
+      }
       charts.scheduleChartResizeAll();
     });
 
@@ -185,12 +211,20 @@ function attachExpandableSections() {
         details.open = false;
       }
     }
+    if (details.id === "transfers-section" && details.open) {
+      refresh.loadTransfersIfNeeded().catch((err) => {
+        console.error("transfers load failed", err);
+      });
+    }
   });
 }
 
 export function initDashboard() {
   refresh.registerRenderDashboard(renderDashboard);
   const boot = () => {
+    if (INVESTOR && !STATE.investorReady) {
+      refresh.beginInvestorLoad({ blocking: true });
+    }
     ensureAggregateSkeleton();
     refresh.applyInvestorLoadCopy();
     charts.attachChartResizeObservers();
@@ -198,8 +232,15 @@ export function initDashboard() {
     attachExpandableSections();
     attachChartHoverPrefetch();
     attachStressHoverPrefetch();
+    attachTransfersHoverPrefetch();
     attachAutoRefresh();
     refresh.startLastRefreshTicker();
+    if (INVESTOR) {
+      const cached = investorCache.loadInvestorCache();
+      if (cached) {
+        investorCache.hydrateFromInvestorCache(cached);
+      }
+    }
     refresh.refreshAll({ force: true, renderDashboard });
   };
   if (document.readyState === "loading") {

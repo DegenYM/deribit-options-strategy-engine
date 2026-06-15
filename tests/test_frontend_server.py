@@ -707,15 +707,51 @@ def test_latest_ledger_snapshot_dedupes_shared_api_identity(tmp_path) -> None:
     assert Decimal(snap["portfolio"]["total_equity_usdc"]) == Decimal("5000")
 
 
+def test_aggregate_groups_disk_only_skips_exchange_prefetch(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "bot.json"
+    store = StrategyStateStore(state_path)
+    group = TradeGroup(
+        group_id="g1",
+        currency="ETH",
+        collateral_currency="ETH",
+        quantity=Decimal("1"),
+        entry_timestamp_ms=1_699_000_000_000,
+        expiration_timestamp_ms=future_expiry(30),
+        short_instrument_name="ETH-29MAR24-3000-C",
+        short_strike=Decimal("3000"),
+        entry_credit=Decimal("38"),
+        original_entry_credit=Decimal("38"),
+        max_loss=Decimal("250"),
+        regime_at_entry="normal",
+        entry_fee=Decimal("0.5"),
+        status="closed",
+        strategy="naked_short",
+        closed_timestamp_ms=1_700_000_000_000,
+        realized_pnl=Decimal("23"),
+        realized_close_debit=Decimal("14"),
+        realized_close_fee=Decimal("0.5"),
+    )
+    state = StrategyState(groups=[group], next_group_id=2)
+    store.save(state)
+    cfg = make_config(tmp_path, state_file=state_path)
+    env_file = tmp_path / ".env.test"
+    accounts = [DashboardAccount("a", env_file, cfg, state_path, tmp_path / "ledger")]
+
+    def _no_prefetch(*_args, **_kwargs):
+        raise AssertionError("_prefetch_all_accounts must not run for disk-only groups")
+
+    monkeypatch.setattr(frontend_server, "_prefetch_all_accounts", _no_prefetch)
+    payload = frontend_server._aggregate_groups_disk_only(accounts, spot_index={"ETH": Decimal("2400")})
+    assert payload["source"] == "disk"
+    assert len(payload["closed"]) == 1
+
+
 def test_portfolio_snapshot_endpoint_no_deribit(tmp_path, monkeypatch) -> None:
     from fastapi.testclient import TestClient
 
     env_file = tmp_path / ".env.test"
     env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
     cfg = make_config(tmp_path, state_file=tmp_path / "bot.json")
-
-    def _no_deribit(*_args, **_kwargs):
-        raise AssertionError("DeribitClient must not be used for /api/portfolio/snapshot")
 
     def _fake_snapshot(_accounts, **_kwargs):
         return {
@@ -727,9 +763,29 @@ def test_portfolio_snapshot_endpoint_no_deribit(tmp_path, monkeypatch) -> None:
             "scheduler": {},
         }
 
-    monkeypatch.setattr(frontend_server, "DeribitClient", _no_deribit)
     monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
     monkeypatch.setattr(frontend_server, "_latest_ledger_snapshot", _fake_snapshot)
+    monkeypatch.setattr(
+        frontend_server,
+        "_aggregate_groups_disk_only",
+        lambda _accounts, **kwargs: {
+            "open": [],
+            "closed": [],
+            "underlying_index_usd": {},
+            "source": "disk",
+        },
+    )
+
+    from deribit_engine.frontend_server.types import _TtlCache
+
+    _orig_get_or_set = _TtlCache.get_or_set
+
+    def _spot_get_or_set(self, key, fetch):
+        if key == "spot":
+            return {"BTC": "65000", "ETH": "3500"}
+        return _orig_get_or_set(self, key, fetch)
+
+    monkeypatch.setattr(_TtlCache, "get_or_set", _spot_get_or_set)
     app = frontend_server.create_app(
         env_file=env_file,
         account_env_files=(env_file,),
@@ -740,7 +796,9 @@ def test_portfolio_snapshot_endpoint_no_deribit(tmp_path, monkeypatch) -> None:
     response = client.get("/api/portfolio/snapshot")
 
     assert response.status_code == 200
-    assert response.json()["portfolio"]["total_equity_usdc"] == "1234.56"
+    body = response.json()
+    assert body["portfolio"]["total_equity_usdc"] == "1234.56"
+    assert body["groups"]["source"] == "disk"
 
 
 def test_dashboard_bundle_endpoint_returns_sections(tmp_path, monkeypatch) -> None:
@@ -855,6 +913,85 @@ def test_dashboard_bundle_endpoint_requires_private_creds(tmp_path, monkeypatch)
     response = client.get("/api/dashboard_bundle")
 
     assert response.status_code == 401
+
+
+def test_transfers_endpoint_returns_account_rows(tmp_path, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
+    cfg = make_config(
+        tmp_path,
+        state_file=tmp_path / "bot.json",
+        client_id="cid",
+        client_secret="sec",
+        traded_collaterals=("USDC",),
+    )
+    fake_payload = {
+        "days_requested": 90,
+        "start_timestamp_ms": 1,
+        "end_timestamp_ms": 2,
+        "accounts": [
+            {
+                "name": "main",
+                "env": "mainnet",
+                "option_strategy": "covered_call",
+                "traded_collaterals": ["USDC"],
+                "books_scanned": ["USDC"],
+                "transfer_count": 1,
+                "transfers": [
+                    {
+                        "id": 1,
+                        "timestamp_ms": 1_700_000_000_000,
+                        "book": "USDC",
+                        "direction": "in",
+                        "amount_native": "100",
+                        "usdc_equiv": "100",
+                        "info": "sub transfer",
+                        "balance_after": "500",
+                    }
+                ],
+            }
+        ],
+    }
+
+    monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
+    monkeypatch.setattr(
+        "deribit_engine.frontend_server.market_vol.fetch_iv_rank_snapshot",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "deribit_engine.frontend_server.market_vol.fetch_index_price_change_24h_pct",
+        lambda *_args, **_kwargs: {},
+    )
+
+    class _SpotClient:
+        def get_index_price(self, name: str):
+            if "btc" in name.lower():
+                return {"index_price": "100000"}
+            return {"index_price": "5000"}
+
+    monkeypatch.setattr(frontend_server, "DeribitClient", lambda _cfg: _SpotClient())
+    monkeypatch.setattr(
+        "deribit_engine.frontend_server.transfers_service.aggregate_transfers_for_accounts",
+        lambda *_args, **_kwargs: fake_payload,
+    )
+    app = frontend_server.create_app(
+        env_file=env_file,
+        account_env_files=(env_file,),
+        enable_scheduler=False,
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/transfers?days=90&limit=50")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["accounts"][0]["transfer_count"] == 1
+    assert body["accounts"][0]["transfers"][0]["direction"] == "in"
+
+    cached = client.get("/api/transfers?days=90&limit=50")
+    assert cached.status_code == 200
 
 
 def test_health_dashboard_strategies_from_accounts_toml(tmp_path, monkeypatch) -> None:
@@ -1047,6 +1184,24 @@ def test_aggregate_status_fetches_accounts_in_parallel(tmp_path, monkeypatch) ->
 
     assert max_in_flight >= 2
     assert elapsed < 0.30
+
+
+def test_attach_cached_premium_sweep_fill_stats() -> None:
+    from deribit_engine.frontend_server.aggregation import attach_cached_premium_sweep_fill_stats
+
+    cache = frontend_server._TtlCache(3600.0)
+    empty = {"portfolio": {}}
+    assert attach_cached_premium_sweep_fill_stats(empty, cache) == empty
+
+    fill = {"BTC": {"net_usdt": "411.449", "net_native_sold": "0.0065"}}
+    seeded = attach_cached_premium_sweep_fill_stats(
+        {"premium_sweep_fill_stats_by_book": fill},
+        cache,
+    )
+    assert seeded["premium_sweep_fill_stats_by_book"] == fill
+
+    restored = attach_cached_premium_sweep_fill_stats({"portfolio": {}}, cache)
+    assert restored["premium_sweep_fill_stats_by_book"] == fill
 
 
 def test_aggregate_groups_fetches_accounts_in_parallel(tmp_path, monkeypatch) -> None:

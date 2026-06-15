@@ -28,6 +28,21 @@ pip install -r requirements.txt
 
 多子帳 dashboard 建議 `./bot --investor <id> frontend`，或 `--account-env-files` 傳入**同一位**投資人的多個 `accounts/.env.<slug>`。
 
+## 背景快照與快取
+
+`frontend` 啟動後（`--no-scheduler` 除外）會跑數個背景 scheduler，寫入 disk 並供 API / 投資人 portal 讀取：
+
+| 資料 | 路徑 | 環境變數（預設） |
+|------|------|------------------|
+| Equity ledger（帳戶快照 JSONL） | `data/frontend_ledger/<id>/[<slug>/]equity_*.jsonl` | `FRONTEND_SNAPSHOT_INTERVAL_SEC`（300s） |
+| Market 快照（BTC/ETH spot、IVR） | `data/frontend_ledger/_shared/market.db` | `MARKET_SNAPSHOT_INTERVAL_SEC`（300s）、`MARKET_SNAPSHOT_RETENTION_DAYS`（7） |
+| Portal disk 快照 | `data/frontend_ledger/<id>/portal_snapshots.db` | `PORTAL_SNAPSHOT_DISK_INTERVAL_SEC`（300s）、`PORTAL_SNAPSHOT_DISK_RETENTION_DAYS`（90） |
+| Portal live 快照 | 同上（`snapshot_kind=live`） | `PORTAL_SNAPSHOT_LIVE_INTERVAL_SEC`（600s）、`PORTAL_SNAPSHOT_LIVE_RETENTION_DAYS`（30） |
+
+投資人 portal（`investor.html`）優先讀 `portal_snapshots.db` 的預組 bundle（`source=portal_cache`），並以 `FRONTEND_INVESTOR_STATUS_CACHE_TTL_SEC`（預設 180s）作為 live 快照有效期限；背景 warm 週期由 `FRONTEND_BUNDLE_WARM_INTERVAL_SEC`（預設 90s）控制，避免每次刷新都打 Deribit。
+
+Ledger 每列可含 `equity_native_by_book`（原幣 equity）；舊列若只有 USDC 等價 `equity_by_book`，可用 `scripts/backfill_ledger_equity_native.py` 回填（詳見 [`scripts/README.md`](../scripts/README.md)）。
+
 ## 多名投資人與對外存取
 
 **多名投資人**（各 `config/investors/<id>/` 一份資料）若需各自專屬對外網址：請為每位投資人各跑一個 `frontend`（例如不同 `--port`），再以 reverse proxy／Tunnel 將不同子網域指到對應埠；細節見 [cloudflare-tunnel-investor.md](cloudflare-tunnel-investor.md)。

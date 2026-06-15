@@ -157,4 +157,44 @@ export INVESTOR=youming
 | Cooldown | 不設定 | 寫入全 book cooldown |
 | 本地 state | 不自動更新 group | 標記 group 為 closed |
 
-手動平掉 bot 有追蹤的 spread 後，本地 `STATE_FILE` 可能與交易所不一致；之後可再跑 `manage` 讓 reconcile 收斂，或等 Phase 2 的 `--group-id` / `--sync-state`。
+手動平掉 bot 有追蹤的 spread 後，本地 `STATE_FILE` 可能與交易所不一致；之後可再跑 `manage` 讓 reconcile 收斂。
+
+## Covered call profit sweep
+
+啟用 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true` 後，live `manage` 會在獲利平倉時自動將 premium 賣成 USDT。設定與滑價保護見 [`configuration-zh-TW.md`](configuration-zh-TW.md#績效費-nav-快照performance-fee)。
+
+```bash
+export INVESTOR=youming
+ACCT=covered_call
+
+# 預覽剩餘 spot profit sweep（dry-run）
+./bot --investor $INVESTOR --account $ACCT profit-sweep --json
+
+# 實單 sweep 全部 pending remainder
+./bot --investor $INVESTOR --account $ACCT profit-sweep --live --json
+
+# 只 sweep 單一已平倉 group
+./bot --investor $INVESTOR --account $ACCT profit-sweep --group-id cc-btc-20260327 --live --json
+
+# 只從 Deribit order label 同步 profit_sweep_*，不下單
+./bot --investor $INVESTOR --account $ACCT profit-sweep --reconcile-only --json
+```
+
+| 參數 | 說明 |
+|------|------|
+| `--group-id` | 只處理指定已平倉 group |
+| `--reconcile-only` | 只同步 state 上的 sweep 欄位，不送 spot 單 |
+| `--live` | 實際下單並寫入 state（預設 dry-run） |
+
+亦可使用等價腳本 `python scripts/sweep_remaining_spot_profit.py --env-file config/investors/$INVESTOR/accounts/.env.$ACCT`。
+
+### 修復 / 回填（ops）
+
+| 情境 | 指令 |
+|------|------|
+| 各 group proceeds 與交易所 net sweep 不一致 | `python scripts/reconcile_premium_proceeds.py --env-file ... [--live]` |
+| Premium 賣超或賣不足 | `python scripts/align_premium_swap.py --env-file ... [--live]` |
+| 重複 sweep、需買回多賣原幣 | `python scripts/repair_double_profit_sweep.py --env-file ... [--live]` |
+| Ledger 缺 `equity_native_by_book` | `python scripts/backfill_ledger_equity_native.py --investor <id>` |
+
+詳見 [`scripts/README.md`](../scripts/README.md)。

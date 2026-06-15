@@ -3,10 +3,6 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from ..exit_eval import (
-    dynamic_tp_capture_pct,
-    exit_eval_context_from_config,
-)
 from ..exit_reasons import INCOME_EXIT_REASONS
 from ..models import (
     AccountSummary,
@@ -46,7 +42,7 @@ class CoveredCallMixin:
                 return robust_exit_actions
             return []
         actions: list[dict[str, Any]] = []
-        if group.profit_capture >= dynamic_tp_capture_pct(group.dte_days, exit_eval_context_from_config(self.config)):
+        if self._take_profit_triggered(context, group):
             actions.extend(self._close_group(context, group, reason="take_profit", live=live))
             return actions
         early_exit_reason = self._maybe_early_exit_reason(context, group)
@@ -141,7 +137,7 @@ class CoveredCallMixin:
         return actions
 
     def _maybe_schedule_profit_sweep(self, group: TradeGroup, *, reason: str, live: bool) -> None:
-        """Queue a post-close spot sale of native premium profit to USDT."""
+        """Queue a post-close spot sale of realized premium profit to USDT (not collateral)."""
         if not live:
             return
         if not self.config.covered_call_profit_sweep_enabled:
@@ -154,6 +150,17 @@ class CoveredCallMixin:
             return
         native = self._coin_profit_native_for_sweep(group)
         if native is None:
+            return
+        status = str(group.profit_sweep_status or "").lower()
+        if status == "filled":
+            unswept = self._unswept_profit_native_for_sweep(group)
+            if unswept is None or unswept <= 0:
+                return
+            group.profit_sweep_status = "pending"
+            group.profit_sweep_reason = reason
+            group.profit_sweep_amount = unswept
+            return
+        if status in {"pending", "submitted"}:
             return
         group.profit_sweep_status = "pending"
         group.profit_sweep_reason = reason
@@ -168,8 +175,24 @@ class CoveredCallMixin:
         if not self.config.covered_call_profit_sweep_enabled:
             return []
         if live:
+            from ..profit_sweep_dust import reconcile_dust_sweep_from_exchange
+            from ..profit_sweep_ops import heal_reconciled_proceeds_drift, reschedule_failed_profit_sweeps
+            from ..trade_journal_backfill import (
+                repair_manual_swap_proceeds_in_groups,
+                repair_unlabeled_profit_sweeps_in_groups,
+            )
+
+            repair_manual_swap_proceeds_in_groups(context.state.groups)
+            repair_unlabeled_profit_sweeps_in_groups(
+                context.state.groups,
+                self.client,
+                self.config.order_label_prefix,
+            )
+            heal_reconciled_proceeds_drift(self, context.state.groups)
             self._reconcile_profit_sweep_quote_proceeds(context)
             self._reconcile_profit_sweeps_from_exchange(context)
+            reconcile_dust_sweep_from_exchange(self, context.state.groups)
+            reschedule_failed_profit_sweeps(self, context.state.groups)
         actions: list[dict[str, Any]] = []
         for group in context.state.groups:
             if (
@@ -178,6 +201,9 @@ class CoveredCallMixin:
                 and group.profit_sweep_status == "pending"
             ):
                 actions.append(self._execute_covered_call_profit_sweep(context, group, live=live))
+        from ..profit_sweep_dust import run_dust_pool_profit_sweeps
+
+        actions.extend(run_dust_pool_profit_sweeps(self, context, live=live))
         return actions
 
     def _reconcile_profit_sweeps_from_exchange(self, context: RuntimeContext) -> None:
@@ -213,19 +239,92 @@ class CoveredCallMixin:
             proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
             if proceeds > 0:
                 group.profit_sweep_quote_proceeds = proceeds
+                from ..profit_sweep_ops import record_profit_sweep_lifetime_proceeds
 
-    def _apply_profit_sweep_quote_proceeds(self, group: TradeGroup, response: dict[str, Any] | None) -> Decimal:
+                record_profit_sweep_lifetime_proceeds(group, proceeds)
+
+    def _apply_profit_sweep_quote_proceeds(
+        self,
+        group: TradeGroup,
+        response: dict[str, Any] | None,
+        *,
+        cumulative: bool = False,
+    ) -> Decimal:
         from ..wallet_ops import spot_sell_quote_proceeds_from_trades
 
         trades = self._order_trades(response)
         proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
         if proceeds > 0:
-            group.profit_sweep_quote_proceeds = proceeds
+            if cumulative:
+                group.profit_sweep_quote_proceeds += proceeds
+            else:
+                group.profit_sweep_quote_proceeds = proceeds
+            from ..profit_sweep_ops import record_profit_sweep_lifetime_proceeds
+
+            record_profit_sweep_lifetime_proceeds(group, group.profit_sweep_quote_proceeds)
         return proceeds
 
     @staticmethod
     def _covered_call_profit_sweep_instrument(currency: str) -> str:
         return CoveredCallMixin._covered_call_spot_instrument(currency)
+
+    def _unswept_profit_native_for_sweep(self, group: TradeGroup) -> Decimal | None:
+        """Coin profit not yet sold to USDT (supports partial prior sweeps)."""
+        native_cap = self._coin_profit_native_for_sweep(group)
+        if native_cap is None or native_cap <= 0:
+            return None
+        status = str(group.profit_sweep_status or "").lower()
+        swept = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal("0")
+        if status == "filled":
+            return max(native_cap - min(swept, native_cap), Decimal("0"))
+        if status in {"pending", "submitted"} and swept > 0 and swept < native_cap:
+            return max(native_cap - swept, Decimal("0"))
+        return native_cap
+
+    def _prior_swept_profit_native(self, group: TradeGroup) -> Decimal:
+        native_cap = self._coin_profit_native_for_sweep(group)
+        if native_cap is None or native_cap <= 0:
+            return Decimal("0")
+        status = str(group.profit_sweep_status or "").lower()
+        swept = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal("0")
+        if status == "filled":
+            return min(swept, native_cap)
+        if status == "pending" and swept > 0 and swept < native_cap:
+            return swept
+        return Decimal("0")
+
+    def _profit_sweep_wallet_unswept_budget(
+        self,
+        context: RuntimeContext,
+        currency: str,
+    ) -> Decimal:
+        """Sum of per-group unswept premium profit — cross-group oversell guard."""
+        ccy = currency.upper()
+        total = Decimal("0")
+        for group in context.state.groups:
+            if group.status != "closed" or not self._is_covered_call_group(group):
+                continue
+            if group.currency.upper() != ccy or not group.is_coin_collateral():
+                continue
+            unswept = self._unswept_profit_native_for_sweep(group)
+            if unswept is not None and unswept > 0:
+                total += unswept
+        return total
+
+    def _profit_sweep_sellable_native_cap(
+        self,
+        context: RuntimeContext,
+        currency: str,
+        *,
+        live: bool,
+    ) -> Decimal:
+        """Native free to sell without touching open covered-call collateral."""
+        summaries = self._account_summaries_by_currency() if live else context.summaries
+        return self._available_covered_call_quantity_from_summaries(
+            context.state,
+            summaries,
+            currency,
+        )
 
     def _profit_sweep_amount(
         self,
@@ -234,26 +333,27 @@ class CoveredCallMixin:
         *,
         live: bool,
     ) -> Decimal:
-        native_cap = self._coin_profit_native_for_sweep(group)
-        if native_cap is None:
+        unswept = self._unswept_profit_native_for_sweep(group)
+        if unswept is None or unswept <= 0:
             return Decimal("0")
-        target = native_cap
+        target = unswept
 
-        summary = context.summaries.get(group.currency)
-        if live:
-            summary = self._account_summaries_by_currency().get(group.currency, summary)
-        if summary is not None:
-            available = max(summary.available_funds, summary.available_withdrawal_funds, summary.balance)
-            if available <= 0:
-                return Decimal("0")
-            target = min(target, available)
+        wallet_budget = self._profit_sweep_wallet_unswept_budget(context, group.currency)
+        if wallet_budget <= 0:
+            return Decimal("0")
+        target = min(target, wallet_budget)
+
+        free_native = self._profit_sweep_sellable_native_cap(context, group.currency, live=live)
+        if free_native <= 0:
+            return Decimal("0")
+        target = min(target, free_native)
 
         instrument_name = self._covered_call_profit_sweep_instrument(group.currency)
         contract_size, min_trade_amount = self._spot_min_trade_amount(instrument_name, group.currency)
         aligned = align_option_order_amount(target, contract_size, min_trade_amount)
         if aligned <= 0:
             return Decimal("0")
-        return min(aligned, native_cap)
+        return min(aligned, unswept)
 
     def _execute_covered_call_profit_sweep(
         self,
@@ -262,14 +362,36 @@ class CoveredCallMixin:
         *,
         live: bool,
     ) -> dict[str, Any]:
-        if group.profit_sweep_status in {"submitted", "filled"}:
+        realized_profit = self._coin_profit_native_for_sweep(group)
+        if realized_profit is None or realized_profit <= 0:
+            if live and group.profit_sweep_status == "pending":
+                group.profit_sweep_status = "skipped"
+                group.profit_sweep_reason = "no_realized_spot_profit"
             return {
                 "action": "covered_call_profit_sweep_skipped",
                 "group_id": group.group_id,
-                "reason": f"already_{group.profit_sweep_status}",
+                "reason": "no_realized_spot_profit",
+                "profit_sweep_status": group.profit_sweep_status or None,
+                "live": live,
+            }
+        if group.profit_sweep_status == "submitted":
+            return {
+                "action": "covered_call_profit_sweep_skipped",
+                "group_id": group.group_id,
+                "reason": "already_submitted",
                 "profit_sweep_status": group.profit_sweep_status,
                 "profit_sweep_order_id": group.profit_sweep_order_id or None,
             }
+        if group.profit_sweep_status == "filled":
+            unswept = self._unswept_profit_native_for_sweep(group)
+            if unswept is None or unswept <= 0:
+                return {
+                    "action": "covered_call_profit_sweep_skipped",
+                    "group_id": group.group_id,
+                    "reason": "already_filled",
+                    "profit_sweep_status": group.profit_sweep_status,
+                    "profit_sweep_order_id": group.profit_sweep_order_id or None,
+                }
 
         instrument_name = self._covered_call_profit_sweep_instrument(group.currency)
         amount = self._profit_sweep_amount(context, group, live=live)
@@ -299,9 +421,10 @@ class CoveredCallMixin:
         if not live:
             return payload
 
-        native_cap = self._coin_profit_native_for_sweep(group)
-        if native_cap is not None and amount > native_cap:
-            amount = native_cap
+        unswept_cap = self._unswept_profit_native_for_sweep(group)
+        if unswept_cap is not None and amount > unswept_cap:
+            amount = unswept_cap
+        prior_swept = self._prior_swept_profit_native(group)
         group.profit_sweep_status = "submitted"
         group.profit_sweep_amount = amount
         group.profit_sweep_instrument_name = instrument_name
@@ -350,7 +473,14 @@ class CoveredCallMixin:
             group.profit_sweep_status = "failed"
         else:
             group.profit_sweep_status = "filled"
-        proceeds = self._apply_profit_sweep_quote_proceeds(group, result.get("response"))
+        cumulative = prior_swept > 0
+        proceeds = self._apply_profit_sweep_quote_proceeds(
+            group,
+            result.get("response"),
+            cumulative=cumulative,
+        )
+        if prior_swept > 0:
+            group.profit_sweep_amount = prior_swept + amount
         payload["profit_sweep_status"] = group.profit_sweep_status
         payload["profit_sweep_order_id"] = group.profit_sweep_order_id or None
         if proceeds > 0:

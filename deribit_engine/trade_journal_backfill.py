@@ -7,6 +7,7 @@ import logging
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from .client import DeribitClient
 from .config import BotConfig, load_config
 from .exit_reasons import INCOME_EXIT_REASONS
 from .fee_discount import effective_option_fee_discount_rate, resolve_first_option_trade_timestamp_ms
-from .fees import option_trade_fee_native
+from .fees import option_trade_fee_native, option_trade_fee_usdc, premium_value_usdc
 from .metrics_store import MetricsStore, performance_scope_key
 from .models import TradeGroup
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
@@ -31,7 +32,7 @@ from .trade_journal import (
     journal_db_path_for_state,
     scope_key_for_state,
 )
-from .utils import safe_div, to_decimal, utc_now_ms
+from .utils import parse_option_name, safe_div, to_decimal, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
 
@@ -331,7 +332,7 @@ def infer_bot_income_exit_close_reason(
     for row in executions:
         if str(row.get("event_type") or "").lower() != "close":
             continue
-        if str(row.get("leg") or "short").lower() not in {"", "short"}:
+        if str(row.get("leg") or "short").lower() not in {"", "short", "short_leg"}:
             continue
         if str(row.get("source_action") or "") == "reconcile_external":
             continue
@@ -367,18 +368,102 @@ def _order_state_by_label_rows(raw: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _profit_sweep_state_locked(group: TradeGroup) -> bool:
+    reason = str(group.profit_sweep_reason or "")
+    if group_excluded_from_premium_proceeds_pool(group):
+        return True
+    return any(
+        token in reason
+        for token in (
+            "duplicate_sweep_repaired",
+            "proceeds_reconciled",
+            "premium_amount_synced",
+        )
+    )
+
+
 def reconcile_profit_sweep_from_exchange(
     group: TradeGroup,
     *,
     client: DeribitClient,
     order_label_prefix: str,
+    trade_cache: Any | None = None,
 ) -> bool:
     """Sync filled profit-sweep orders from Deribit when state still shows pending."""
     if group.status != "closed" or not _is_covered_call_group(group):
         return False
+    if _profit_sweep_state_locked(group):
+        return False
+
+    label = profit_sweep_order_label(order_label_prefix, group)
+    trades: list[dict[str, Any]] = []
+    if trade_cache is not None:
+        trades = list(trade_cache.trades_for_group(group, order_label_prefix))
+    else:
+        fetch_trades = getattr(client, "get_user_trades_by_currency", None)
+        if callable(fetch_trades):
+            try:
+                seen: set[Any] = set()
+                for trade in fetch_trades(group.currency, kind="spot", count=100, historical=True).get("trades", []):
+                    if str(trade.get("label") or "") != label:
+                        continue
+                    if str(trade.get("direction") or "").lower() != "sell":
+                        continue
+                    trade_id = trade.get("trade_id")
+                    if trade_id in seen:
+                        continue
+                    seen.add(trade_id)
+                    trades.append(trade)
+            except Exception:  # noqa: BLE001
+                LOGGER.debug(
+                    "profit_sweep reconcile: currency trades lookup failed group=%s",
+                    group.group_id,
+                    exc_info=True,
+                )
+                trades = []
+
+    if trades:
+        trades.sort(key=lambda row: int(row.get("timestamp") or 0))
+        days = sorted(
+            {
+                datetime.fromtimestamp(int(row.get("timestamp") or 0) / 1000, tz=UTC).strftime("%Y-%m-%d")
+                for row in trades
+            }
+        )
+        first_day = days[0]
+        first_trades = [
+            row
+            for row in trades
+            if datetime.fromtimestamp(int(row.get("timestamp") or 0) / 1000, tz=UTC).strftime("%Y-%m-%d") == first_day
+        ]
+        amount = sum(to_decimal(row.get("amount")) for row in first_trades)
+        from .wallet_ops import spot_sell_quote_proceeds_from_trades
+
+        proceeds = spot_sell_quote_proceeds_from_trades(first_trades, quote_currency="USDT")
+        last = first_trades[-1]
+        order_id = str(last.get("order_id") or "").strip()
+        instrument_name = str(last.get("instrument_name") or f"{group.currency.upper()}_USDT")
+
+        group.profit_sweep_status = "filled"
+        group.profit_sweep_instrument_name = instrument_name
+        if order_id:
+            group.profit_sweep_order_id = order_id
+        if amount > 0:
+            group.profit_sweep_amount = amount
+        if proceeds > 0:
+            group.profit_sweep_quote_proceeds = proceeds
+            from .profit_sweep_ops import record_profit_sweep_lifetime_proceeds
+
+            record_profit_sweep_lifetime_proceeds(group, proceeds)
+        reason = str(group.profit_sweep_reason or "")
+        if len(days) > 1 and "duplicate_sweep_detected" not in reason:
+            group.profit_sweep_reason = (reason + "; duplicate_sweep_detected").strip("; ")
+        elif not reason:
+            group.profit_sweep_reason = "profit_sweep"
+        return True
+
     if group.profit_sweep_status == "filled" and group.profit_sweep_order_id and group.profit_sweep_quote_proceeds > 0:
         return False
-    label = profit_sweep_order_label(order_label_prefix, group)
     try:
         raw = client.get_order_state_by_label(group.currency, label)
     except Exception:  # noqa: BLE001
@@ -420,9 +505,267 @@ def reconcile_profit_sweep_from_exchange(
             proceeds = amount * avg
     if proceeds > 0:
         group.profit_sweep_quote_proceeds = proceeds
+        from .profit_sweep_ops import record_profit_sweep_lifetime_proceeds
+
+        record_profit_sweep_lifetime_proceeds(group, proceeds)
     if not group.profit_sweep_reason:
         group.profit_sweep_reason = "profit_sweep"
     return True
+
+
+_UNLABELED_PREMIUM_REPAIR_REASON = "unlabeled_premium_reconciled"
+_UNLABELED_PREMIUM_MATCH_WINDOW_MS = 7 * 86400 * 1000
+
+
+def group_excluded_from_premium_proceeds_pool(group: TradeGroup) -> bool:
+    """Groups with exchange-attributed unlabeled premium sells skip dust-pool reconcile."""
+    reason = str(group.profit_sweep_reason or "")
+    if _UNLABELED_PREMIUM_REPAIR_REASON in reason:
+        return True
+    # Pre-label manual premium swaps must not be re-weighted by dust-pool reconcile.
+    if "manual_swap" in reason:
+        return True
+    return False
+
+
+def unlabeled_premium_usdt_total(groups: list[TradeGroup]) -> Decimal:
+    """Sum of USDT proceeds attributed to pre-label premium spot sells."""
+    total = Decimal("0")
+    for group in groups:
+        if group.status != "closed" or not group_excluded_from_premium_proceeds_pool(group):
+            continue
+        proceeds = group.profit_sweep_quote_proceeds_lifetime or group.profit_sweep_quote_proceeds
+        if proceeds > 0:
+            total += proceeds
+    return total
+
+
+def _manual_swap_usdt_proceeds_estimate(group: TradeGroup) -> Decimal | None:
+    if group.status != "closed" or not _is_covered_call_group(group):
+        return None
+    if "manual_swap" not in str(group.profit_sweep_reason or ""):
+        return None
+    native = group.realized_pnl_collateral_native
+    if native is None or native <= 0:
+        return None
+    pnl = group.realized_pnl
+    if pnl is not None and pnl > 0:
+        return pnl
+    spot = group.close_index_usd or group.entry_index_usd
+    if spot is None or spot <= 0:
+        return None
+    return native * spot
+
+
+def repair_manual_swap_proceeds_in_groups(groups: list[TradeGroup]) -> int:
+    """Restore USDT proceeds for pre-label manual premium swaps (no exchange API)."""
+    repaired = 0
+    for group in groups:
+        estimate = _manual_swap_usdt_proceeds_estimate(group)
+        if estimate is None or estimate <= 0:
+            continue
+        current = group.profit_sweep_quote_proceeds_lifetime or group.profit_sweep_quote_proceeds
+        if current >= estimate * Decimal("0.95"):
+            continue
+        group.profit_sweep_status = "filled"
+        if (group.profit_sweep_amount or Decimal("0")) <= 0 and group.realized_pnl_collateral_native:
+            group.profit_sweep_amount = group.realized_pnl_collateral_native
+        group.profit_sweep_quote_proceeds = estimate
+        from .profit_sweep_ops import record_profit_sweep_lifetime_proceeds
+
+        record_profit_sweep_lifetime_proceeds(group, estimate)
+        reason = str(group.profit_sweep_reason or "")
+        if _UNLABELED_PREMIUM_REPAIR_REASON not in reason:
+            group.profit_sweep_reason = (reason + f"; {_UNLABELED_PREMIUM_REPAIR_REASON}").strip("; ")
+        repaired += 1
+    return repaired
+
+
+def _premium_sweep_amount_tolerance(native: Decimal) -> Decimal:
+    return max(Decimal("1e-8"), native * Decimal("0.001"))
+
+
+def _iter_spot_sell_trades(client: DeribitClient, currency: str) -> Iterator[dict[str, Any]]:
+    fetch = getattr(client, "get_user_trades_by_currency", None)
+    if not callable(fetch):
+        return
+    cursor_ts = 0
+    while True:
+        kwargs: dict[str, Any] = {"currency": currency, "kind": "spot", "count": 100, "historical": True}
+        if cursor_ts > 0:
+            kwargs["start_timestamp"] = cursor_ts
+        batch = fetch(**kwargs)
+        if not isinstance(batch, dict):
+            break
+        trades = list(batch.get("trades") or [])
+        if not trades:
+            break
+        for trade in trades:
+            if str(trade.get("direction") or "").lower() == "sell":
+                yield trade
+        if not batch.get("has_more"):
+            break
+        last_ts = int(trades[-1].get("timestamp") or 0)
+        if last_ts <= 0 or last_ts <= cursor_ts:
+            break
+        cursor_ts = last_ts + 1
+
+
+def _collect_unlabeled_premium_sell_trades(client: DeribitClient, currency: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for trade in _iter_spot_sell_trades(client, currency):
+        label = str(trade.get("label") or "")
+        if label and ("profit-sweep" in label or "spot-exit" in label):
+            continue
+        if "USDT" not in str(trade.get("instrument_name") or ""):
+            continue
+        out.append(trade)
+    return out
+
+
+def _group_has_labeled_profit_sweep_trades(
+    group: TradeGroup,
+    client: DeribitClient,
+    order_label_prefix: str,
+) -> bool:
+    label = profit_sweep_order_label(order_label_prefix, group)
+    fetch = getattr(client, "get_user_trades_by_currency", None)
+    if not callable(fetch):
+        return False
+    try:
+        batch = fetch(group.currency, kind="spot", count=100, historical=True)
+        for trade in (batch.get("trades") if isinstance(batch, dict) else []) or []:
+            if str(trade.get("label") or "") != label:
+                continue
+            if str(trade.get("direction") or "").lower() != "sell":
+                continue
+            return True
+    except Exception:  # noqa: BLE001
+        LOGGER.debug(
+            "unlabeled premium repair: labeled trade lookup failed group=%s",
+            group.group_id,
+            exc_info=True,
+        )
+    return False
+
+
+def _match_unlabeled_premium_trades_for_group(
+    group: TradeGroup,
+    trades: list[dict[str, Any]],
+    *,
+    used_trade_ids: set[Any],
+) -> list[dict[str, Any]]:
+    native = group.realized_pnl_collateral_native
+    if native is None or native <= 0:
+        return []
+    close_ms = int(group.closed_timestamp_ms or 0)
+    tol = _premium_sweep_amount_tolerance(native)
+    candidates: list[dict[str, Any]] = []
+    for trade in trades:
+        trade_id = trade.get("trade_id")
+        if trade_id is not None and trade_id in used_trade_ids:
+            continue
+        amount = to_decimal(trade.get("amount"))
+        if abs(amount - native) > tol:
+            continue
+        ts = int(trade.get("timestamp") or 0)
+        if close_ms > 0:
+            if ts < close_ms - 86400000:
+                continue
+            if ts > close_ms + _UNLABELED_PREMIUM_MATCH_WINDOW_MS:
+                continue
+        candidates.append(trade)
+    if not candidates:
+        return []
+    if close_ms > 0:
+        candidates.sort(key=lambda row: abs(int(row.get("timestamp") or 0) - close_ms))
+    chosen = candidates[0]
+    if chosen.get("trade_id") is not None:
+        used_trade_ids.add(chosen.get("trade_id"))
+    return [chosen]
+
+
+def repair_unlabeled_profit_sweep_from_exchange(
+    group: TradeGroup,
+    *,
+    client: DeribitClient,
+    order_label_prefix: str,
+    unlabeled_trades: list[dict[str, Any]] | None = None,
+    used_trade_ids: set[Any] | None = None,
+) -> bool:
+    """Attribute pre-label spot premium sells to closed groups (counts as realized USDT)."""
+    if group.status != "closed" or not _is_covered_call_group(group):
+        return False
+    native = group.realized_pnl_collateral_native
+    if native is None or native <= 0:
+        return False
+    if _group_has_labeled_profit_sweep_trades(group, client, order_label_prefix):
+        return False
+
+    pool = used_trade_ids if used_trade_ids is not None else set()
+    if unlabeled_trades is None:
+        unlabeled_trades = _collect_unlabeled_premium_sell_trades(client, group.currency.upper())
+    matched = _match_unlabeled_premium_trades_for_group(group, unlabeled_trades, used_trade_ids=pool)
+    if not matched:
+        return False
+
+    from .wallet_ops import spot_sell_quote_proceeds_from_trades
+
+    proceeds = spot_sell_quote_proceeds_from_trades(matched, quote_currency="USDT")
+    if proceeds <= 0:
+        return False
+    if proceeds <= group.profit_sweep_quote_proceeds and group_excluded_from_premium_proceeds_pool(group):
+        return False
+
+    amount = sum(to_decimal(row.get("amount")) for row in matched)
+    last = matched[-1]
+    order_id = str(last.get("order_id") or "").strip()
+    instrument_name = str(last.get("instrument_name") or f"{group.currency.upper()}_USDT")
+
+    group.profit_sweep_status = "filled"
+    group.profit_sweep_instrument_name = instrument_name
+    if order_id:
+        group.profit_sweep_order_id = order_id
+    if amount > 0:
+        group.profit_sweep_amount = amount
+    group.profit_sweep_quote_proceeds = proceeds
+    from .profit_sweep_ops import record_profit_sweep_lifetime_proceeds
+
+    record_profit_sweep_lifetime_proceeds(group, proceeds)
+    reason = str(group.profit_sweep_reason or "")
+    if _UNLABELED_PREMIUM_REPAIR_REASON not in reason:
+        group.profit_sweep_reason = (reason + f"; {_UNLABELED_PREMIUM_REPAIR_REASON}").strip("; ")
+    return True
+
+
+def repair_unlabeled_profit_sweeps_in_groups(
+    groups: list[TradeGroup],
+    client: DeribitClient,
+    order_label_prefix: str,
+) -> int:
+    """Match orphan spot premium sells (no profit-sweep label) back to closed groups."""
+    repaired = repair_manual_swap_proceeds_in_groups(groups)
+    unlabeled_by_currency: dict[str, list[dict[str, Any]]] = {}
+    used_trade_ids: set[Any] = set()
+    closed = [
+        g
+        for g in groups
+        if g.status == "closed" and _is_covered_call_group(g) and (g.realized_pnl_collateral_native or Decimal("0")) > 0
+    ]
+    closed.sort(key=lambda g: int(g.closed_timestamp_ms or 0))
+    for group in closed:
+        currency = group.currency.upper()
+        if currency not in unlabeled_by_currency:
+            unlabeled_by_currency[currency] = _collect_unlabeled_premium_sell_trades(client, currency)
+        if repair_unlabeled_profit_sweep_from_exchange(
+            group,
+            client=client,
+            order_label_prefix=order_label_prefix,
+            unlabeled_trades=unlabeled_by_currency[currency],
+            used_trade_ids=used_trade_ids,
+        ):
+            repaired += 1
+    return repaired
 
 
 def reconcile_profit_sweeps_in_state(
@@ -483,6 +826,120 @@ def repair_reconciled_bot_income_exit_group(
             group.profit_sweep_amount = native
             group.profit_sweep_reason = inferred
     return True
+
+
+def repair_reconciled_manual_close_pnl(
+    group: TradeGroup,
+    *,
+    client: Any,
+    fee_rate: Decimal,
+    fee_cap_rate: Decimal,
+) -> bool:
+    """Recompute USDC manual closes tagged reconciled_external from exchange buy fills."""
+    if group.status != "closed":
+        return False
+    if (group.close_reason or "").lower() != "reconciled_external":
+        return False
+    if group.is_coin_collateral():
+        return False
+    if not group.short_instrument_name or group.quantity <= 0:
+        return False
+    closed_ms = int(group.closed_timestamp_ms or 0)
+    if closed_ms <= 0:
+        return False
+    start_ms = max(int(group.entry_timestamp_ms or 0) - 60_000, 0)
+    end_ms = closed_ms + 300_000
+    try:
+        payload = client.get_user_trades_by_instrument(
+            group.short_instrument_name,
+            start_timestamp=start_ms,
+            end_timestamp=end_ms,
+            count=200,
+            sorting="asc",
+            historical=True,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    buy_trades = [row for row in (payload.get("trades") or []) if str(row.get("direction") or "").lower() == "buy"]
+    if not buy_trades:
+        return False
+    total_amount = Decimal("0")
+    weighted = Decimal("0")
+    for trade in buy_trades:
+        amount = to_decimal(trade.get("amount"))
+        price = to_decimal(trade.get("price"))
+        if amount <= 0 or price <= 0:
+            continue
+        total_amount += amount
+        weighted += amount * price
+    if total_amount <= 0 or total_amount < group.quantity * Decimal("0.5"):
+        return False
+    close_premium = weighted / total_amount
+    index_price = (
+        group.close_index_usd if group.close_index_usd and group.close_index_usd > 0 else group.entry_index_usd
+    )
+    if index_price <= 0:
+        return False
+    parsed = parse_option_name(group.short_instrument_name)
+    base_currency = (parsed or {}).get("base_currency") or group.currency
+    quote_currency = (parsed or {}).get("quote_currency") or "USDC"
+    settlement_currency = quote_currency
+    close_fee = option_trade_fee_usdc(
+        index_price=index_price,
+        premium=close_premium,
+        quantity=group.quantity,
+        fee_rate=fee_rate,
+        fee_cap_rate=fee_cap_rate,
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+        settlement_currency=settlement_currency,
+    )
+    gross = premium_value_usdc(
+        index_price=index_price,
+        premium=close_premium,
+        quantity=group.quantity,
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+        settlement_currency=settlement_currency,
+    )
+    close_debit = gross + close_fee
+    realized_pnl = group.entry_credit_net_usdc() - close_debit
+    before_pnl = group.realized_pnl
+    before_debit = group.realized_close_debit
+    group.short_close_average_price = close_premium
+    group.realized_close_debit = close_debit
+    group.realized_close_fee = close_fee
+    group.realized_pnl = realized_pnl
+    group.realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss) if group.max_loss > 0 else None
+    group.profit_capture = safe_div(max(group.entry_credit - close_debit, Decimal("0")), group.entry_credit)
+    group.backfill_realized_pnl_usdc()
+    before_apr = group.realized_apr_on_equity
+    from .trade_apr import realized_apr_from_close
+
+    apr = realized_apr_from_close(
+        strategy=group.strategy or "naked_short",
+        collateral_currency=group.collateral_currency or group.currency or "USDC",
+        option_type=group.option_type or "put",
+        quantity=group.quantity,
+        contract_size=Decimal("1"),
+        strike=group.short_strike,
+        index_price_usd=index_price,
+        estimated_im_collateral=group.estimated_im_collateral,
+        covered_underlying_quantity=group.covered_underlying_quantity,
+        pnl_collateral_native=realized_pnl
+        if group.collateral_currency == "USDC"
+        else (group.realized_pnl_collateral_native or Decimal("0")),
+        entry_timestamp_ms=int(group.entry_timestamp_ms or 0),
+        closed_timestamp_ms=closed_ms,
+    )
+    group.realized_apr_on_equity = apr
+    group.realized_annualized_return = apr
+    return (
+        group.realized_pnl != before_pnl
+        or group.realized_close_debit != before_debit
+        or group.short_close_average_price != close_premium
+        or group.realized_apr_on_equity != before_apr
+    )
 
 
 def repair_reconciled_bot_income_exit_in_state(

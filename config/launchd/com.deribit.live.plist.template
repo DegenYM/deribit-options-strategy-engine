@@ -26,9 +26,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>__REPO_ROOT__/logs/live/__INVESTOR_ID__/supervisor.log</string>
+  <string>__STDOUT_PATH__</string>
 
   <key>StandardErrorPath</key>
-  <string>__REPO_ROOT__/logs/live/__INVESTOR_ID__/supervisor.err.log</string>
+  <string>__STDERR_PATH__</string>
 </dict>
 </plist>

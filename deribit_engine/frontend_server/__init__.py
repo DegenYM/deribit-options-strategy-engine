@@ -20,6 +20,7 @@ from .exchange import (
 )
 from .groups_service import (
     _aggregate_groups,
+    _aggregate_groups_disk_only,
     _closed_groups_cache_key,
     _closed_groups_payload,
     _enrich_groups_payload_open_unrealized,
@@ -53,6 +54,7 @@ __all__ = [
     "TradeJournalSyncScheduler",
     "_TtlCache",
     "_aggregate_groups",
+    "_aggregate_groups_disk_only",
     "_aggregate_portfolios",
     "_aggregate_realized_summary",
     "_all_closed_group_rows",

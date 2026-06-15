@@ -61,6 +61,7 @@ export INVESTOR=youming   # 後續指令可寫 --investor $INVESTOR
 | [投資人 onboarding](docs/investor-onboarding-zh-TW.md) | 入金、子帳、API Key |
 | [管理方 onboarding](docs/operator-onboarding-zh-TW.md) | `investor init`、registry |
 | [目錄架構](docs/repo-layout-zh-TW.md) | canonical layout、legacy 遷移 |
+| [風險分級與 APR 說明](docs/investor-risk-tiers-apr-zh-TW.md) | 低／中／高 tier、當前市場預期區間 |
 | [績效費口徑](docs/investor-fee-disclosure-zh-TW.md) | NAV、HWM、計費 |
 | [Telegram 告警](docs/telegram-alerts-zh-TW.md) | 告警設定 |
 | [Live 故障 runbooks](docs/runbooks/README-zh-TW.md) | state 不一致、429、panic、Tunnel |

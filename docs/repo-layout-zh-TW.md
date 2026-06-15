@@ -10,7 +10,7 @@ deribit-options-strategy-engine/
 ├── deribit_engine/                # 策略引擎、frontend、投資人 ops
 ├── config/
 │   ├── shared/                  # 全投資人共用（無 API 金鑰）
-│   │   ├── defaults.env.example
+│   │   ├── .env.defaults.example
 │   │   └── strategies/.env.*    # 策略 tuning（納版、可追蹤）
 │   ├── investors/
 │   │   ├── _example/            # 範本（納版）
@@ -43,7 +43,7 @@ deribit-options-strategy-engine/
 
 | 層級 | 路徑 | 用途 |
 |------|------|------|
-| 1 | `config/shared/defaults.env` | 可選共用 fallback（`config/shared/.env.defaults` 為 legacy 別名，載入時會提示） |
+| 1 | `config/shared/.env.defaults` | 可選共用 fallback（`config/shared/defaults.env` 為 legacy 別名，載入時會提示） |
 | 2 | `config/investors/<id>/.env.investor` | 投資人層級（費率、備兌現貨等） |
 | 3 | `config/shared/strategies/.env.<strategy>` | 策略參數 |
 | 4 | `config/investors/<id>/accounts/.env.<slug>` | 子帳憑證、資金規模、覆寫 |
@@ -61,6 +61,8 @@ deribit-options-strategy-engine/
 | trade journal | `.state/investors/<id>/<slug>.trade_journal.db` |
 | Dashboard ledger | `data/frontend_ledger/<id>/[<slug>/]equity_*.jsonl` |
 | Dashboard metrics | `data/frontend_ledger/<id>/metrics.db` |
+| Investor portal 快照 | `data/frontend_ledger/<id>/portal_snapshots.db` |
+| 共用 market 快照 | `data/frontend_ledger/_shared/market.db` |
 | Live 日誌 | `logs/live/<id>/<slug>.log` |
 | Frontend 日誌 | `logs/frontend/<id>/` |
 | 績效費快照 | `data/fee_ledger/<id>/snapshots.db` |
@@ -89,6 +91,7 @@ deribit-options-strategy-engine/
 | `data/frontend_ledger/An/`（大小寫不一致） | `data/frontend_ledger/an/` |
 | `accounts/<slug>.env` | `accounts/.env.<slug>` |
 | `investor.env` | `.env.investor` |
+| `config/shared/defaults.env` | `config/shared/.env.defaults` |
 | `reports/*.md`（根目錄） | `docs/backtest/*.md` |
 
 ### 本機清理
@@ -122,7 +125,7 @@ deribit-options-strategy-engine/
 | 納版（git） | 本機專用（gitignore） |
 |-------------|----------------------|
 | `config/investors/_example/` | `config/investors/<id>/` |
-| `config/shared/strategies/.env.*` | `config/shared/defaults.env` |
+| `config/shared/strategies/.env.*` | `config/shared/.env.defaults` |
 | `config/platform/registry.toml.example` | `config/platform/registry.toml` |
 | `config/handoff/handoff.template.toml` | `config/handoff/<id>.toml` |
 | `docs/`、`tests/`、`deribit_engine/` | `.state/`、`data/`、`logs/` |

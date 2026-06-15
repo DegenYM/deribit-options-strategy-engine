@@ -25,6 +25,11 @@ from .env_layout import (
 )
 from .exceptions import ConfigurationError
 from .fee_snapshot_store import FeeSnapshotStore, fee_ledger_db_path
+from .investor_launchd_common import (
+    ensure_investor_launchd_log_dir,
+    investor_frontend_launchd_log_paths,
+    investor_live_launchd_log_paths,
+)
 from .investor_registry import (
     InvestorRegistryEntry,
     PlatformRegistry,
@@ -217,6 +222,8 @@ def investor_init(
 
     for sub in ("logs/live", "logs/frontend", "data/fee_ledger"):
         (repo / sub / investor_id).mkdir(parents=True, exist_ok=True)
+    ensure_investor_launchd_log_dir("live", investor_id)
+    ensure_investor_launchd_log_dir("frontend", investor_id)
 
     return InitResult(
         investor_id=investor_id,
@@ -457,16 +464,6 @@ def validate_investor(
                 )
             )
             continue
-        if config.risk_tier != account.risk_tier:
-            issues.append(
-                ValidationIssue(
-                    "warning",
-                    "risk_tier_mismatch",
-                    f"Account {account.slug!r}: accounts.toml risk_tier={account.risk_tier!r} "
-                    f"but env RISK_TIER={config.risk_tier!r}",
-                )
-            )
-
     from .fee_payout import load_fee_payout_addresses
 
     if not load_fee_payout_addresses(cwd_repo):
@@ -631,14 +628,27 @@ def render_launchd_plists(
     out_dir = repo_root / "config/platform/generated/launchd"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    live_stdout, live_stderr = investor_live_launchd_log_paths(investor_id)
+    frontend_stdout, frontend_stderr = investor_frontend_launchd_log_paths(investor_id)
+    ensure_investor_launchd_log_dir("live", investor_id)
+    ensure_investor_launchd_log_dir("frontend", investor_id)
+
     templates = {
         f"com.deribit.live.{investor_id}.plist": (
             repo_root / "config/launchd/com.deribit.live.plist.template",
-            _investor_service_replacements(**common, label=f"com.deribit.live.{investor_id}"),
+            {
+                **_investor_service_replacements(**common, label=f"com.deribit.live.{investor_id}"),
+                "__STDOUT_PATH__": str(live_stdout),
+                "__STDERR_PATH__": str(live_stderr),
+            },
         ),
         f"com.deribit.frontend.{investor_id}.plist": (
             repo_root / "config/launchd/com.deribit.frontend.plist.template",
-            _investor_service_replacements(**common, label=f"com.deribit.frontend.{investor_id}"),
+            {
+                **_investor_service_replacements(**common, label=f"com.deribit.frontend.{investor_id}"),
+                "__STDOUT_PATH__": str(frontend_stdout),
+                "__STDERR_PATH__": str(frontend_stderr),
+            },
         ),
     }
 
@@ -718,17 +728,16 @@ def _write_accounts_toml(
         strategy = STRATEGY_BY_SLUG[slug]
         title = DISPLAY_NAME_BY_SLUG[slug]
         risk_tier = normalize_risk_tier(risk_tiers.get(slug, RISK_TIER_MEDIUM))
-        lines.extend(
-            [
-                "[[accounts]]",
-                f'slug = "{slug}"',
-                f'strategy = "{strategy}"',
-                f'display_name = "{title}"',
-                f'risk_tier = "{risk_tier}"',
-                "enabled = true",
-                "",
-            ]
-        )
+        row = [
+            "[[accounts]]",
+            f'slug = "{slug}"',
+            f'strategy = "{strategy}"',
+            f'display_name = "{title}"',
+        ]
+        if risk_tier != RISK_TIER_MEDIUM:
+            row.append(f'risk_tier = "{risk_tier}"')
+        row.extend(["enabled = true", ""])
+        lines.extend(row)
     (investor_dir / "accounts.toml").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -756,15 +765,12 @@ def _materialize_account_env(
 ) -> None:
     example_env = example_dir / "accounts" / f".env.{slug}.example"
     dest = investor_dir / "accounts" / account_env_basename(slug)
-    strategy = STRATEGY_BY_SLUG[slug]
-    tier = normalize_risk_tier(risk_tier)
     if example_env.is_file():
         text = example_env.read_text(encoding="utf-8")
         text = _substitute_placeholders(
             text,
             investor_id=investor_id,
             slug=slug,
-            strategy=strategy,
             deribit_env=deribit_env,
         )
         dest.write_text(text, encoding="utf-8")
@@ -775,8 +781,6 @@ def _materialize_account_env(
                     f"DERIBIT_ENV={deribit_env}",
                     "DERIBIT_CLIENT_ID=",
                     "DERIBIT_CLIENT_SECRET=",
-                    f"OPTION_STRATEGY={strategy}",
-                    f"RISK_TIER={tier}",
                     f"ORDER_LABEL_PREFIX={investor_id}_{slug}",
                     f"STATE_FILE={default_state_file(investor_id, slug)}",
                     "REFERENCE_CAPITAL_USDC=1000",
@@ -787,8 +791,6 @@ def _materialize_account_env(
             ),
             encoding="utf-8",
         )
-        return
-    _ensure_risk_tier_in_env(dest, tier)
 
 
 def _substitute_placeholders(
@@ -796,7 +798,6 @@ def _substitute_placeholders(
     *,
     investor_id: str,
     slug: str,
-    strategy: str,
     deribit_env: str,
 ) -> str:
     state = str(default_state_file(investor_id, slug))
@@ -808,13 +809,9 @@ def _substitute_placeholders(
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
-    if f"OPTION_STRATEGY={strategy}" not in text:
-        text = re.sub(r"OPTION_STRATEGY=.*", f"OPTION_STRATEGY={strategy}", text)
+    text = re.sub(r"^OPTION_STRATEGY=.*\n?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^RISK_TIER=.*\n?", "", text, flags=re.MULTILINE)
     return text
-
-
-def _ensure_risk_tier_in_env(path: Path, risk_tier: str) -> None:
-    _update_env_file(path, {"RISK_TIER": normalize_risk_tier(risk_tier)})
 
 
 def _update_env_file(path: Path, updates: dict[str, str]) -> None:

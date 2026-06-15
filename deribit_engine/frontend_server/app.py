@@ -16,14 +16,20 @@ from ..env_layout import (
     resolve_investor_scope,
 )
 from ..exceptions import ConfigurationError
+from ..portal_snapshot_service import PortalSnapshotService, attach_realized_summary_to_ledger_snapshot
 from ..trade_journal import TradeJournalStore, journal_db_path_for_state, scope_key_for_state
 from ..utils import to_decimal, utc_now_ms
 from .aggregation import (
+    FILL_STATS_CACHE_KEY,
     _resolve_apr_effective_capital_usdc,
+    attach_cached_premium_sweep_fill_stats,
 )
 from .constants import (
     DEFAULT_BUNDLE_WARM_INTERVAL_SEC,
     DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC,
+    DEFAULT_MARKET_SNAPSHOT_INTERVAL_SEC,
+    DEFAULT_PORTAL_SNAPSHOT_DISK_INTERVAL_SEC,
+    DEFAULT_PREMIUM_SWEEP_FILL_STATS_CACHE_TTL_SEC,
     DEFAULT_SNAPSHOT_INTERVAL_SEC,
     DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC,
     GROUPS_CACHE_TTL_SEC,
@@ -31,6 +37,7 @@ from .constants import (
     SERIES_CACHE_TTL_SEC,
     SPOT_CACHE_TTL_SEC,
     STATUS_CACHE_TTL_SEC,
+    TRANSFERS_CACHE_TTL_SEC,
 )
 from .exchange import _bot_for_account
 from .groups_service import _closed_groups_cache_key
@@ -38,7 +45,8 @@ from .helpers import (
     _apply_spot_native_backfill,
     _backfill_row_collateral_native,
     _configure_metrics_db,
-    _cumulative_pnl_series_from_store,
+    _cumulative_spot_pnl_series_from_accounts,
+    _cumulative_stable_pnl_series,
     _dashboard_strategies,
     _decimalize,
     _has_private_creds,
@@ -50,6 +58,11 @@ from .helpers import (
     _spot_index_decimals,
 )
 from .market_vol import fetch_index_price_change_24h_pct, fetch_iv_rank_snapshot
+from .portal_snapshot_scheduler import (
+    MarketSnapshotScheduler,
+    PortalDiskSnapshotScheduler,
+    make_portal_snapshot_service,
+)
 from .types import (
     BundleWarmScheduler,
     DashboardAccount,
@@ -136,12 +149,14 @@ def create_app(
     # Serve stale live data instantly while refreshing in the background so a slow
     # Deribit prefetch never blocks the Snapshot→Live flip on the dashboard.
     status_cache = _TtlCache(status_ttl, stale_while_revalidate=True)
+    fill_stats_cache = _TtlCache(DEFAULT_PREMIUM_SWEEP_FILL_STATS_CACHE_TTL_SEC)
     report_cache = _TtlCache(REPORT_CACHE_TTL_SEC)
     groups_cache = _TtlCache(GROUPS_CACHE_TTL_SEC)
     bundle_cache = _TtlCache(status_ttl, stale_while_revalidate=True)
     exchange_prefetch_cache = _TtlCache(status_ttl)
     spot_cache = _TtlCache(SPOT_CACHE_TTL_SEC)
     stress_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
+    transfers_cache = _TtlCache(TRANSFERS_CACHE_TTL_SEC)
     series_cache = _TtlCache(SERIES_CACHE_TTL_SEC)
     # Serialize heavy portfolio endpoints so parallel browser tabs / dashboard waves
     # do not stack duplicate Deribit JSON-RPC bursts (often surfaced as 502/timeouts).
@@ -162,6 +177,104 @@ def create_app(
     ]
     journal_scheduler = TradeJournalSyncScheduler(accounts=accounts, interval_sec=journal_interval)
     background_schedulers: list[Any] = [*equity_schedulers, journal_scheduler]
+
+    portal_service: PortalSnapshotService | None = make_portal_snapshot_service(repo_root, dashboard_investor_id)
+
+    def _build_ledger_snapshot_payload() -> dict[str, Any]:
+        import deribit_engine.frontend_server as pkg
+
+        payload = pkg._latest_ledger_snapshot(
+            accounts,
+            scheduler_states=[s.state for s in equity_schedulers],
+            snapshot_interval_sec=interval,
+        )
+        if payload is None:
+            payload = {"source": "none"}
+        if isinstance(payload, dict) and payload.get("source") != "none":
+            payload["dashboard_strategies"] = list(dashboard_strategies_list)
+        return payload
+
+    def _capture_portal_disk_snapshot(*, market_snapshot_id: int | None = None) -> None:
+        if portal_service is None or not dashboard_investor_id:
+            return
+
+        ledger = _build_ledger_snapshot_payload()
+        if ledger.get("source") == "none":
+            return
+        enriched = attach_realized_summary_to_ledger_snapshot(
+            ledger,
+            accounts=accounts,
+            days=30,
+            status_payload=status_cache.try_get("status"),
+            series_cache=series_cache,
+            spot_cache=spot_cache,
+            fetch_spot=_fetch_spot,
+            status_cache=status_cache,
+        )
+        market_id = market_snapshot_id
+        if market_id is None:
+            latest_market = portal_service.market_store.latest()
+            market_id = latest_market.id if latest_market is not None else None
+        portal_service.capture_disk(
+            ledger_snapshot=ledger,
+            groups=enriched.get("groups") or {},
+            realized_summary=enriched.get("realized_summary") or {},
+            dashboard_strategies=list(dashboard_strategies_list),
+            market_snapshot_id=market_id,
+        )
+
+    def _capture_portal_live_snapshot(
+        *,
+        status: dict[str, Any],
+        groups: dict[str, Any],
+        realized_summary: dict[str, Any],
+    ) -> None:
+        if portal_service is None or not dashboard_investor_id:
+            return
+        ledger = _build_ledger_snapshot_payload()
+        latest_market = portal_service.market_store.latest()
+        portal_service.capture_live(
+            ledger_snapshot=ledger if ledger.get("source") != "none" else None,
+            status=status,
+            groups=groups,
+            realized_summary=realized_summary,
+            dashboard_strategies=list(dashboard_strategies_list),
+            market_snapshot_id=latest_market.id if latest_market is not None else None,
+        )
+
+    def _market_store():
+        if repo_root is None:
+            return None
+        if portal_service is not None:
+            return portal_service.market_store
+        from ..env_layout import shared_market_db_path
+        from ..market_snapshot_store import MarketSnapshotStore
+
+        return MarketSnapshotStore(shared_market_db_path(repo_root))
+
+    def _capture_market_snapshot() -> None:
+        store = _market_store()
+        if store is None:
+            return
+        spot_payload = spot_cache.get_or_set("spot", _fetch_spot)
+        store.append_from_spot_payload(spot_payload)
+
+    def _run_snapshot_retention() -> None:
+        if portal_service is not None:
+            deleted = portal_service.run_retention()
+            LOGGER.debug("portal snapshot retention: %s", deleted)
+            return
+        store = _market_store()
+        if store is None:
+            return
+        from .constants import DEFAULT_MARKET_SNAPSHOT_RETENTION_DAYS
+
+        cutoff = (
+            utc_now_ms()
+            - int(os.environ.get("MARKET_SNAPSHOT_RETENTION_DAYS", DEFAULT_MARKET_SNAPSHOT_RETENTION_DAYS)) * 86400_000
+        )
+        deleted = store.purge_older_than(cutoff_ms=cutoff)
+        LOGGER.debug("market snapshot retention deleted=%s", deleted)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
@@ -223,6 +336,15 @@ def create_app(
     def api_spot() -> dict[str, Any]:
         """Public BTC/ETH USD index and IV rank for dashboard header (no private auth)."""
         try:
+            store = _market_store()
+            if store is not None:
+                row = store.latest()
+                if row is not None:
+                    max_age_ms = (
+                        int(os.environ.get("MARKET_SNAPSHOT_INTERVAL_SEC", DEFAULT_MARKET_SNAPSHOT_INTERVAL_SEC)) * 2000
+                    )
+                    if utc_now_ms() - row.ts_ms <= max_age_ms:
+                        return row.to_spot_api_payload()
             return spot_cache.get_or_set("spot", _fetch_spot)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"spot failed: {exc}") from exc
@@ -309,67 +431,63 @@ def create_app(
         days: int = Query(default=30, ge=0, le=3650),
     ) -> Any:
         """Last on-disk equity snapshot (no Deribit); for fast investor first paint."""
-        import deribit_engine.frontend_server as pkg
+        if portal_service is not None and investor_portal:
+            cached = portal_service.load_for_api(
+                prefer_live=True,
+                live_max_age_ms=investor_status_ttl * 1000,
+            )
+            if cached is not None:
+                return JSONResponse(_decimalize(_enrich_snapshot_payload(cached)))
 
-        payload = pkg._latest_ledger_snapshot(
-            accounts,
-            scheduler_states=[s.state for s in equity_schedulers],
-            snapshot_interval_sec=interval,
-        )
-        if payload is None:
-            payload = {"source": "none"}
-        if isinstance(payload, dict) and payload.get("source") != "none":
-            payload["dashboard_strategies"] = list(dashboard_strategies_list)
+        payload = _build_ledger_snapshot_payload()
         if payload.get("source") == "none":
             return JSONResponse(_decimalize(payload), status_code=200)
-        try:
-            status_payload = status_cache.try_get("status")
-            override = None
-            capital = _resolve_apr_effective_capital_usdc(
-                accounts,
-                override=override,
-                status_payload=status_payload,
-            )
-            cache_key = (
-                "realized_summary",
-                days,
-                str(capital),
-                _ledger_equity_cache_key(accounts),
-                _closed_groups_cache_key(accounts),
-            )
-            summary = series_cache.try_get(cache_key)
-            if summary is None:
-                summary = pkg._aggregate_realized_summary(
-                    accounts,
-                    days=days,
-                    status_payload=status_payload,
-                    effective_capital_override=override,
-                )
-                series_cache.seed(cache_key, summary)
-            report_payload = copy.deepcopy(summary)
-            try:
-                from ..realized_summary import patch_realized_report_spot_pnl
-
-                spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
-                closed_rows = pkg._all_closed_group_rows(accounts, spot_index=spot_idx)
-                patch_realized_report_spot_pnl(
-                    report_payload,
-                    closed_rows,
-                    spot_index=spot_idx,
-                    window_days=days,
-                )
-            except Exception as spot_exc:  # noqa: BLE001
-                LOGGER.debug("snapshot realized_summary spot patch skipped: %s", spot_exc)
-            payload["realized_summary"] = report_payload
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.debug("snapshot realized_summary attach skipped: %s", exc)
-        return JSONResponse(_decimalize(payload))
+        payload = attach_realized_summary_to_ledger_snapshot(
+            payload,
+            accounts=accounts,
+            days=days,
+            status_payload=status_cache.try_get("status"),
+            series_cache=series_cache,
+            spot_cache=spot_cache,
+            fetch_spot=_fetch_spot,
+            status_cache=status_cache,
+        )
+        return JSONResponse(_decimalize(_enrich_snapshot_payload(payload)))
 
     def _locked_aggregate_status() -> dict[str, Any]:
         import deribit_engine.frontend_server as pkg
 
         with _heavy_portfolio_lock:
-            return pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+            status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+        return attach_cached_premium_sweep_fill_stats(status, fill_stats_cache)
+
+    def _fill_stats_for_snapshot() -> dict[str, Any]:
+        cached = fill_stats_cache.get_stale(FILL_STATS_CACHE_KEY)
+        if cached:
+            return cached
+        cached_status = status_cache.try_get("status")
+        fill_stats = (cached_status or {}).get("premium_sweep_fill_stats_by_book")
+        if fill_stats:
+            return fill_stats
+        if not any(_has_private_creds(account.config) for account in accounts):
+            return {}
+        try:
+            live_status = _locked_aggregate_status()
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("snapshot fill stats status fetch skipped: %s", exc)
+            return fill_stats_cache.get_stale(FILL_STATS_CACHE_KEY) or {}
+        status_cache.seed("status", live_status)
+        return live_status.get("premium_sweep_fill_stats_by_book") or {}
+
+    def _enrich_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        fill_stats = _fill_stats_for_snapshot()
+        if not fill_stats:
+            return payload
+        out = dict(payload)
+        live_status = dict(out.get("live_status") or {})
+        live_status["premium_sweep_fill_stats_by_book"] = fill_stats
+        out["live_status"] = live_status
+        return out
 
     def _locked_aggregate_report(d: int) -> dict[str, Any]:
         import deribit_engine.frontend_server as pkg
@@ -394,7 +512,10 @@ def create_app(
         with _heavy_portfolio_lock:
             status: dict[str, Any] | None = None
             if need_status:
-                status = pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+                status = attach_cached_premium_sweep_fill_stats(
+                    pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache),
+                    fill_stats_cache,
+                )
                 payload["status"] = status
             if need_groups:
                 payload["groups"] = pkg._aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
@@ -484,6 +605,21 @@ def create_app(
                 override=override,
             )
             bundle_cache.seed(cache_key, payload)
+            if (
+                portal_service is not None
+                and investor_portal
+                and "realized_summary" in sections
+                and payload.get("status")
+                and payload.get("groups")
+            ):
+                try:
+                    _capture_portal_live_snapshot(
+                        status=payload["status"],
+                        groups=payload["groups"],
+                        realized_summary=payload.get("realized_summary") or {},
+                    )
+                except Exception as live_exc:  # noqa: BLE001
+                    LOGGER.debug("portal live snapshot skipped: %s", live_exc)
 
     def _finalize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         out = copy.deepcopy(payload)
@@ -521,10 +657,27 @@ def create_app(
                 exchange_prefetch_cache=exchange_prefetch_cache,
             )
 
+    def _locked_aggregate_transfers(
+        *,
+        days: int,
+        limit: int,
+        index_by_ccy: dict[str, Decimal],
+    ) -> dict[str, Any]:
+        from .transfers_service import aggregate_transfers_for_accounts
+
+        with _heavy_portfolio_lock:
+            return aggregate_transfers_for_accounts(
+                accounts,
+                days=days,
+                index_by_ccy=index_by_ccy,
+                limit_per_account=limit,
+            )
+
     from .routes.bundle import register_bundle_routes
     from .routes.context import RouteContext
     from .routes.groups import register_groups_routes
     from .routes.stress import register_stress_routes
+    from .routes.transfers import register_transfers_routes
 
     route_ctx = RouteContext(
         accounts=accounts,
@@ -536,6 +689,7 @@ def create_app(
         exchange_prefetch_cache=exchange_prefetch_cache,
         spot_cache=spot_cache,
         stress_cache=stress_cache,
+        transfers_cache=transfers_cache,
         series_cache=series_cache,
         heavy_portfolio_lock=_heavy_portfolio_lock,
         fetch_spot=_fetch_spot,
@@ -543,16 +697,40 @@ def create_app(
         locked_aggregate_report=_locked_aggregate_report,
         locked_compute_dashboard_bundle=_locked_compute_dashboard_bundle,
         locked_aggregate_stress=_locked_aggregate_stress,
+        locked_aggregate_transfers=_locked_aggregate_transfers,
         seed_bundle_component_caches=_seed_bundle_component_caches,
         finalize_dashboard_bundle=_finalize_dashboard_bundle,
     )
     register_bundle_routes(app, route_ctx)
     register_groups_routes(app, route_ctx)
     register_stress_routes(app, route_ctx)
+    register_transfers_routes(app, route_ctx)
 
     # Keep the investor live caches warm so Snapshot→Live is near-instant. Only the
     # investor portal uses a long status TTL, so warming the ops dashboard (15s TTL)
     # would add load without helping; gate it accordingly.
+    if enable_scheduler and repo_root is not None:
+        background_schedulers.append(
+            MarketSnapshotScheduler(
+                capture_fn=_capture_market_snapshot,
+                interval_sec=int(os.environ.get("MARKET_SNAPSHOT_INTERVAL_SEC", DEFAULT_MARKET_SNAPSHOT_INTERVAL_SEC)),
+                retention_fn=_run_snapshot_retention,
+            )
+        )
+    if enable_scheduler and investor_portal and portal_service is not None:
+        background_schedulers.append(
+            PortalDiskSnapshotScheduler(
+                capture_fn=lambda: _capture_portal_disk_snapshot(),
+                interval_sec=int(
+                    os.environ.get(
+                        "PORTAL_SNAPSHOT_DISK_INTERVAL_SEC",
+                        DEFAULT_PORTAL_SNAPSHOT_DISK_INTERVAL_SEC,
+                    )
+                ),
+                retention_fn=_run_snapshot_retention,
+            )
+        )
+
     if investor_portal:
         bundle_warm_interval = int(
             os.environ.get("FRONTEND_BUNDLE_WARM_INTERVAL_SEC", DEFAULT_BUNDLE_WARM_INTERVAL_SEC)
@@ -672,12 +850,35 @@ def create_app(
             }
         )
 
-    @app.get("/api/cumulative_pnl_series")
-    def api_cumulative_pnl_series() -> Any:
-        cache_key = ("cumulative_pnl", _closed_groups_cache_key(accounts))
+    @app.get("/api/cumulative_spot_pnl_series")
+    def api_cumulative_spot_pnl_series() -> Any:
+        cache_key = (
+            "cumulative_spot_pnl",
+            _closed_groups_cache_key(accounts),
+            spot_cache.try_get("spot"),
+        )
 
         def _compute() -> dict[str, Any]:
-            return _cumulative_pnl_series_from_store(accounts)
+            spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+            return _cumulative_spot_pnl_series_from_accounts(accounts, spot_index=spot_idx)
+
+        try:
+            series = series_cache.get_or_set(cache_key, _compute)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"cumulative spot pnl failed: {exc}") from exc
+        return JSONResponse(series)
+
+    @app.get("/api/cumulative_pnl_series")
+    def api_cumulative_pnl_series() -> Any:
+        cache_key = (
+            "cumulative_pnl_stable",
+            _closed_groups_cache_key(accounts),
+            spot_cache.try_get("spot"),
+        )
+
+        def _compute() -> dict[str, Any]:
+            spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+            return _cumulative_stable_pnl_series(accounts, spot_index=spot_idx)
 
         try:
             series = series_cache.get_or_set(cache_key, _compute)

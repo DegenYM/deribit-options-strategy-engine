@@ -5,9 +5,16 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>投資組合總覽 · Deribit 選擇權策略</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=56b288d187" as="script" />
-    <link rel="stylesheet" href="/tailwind.css?v=72d54db90e" />
-    <link rel="stylesheet" href="/styles.css?v=ce00fba6d7" />
+    <link rel="preload" href="/app-investor.js?v=090d5bcabf" as="script" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/tailwind.css?v=38291f0f19" />
+    <link rel="stylesheet" href="/tokens.css?v=ds003" />
+    <link rel="stylesheet" href="/styles.css?v=869fcb1d5d" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -25,38 +32,26 @@
       })();
     </script>
   </head>
-  <body class="app-body investor-portal investor-blocking-load text-slate-100 min-h-screen font-sans">
+  <body class="app-body investor-portal">
     <script>
       window.__DASHBOARD_MODE__ = "investor";
       window.__INVESTOR_LOCALE__ = "zh-Hant";
     </script>
+    <a class="skip-link" href="#dashboard-main">跳至主要內容</a>
     <header class="app-header">
       <div class="dashboard-shell investor-header-shell py-3 flex flex-wrap items-center gap-3">
         <div class="investor-header-title min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight text-slate-50">投資組合總覽</h1>
-          <p class="text-xs text-slate-500">
+          <h1 class="page-title">投資組合總覽</h1>
+          <p class="page-subtitle">
             即時權益與策略摘要；非投資建議。詳細營運請使用內部儀表板。
           </p>
         </div>
         <div class="investor-header-meta flex flex-wrap items-center gap-2 min-w-0 flex-1">
-          <div class="investor-header-badges flex flex-wrap items-center gap-2">
-            <span
-              id="env-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-            >載入中…</span>
-            <span
-              id="regime-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-            >風控狀態：—</span>
-            <span
-              id="strategy-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-            >策略：—</span>
-            <span
-              id="profit-sweep-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300 hidden"
-              hidden
-            >獲利兌 USDT：—</span>
+          <div class="investor-header-badges">
+            <span id="env-badge" class="inv-chip inv-chip--neutral">載入中…</span>
+            <span id="regime-badge" class="inv-chip inv-chip--neutral">風控 · —</span>
+            <span id="strategy-badge" class="inv-chip inv-chip--info">策略 · —</span>
+            <span id="profit-sweep-badge" class="inv-chip inv-chip--success hidden" hidden>兌 USDT · —</span>
           </div>
           <div class="investor-header-spot header-market-strip" aria-label="現價與 IV Rank">
             <div id="header-spot-btc" class="header-market-card header-market-card--btc">
@@ -73,18 +68,13 @@
             </div>
           </div>
         </div>
-        <div class="investor-header-actions ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-400">
+        <div class="header-actions investor-header-actions">
           <span id="last-refresh" aria-live="polite">上次更新（本地時間）：—</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
-            <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
+            <input id="auto-refresh" type="checkbox" checked />
             自動更新
           </label>
-          <button
-            id="refresh-now"
-            class="px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition"
-          >
-            重新整理
-          </button>
+          <button id="refresh-now" type="button" class="ds-btn ds-btn-secondary">重新整理</button>
         </div>
       </div>
     </header>
@@ -98,23 +88,31 @@
       <div class="investor-progress-bar-fill"></div>
     </div>
 
-    <main class="dashboard-shell dashboard-main">
+    <main id="dashboard-main" class="dashboard-shell dashboard-main">
       <section class="section-card priority-section">
         <div class="section-heading">
           <div>
             <p class="section-eyebrow">總覽</p>
-            <h2 class="section-title">帳戶核心指標（USDC 約當）</h2>
+            <h2 class="section-title">投資組合摘要</h2>
           </div>
           <p class="section-copy">
-            彙總權益、本日損益、已收權利金與歷史已實現表現；數字來自連線 Deribit 與本地狀態檔，延遲與估計誤差屬正常範圍。
+            總權益與當日損益、未實現權利金、勝率及已實現損益紀錄。數字僅供參考，可能略滯後於即時標價。
           </p>
         </div>
         <div id="aggregate-card" class="overview-panel">
-          <div class="overview-metrics-grid">
-            <div class="skeleton-block h-16 rounded-lg"></div>
-            <div class="skeleton-block h-16 rounded-lg"></div>
-            <div class="skeleton-block h-16 rounded-lg"></div>
-            <div class="skeleton-block h-16 rounded-lg"></div>
+          <div class="overview-stack">
+            <div class="overview-headline">
+              <div class="overview-hero skeleton-block" style="min-height:6.5rem;border-radius:16px"></div>
+              <div class="overview-composition-grid">
+                <section class="overview-composition-card skeleton-block" style="min-height:11rem;border-radius:14px"></section>
+                <section class="overview-composition-card skeleton-block" style="min-height:11rem;border-radius:14px"></section>
+              </div>
+              <div class="overview-stat-row">
+                <div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>
+                <div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>
+                <div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -191,46 +189,46 @@
           </div>
 
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">各帳本總權益（USDC 約當）</h3>
-                <span class="text-xs text-slate-500" id="risk-capital-meta">—</span>
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">累計已實現 spot 損益</h3>
+                <span class="chart-panel-meta" id="risk-capital-meta">—</span>
               </div>
               <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-risk-capital"></canvas>
               </div>
-              <p class="text-xs text-slate-500 mt-2" id="risk-capital-hint">
-                各帳本權益以 USDC 約當顯示，來自即時或最近快照。
+              <p class="chart-panel-hint" id="risk-capital-hint">
+                各帳本累計已實現 spot 損益（BTC / ETH 幣本位 premium 獲利），來自已平倉組。
               </p>
             </div>
 
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">累計已實現損益（USDC）</h3>
-                <span class="text-xs text-slate-500" id="cum-pnl-meta">—</span>
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">累計已實現損益（StableCoin）</h3>
+                <span class="chart-panel-meta" id="cum-pnl-meta">—</span>
               </div>
               <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-cum-pnl"></canvas>
               </div>
             </div>
 
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">每日已實現損益（USDC）</h3>
-                <span class="text-xs text-slate-500" id="daily-pnl-meta">—</span>
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">每日已實現損益（StableCoin）</h3>
+                <span class="chart-panel-meta" id="daily-pnl-meta">—</span>
               </div>
               <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-daily-pnl"></canvas>
               </div>
             </div>
 
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">滾動年化報酬率（視窗／當日總權益）</h3>
-                <div class="text-xs text-slate-400 flex gap-2 items-center">
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">滾動年化報酬率（視窗／當日總權益）</h3>
+                <div class="chart-panel-meta flex gap-2 items-center">
                   <label>
                     視窗
-                    <select id="apr-window" class="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-200">
+                    <select id="apr-window" class="ds-select">
                       <option value="7">7 日</option>
                       <option value="14">14 日</option>
                       <option value="30" selected>30 日</option>
@@ -247,13 +245,31 @@
         </div>
       </details>
 
-      <footer class="text-xs text-slate-600 text-center pt-4 pb-8 max-w-3xl mx-auto leading-relaxed">
+      <details id="transfers-section" class="section-card collapsible-section" open>
+        <summary class="section-summary">
+          <div>
+            <p class="section-eyebrow">資金移動</p>
+            <h2 class="section-title">資產劃轉紀錄</h2>
+            <p class="section-copy">
+              各帳戶最近的內部資金移動（子帳戶劃轉、跨帳本移轉）；不含鏈上入金或出金。
+            </p>
+          </div>
+          <span class="section-toggle" aria-hidden="true"></span>
+        </summary>
+        <div class="section-body">
+          <div id="transfer-cards" class="transfer-cards-grid">
+            <p class="text-slate-500 text-sm">正在載入劃轉紀錄…</p>
+          </div>
+        </div>
+      </details>
+
+      <footer class="page-footer">
         本頁面僅供資訊揭露與溝通，不構成買賣建議。加密資產與選擇權具高波動與本金虧損風險；過去績效不代表未來結果。
         金額以 USDC 約當列示者依當下匯率與標的指數換算。價差策略之報表通常不含永續對沖部位之損益。
-        <span class="block mt-2 text-slate-500">
-          <a href="/investor.html" class="footer-link text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">English investor view</a>
+        <span class="page-footer-links">
+          <a href="/investor.html" class="footer-nav-link">English investor view</a>
           ·
-          <a href="/index.html" class="footer-link text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">內部營運儀表板</a>
+          <a href="/index.html" class="footer-nav-link">內部營運儀表板</a>
           （含帳戶路徑、保證金細節與壓力情境）
         </span>
       </footer>
@@ -267,15 +283,15 @@
       aria-busy="true"
     >
       <div class="investor-load-card">
-        <p class="investor-load-eyebrow" data-investor-load-eyebrow>請稍候</p>
-        <h2 class="investor-load-title" data-investor-load-title>正在載入您的投資組合</h2>
+        <p class="investor-load-eyebrow" data-investor-load-eyebrow>初始化中</p>
+        <h2 class="investor-load-title" data-investor-load-title>正在載入投資組合資料</h2>
         <p class="investor-load-step" data-investor-load-step>準備中…</p>
         <div class="investor-load-bar" aria-hidden="true">
           <div id="investor-load-bar-fill" class="investor-load-bar-fill"></div>
         </div>
         <p class="investor-load-pct" data-investor-load-pct>0%</p>
         <p class="investor-load-hint" data-investor-load-hint>
-          先載入最近快照，再於背景同步 Deribit 即時資料。
+          先還原快取快照；即時標價於背景同步。
         </p>
       </div>
     </div>
@@ -284,9 +300,9 @@
       id="toast"
       role="alert"
       aria-live="assertive"
-      class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
+      class="hidden"
     ></div>
 
-    <script defer src="/app-investor.js?v=56b288d187"></script>
+    <script defer src="/app-investor.js?v=090d5bcabf"></script>
   </body>
 </html>

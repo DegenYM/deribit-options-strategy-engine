@@ -18,7 +18,7 @@ from .models import is_phantom_reconcile_close, open_short_instrument_names
 from .state import StrategyStateStore, load_performance_exclusion_group_ids
 from .utils import to_decimal
 
-_BOOKS: tuple[str, ...] = ("BTC", "ETH", "USDC")
+_BOOKS: tuple[str, ...] = ("BTC", "ETH", "USDC", "USDT")
 _DEPOSIT_FLOW_TYPES = frozenset({"deposit", "transfer_in"})
 _WITHDRAW_FLOW_TYPES = frozenset({"withdrawal", "transfer_out"})
 
@@ -73,6 +73,8 @@ class InvestorPeriodReport:
     total_equity_change: Decimal
     usdc_equiv_change: dict[str, Decimal]
     net_flow_usdc: Decimal
+    net_flow_usdc_raw: Decimal | None
+    fee_payment_usdc_excluded: Decimal
     distributable_profit: Decimal
     index_end: dict[str, Decimal]
     period_flow_lines: tuple[SubscriptionFlowLine, ...]
@@ -92,7 +94,7 @@ def _native_from_snapshot(snap: dict[str, Any] | None, book: str) -> Decimal:
     if book in native:
         return to_decimal(native[book])
     usdc = to_decimal((snap.get("equity_usdc_by_book") or snap.get("equity_by_book") or {}).get(book, 0))
-    if book == "USDC":
+    if book in ("USDC", "USDT"):
         return usdc
     idx = to_decimal(snap.get("index_btc_usd" if book == "BTC" else "index_eth_usd", 0))
     return usdc / idx if idx > 0 else Decimal("0")
@@ -212,7 +214,12 @@ def fetch_period_closed_trades(
                 journal_executions=journal_rows,
             )
             pnl_native = group.realized_pnl_collateral_native or Decimal("0")
-            pnl_usdc = group.realized_pnl
+            from .realized_summary import realized_pnl_usdc_at_spot
+
+            spot_index = {k: v for k, v in index_by_ccy.items() if k in ("BTC", "ETH") and v > 0}
+            pnl_usdc = realized_pnl_usdc_at_spot(group.to_dict(), spot_index or None)
+            if pnl_usdc is None:
+                pnl_usdc = group.realized_pnl
             if pnl_usdc is None and spot > 0:
                 pnl_usdc = pnl_native * spot if book != "USDC" else pnl_native
             rows.append(
@@ -253,6 +260,7 @@ def build_investor_period_report(
         "BTC": to_decimal((ctx.end_snapshot or {}).get("index_btc_usd", ctx.index_by_ccy["BTC"])),
         "ETH": to_decimal((ctx.end_snapshot or {}).get("index_eth_usd", ctx.index_by_ccy["ETH"])),
         "USDC": Decimal("1"),
+        "USDT": Decimal("1"),
     }
     earned_usdc = {book: native_book_amount_to_usdc(earned[book], book, index_end) for book in _BOOKS}
 
@@ -275,6 +283,8 @@ def build_investor_period_report(
     total_equity_change = day_b_view.total_equity_usdc - day_a_view.total_equity_usdc
     usdc_equiv_change = {book: day_b_view.usdc_equiv[book] - day_a_view.usdc_equiv[book] for book in _BOOKS}
     net_flow_usdc = to_decimal(s["net_flow_usdc"])
+    net_flow_usdc_raw = to_decimal(s["net_flow_usdc_raw"]) if s.get("net_flow_usdc_raw") is not None else None
+    fee_payment_usdc_excluded = to_decimal(s.get("fee_payment_usdc_excluded", 0))
     distributable_profit = to_decimal(s["distributable_profit"])
 
     return InvestorPeriodReport(
@@ -302,6 +312,8 @@ def build_investor_period_report(
         total_equity_change=total_equity_change,
         usdc_equiv_change=usdc_equiv_change,
         net_flow_usdc=net_flow_usdc,
+        net_flow_usdc_raw=net_flow_usdc_raw,
+        fee_payment_usdc_excluded=fee_payment_usdc_excluded,
         distributable_profit=distributable_profit,
         index_end=index_end,
         period_flow_lines=included,
@@ -344,54 +356,61 @@ def render_period_summary_md(report: InvestorPeriodReport) -> list[str]:
     lines.append("")
     lines.append("## Account balances")
     lines.append("")
-    lines.append("| | BTC | ETH | USDC |")
-    lines.append("|---|-----|-----|------|")
+    lines.append("| | BTC | ETH | USDC | USDT |")
+    lines.append("|---|-----|-----|------|------|")
     lines.append(
         f"| **Day A** ({report.day_a.label}) | "
         f"`{_native(report.day_a.native['BTC'], 'BTC')}` | "
         f"`{_native(report.day_a.native['ETH'], 'ETH')}` | "
-        f"`{_native(report.day_a.native['USDC'], 'USDC')}` |"
+        f"`{_native(report.day_a.native['USDC'], 'USDC')}` | "
+        f"`{_native(report.day_a.native['USDT'], 'USDT')}` |"
     )
     lines.append(
         f"| **Day B** ({report.day_b.label}) | "
         f"`{_native(report.day_b.native['BTC'], 'BTC')}` | "
         f"`{_native(report.day_b.native['ETH'], 'ETH')}` | "
-        f"`{_native(report.day_b.native['USDC'], 'USDC')}` |"
+        f"`{_native(report.day_b.native['USDC'], 'USDC')}` | "
+        f"`{_native(report.day_b.native['USDT'], 'USDT')}` |"
     )
     lines.append(
         f"| **Period deposits** | "
         f"`{_native(report.deposit_native['BTC'], 'BTC')}` | "
         f"`{_native(report.deposit_native['ETH'], 'ETH')}` | "
-        f"`{_native(report.deposit_native['USDC'], 'USDC')}` |"
+        f"`{_native(report.deposit_native['USDC'], 'USDC')}` | "
+        f"`{_native(report.deposit_native['USDT'], 'USDT')}` |"
     )
     lines.append(
         f"| **Period withdrawals** | "
         f"`{_native(report.withdraw_native['BTC'], 'BTC')}` | "
         f"`{_native(report.withdraw_native['ETH'], 'ETH')}` | "
-        f"`{_native(report.withdraw_native['USDC'], 'USDC')}` |"
+        f"`{_native(report.withdraw_native['USDC'], 'USDC')}` | "
+        f"`{_native(report.withdraw_native['USDT'], 'USDT')}` |"
     )
     lines.append(
         f"| **Earned** (balance change − deposits + withdrawals) | "
         f"`{_signed_native(report.earned_native['BTC'], 'BTC')}` | "
         f"`{_signed_native(report.earned_native['ETH'], 'ETH')}` | "
-        f"`{_signed_native(report.earned_native['USDC'], 'USDC')}` |"
+        f"`{_signed_native(report.earned_native['USDC'], 'USDC')}` | "
+        f"`{_signed_native(report.earned_native['USDT'], 'USDT')}` |"
     )
     lines.append(
         f"| **USDC equivalent** (at period-end index) | "
         f"`{_money(report.earned_usdc['BTC'])}` | "
         f"`{_money(report.earned_usdc['ETH'])}` | "
-        f"`{_money(report.earned_usdc['USDC'])}` |"
+        f"`{_money(report.earned_usdc['USDC'])}` | "
+        f"`{_money(report.earned_usdc['USDT'])}` |"
     )
     lines.append("")
     lines.append("## USDC-equivalent balances")
     lines.append("")
-    lines.append("| | BTC | ETH | USDC | **Total** |")
-    lines.append("|---|-----|-----|------|-----------|")
+    lines.append("| | BTC | ETH | USDC | USDT | **Total** |")
+    lines.append("|---|-----|-----|------|------|-----------|")
     lines.append(
         f"| **Day A** ({report.day_a.label}) | "
         f"`{_money(report.day_a.usdc_equiv['BTC'])}` | "
         f"`{_money(report.day_a.usdc_equiv['ETH'])}` | "
         f"`{_money(report.day_a.usdc_equiv['USDC'])}` | "
+        f"`{_money(report.day_a.usdc_equiv['USDT'])}` | "
         f"**`{_money(_usdc_equiv_total(report.day_a.usdc_equiv))}`** |"
     )
     lines.append(
@@ -399,6 +418,7 @@ def render_period_summary_md(report: InvestorPeriodReport) -> list[str]:
         f"`{_money(report.day_b.usdc_equiv['BTC'])}` | "
         f"`{_money(report.day_b.usdc_equiv['ETH'])}` | "
         f"`{_money(report.day_b.usdc_equiv['USDC'])}` | "
+        f"`{_money(report.day_b.usdc_equiv['USDT'])}` | "
         f"**`{_money(_usdc_equiv_total(report.day_b.usdc_equiv))}`** |"
     )
     lines.append(
@@ -406,6 +426,7 @@ def render_period_summary_md(report: InvestorPeriodReport) -> list[str]:
         f"`{_signed_money(report.usdc_equiv_change['BTC'])}` | "
         f"`{_signed_money(report.usdc_equiv_change['ETH'])}` | "
         f"`{_signed_money(report.usdc_equiv_change['USDC'])}` | "
+        f"`{_signed_money(report.usdc_equiv_change['USDT'])}` | "
         f"**`{_signed_money(report.total_equity_change)}`** |"
     )
     lines.append("")
@@ -420,6 +441,9 @@ def render_period_summary_md(report: InvestorPeriodReport) -> list[str]:
     lines.append(f"| **NAV_perf at Day A** | **`{_money(report.nav_perf_start)}`** |")
     lines.append(f"| **NAV_perf at Day B** | **`{_money(report.nav_perf_end)}`** |")
     lines.append(f"| **NAV_perf change (B − A)** | **`{_signed_money(report.nav_perf_change)}`** |")
+    if report.fee_payment_usdc_excluded > 0 and report.net_flow_usdc_raw is not None:
+        lines.append(f"| Net subscription (Deribit log) | `{_money(report.net_flow_usdc_raw)}` |")
+        lines.append(f"| Fee payment via Deribit withdraw (excluded) | `+{_money(report.fee_payment_usdc_excluded)}` |")
     lines.append(f"| Net subscription in period | `{_money(report.net_flow_usdc)}` |")
     lines.append(f"| **Strategy P&L (period)** | **`{_money(report.total_usdc_earned)}`** |")
     lines.append(f"| HWM at period start | `{_money(report.hwm_start)}` |")
@@ -442,6 +466,11 @@ def render_period_summary_md(report: InvestorPeriodReport) -> list[str]:
         f"- Deposit total (USDC equiv.): `{_money(_total_usdc(report.deposit_native, report.index_end))}` · "
         f"Withdrawal total (USDC equiv.): `{_money(_total_usdc(report.withdraw_native, report.index_end))}`"
     )
+    if report.fee_payment_usdc_excluded > 0:
+        lines.append(
+            f"- Fee payment via Deribit withdraw (excluded from capital redemption): "
+            f"`{_money(report.fee_payment_usdc_excluded)}` USDC"
+        )
     lines.append(
         "- *Strategy P&L* = NAV_perf at Day B − NAV_perf at Day A − net subscription. "
         "*Distributable profit* = max(0, NAV_perf at Day B − HWM at start − net subscription). "

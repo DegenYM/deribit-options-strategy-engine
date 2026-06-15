@@ -15,6 +15,7 @@ from .env_layout import (
     _is_main_account_env_file,
     _main_account_layer_paths,
     env_layer_paths,
+    manifest_context_for_account_env,
     normalize_risk_tier,
 )
 from .exceptions import ConfigurationError
@@ -290,6 +291,7 @@ class BotConfig:
     covered_call_spot_order_type: str = "market"
     covered_call_spot_max_slippage_pct: Decimal = Decimal("0")
     covered_call_profit_sweep_enabled: bool = False
+    covered_call_profit_sweep_dust_pool_enabled: bool = True
     # When true, each covered_call entry sizes to available_cover / remaining
     # MAX_GROUPS_PER_CURRENCY slots (scales with spot; no fixed QTY cap).
     covered_call_slot_sizing: bool = True
@@ -638,7 +640,12 @@ def _load_env_values_with_strategy_profile(
         values["ACCOUNT_ROLE"] = ACCOUNT_ROLE_MAIN
         return values
 
-    base_strategy = _option_strategy(strategy_override or _optional(seed, "OPTION_STRATEGY", "naked_short"))
+    manifest_ctx = manifest_context_for_account_env(env_path)
+    base_strategy = _option_strategy(
+        strategy_override
+        or (manifest_ctx.strategy if manifest_ctx is not None else None)
+        or _optional(seed, "OPTION_STRATEGY", "naked_short")
+    )
 
     values: dict[str, str] = {}
     for layer_path in env_layer_paths(env_path, base_strategy):
@@ -657,6 +664,9 @@ def _load_env_values_with_strategy_profile(
         values.update(layer_values)
 
     values["OPTION_STRATEGY"] = base_strategy
+    if manifest_ctx is not None:
+        values["OPTION_STRATEGY"] = manifest_ctx.strategy
+        values["RISK_TIER"] = manifest_ctx.risk_tier
     return values
 
 
@@ -733,6 +743,10 @@ def load_config(
         raise ConfigurationError("COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT must be in [0, 1)")
     covered_call_spot_exit_enabled = _to_bool(_optional(values, "COVERED_CALL_SPOT_EXIT_ENABLED", "false"))
     covered_call_profit_sweep_enabled = _to_bool(_optional(values, "COVERED_CALL_PROFIT_SWEEP_ENABLED", "false"))
+    covered_call_profit_sweep_dust_pool_enabled = _to_bool(
+        _optional(values, "COVERED_CALL_PROFIT_SWEEP_DUST_POOL_ENABLED", "true"),
+        default=True,
+    )
     covered_call_slot_sizing = _to_bool(_optional(values, "COVERED_CALL_SLOT_SIZING", "true"), default=True)
     if (covered_call_profit_sweep_enabled or covered_call_spot_exit_enabled) and "USDT" not in traded_collaterals:
         traded_collaterals = tuple(list(traded_collaterals) + ["USDT"])
@@ -974,6 +988,7 @@ def load_config(
         covered_call_spot_order_type=covered_call_spot_order_type,
         covered_call_spot_max_slippage_pct=covered_call_spot_max_slippage_pct,
         covered_call_profit_sweep_enabled=covered_call_profit_sweep_enabled,
+        covered_call_profit_sweep_dust_pool_enabled=covered_call_profit_sweep_dust_pool_enabled,
         covered_call_slot_sizing=covered_call_slot_sizing,
         account_role=account_role,
         risk_tier=risk_tier,

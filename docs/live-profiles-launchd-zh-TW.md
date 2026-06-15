@@ -171,7 +171,7 @@ done
 Live bot 每完成一個 cycle（或 API 退避重試時）會更新 heartbeat。外部腳本可偵測 bot 卡住：
 
 ```bash
-# 預設 10 分鐘無更新 → Telegram 告警（需 defaults.env 內 Telegram 設定）
+# 預設 10 分鐘無更新 → Telegram 告警（需 `config/shared/.env.defaults` 內 Telegram 設定）
 python scripts/check_live_heartbeat.py
 
 # 乾跑（只印 STALE、不發 TG）

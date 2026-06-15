@@ -143,7 +143,7 @@ def test_rate_limit_feedback_widens_then_recovers_adaptive_interval(tmp_path, mo
     exchange_throttle.reset_adaptive_backoff()
     try:
         # Exhaust retries with 429s so no success note resets the penalty.
-        session = FakeSession([FakeResponse({}, status_code=429, text="rate limited") for _ in range(4)])
+        session = FakeSession([FakeResponse({}, status_code=429, text="rate limited") for _ in range(5)])
         client = _make_client(tmp_path, session)
         with pytest.raises(TransientExchangeError):
             client.get_order_book("BTC-PERPETUAL")
@@ -176,7 +176,7 @@ def test_idempotent_request_retries_on_retryable_http(tmp_path, monkeypatch):
 
 def test_idempotent_request_raises_after_retry_exhaustion(tmp_path, monkeypatch):
     monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
-    session = FakeSession([FakeResponse({}, status_code=522, text="timeout")] * 4)
+    session = FakeSession([FakeResponse({}, status_code=522, text="timeout")] * 5)
     client = _make_client(tmp_path, session)
 
     with pytest.raises(TransientExchangeError, match="HTTP 522"):

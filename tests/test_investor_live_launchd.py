@@ -144,10 +144,16 @@ def test_manage_start_bootstraps_each_investor(tmp_path: Path):
     assert (agents / "com.deribit.live.bob.plist").is_file()
 
 
-def test_probe_live_supervisor_reads_log(tmp_path: Path):
-    log_dir = tmp_path / "logs" / "live" / "alice"
-    log_dir.mkdir(parents=True)
-    (log_dir / "supervisor.log").write_text("started .env.naked pid=123 log=...\n", encoding="utf-8")
+def test_probe_live_supervisor_reads_log(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "deribit_engine.investor_launchd_common.Path.home",
+        classmethod(lambda cls: tmp_path),
+    )
+    from deribit_engine.investor_launchd_common import investor_live_launchd_log_paths
+
+    stdout, _ = investor_live_launchd_log_paths("alice")
+    stdout.parent.mkdir(parents=True, exist_ok=True)
+    stdout.write_text("started .env.naked pid=123 log=...\n", encoding="utf-8")
     assert probe_live_supervisor(tmp_path, "alice") is True
 
 

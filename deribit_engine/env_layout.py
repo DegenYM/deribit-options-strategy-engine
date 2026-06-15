@@ -6,7 +6,7 @@ Layout (canonical)::
     config/shared/strategies/.env.<strategy>  # strategy identity (markets, collaterals, side)
     config/shared/strategies/tiers/<strategy>/.env.<tier>  # low | medium | high risk tuning
     config/investors/<id>/accounts.toml  # manifest (investor id + ≤ few sub-accounts)
-    config/investors/<id>/accounts/.env.<slug>  # sub-account credentials + sizing + optional overrides
+    config/investors/<id>/accounts/.env.<slug>  # sub-account credentials + sizing (strategy/risk from accounts.toml)
 
 Strategy profiles: ``config/shared/strategies/.env.<strategy>`` (legacy: repo-root ``.env.<strategy>``).
 For files under ``config/investors/<id>/accounts/``, the sub-account env is merged **after** the strategy
@@ -81,6 +81,37 @@ def risk_tier_profile_path(
     """Path to tier env: ``config/shared/strategies/tiers/<strategy>/.env.<tier>``."""
     tier = normalize_risk_tier(risk_tier)
     return (Path(repo_root).resolve() / CONFIG_STRATEGY_TIERS / base_strategy / f".env.{tier}").resolve()
+
+
+@dataclass(frozen=True)
+class ManifestAccountContext:
+    strategy: str
+    risk_tier: str
+
+
+def manifest_context_for_account_env(
+    account_env: Path,
+    *,
+    repo_root: Path | str | None = None,
+) -> ManifestAccountContext | None:
+    """Strategy + risk tier from ``accounts.toml`` when ``account_env`` is under an investor layout."""
+    investor_dir = investor_dir_for_account(account_env)
+    if investor_dir is None:
+        return None
+    slug = account_slug_from_env_path(account_env)
+    if not slug:
+        return None
+    root = Path(repo_root).resolve() if repo_root is not None else find_repo_root(account_env)
+    if root is None:
+        return None
+    try:
+        manifest = load_investor_manifest(investor_dir, repo_root=root)
+    except ConfigurationError:
+        return None
+    for account in manifest.accounts:
+        if account.slug == slug:
+            return ManifestAccountContext(strategy=account.strategy, risk_tier=account.risk_tier)
+    return None
 
 
 @dataclass(frozen=True)
@@ -278,6 +309,15 @@ def investor_live_log_dir(repo_root: Path | str, investor_id: str) -> Path:
 
 def investor_metrics_db_path(repo_root: Path | str, investor_id: str) -> Path:
     return investor_frontend_ledger_dir(repo_root, investor_id) / "metrics.db"
+
+
+def shared_market_db_path(repo_root: Path | str) -> Path:
+    """Shared BTC/ETH spot + IVR snapshots for all frontend processes."""
+    return Path(repo_root) / "data" / "frontend_ledger" / "_shared" / "market.db"
+
+
+def investor_portal_db_path(repo_root: Path | str, investor_id: str) -> Path:
+    return investor_frontend_ledger_dir(repo_root, investor_id) / "portal_snapshots.db"
 
 
 def default_state_file(investor_id: str, slug: str) -> Path:
@@ -501,7 +541,11 @@ def env_layer_paths(account_env: Path, base_strategy: str) -> tuple[Path, ...]:
     )
     if profile is not None:
         _warn_legacy_strategy_profile(profile, root)
-    risk_tier = normalize_risk_tier(_read_env_key(account_env, "RISK_TIER"))
+    manifest_ctx = manifest_context_for_account_env(account_env, repo_root=root)
+    if manifest_ctx is not None:
+        risk_tier = manifest_ctx.risk_tier
+    else:
+        risk_tier = normalize_risk_tier(_read_env_key(account_env, "RISK_TIER"))
     tier_profile: Path | None = None
     if root is not None:
         candidate = risk_tier_profile_path(root, base_strategy, risk_tier)

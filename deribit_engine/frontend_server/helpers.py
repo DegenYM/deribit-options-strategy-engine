@@ -19,6 +19,7 @@ from ..env_layout import (
     investor_metrics_db_path,
     load_investor_manifest,
     resolve_investor_scope,
+    shared_market_db_path,
 )
 from ..exceptions import ConfigurationError
 from ..metrics_store import MetricsStore, fingerprint_from_cache_key, performance_scope_key
@@ -452,6 +453,7 @@ def _cumulative_pnl_series_from_daily(
     daily_total: dict[str, Decimal],
     *,
     realized_count: int,
+    value_key: str = "pnl_usdc",
 ) -> dict[str, Any]:
     days_sorted = sorted(daily_total.keys())
     books_sorted = sorted(daily_by_book.keys())
@@ -460,7 +462,7 @@ def _cumulative_pnl_series_from_daily(
     running_total = Decimal("0")
     for day in days_sorted:
         running_total += daily_total[day]
-        cumulative_total.append({"date": day, "pnl_usdc": str(running_total)})
+        cumulative_total.append({"date": day, value_key: str(running_total)})
 
     cumulative_by_book: dict[str, list[dict[str, Any]]] = {}
     for book in books_sorted:
@@ -468,12 +470,12 @@ def _cumulative_pnl_series_from_daily(
         rows: list[dict[str, Any]] = []
         for day in days_sorted:
             running += daily_by_book[book].get(day, Decimal("0"))
-            rows.append({"date": day, "pnl_usdc": str(running)})
+            rows.append({"date": day, value_key: str(running)})
         cumulative_by_book[book] = rows
 
-    daily_total_rows = [{"date": day, "pnl_usdc": str(daily_total[day])} for day in days_sorted]
+    daily_total_rows = [{"date": day, value_key: str(daily_total[day])} for day in days_sorted]
     daily_by_book_rows = {
-        book: [{"date": day, "pnl_usdc": str(daily_by_book[book].get(day, Decimal("0")))} for day in days_sorted]
+        book: [{"date": day, value_key: str(daily_by_book[book].get(day, Decimal("0")))} for day in days_sorted]
         for book in books_sorted
     }
 
@@ -487,19 +489,106 @@ def _cumulative_pnl_series_from_daily(
     }
 
 
-def _cumulative_pnl_series(closed: list[dict[str, Any]]) -> dict[str, Any]:
+def _native_realized_pnl_for_row(
+    row: dict[str, Any],
+    spot_index: dict[str, Decimal] | None,
+) -> Decimal | None:
+    """Realized PnL in each book's native unit (premium profit for coin collateral)."""
+    if row.get("realized_pnl") is None:
+        return None
+    group = TradeGroup.from_dict(row)
+    book = str(row.get("collateral_currency") or row.get("currency") or "USDC").upper()
+    if book == "USDC":
+        return to_decimal(row.get("realized_pnl"))
+    native_raw = row.get("realized_pnl_collateral_native")
+    if native_raw is not None:
+        return to_decimal(native_raw)
+    if spot_index:
+        spot = spot_index.get(book)
+        if spot is not None and spot > 0:
+            group.backfill_realized_pnl_collateral_native(spot_index_usd=spot)
+            if group.realized_pnl_collateral_native is not None:
+                return group.realized_pnl_collateral_native
+    return None
+
+
+def _cumulative_spot_pnl_series(
+    closed: list[dict[str, Any]],
+    *,
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
+    """Per-book cumulative realized PnL in native spot units (BTC / ETH only)."""
+    spot_books = frozenset({"BTC", "ETH"})
+    daily_by_book: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
+    daily_total: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    realized = [g for g in closed if g.get("closed_timestamp_ms") is not None and g.get("realized_pnl") is not None]
+    included = 0
+    for g in realized:
+        book = str(g.get("collateral_currency") or g.get("currency") or "USDC").upper()
+        if book not in spot_books:
+            continue
+        pnl = _native_realized_pnl_for_row(g, spot_index)
+        if pnl is None:
+            continue
+        day = _bucket_day_utc(int(g["closed_timestamp_ms"]))
+        daily_by_book[book][day] += pnl
+        daily_total[day] += pnl
+        included += 1
+
+    return _cumulative_pnl_series_from_daily(
+        {book: dict(days) for book, days in daily_by_book.items()},
+        dict(daily_total),
+        realized_count=included,
+        value_key="pnl_native",
+    )
+
+
+def _cumulative_spot_pnl_series_from_accounts(
+    accounts: list[DashboardAccount],
+    *,
+    spot_index: dict[str, Decimal] | None,
+) -> dict[str, Any]:
+    from .groups_service import _aggregate_closed_groups
+
+    closed = _aggregate_closed_groups(accounts)
+    return _cumulative_spot_pnl_series(closed, spot_index=spot_index)
+
+
+def _stable_realized_pnl_usdc(
+    row: dict[str, Any],
+    spot_index: dict[str, Decimal] | None,
+) -> Decimal | None:
+    """Stablecoin PnL: USDC rows + coin rows at live spot / profit-sweep USDT."""
+    if row.get("realized_pnl") is None:
+        return None
+    if spot_index:
+        from ..realized_summary import realized_pnl_usdc_at_spot
+
+        at_spot = realized_pnl_usdc_at_spot(row, spot_index)
+        if at_spot is not None:
+            return at_spot
+    return to_decimal(row.get("realized_pnl"))
+
+
+def _cumulative_pnl_series(
+    closed: list[dict[str, Any]],
+    *,
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
     """Return per-book + total cumulative realized PnL by UTC day.
 
-    Each closed group has a ``closed_timestamp_ms`` and ``realized_pnl`` in
-    USDC equivalent (engine invariant). We bucket by UTC day so the chart
-    works even when only ~20 trades exist.
+    When ``spot_index`` is set, coin-collateral rows use stablecoin display rules
+    (profit-sweep USDT proceeds + live index for unswept native). Otherwise each
+    closed group's stored ``realized_pnl`` is used.
     """
     daily_by_book: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
     daily_total: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
     realized = [g for g in closed if g.get("closed_timestamp_ms") is not None and g.get("realized_pnl") is not None]
     for g in realized:
         day = _bucket_day_utc(int(g["closed_timestamp_ms"]))
-        pnl = to_decimal(g["realized_pnl"])
+        pnl = _stable_realized_pnl_usdc(g, spot_index)
+        if pnl is None:
+            continue
         book = str(g.get("collateral_currency") or g.get("currency") or "USDC").upper()
         daily_by_book[book][day] += pnl
         daily_total[day] += pnl
@@ -675,6 +764,227 @@ def _cumulative_pnl_series_from_store(accounts: list[DashboardAccount]) -> dict[
         daily_total,
         realized_count=metrics.closed_count(scope_key),
     )
+
+
+def _cumulative_stable_pnl_series(
+    accounts: list[DashboardAccount],
+    *,
+    spot_index: dict[str, Decimal] | None,
+) -> dict[str, Any]:
+    """Cumulative realized PnL in stablecoin terms (matches dashboard overview KPIs)."""
+    from .groups_service import _aggregate_closed_groups
+
+    closed = _aggregate_closed_groups(accounts)
+    return _cumulative_pnl_series(closed, spot_index=spot_index)
+
+
+_CRYPTO_NATIVE_HINT_MAX: dict[str, Decimal] = {
+    "BTC": Decimal("10"),
+    "ETH": Decimal("100"),
+}
+
+
+def _coin_book_equity_looks_native(raw: Decimal, book: str) -> bool:
+    """Legacy ledger rows sometimes store coin-book ``equity_by_book`` in native units."""
+    book = str(book or "").upper()
+    cap = _CRYPTO_NATIVE_HINT_MAX.get(book)
+    if cap is None or raw <= 0:
+        return False
+    return raw <= cap
+
+
+def compute_equity_native_by_book_for_row(
+    row: dict[str, Any],
+    *,
+    index_btc: Decimal | None = None,
+    index_eth: Decimal | None = None,
+    books: tuple[str, ...] = ("BTC", "ETH", "USDC", "USDT"),
+) -> dict[str, Decimal]:
+    """Return native balances for each book present on a ledger snapshot row."""
+    out: dict[str, Decimal] = {}
+    for book in books:
+        native = _equity_native_from_ledger_row(
+            row,
+            book,
+            index_btc=index_btc,
+            index_eth=index_eth,
+        )
+        if native is not None:
+            out[book] = native
+    return out
+
+
+def _resolve_index_prices_for_ledger_row(
+    row: dict[str, Any],
+    *,
+    market_store: Any | None,
+    index_btc_series: list[tuple[int, Decimal]] | None = None,
+    index_eth_series: list[tuple[int, Decimal]] | None = None,
+) -> tuple[Decimal | None, Decimal | None]:
+    btc = to_decimal(row.get("index_btc_usd")) if row.get("index_btc_usd") else None
+    eth = to_decimal(row.get("index_eth_usd")) if row.get("index_eth_usd") else None
+    if btc is not None and btc > 0 and eth is not None and eth > 0:
+        return btc, eth
+    ts = int(row.get("ts_ms") or 0)
+    if market_store is not None and ts > 0:
+        snap = market_store.nearest_at_or_before(ts)
+        if snap is None:
+            snap = market_store.latest()
+        if snap is not None:
+            if btc is None or btc <= 0:
+                btc = snap.btc_usd
+            if eth is None or eth <= 0:
+                eth = snap.eth_usd
+    if ts > 0:
+        if (btc is None or btc <= 0) and index_btc_series:
+            btc = _index_price_at_series(index_btc_series, ts)
+        if (eth is None or eth <= 0) and index_eth_series:
+            eth = _index_price_at_series(index_eth_series, ts)
+    return btc, eth
+
+
+def _index_price_at_series(series: list[tuple[int, Decimal]], ts_ms: int) -> Decimal | None:
+    if not series:
+        return None
+    best_ts, best_px = min(series, key=lambda item: abs(item[0] - ts_ms))
+    return best_px if best_px > 0 else None
+
+
+def _equity_native_from_ledger_row(
+    row: dict[str, Any],
+    book: str,
+    *,
+    index_btc: Decimal | None = None,
+    index_eth: Decimal | None = None,
+) -> Decimal | None:
+    """Native book equity from ledger row.
+
+    Prefer stored ``equity_native_by_book``; for legacy rows derive coin books from
+    ``equity_by_book`` (USDC equivalent at snapshot) ÷ index price at snapshot time.
+    """
+    book = str(book or "").upper()
+    native_map = row.get("equity_native_by_book") or {}
+    equity_map = row.get("equity_by_book") or {}
+    usdc_eq_raw = equity_map.get(book)
+    usdc_eq = to_decimal(usdc_eq_raw) if usdc_eq_raw is not None else None
+
+    if book in native_map and native_map.get(book) is not None:
+        native = to_decimal(native_map[book])
+        if book in ("USDC", "USDT") or native > 0 or usdc_eq is None or usdc_eq <= 0:
+            return native
+
+    if usdc_eq is None:
+        return None
+
+    if book in ("USDC", "USDT"):
+        return usdc_eq
+
+    row_btc_idx = to_decimal(row.get("index_btc_usd")) if row.get("index_btc_usd") else None
+    row_eth_idx = to_decimal(row.get("index_eth_usd")) if row.get("index_eth_usd") else None
+    if book == "BTC":
+        idx = row_btc_idx if row_btc_idx is not None and row_btc_idx > 0 else index_btc
+    elif book == "ETH":
+        idx = row_eth_idx if row_eth_idx is not None and row_eth_idx > 0 else index_eth
+    else:
+        return None
+    if idx is None or idx <= 0:
+        return None
+    if _coin_book_equity_looks_native(usdc_eq, book):
+        return usdc_eq
+    return usdc_eq / idx
+
+
+def _market_index_lookup(accounts: list[DashboardAccount]) -> Any | None:
+    if not accounts:
+        return None
+    repo_root = find_repo_root(accounts[0].env_file)
+    if repo_root is None:
+        return None
+    from ..market_snapshot_store import MarketSnapshotStore
+
+    path = shared_market_db_path(repo_root)
+    if not path.exists():
+        return None
+    return MarketSnapshotStore(path)
+
+
+def _index_prices_for_ledger_row(
+    row: dict[str, Any],
+    *,
+    market_store: Any | None,
+    index_btc_series: list[tuple[int, Decimal]] | None = None,
+    index_eth_series: list[tuple[int, Decimal]] | None = None,
+) -> tuple[Decimal | None, Decimal | None]:
+    return _resolve_index_prices_for_ledger_row(
+        row,
+        market_store=market_store,
+        index_btc_series=index_btc_series,
+        index_eth_series=index_eth_series,
+    )
+
+
+def _equity_native_by_book_series(
+    accounts: list[DashboardAccount],
+    *,
+    max_chart_days: int = ROLLING_APR_MAX_CHART_DAYS,
+) -> dict[str, Any]:
+    """Daily last native equity per book from ledger snapshots (de-duped by API login)."""
+    books = ("BTC", "ETH", "USDC")
+    market_store = _market_index_lookup(accounts)
+    last_by_day_identity: dict[tuple[date, str], tuple[int, dict[str, Any]]] = {}
+    for account in accounts:
+        identity = _live_api_identity(account)
+        for row in _read_ledger(account.ledger_root):
+            ts = int(row.get("ts_ms") or 0)
+            if ts <= 0:
+                continue
+            day = datetime.fromtimestamp(ts / 1000, tz=UTC).date()
+            key = (day, identity)
+            prev = last_by_day_identity.get(key)
+            if prev is None or ts >= prev[0]:
+                last_by_day_identity[key] = (ts, row)
+
+    daily_by_book: dict[date, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
+    for (day, _identity), (_ts, row) in last_by_day_identity.items():
+        index_btc, index_eth = _index_prices_for_ledger_row(row, market_store=market_store)
+        for book in books:
+            native = _equity_native_from_ledger_row(
+                row,
+                book,
+                index_btc=index_btc,
+                index_eth=index_eth,
+            )
+            if native is None:
+                continue
+            daily_by_book[day][book] += native
+
+    if not daily_by_book:
+        return {
+            "books": list(books),
+            "series_by_book": {book: [] for book in books},
+            "day_count": 0,
+        }
+
+    first_day = min(daily_by_book.keys())
+    last_day = max(daily_by_book.keys())
+    chart_start = first_day
+    if max_chart_days > 0 and (last_day - first_day).days + 1 > max_chart_days:
+        chart_start = last_day - timedelta(days=max_chart_days - 1)
+
+    series_by_book: dict[str, list[dict[str, Any]]] = {book: [] for book in books}
+    cursor = chart_start
+    while cursor <= last_day:
+        day_str = cursor.strftime("%Y-%m-%d")
+        for book in books:
+            equity = daily_by_book[cursor].get(book, Decimal("0"))
+            series_by_book[book].append({"date": day_str, "equity_native": str(equity)})
+        cursor += timedelta(days=1)
+
+    return {
+        "books": list(books),
+        "series_by_book": series_by_book,
+        "day_count": (last_day - chart_start).days + 1,
+    }
 
 
 def _rolling_apr_series_from_store(

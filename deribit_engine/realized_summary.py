@@ -63,16 +63,35 @@ def _annualize_apr(pnl: Decimal, sample_days: Decimal, capital: Decimal) -> Deci
     return safe_div(pnl, capital) * (Decimal("365") / sample_days)
 
 
+def profit_sweep_lifetime_usdt(group: TradeGroup) -> Decimal:
+    """Journal lifetime USDT high-water from premium swap reconcile."""
+    lifetime = group.profit_sweep_quote_proceeds_lifetime
+    if lifetime > 0:
+        return lifetime
+    quote = group.profit_sweep_quote_proceeds
+    if quote > 0 and str(group.profit_sweep_status or "").lower() == "filled":
+        return quote
+    return Decimal("0")
+
+
+def profit_sweep_realized_usdt(group: TradeGroup) -> Decimal:
+    """USDT actually received from premium swap fills (exchange quote, not reconcile high-water)."""
+    quote = group.profit_sweep_quote_proceeds
+    if quote > 0 and str(group.profit_sweep_status or "").lower() == "filled":
+        return quote
+    return profit_sweep_lifetime_usdt(group)
+
+
 def _profit_sweep_display_usdc(
     group: TradeGroup,
     native: Decimal,
     spot: Decimal,
 ) -> Decimal:
-    """Coin profit swapped to USDT uses actual quote proceeds, not live spot on sold size."""
+    """Coin profit swapped to USDT uses lifetime quote proceeds, not live wallet."""
     if native <= 0:
         return native * spot
     sweep = str(group.profit_sweep_status or "").lower()
-    swept_usdt = group.profit_sweep_quote_proceeds
+    swept_usdt = profit_sweep_realized_usdt(group)
     sweep_amt = group.profit_sweep_amount if group.profit_sweep_amount > 0 else native
     if sweep == "filled" and swept_usdt > 0:
         swept_native = min(sweep_amt, native)

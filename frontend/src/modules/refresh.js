@@ -14,11 +14,12 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, num, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, updateUnderlyingIndexCache } from "./domain.js";
+import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, formatFetchError, isInvestorOverviewDisplayReady, mergeStatusPayload, num, premiumSweepFillStatsByBook, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, transfersUrl, updateUnderlyingIndexCache, applyDiskGroupsPayload } from "./domain.js";
+import { saveInvestorCache } from "./investor-cache.js";
 import { loadChartJs } from "./chart-vendor.js";
 import { formatDateTimeHmsLocal } from "./date-time.js";
-import { aprSeriesUrl, renderAprChart, renderBookEquityChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
-import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress } from "./render.js";
+import { aprSeriesUrl, renderAprChart, renderCumulativeSpotPnlChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
+import { renderAccountCards, renderAggregate, renderBookCards, renderRecentActivity, renderRegime, renderStrategyGroups, renderStress, renderTransferCards } from "./render.js";
 
 /** Set for the duration of refreshAll; used by background status/bundle retries. */
 let activeRenderDashboard = null;
@@ -209,11 +210,11 @@ export async function renderPerformanceCharts() {
     await loadChartJs();
   } catch (err) {
     console.error("chart vendor load failed", err);
-    showToast(`charts: ${err.message}`);
+    showToast(`${i18n("charts", "圖表")}: ${formatFetchError(err)}`);
     return;
   }
   const chartFns = [
-    ["risk-capital", renderBookEquityChart],
+    ["risk-capital", renderCumulativeSpotPnlChart],
     ["cum-pnl", renderCumulativePnlChart],
     ["daily-pnl", renderDailyPnlChart],
     ["apr", renderAprChart],
@@ -227,6 +228,9 @@ export async function renderPerformanceCharts() {
   }
   scheduleChartResizeAll();
 }
+
+/** Minimum time the blocking investor overlay stays visible (allows first paint). */
+const INVESTOR_LOAD_MIN_MS = 450;
 
 const INVESTOR_LOAD_STEPS = {
   spot: {
@@ -248,6 +252,10 @@ const INVESTOR_LOAD_STEPS = {
   cumulative: {
     en: "Loading realized P&L history…",
     zh: "正在載入已實現損益歷史…",
+  },
+  "spot-pnl": {
+    en: "Loading spot P&L history…",
+    zh: "正在載入 spot 損益歷史…",
   },
   apr: {
     en: "Calculating rolling performance (APR)…",
@@ -278,7 +286,7 @@ export function investorLoadLabel(stepKey) {
 
 export function investorLoadStepCount(hasPrivateCreds, { includeCharts = true } = {}) {
   let steps = 2 + 1 + (hasPrivateCreds ? 2 : 0) + 1;
-  if (includeCharts) steps += 2;
+  if (includeCharts) steps += 3;
   return steps;
 }
 
@@ -298,12 +306,12 @@ export function applyInvestorLoadCopy() {
     const el = document.querySelector(`[data-investor-load-${attr}]`);
     if (el) el.textContent = i18n(en, zh);
   };
-  set("eyebrow", "Please wait", "請稍候");
-  set("title", "Loading your portfolio", "正在載入您的投資組合");
+  set("eyebrow", "Initializing", "初始化中");
+  set("title", "Loading portfolio data", "正在載入投資組合資料");
   set(
     "hint",
-    "Showing snapshot first; live positions and P&L sync in the background.",
-    "先顯示最近快照；持倉與損益於背景同步中。"
+    "Restoring cached snapshot; live marks sync in the background.",
+    "先還原快取快照；即時標價於背景同步。"
   );
 }
 
@@ -311,6 +319,8 @@ export function beginInvestorLoad({ blocking = true } = {}) {
   if (!INVESTOR) return;
   STATE.investorLoadDone = 0;
   STATE.investorLoadTotal = investorLoadStepCount(false);
+  STATE.investorLoadStartedMs = Date.now();
+  STATE.investorLoadDismissAllowed = false;
   document.body.classList.toggle("investor-blocking-load", blocking);
   const overlay = document.getElementById("investor-load-overlay");
   if (overlay) {
@@ -321,6 +331,33 @@ export function beginInvestorLoad({ blocking = true } = {}) {
   const refreshBtn = document.getElementById("refresh-now");
   if (refreshBtn) refreshBtn.disabled = true;
   setInvestorLoadProgress(0, "spot");
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      STATE.investorLoadDismissAllowed = true;
+    });
+  });
+}
+
+function investorOverlayDismissDelayMs() {
+  const started = STATE.investorLoadStartedMs || 0;
+  const minRemaining = Math.max(0, INVESTOR_LOAD_MIN_MS - (Date.now() - started));
+  if (!STATE.investorLoadDismissAllowed) {
+    return Math.max(minRemaining, 32);
+  }
+  return minRemaining;
+}
+
+function scheduleInvestorOverlayDismiss(onReady) {
+  const attempt = () => {
+    if (!INVESTOR || STATE.investorReady) return;
+    const delayMs = investorOverlayDismissDelayMs();
+    if (delayMs > 0) {
+      setTimeout(attempt, delayMs);
+      return;
+    }
+    onReady();
+  };
+  attempt();
 }
 
 export function advanceInvestorLoad(stepKey) {
@@ -370,6 +407,7 @@ export async function tickHeaderSpot({ renderDependentViews = true, updateDom = 
     if (updateDom) {
       updateHeaderSpotDom();
       if (renderDependentViews && !STATE.refreshInFlight) {
+        renderAggregate(STATE.status, STATE.report);
         renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
         renderRecentActivity(STATE.status, STATE.report, STATE.groups);
       }
@@ -389,6 +427,11 @@ export function stressSectionOpen() {
   return Boolean(el?.open);
 }
 
+export function transfersSectionOpen() {
+  const el = document.getElementById("transfers-section");
+  return Boolean(el?.open);
+}
+
 export async function fetchPortfolioSnapshot() {
   try {
     const d = await fetchJson("/api/portfolio/snapshot");
@@ -398,10 +441,34 @@ export async function fetchPortfolioSnapshot() {
       STATE.summaryLoadPending = false;
       STATE.summaryLoadInFlight = false;
     }
-    if (d?.source === "ledger") {
-      STATE.dataFreshness.source = "snapshot";
+    if (d?.groups) {
+      applyDiskGroupsPayload(d.groups);
+    }
+    const liveStatus = d?.live_status;
+    if (liveStatus && typeof liveStatus === "object") {
+      STATE.status = mergeStatusPayload(STATE.status, liveStatus);
+    }
+    if (!premiumSweepFillStatsByBook(STATE.status) && Boolean(STATE.health?.has_private_creds)) {
+      fetchJson("/api/status")
+        .then((status) => {
+          if (status?.premium_sweep_fill_stats_by_book) {
+            STATE.status = mergeStatusPayload(STATE.status, status);
+            invokeRenderDashboard();
+          }
+        })
+        .catch(() => {});
+    }
+    if (d?.source === "ledger" || d?.source === "portal_cache") {
+      if (d.source === "portal_cache" && d.cache_kind === "live") {
+        STATE.dataFreshness.source = "live";
+        STATE.dataFreshness.live = true;
+        STATE.dataFreshness.statusMs = 0;
+        STATE.groupsLivePending = false;
+      } else {
+        STATE.dataFreshness.source = "snapshot";
+        STATE.dataFreshness.live = false;
+      }
       STATE.dataFreshness.snapshotMs = num(d.freshness_ms);
-      STATE.dataFreshness.live = false;
     }
   } catch (_) {
     /* snapshot is optional for first paint */
@@ -419,7 +486,7 @@ export async function fetchStatusWithTimeout() {
   });
   try {
     const d = await Promise.race([fetchJson("/api/status"), timeoutPromise]);
-    STATE.status = d;
+    STATE.status = mergeStatusPayload(STATE.status, d);
     STATE.statusErrorOnce = false;
     STATE.dataFreshness.source = "live";
     STATE.dataFreshness.live = true;
@@ -438,7 +505,7 @@ export async function fetchStatusWithTimeout() {
       }
       fetchJson("/api/status")
         .then((d) => {
-          STATE.status = d;
+          STATE.status = mergeStatusPayload(STATE.status, d);
           STATE.dataFreshness.source = "live";
           STATE.dataFreshness.live = true;
           invokeRenderDashboard();
@@ -448,7 +515,7 @@ export async function fetchStatusWithTimeout() {
     }
     STATE.status = null;
     if (!STATE.statusErrorOnce) {
-      showToast(`status: ${err.message}`, {
+      showToast(`${i18n("status", "即時狀態")}: ${formatFetchError(err)}`, {
         retry: () => refreshAll({ force: true, renderDashboard: persistentRenderDashboard }),
       });
       STATE.statusErrorOnce = true;
@@ -495,34 +562,61 @@ export async function fetchDashboardBundle({ backgroundOnTimeout = false, sectio
       return false;
     }
     if (!INVESTOR || !timedOut) {
-      showToast(`dashboard bundle: ${err.message}`);
+      showRefreshFetchToast(i18n("dashboard bundle", "Dashboard 資料"), err, {
+        hasCachedData: Boolean(STATE.status || STATE.groups?.open?.length || STATE.groups?.closed?.length),
+      });
     }
     return false;
   }
 }
 
 async function fetchChartSeries(investorFetchWrap = null) {
+  const chartFetchOpts =
+    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+      ? { signal: AbortSignal.timeout(INVESTOR_STATUS_TIMEOUT_MS) }
+      : {};
+
   const fetchCumulative = () =>
-    fetchJson("/api/cumulative_pnl_series")
+    fetchJson("/api/cumulative_pnl_series", chartFetchOpts)
       .then((d) => {
         STATE.cumulativePnl = d;
       })
-      .catch((err) => showToast(`cumulative pnl: ${err.message}`));
+      .catch((err) =>
+        showRefreshFetchToast(i18n("cumulative pnl", "累積損益"), err, {
+          hasCachedData: Boolean(STATE.cumulativePnl),
+        })
+      );
+
+  const fetchSpotPnlSeries = () =>
+    fetchJson("/api/cumulative_spot_pnl_series", chartFetchOpts)
+      .then((d) => {
+        STATE.cumulativeSpotPnl = d;
+      })
+      .catch((err) =>
+        showRefreshFetchToast(i18n("cumulative spot pnl", "累積 spot 損益"), err, {
+          hasCachedData: Boolean(STATE.cumulativeSpotPnl),
+        })
+      );
 
   const fetchApr = () =>
-    fetchJson(aprSeriesUrl())
+    fetchJson(aprSeriesUrl(), chartFetchOpts)
       .then((d) => {
         STATE.aprSeries = d;
       })
-      .catch((err) => showToast(`apr series: ${err.message}`));
+      .catch((err) =>
+        showRefreshFetchToast(i18n("apr series", "APR 序列"), err, {
+          hasCachedData: Boolean(STATE.aprSeries),
+        })
+      );
 
   if (investorFetchWrap) {
     await Promise.all([
       investorFetchWrap("cumulative", fetchCumulative),
+      investorFetchWrap("spot-pnl", fetchSpotPnlSeries),
       investorFetchWrap("apr", fetchApr),
     ]);
   } else {
-    await Promise.all([fetchCumulative(), fetchApr()]);
+    await Promise.all([fetchCumulative(), fetchSpotPnlSeries(), fetchApr()]);
   }
 }
 
@@ -570,9 +664,34 @@ export async function loadStressIfNeeded({ force = false } = {}) {
     STATE.stressDataLoaded = true;
     renderStress(STATE.stress);
   } catch (err) {
-    showToast(`stress: ${err.message}`);
+    showRefreshFetchToast(i18n("stress", "壓力測試"), err, {
+      hasCachedData: Boolean(STATE.stress),
+    });
   } finally {
     STATE.stressLoadInFlight = false;
+  }
+}
+
+export async function loadTransfersIfNeeded({ force = false } = {}) {
+  if (!force && !transfersSectionOpen()) return;
+  if (!force && STATE.transfersDataLoaded) {
+    renderTransferCards(STATE.transfers);
+    return;
+  }
+  if (STATE.transfersLoadInFlight) return;
+  if (!STATE.health?.has_private_creds) return;
+  STATE.transfersLoadInFlight = true;
+  try {
+    const d = await fetchJson(transfersUrl(90, 100));
+    STATE.transfers = d;
+    STATE.transfersDataLoaded = true;
+    renderTransferCards(STATE.transfers);
+  } catch (err) {
+    showRefreshFetchToast(i18n("asset transfers", "資產劃轉"), err, {
+      hasCachedData: Boolean(STATE.transfers),
+    });
+  } finally {
+    STATE.transfersLoadInFlight = false;
   }
 }
 
@@ -602,8 +721,15 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
   STATE.refreshInFlight = true;
   STATE.lastRefreshStartedMs = Date.now();
   const investorFirstLoad = INVESTOR && !STATE.investorReady;
+  function showRefreshFetchToast(label, err, { retry, hasCachedData = false } = {}) {
+    if (silentIfLimited && hasCachedData && STATE.lastRefreshMs) return;
+    const msg = formatFetchError(err);
+    showToast(`${label}: ${msg}`, retry ? { retry } : undefined);
+  }
   if (investorFirstLoad) {
-    beginInvestorLoad({ blocking: true });
+    if (!STATE.investorLoadStartedMs) {
+      beginInvestorLoad({ blocking: true });
+    }
   } else {
     setRefreshProgressBar(true, { indeterminate: true });
     setRefreshControlsDisabled(true);
@@ -642,14 +768,18 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     function maybeDismissInvestorOverlay() {
       if (!investorFirstLoad) return;
       const snap = STATE.portfolioSnapshot;
-      const hasPortfolio = snap?.source === "ledger" && snap?.portfolio;
+      const hasPortfolio =
+        (snap?.source === "ledger" || snap?.source === "portal_cache") && snap?.portfolio;
       const hasSummary = Boolean(STATE.report?.summary);
       if (!hasPortfolio && !hasSummary) return;
-      if (!STATE.investorReady) {
-        setInvestorPageReady(true);
-        setRefreshProgressBar(true, { indeterminate: true });
-      }
-      scheduleRender();
+      if (!isInvestorOverviewDisplayReady()) return;
+      scheduleInvestorOverlayDismiss(() => {
+        if (!STATE.investorReady) {
+          setInvestorPageReady(true);
+          setRefreshProgressBar(true, { indeterminate: true });
+        }
+        scheduleRender();
+      });
     }
 
     function getSnapshotLoad() {
@@ -662,6 +792,10 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         snapshotPromise = investorFirstLoad ? investorFetch("snapshot", run) : run();
       }
       return snapshotPromise;
+    }
+
+    if (INVESTOR && investorFirstLoad) {
+      getSnapshotLoad();
     }
 
     function ensureSummaryLoad() {
@@ -682,7 +816,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
             return true;
           })
           .catch((err) => {
-            showToast(`realized summary: ${err.message}`);
+            showRefreshFetchToast(i18n("realized summary", "已實現損益"), err, {
+              hasCachedData: Boolean(STATE.report?.summary),
+            });
             return false;
           });
       const tracked = wrapStep("summary", load);
@@ -708,7 +844,6 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         });
       }
       if (d?.has_private_creds) {
-        if (INVESTOR && investorFirstLoad) getSnapshotLoad();
         ensureSummaryLoad()?.then(() => maybeDismissInvestorOverlay());
       }
       return d;
@@ -725,7 +860,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         ),
       ]);
     } catch (err) {
-      showToast(`health failed: ${err.message}`);
+      showRefreshFetchToast(i18n("health", "連線狀態"), err, {
+        hasCachedData: Boolean(STATE.health),
+      });
     }
 
     const hasPrivateCreds = Boolean(STATE.health?.has_private_creds);
@@ -748,8 +885,14 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       }
       maybeDismissInvestorOverlay();
       if (!STATE.investorReady) {
-        setInvestorPageReady(true);
-        setRefreshProgressBar(true, { indeterminate: true });
+        scheduleInvestorOverlayDismiss(() => {
+          if (!STATE.investorReady) {
+            setInvestorPageReady(true);
+            setRefreshProgressBar(true, { indeterminate: true });
+          }
+          scheduleRender();
+        });
+      } else {
         scheduleRender();
       }
       snapshotFetchedThisRefresh = true;
@@ -772,7 +915,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
           scheduleRender();
         })
         .catch((err) => {
-          showToast(`groups: ${err.message}`);
+          showRefreshFetchToast(i18n("groups", "持倉"), err, {
+            hasCachedData: Boolean(STATE.groups?.open?.length || STATE.groups?.closed?.length),
+          });
         });
     }
 
@@ -783,14 +928,14 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     function fetchStatusOp() {
       return fetchJson("/api/status")
         .then((d) => {
-          STATE.status = d;
+          STATE.status = mergeStatusPayload(STATE.status, d);
           STATE.statusErrorOnce = false;
           scheduleRender();
         })
         .catch((err) => {
           STATE.status = null;
           if (!STATE.statusErrorOnce) {
-            showToast(`status: ${err.message}`, {
+            showToast(`${i18n("status", "即時狀態")}: ${formatFetchError(err)}`, {
               retry: () => refreshAll({ force: true, renderDashboard: persistentRenderDashboard }),
             });
             STATE.statusErrorOnce = true;
@@ -800,6 +945,10 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
 
     function fetchStress() {
       return loadStressIfNeeded({ force: true });
+    }
+
+    function fetchTransfers() {
+      return loadTransfersIfNeeded({ force: true });
     }
 
     async function fetchPortfolioDataIndividual() {
@@ -819,6 +968,8 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         STATE.report = null;
         STATE.stress = null;
         STATE.stressDataLoaded = false;
+        STATE.transfers = null;
+        STATE.transfersDataLoaded = false;
         return;
       }
       if (USE_DASHBOARD_BUNDLE) {
@@ -868,6 +1019,11 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       wave.push(() => fetchStress());
     }
 
+    const transfersNeeded = hasPrivateCreds && transfersSectionOpen();
+    if (transfersNeeded) {
+      wave.push(() => fetchTransfers());
+    }
+
     if (INVESTOR && !snapshotFetchedThisRefresh) {
       wave.push(() =>
         wrapStep("snapshot", () => fetchPortfolioSnapshot().then(() => scheduleRender()))
@@ -890,9 +1046,15 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       STATE.stress = null;
     }
 
-    if (!INVESTOR || STATE.investorReady) {
-      scheduleRender();
+    if (INVESTOR && !STATE.investorReady && isInvestorOverviewDisplayReady()) {
+      scheduleInvestorOverlayDismiss(() => {
+        if (!STATE.investorReady) {
+          setInvestorPageReady(true);
+        }
+      });
     }
+
+    scheduleRender();
 
     setRefreshProgressBar(false);
     setRefreshControlsDisabled(false);
@@ -903,5 +1065,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     setRefreshProgressBar(false);
     setRefreshControlsDisabled(false);
     activeRenderDashboard = null;
+    if (INVESTOR) {
+      saveInvestorCache();
+      invokeRenderDashboard();
+    }
   }
 }

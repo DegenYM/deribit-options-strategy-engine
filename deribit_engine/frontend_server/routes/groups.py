@@ -10,11 +10,24 @@ LOGGER = logging.getLogger(__name__)
 
 
 def register_groups_routes(app: Any, ctx: RouteContext) -> None:
+    from fastapi import HTTPException, Query
+    from fastapi.responses import JSONResponse
+
     import deribit_engine.frontend_server as pkg
 
     @app.get("/api/groups")
-    def api_groups() -> Any:
-        from fastapi.responses import JSONResponse
+    def api_groups(
+        snapshot: bool = Query(default=False, description="Disk-only groups (no Deribit prefetch)"),
+    ) -> Any:
+        if snapshot:
+            try:
+                spot_idx = pkg._spot_index_decimals(ctx.spot_cache.get_or_set("spot", ctx.fetch_spot))
+                payload = copy.deepcopy(pkg._aggregate_groups_disk_only(ctx.accounts, spot_index=spot_idx or None))
+                pkg._apply_spot_native_backfill(payload, spot_idx)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("dashboard /api/groups?snapshot=1 failed: %s", exc)
+                raise HTTPException(status_code=500, detail=f"groups snapshot failed: {exc}") from exc
+            return JSONResponse(pkg._decimalize(payload))
 
         cache_key = ("groups", pkg._closed_groups_cache_key(ctx.accounts))
 
@@ -29,8 +42,6 @@ def register_groups_routes(app: Any, ctx: RouteContext) -> None:
                 LOGGER.warning("dashboard /api/groups using stale cache: %s", exc)
                 payload = copy.deepcopy(stale)
             else:
-                from fastapi import HTTPException
-
                 raise HTTPException(status_code=500, detail=f"groups failed: {exc}") from exc
         try:
             spot_idx = pkg._spot_index_decimals(ctx.spot_cache.get_or_set("spot", ctx.fetch_spot))

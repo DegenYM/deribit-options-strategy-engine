@@ -7,9 +7,16 @@
     <!-- <meta name="dashboard-api-base" content="https://your-dashboard.example.com" /> -->
     <title>Investor summary · Deribit options</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=56b288d187" as="script" />
-    <link rel="stylesheet" href="/tailwind.css?v=72d54db90e" />
-    <link rel="stylesheet" href="/styles.css?v=ce00fba6d7" />
+    <link rel="preload" href="/app-investor.js?v=090d5bcabf" as="script" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/tailwind.css?v=38291f0f19" />
+    <link rel="stylesheet" href="/tokens.css?v=ds003" />
+    <link rel="stylesheet" href="/styles.css?v=869fcb1d5d" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -27,40 +34,28 @@
       })();
     </script>
   </head>
-  <body class="app-body investor-portal investor-blocking-load text-slate-100 min-h-screen font-sans">
+  <body class="app-body investor-portal">
     <script>
       window.__DASHBOARD_MODE__ = "investor";
       window.__INVESTOR_LOCALE__ = "en";
       // When this file is served from static hosting, point API calls at your public dashboard URL (same host you bind with --host 0.0.0.0 or your reverse proxy):
       // window.__API_BASE__ = "https://portfolio.yourcompany.com";
     </script>
+    <a class="skip-link" href="#dashboard-main">Skip to content</a>
     <header class="app-header">
       <div class="dashboard-shell investor-header-shell py-3 flex flex-wrap items-center gap-3">
         <div class="investor-header-title min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight text-slate-50">Investor summary</h1>
-          <p class="text-xs text-slate-500">
+          <h1 class="page-title">Investor summary</h1>
+          <p class="page-subtitle">
             Live equity and strategy snapshot. Not investment advice. For operational detail use the internal dashboard.
           </p>
         </div>
         <div class="investor-header-meta flex flex-wrap items-center gap-2 min-w-0 flex-1">
-          <div class="investor-header-badges flex flex-wrap items-center gap-2">
-            <span
-              id="env-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-            >Loading…</span>
-            <span
-              id="regime-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-            >Risk posture: —</span>
-            <span
-              id="strategy-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300"
-            >Strategy: —</span>
-            <span
-              id="profit-sweep-badge"
-              class="text-xs px-2 py-0.5 rounded-full border border-slate-700 bg-slate-800/60 text-slate-300 hidden"
-              hidden
-            >Profit → USDT: —</span>
+          <div class="investor-header-badges">
+            <span id="env-badge" class="inv-chip inv-chip--neutral">Loading…</span>
+            <span id="regime-badge" class="inv-chip inv-chip--neutral">Risk · —</span>
+            <span id="strategy-badge" class="inv-chip inv-chip--info">Strategy · —</span>
+            <span id="profit-sweep-badge" class="inv-chip inv-chip--success hidden" hidden>Sweep · —</span>
           </div>
           <div class="investor-header-spot header-market-strip" aria-label="Spot and IV Rank">
             <div id="header-spot-btc" class="header-market-card header-market-card--btc">
@@ -77,18 +72,13 @@
             </div>
           </div>
         </div>
-        <div class="investor-header-actions ml-auto flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-400">
+        <div class="header-actions investor-header-actions">
           <span id="last-refresh" aria-live="polite">Last refresh (local time): —</span>
           <label class="inline-flex items-center gap-1 cursor-pointer select-none">
-            <input id="auto-refresh" type="checkbox" class="accent-emerald-500" checked />
+            <input id="auto-refresh" type="checkbox" checked />
             Auto refresh
           </label>
-          <button
-            id="refresh-now"
-            class="px-2 py-1 rounded border border-slate-700 hover:bg-slate-800 transition"
-          >
-            Refresh
-          </button>
+          <button id="refresh-now" type="button" class="ds-btn ds-btn-secondary">Refresh</button>
         </div>
       </div>
     </header>
@@ -102,23 +92,31 @@
       <div class="investor-progress-bar-fill"></div>
     </div>
 
-    <main class="dashboard-shell dashboard-main">
+    <main id="dashboard-main" class="dashboard-shell dashboard-main">
       <section class="section-card priority-section">
         <div class="section-heading">
           <div>
             <p class="section-eyebrow">Overview</p>
-            <h2 class="section-title">Portfolio headline metrics (USDC equivalent)</h2>
+            <h2 class="section-title">Portfolio Summary</h2>
           </div>
           <p class="section-copy">
-            Equity, day P&amp;L, open premium collected, and realized history from the live Deribit link and on-disk state. Figures are indicative and may lag.
+            Aggregate equity and intraday P&amp;L; open premium, win rate, and realized P&amp;L history. Figures are indicative and may lag live marks.
           </p>
         </div>
         <div id="aggregate-card" class="overview-panel">
-          <div class="overview-metrics-grid">
-            <div class="skeleton-block h-16 rounded-lg"></div>
-            <div class="skeleton-block h-16 rounded-lg"></div>
-            <div class="skeleton-block h-16 rounded-lg"></div>
-            <div class="skeleton-block h-16 rounded-lg"></div>
+          <div class="overview-stack">
+            <div class="overview-headline">
+              <div class="overview-hero skeleton-block" style="min-height:6.5rem;border-radius:16px"></div>
+              <div class="overview-composition-grid">
+                <section class="overview-composition-card skeleton-block" style="min-height:11rem;border-radius:14px"></section>
+                <section class="overview-composition-card skeleton-block" style="min-height:11rem;border-radius:14px"></section>
+              </div>
+              <div class="overview-stat-row">
+                <div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>
+                <div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>
+                <div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -127,9 +125,9 @@
         <summary class="section-summary">
           <div>
             <p class="section-eyebrow">Strategies &amp; positions</p>
-            <h2 class="section-title">Playbook rollups and open books</h2>
+            <h2 class="section-title">Strategy rollups and open positions</h2>
             <p class="section-copy mt-1">
-              Strategy-level win rate and P&amp;L first, then each open group (including two-leg spreads).
+              Strategy-level win rate and P&amp;L, followed by open position groups (including two-leg spreads).
             </p>
           </div>
           <div class="section-summary-meta">
@@ -195,46 +193,46 @@
           </div>
 
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">Total equity by book (USDC equivalent)</h3>
-                <span class="text-xs text-slate-500" id="risk-capital-meta">—</span>
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">Cumulative realized P&L in spot</h3>
+                <span class="chart-panel-meta" id="risk-capital-meta">—</span>
               </div>
               <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-risk-capital"></canvas>
               </div>
-              <p class="text-xs text-slate-500 mt-2" id="risk-capital-hint">
-                Per-book equity in USDC equivalent from the live snapshot (or last saved snapshot).
+              <p class="chart-panel-hint" id="risk-capital-hint">
+                Per-book cumulative realized PnL in native spot units (BTC / ETH) from closed groups.
               </p>
             </div>
 
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">Cumulative realized P&amp;L (USDC)</h3>
-                <span class="text-xs text-slate-500" id="cum-pnl-meta">—</span>
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">Cumulative realized P&amp;L (StableCoin)</h3>
+                <span class="chart-panel-meta" id="cum-pnl-meta">—</span>
               </div>
               <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-cum-pnl"></canvas>
               </div>
             </div>
 
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">Daily realized P&amp;L (USDC)</h3>
-                <span class="text-xs text-slate-500" id="daily-pnl-meta">—</span>
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">Daily realized P&amp;L (StableCoin)</h3>
+                <span class="chart-panel-meta" id="daily-pnl-meta">—</span>
               </div>
               <div class="h-72 relative chart-panel-canvas">
                 <canvas id="chart-daily-pnl"></canvas>
               </div>
             </div>
 
-            <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <div class="flex justify-between items-baseline mb-2">
-                <h3 class="text-sm font-semibold text-slate-200">Rolling APR (window vs daily total equity)</h3>
-                <div class="text-xs text-slate-400 flex gap-2 items-center">
+            <div class="chart-panel">
+              <div class="chart-panel-head">
+                <h3 class="chart-panel-title">Rolling APR (window vs daily total equity)</h3>
+                <div class="chart-panel-meta flex gap-2 items-center">
                   <label>
                     Window
-                    <select id="apr-window" class="bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-200">
+                    <select id="apr-window" class="ds-select">
                       <option value="7">7d</option>
                       <option value="14">14d</option>
                       <option value="30" selected>30d</option>
@@ -251,13 +249,31 @@
         </div>
       </details>
 
-      <footer class="text-xs text-slate-600 text-center pt-4 pb-8 max-w-3xl mx-auto leading-relaxed">
+      <details id="transfers-section" class="section-card collapsible-section" open>
+        <summary class="section-summary">
+          <div>
+            <p class="section-eyebrow">Cash movement</p>
+            <h2 class="section-title">Asset transfers</h2>
+            <p class="section-copy">
+              Recent internal moves per account—sub-account transfers and cross-book shifts—not deposits or withdrawals.
+            </p>
+          </div>
+          <span class="section-toggle" aria-hidden="true"></span>
+        </summary>
+        <div class="section-body">
+          <div id="transfer-cards" class="transfer-cards-grid">
+            <p class="text-slate-500 text-sm">Loading transfer history…</p>
+          </div>
+        </div>
+      </details>
+
+      <footer class="page-footer">
         For information only; not an offer or recommendation. Crypto and options are volatile and you can lose capital. Past performance does not guarantee future results.
         USDC-equivalent amounts use live FX / index marks. Spread-style reports typically exclude perpetual hedge PnL.
-        <span class="block mt-2 text-slate-500">
-          <a href="/investor.zh.html" class="footer-link text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">繁中投資人摘要</a>
+        <span class="page-footer-links">
+          <a href="/investor.zh.html" class="footer-nav-link">繁中投資人摘要</a>
           ·
-          <a href="/index.html" class="footer-link text-sky-400/90 hover:text-sky-300 underline-offset-2 hover:underline">Internal ops dashboard</a>
+          <a href="/index.html" class="footer-nav-link">Internal ops dashboard</a>
           (paths, margin detail, stress scenarios)
         </span>
       </footer>
@@ -271,15 +287,15 @@
       aria-busy="true"
     >
       <div class="investor-load-card">
-        <p class="investor-load-eyebrow" data-investor-load-eyebrow>Please wait</p>
-        <h2 class="investor-load-title" data-investor-load-title>Loading your portfolio</h2>
+        <p class="investor-load-eyebrow" data-investor-load-eyebrow>Initializing</p>
+        <h2 class="investor-load-title" data-investor-load-title>Loading portfolio data</h2>
         <p class="investor-load-step" data-investor-load-step>Starting…</p>
         <div class="investor-load-bar" aria-hidden="true">
           <div id="investor-load-bar-fill" class="investor-load-bar-fill"></div>
         </div>
         <p class="investor-load-pct" data-investor-load-pct>0%</p>
         <p class="investor-load-hint" data-investor-load-hint>
-          Loading the latest snapshot first, then syncing live Deribit data in the background.
+          Restoring cached snapshot; live marks sync in the background.
         </p>
       </div>
     </div>
@@ -288,9 +304,9 @@
       id="toast"
       role="alert"
       aria-live="assertive"
-      class="fixed bottom-4 right-4 hidden bg-rose-900/90 border border-rose-700 text-rose-100 text-xs px-3 py-2 rounded-lg shadow-lg max-w-sm"
+      class="hidden"
     ></div>
 
-    <script defer src="/app-investor.js?v=56b288d187"></script>
+    <script defer src="/app-investor.js?v=090d5bcabf"></script>
   </body>
 </html>

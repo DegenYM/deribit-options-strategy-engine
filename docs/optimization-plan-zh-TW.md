@@ -3,7 +3,7 @@
 本文件整理 Deribit Options Strategy Engine 的現況、已完成項、以及建議的分階段優化路線。  
 適用對象：管理方 / 維護者；與 [`repo-layout-zh-TW.md`](repo-layout-zh-TW.md)、[`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md) 互補。
 
-最後更新：2026-05-26（Phase 4 前端模組化 + Playwright 完成）
+最後更新：2026-06-13（portal snapshot、profit sweep、docs 同步）
 
 ---
 
@@ -15,10 +15,10 @@
 | **P1** 營運可靠性 | ✅ 已完成 | heartbeat、watchdog、結構化 log、runbooks（commit `0e75d8b`） |
 | **P2** 程式架構 | ✅ 已完成 | `cli/`、`engine/`、`frontend_server/` + CI coverage ≥60% |
 | **P3** 部署與跨平台 | 🟡 進行中 | systemd 範本 ✅；Docker、Uptime 監控待做 |
-| **P4** 前端與對外交付 | ✅ 已完成 | ES modules + Playwright + Access checklist |
+| **P4** 前端與對外交付 | ✅ 已完成 | ES modules + Playwright + Access checklist + portal cache |
 | **P5** 規模化 | ⬜ 未開始 | 觸發條件未到 |
 
-**品質指標（本機）**：280 tests 全綠 · coverage **~66%**（門檻 60%） · Ruff 全綠
+**品質指標（本機）**：548 tests 全綠 · coverage **~66%**（門檻 60%） · Ruff 全綠
 
 ---
 
@@ -35,9 +35,10 @@
 | **管理方 runbook** | `docs/operator-onboarding-zh-TW.md` |
 | **費用與合規** | HWM/NAV 快照、季結算、PDF/MD/CSV、fee 專戶、披露文件 |
 | **常駐** | macOS launchd + Linux systemd 範本；`./bot investor live\|frontend start`（macOS） |
-| **Dashboard 前端** | ES modules（`frontend/src/`）+ esbuild bundle；Playwright 煙霧測試 |
+| **Dashboard 前端** | ES modules + esbuild；Playwright；investor portal disk cache（`portal_snapshots.db`） |
+| **Covered call profit sweep** | 自動 / 手動 sweep、repair 腳本、`./bot profit-sweep` |
 | **API 穩定性** | `exchange_throttle.py` 全进程 pacing |
-| **測試** | 25+ 測試檔、**280** test cases |
+| **測試** | 40+ 測試檔、**548** test cases |
 | **目錄規範** | `docs/repo-layout-zh-TW.md`（canonical vs legacy） |
 | **程式模組** | `deribit_engine/cli/`、`engine/`、`frontend_server/`（Phase 2 拆分後） |
 | **CI coverage** | GitHub Actions `--cov-fail-under=60`（本機 ~66%） |
@@ -64,15 +65,15 @@ _（目前無待收斂項；Phase 0 / 2 已 push 至 main。）_
 **Runtime 只載入一個共用檔**（全投資人）：
 
 ```text
-config/shared/defaults.env   # 或 .env.defaults（gitignore）
+config/shared/.env.defaults   # gitignore；legacy 別名 defaults.env 載入時會提示
 ```
 
-載入順序見 `env_layout.py`：`defaults.env` → 投資人 env → 策略 profile → 子帳 env。
+載入順序見 `env_layout.py`：`.env.defaults` → 投資人 env → 策略 profile → 子帳 env。
 
-- **`defaults.env.example`**：共用參數範本（可 commit）
+- **`.env.defaults.example`**：共用參數範本（可 commit）
 - ~~**`telegram.env.example`**~~：已刪除；設定改由本文 + [`telegram-alerts-zh-TW.md`](telegram-alerts-zh-TW.md) 說明
 
-Telegram 金鑰應寫在 **`defaults.env`**（勿 commit；已在 `.gitignore`）：
+Telegram 金鑰應寫在 **`config/shared/.env.defaults`**（勿 commit；已在 `.gitignore`）：
 
 ```dotenv
 TELEGRAM_ALERTS_ENABLED=true
@@ -92,8 +93,8 @@ TELEGRAM_ALERT_COOLDOWN_SECONDS=300
 | # | 任務 | 產出 / 完成標準 | 狀態 |
 |---|------|-----------------|------|
 | 0.1 | Commit + push CI、pyproject、Telegram、Ruff、CHANGELOG | GitHub Actions 綠燈 | ✅ |
-| 0.2 | 確認 `defaults.env` 內 Telegram 已啟用且 `./bot telegram-test` 成功 | 告警通道可用 | ✅（營運確認） |
-| 0.3 | 刪除 `telegram.env.example`，更新 README / docs 指向單一 `defaults.env` | 設定路徑單一 | ✅ |
+| 0.2 | 確認 `.env.defaults` 內 Telegram 已啟用且 `./bot telegram-test` 成功 | 告警通道可用 | ✅（營運確認） |
+| 0.3 | 刪除 `telegram.env.example`，更新 README / docs 指向單一 `.env.defaults` | 設定路徑單一 | ✅ |
 | 0.4 | Commit `live_enabled` 及對應 tests（若已驗證） | 子帳可「只追蹤不下單」 | ✅ |
 | 0.5 | Commit Phase 2 架構拆分 + coverage CI | main 與本機一致 | ✅ `17b01d9` |
 

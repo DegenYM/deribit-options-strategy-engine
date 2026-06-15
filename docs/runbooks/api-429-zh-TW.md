@@ -24,7 +24,7 @@
 
 ## 設定
 
-- `REQUEST_TIMEOUT_SECONDS`（`defaults.env`）
+- `REQUEST_TIMEOUT_SECONDS`（`config/shared/.env.defaults`）
 - 勿在短時間大量跑 backfill / 手動 script 與 live 共用 key
 
 ## 升級

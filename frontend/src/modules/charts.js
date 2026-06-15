@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, fmtNum, fmtPct, fmtUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, strategyId, strategyInfo, strategyOrder, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -48,17 +48,45 @@ export function chartCommonOptions() {
   };
 }
 
-export function destroyChart(key) {
+const CHART_CANVAS_BY_KEY = {
+  riskCapital: "chart-risk-capital",
+  cumPnl: "chart-cum-pnl",
+  dailyPnl: "chart-daily-pnl",
+  apr: "chart-apr",
+};
+
+function resetCanvasElement(canvas) {
+  if (!canvas) return;
+  canvas.removeAttribute("width");
+  canvas.removeAttribute("height");
+  canvas.style.width = "";
+  canvas.style.height = "";
+}
+
+export function destroyChart(key, canvasId = CHART_CANVAS_BY_KEY[key] || null) {
   const chart = STATE.charts[key];
-  if (!chart) return;
-  const canvas = chart.canvas;
-  chart.destroy();
-  STATE.charts[key] = null;
-  if (canvas) {
-    canvas.removeAttribute("width");
-    canvas.removeAttribute("height");
-    canvas.style.width = "";
-    canvas.style.height = "";
+  if (chart) {
+    try {
+      chart.destroy();
+    } catch (_) {
+      /* ignore */
+    }
+    STATE.charts[key] = null;
+    resetCanvasElement(chart.canvas);
+  }
+  if (!canvasId) return;
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ChartApi = globalThis.Chart;
+  const orphan = ChartApi?.getChart?.(canvas);
+  if (orphan) {
+    try {
+      orphan.destroy();
+    } catch (_) {
+      /* ignore */
+    }
+    STATE.charts[key] = null;
+    resetCanvasElement(canvas);
   }
 }
 
@@ -201,7 +229,7 @@ export function mountEmptyTimeSeriesChart(
 ) {
   const ctx = chartCanvasContext(canvasId);
   if (!ctx) return;
-  destroyChart(key);
+  destroyChart(key, canvasId);
   setChartPanelEmpty(canvasId, {
     empty: true,
     message: emptyChartMessage(messageKind),
@@ -275,12 +303,79 @@ export function lifetimeRealizedClosedRows(report, groups, status = null) {
     ...(report?.recent_closed_trades || []),
   ])
     .filter((g) => isDisplayableClosedTradeGroup(g, st, groups))
+    .filter((g) => String(g?.status || "").toLowerCase() === "closed")
+    .filter((g) => closedTimestampMs(g) !== null)
     .filter((g) => num(g?.realized_pnl) !== null);
+}
+
+/** Per-book lifetime realized USD (same per-group rules as Total profit). */
+export function sumLifetimeRealizedPnlUsdcByBook(report, groups, status) {
+  const out = { BTC: 0, ETH: 0, USDC: 0 };
+  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
+    const book = tradeGroupAprBook(g);
+    if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
+    const pnl = realizedPnlDisplayUsdc(g, status);
+    if (pnl === null) continue;
+    out[book] += pnl;
+  }
+  return out;
+}
+
+/** Per-book lifetime premium profit at live spot (total earned, before swap display split). */
+export function sumLifetimeEarnedUsdByBook(report, groups, status) {
+  const out = { BTC: 0, ETH: 0, USDC: 0 };
+  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
+    const book = tradeGroupAprBook(g);
+    if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
+    const native = realizedPnlInAprBookNative(g, status);
+    if (native === null) continue;
+    if (book === "USDC") {
+      out.USDC += native;
+    } else {
+      const spot = spotUsdForBook(status, book);
+      if (spot !== null && spot > 0) out[book] += native * spot;
+    }
+  }
+  return out;
+}
+
+/** Per-book profit composition: total earned at spot, unswept native, and swapped USDT. */
+export function profitCompositionByBook(report, groups, status) {
+  const earnedUsdByBook = sumLifetimeEarnedUsdByBook(report, groups, status);
+  const earnedNativeByBook = sumLifetimeRealizedPnlNativeByBook(report, groups, status);
+  const usdByBook = sumLifetimeRealizedPnlUsdcByBook(report, groups, status);
+  const swappedUsdtByBook = { BTC: 0, ETH: 0, USDC: 0 };
+  const swappedNativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
+  const nativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
+  const disposition = aggregateProfitDisposition(report, groups, status);
+  if (disposition) {
+    const summary = summarizeProfitDisposition(disposition, { status });
+    if (summary) {
+      for (const book of ["BTC", "ETH"]) {
+        const held = num(summary.spotHeld?.[book]) ?? 0;
+        const pending = num(summary.spotPending?.[book]) ?? 0;
+        let unswept = held + pending;
+        if (!isMeaningfulNativeForBook(unswept, book)) unswept = 0;
+        nativeByBook[book] = unswept;
+        swappedUsdtByBook[book] = num(summary.spotSoldQuote?.[book]) ?? 0;
+        swappedNativeByBook[book] = num(summary.spotSold?.[book]) ?? 0;
+      }
+    }
+    nativeByBook.USDC = num(disposition.heldNative?.USDC) ?? 0;
+  }
+  return {
+    nativeByBook,
+    earnedNativeByBook,
+    earnedUsdByBook,
+    swappedNativeByBook,
+    swappedUsdtByBook,
+    usdByBook,
+  };
 }
 
 export function sumLifetimeRealizedPnlNativeByBook(report, groups, status) {
   const out = { BTC: 0, ETH: 0, USDC: 0 };
-  for (const g of lifetimeRealizedClosedRows(report, groups)) {
+  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
     const native = realizedPnlInAprBookNative(g, status);
@@ -302,6 +397,16 @@ function _aggregateProfitDispositionRows(rows, status) {
       out.heldNative[disp.book] += disp.held;
       out.pendingSweepNative[disp.book] += disp.pending;
       out.sweptNativeRef[disp.book] += disp.sweptNative;
+      if (disp.sweptUsdt > 0) {
+        if (isPremiumProceedsPoolExcludedGroup(g)) {
+          out.excludedSweptQuoteProceedsByBook[disp.book] += disp.sweptUsdt;
+          if (disp.sweptNative > 0) {
+            out.excludedSweptNativeRefByBook[disp.book] += disp.sweptNative;
+          }
+        } else {
+          out.sweptQuoteProceedsByBook[disp.book] += disp.sweptUsdt;
+        }
+      }
       out.sweptUsdt += disp.sweptUsdt;
     }
     any = true;
@@ -319,7 +424,8 @@ export function aggregateProfitDisposition(report, groups, status, { windowDays 
       return closedMs !== null && closedMs >= cutoffMs;
     });
   }
-  return _aggregateProfitDispositionRows(rows, status);
+  const disposition = _aggregateProfitDispositionRows(rows, status);
+  return disposition ? alignProfitDispositionToUsdtWallet(disposition, status) : null;
 }
 
 /** Lifetime Total profit in USDC using live index for coin-collateral rows. */
@@ -349,6 +455,59 @@ export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDay
     any = true;
   }
   return any ? sum : null;
+}
+
+/** Match backend ``_annualize_apr``. */
+export function annualizeRealizedApr(pnl, sampleDays, capital) {
+  const p = num(pnl);
+  const days = num(sampleDays);
+  const cap = num(capital);
+  if (p === null || days === null || cap === null) return null;
+  if (p === 0 || days <= 0 || cap <= 0) return 0;
+  return (p / cap) * (365 / days);
+}
+
+/** Match backend ``_realized_sample_days`` (earliest entry → latest close). */
+export function realizedSampleDaysFromRows(rows) {
+  let startMs = null;
+  let endMs = null;
+  for (const g of rows) {
+    const closed = closedTimestampMs(g);
+    const entry = entryTimestampMs(g);
+    if (closed === null || entry === null || entry <= 0) continue;
+    if (startMs === null || entry < startMs) startMs = entry;
+    if (endMs === null || closed > endMs) endMs = closed;
+  }
+  if (startMs === null || endMs === null || endMs <= startMs) return null;
+  return (endMs - startMs) / (24 * 3600 * 1000);
+}
+
+export function resolveAprEffectiveCapital(summary, status) {
+  const fromSummary = num(summary?.effective_capital_usdc);
+  if (fromSummary !== null && fromSummary > 0) return fromSummary;
+  const live = aprEffectiveCapitalUsdc();
+  if (live !== null && live > 0) return live;
+  const eq = num(status?.portfolio?.total_equity_usdc);
+  return eq !== null && eq > 0 ? eq : null;
+}
+
+/** Lifetime APR from frontend spot/swap PnL (same source as Total profit). */
+export function computeLifetimeRealizedApr(report, groups, status, summary) {
+  const rows = lifetimeRealizedClosedRows(report, groups, status);
+  const pnl = sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status);
+  if (pnl === null) return null;
+  const sampleDays = realizedSampleDaysFromRows(rows) ?? num(summary?.lifetime_sample_days);
+  const capital = resolveAprEffectiveCapital(summary, status);
+  return annualizeRealizedApr(pnl, sampleDays, capital);
+}
+
+/** Window APR from frontend spot/swap PnL (fixed calendar window, same as backend). */
+export function computeWindowRealizedApr(report, groups, status, summary, windowDays) {
+  const days = windowDays ?? num(summary?.window_days_used) ?? 30;
+  const pnl = sumWindowRealizedPnlUsdcAtSpot(report, groups, status, days);
+  if (pnl === null) return null;
+  const capital = resolveAprEffectiveCapital(summary, status);
+  return annualizeRealizedApr(pnl, days, capital);
 }
 
 export function sumWindowRealizedPnlNativeByBook(report, groups, status, windowDays) {
@@ -433,78 +592,161 @@ export function riskBarChartBaseOptions() {
   };
 }
 
-export function renderBookEquityChart() {
-  const ctx = chartCanvasContext("chart-risk-capital");
-  if (!ctx) return;
-  destroyChart("riskCapital");
+const SPOT_PNL_BOOKS = ["BTC", "ETH"];
+const SPOT_PNL_AXIS_IDS = { BTC: "y", ETH: "y1" };
 
-  const books = visibleBooks();
-  const portfolio = STATE.status?.portfolio;
+function visibleSpotPnlBooks() {
+  return visibleBooks().filter((book) => SPOT_PNL_BOOKS.includes(book));
+}
 
-  const equityBars = books.map((b) => {
-    const v = bookEquityUsdForDisplay(b, STATE.status);
-    return v !== null ? v : 0;
-  });
+function spotPnlUsesDualAxis(datasets) {
+  return datasets.some((d) => d.book === "BTC") && datasets.some((d) => d.book === "ETH");
+}
 
-  const totEq = num(portfolio?.total_equity_usdc);
-  const sumBars = equityBars.reduce((a, b) => a + b, 0);
-  let meta = i18n(`Total ${fmtUsd(totEq)}`, `合計 ${fmtUsd(totEq)}`);
-  if (totEq !== null && sumBars > 0 && Math.abs(sumBars - totEq) > 1) {
-    meta += i18n(" · bars sum may differ from headline", " · 各帳加總可能與總覽略有差異");
-  } else if (!STATE.status) {
-    meta = i18n("Awaiting live snapshot", "等待即時快照");
+function spotPnlChartScales(base, { datasets, xBounds }) {
+  const useDualAxis = spotPnlUsesDualAxis(datasets);
+  const singleBook = datasets.length === 1 ? datasets[0].book : null;
+
+  if (!useDualAxis) {
+    const book = singleBook || datasets[0]?.book || "BTC";
+    return {
+      x: { ...base.scales.x, ...xBounds },
+      y: {
+        ...base.scales.y,
+        ticks: {
+          ...base.scales.y.ticks,
+          color: BOOK_COLORS[book] || base.scales.y.ticks?.color,
+          callback(value) {
+            return fmtNativeBookAmount(value, book);
+          },
+        },
+      },
+    };
   }
 
-  setText("risk-capital-meta", meta);
-  setText(
-    "risk-capital-hint",
-    i18n(
-      "Per-book equity in USDC equivalent from the live snapshot (or last saved snapshot).",
-      "各帳本權益以 USDC 約當顯示，來自即時或最近快照。"
-    )
-  );
-
-  const barColors = books.map((b) => BOOK_COLORS[b] || "#94a3b8");
-  const baseOpts = riskBarChartBaseOptions();
-  setChartPanelEmpty("chart-risk-capital", { empty: false });
-
-  STATE.charts.riskCapital = new globalThis.Chart(ctx, {
-    type: "bar",
-    data: {
-      labels: books,
-      datasets: [
-        {
-          label: i18n("Book equity (USDC eq.)", "帳本權益（USDC 約當）"),
-          data: equityBars,
-          backgroundColor: barColors.map((c) => c + "cc"),
-          borderColor: barColors,
-          borderWidth: 1,
+  return {
+    x: { ...base.scales.x, ...xBounds },
+    y: {
+      type: "linear",
+      position: "left",
+      display: true,
+      grid: { color: "rgba(51,65,85,0.4)" },
+      ticks: {
+        color: BOOK_COLORS.BTC,
+        callback(value) {
+          return fmtNativeBookAmount(value, "BTC");
         },
-      ],
+      },
     },
-    options: {
-      ...baseOpts,
-      plugins: {
-        ...baseOpts.plugins,
-        tooltip: {
-          ...baseOpts.plugins.tooltip,
-          callbacks: {
-            afterBody(items) {
-              if (!items?.length) return "";
-              const i = items[0].dataIndex;
-              if (i === undefined) return "";
-              const eq = equityBars[i] ?? 0;
-              const share = totEq > 0 ? eq / totEq : null;
-              const lines = [
-                `${i18n("Share of total: ", "佔總權益：")}${fmtPct(share, 2)}`,
-              ];
-              return lines;
+    y1: {
+      type: "linear",
+      position: "right",
+      display: true,
+      grid: { drawOnChartArea: false },
+      ticks: {
+        color: BOOK_COLORS.ETH,
+        callback(value) {
+          return fmtNativeBookAmount(value, "ETH");
+        },
+      },
+    },
+  };
+}
+
+export function renderCumulativeSpotPnlChart() {
+  const ctx = chartCanvasContext("chart-risk-capital");
+  if (!ctx) return;
+  destroyChart("riskCapital", "chart-risk-capital");
+
+  const series = STATE.cumulativeSpotPnl;
+  const closedMeta = series?.realized_count
+    ? `${series.realized_count} ${i18n("closed groups", "已平倉組")}`
+    : i18n("no closed groups", "尚無已平倉組");
+  setText("risk-capital-meta", closedMeta);
+
+  if (!series) {
+    mountEmptyTimeSeriesChart("chart-risk-capital", "riskCapital");
+    return;
+  }
+
+  const datasets = [];
+  const books = visibleSpotPnlBooks();
+  for (const book of books) {
+    const rows = series.cumulative_by_book?.[book] || [];
+    const data = finalizeCumulativeLineData(
+      rows.map((r) => ({ x: dateToMs(r.date), y: num(r.pnl_native) }))
+    );
+    if (!data.length) continue;
+    datasets.push({
+      label: `${book} ${i18n("cum. spot PnL", "累積 spot 損益")}`,
+      book,
+      data,
+      borderColor: BOOK_COLORS[book],
+      backgroundColor: BOOK_COLORS[book] + "22",
+      stepped: true,
+      pointRadius: 0,
+      borderWidth: 2,
+    });
+  }
+
+  if (!datasets.length) {
+    mountEmptyTimeSeriesChart("chart-risk-capital", "riskCapital");
+    return;
+  }
+
+  const useDualAxis = spotPnlUsesDualAxis(datasets);
+  if (useDualAxis) {
+    for (const ds of datasets) {
+      ds.yAxisID = SPOT_PNL_AXIS_IDS[ds.book];
+    }
+    setText(
+      "risk-capital-hint",
+      i18n(
+        "BTC (left) and ETH (right) each use their own native scale; filter a book for a single axis.",
+        "BTC（左軸）與 ETH（右軸）各自使用幣本位刻度；篩選單一帳本時改為單軸。"
+      )
+    );
+  } else {
+    setText(
+      "risk-capital-hint",
+      i18n(
+        "Per-book cumulative realized PnL in native spot units (premium profit; BTC / ETH).",
+        "各帳本累計已實現 spot 損益（幣本位 premium 獲利；BTC / ETH）。"
+      )
+    );
+  }
+
+  const base = chartCommonOptions();
+  const flatPoints = datasets.flatMap((d) => d.data || []);
+  const xBounds = suggestTimeScaleMinMax(flatPoints);
+  setChartPanelEmpty("chart-risk-capital", { empty: false });
+  try {
+    STATE.charts.riskCapital = new globalThis.Chart(ctx, {
+      type: "line",
+      data: { datasets },
+      options: {
+        ...base,
+        scales: spotPnlChartScales(base, { datasets, xBounds }),
+        plugins: {
+          ...base.plugins,
+          tooltip: {
+            ...base.plugins.tooltip,
+            callbacks: {
+              label(context) {
+                const book = context.dataset.book || "";
+                const y = context.parsed?.y;
+                return `${context.dataset.label}: ${fmtNativeBookAmount(y, book)}`;
+              },
             },
           },
         },
       },
-    },
-  });
+    });
+  } catch (err) {
+    console.error("spot pnl chart render failed", err);
+    destroyChart("riskCapital", "chart-risk-capital");
+    mountEmptyTimeSeriesChart("chart-risk-capital", "riskCapital");
+  }
 }
 
 const MS_PER_DAY = 86400000;
@@ -570,7 +812,7 @@ export function suggestTimeScaleMinMax(flatPoints) {
 export function renderCumulativePnlChart() {
   const ctx = chartCanvasContext("chart-cum-pnl");
   if (!ctx) return;
-  destroyChart("cumPnl");
+  destroyChart("cumPnl", "chart-cum-pnl");
   const series = STATE.cumulativePnl;
   const closedMeta = series?.realized_count
     ? `${series.realized_count} closed groups`
@@ -590,7 +832,7 @@ export function renderCumulativePnlChart() {
       );
       if (data.length) {
         datasets.push({
-          label: `${book} cum. PnL`,
+          label: `${book} ${i18n("cum. stable PnL", "累積穩定幣損益")}`,
           data,
           borderColor: BOOK_COLORS[book],
           backgroundColor: BOOK_COLORS[book] + "22",
@@ -610,7 +852,7 @@ export function renderCumulativePnlChart() {
     );
     if (data.length) {
       datasets.push({
-        label: "Total cum. PnL",
+        label: i18n("Total cum. stable PnL", "累積穩定幣損益合計"),
         data,
         borderColor: BOOK_COLORS.TOTAL,
         backgroundColor: BOOK_COLORS.TOTAL + "22",
@@ -664,7 +906,7 @@ export function dailyPnlBarBorderColors(points) {
 export function renderDailyPnlChart() {
   const ctx = chartCanvasContext("chart-daily-pnl");
   if (!ctx) return;
-  destroyChart("dailyPnl");
+  destroyChart("dailyPnl", "chart-daily-pnl");
   const MA_WINDOW = 30;
   const series = STATE.cumulativePnl;
   if (!series) {
@@ -776,7 +1018,7 @@ export function renderDailyPnlChart() {
 export function renderAprChart() {
   const ctx = chartCanvasContext("chart-apr");
   if (!ctx) return;
-  destroyChart("apr");
+  destroyChart("apr", "chart-apr");
   const rows = STATE.aprSeries?.rows || [];
   const data = finalizeSimpleLineData(
     filterValidTimePoints(rows.map((r) => ({ x: dateToMs(r.date), y: num(r.apr) })))

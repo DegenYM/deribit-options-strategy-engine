@@ -27,6 +27,7 @@ def build_bot(args) -> DeribitOptionTrialBot:
         "panic-close",
         "close-position",
         "cancel",
+        "profit-sweep",
         "trade-spot",
         "internal-transfer",
     }

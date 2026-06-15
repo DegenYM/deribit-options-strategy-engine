@@ -4,6 +4,8 @@ import {
   BOOK_COLORS,
   CORE_BOOKS,
   FETCH_JSON_MAX_RETRIES,
+  FETCH_JSON_NETWORK_MAX_RETRIES,
+  FETCH_JSON_NETWORK_RETRY_BASE_MS,
   FETCH_JSON_RETRYABLE_STATUS,
   FETCH_JSON_RETRY_BASE_MS,
   FRONTEND_API_CONCURRENCY,
@@ -32,6 +34,15 @@ export function fmtUsd(value, places = 2) {
   const n = num(value);
   if (n === null) return "—";
   return places === 0 ? fmt.usd0.format(n) : fmt.usd2.format(n);
+}
+
+/** Spot / premium-sweep execution price (BTC & ETH: whole dollars). */
+export function fmtBookPriceUsd(book, value) {
+  const n = num(value);
+  if (n === null) return "—";
+  const b = String(book || "").toUpperCase();
+  if (b === "BTC" || b === "ETH") return fmt.usd0.format(n);
+  return fmt.usd2.format(n);
 }
 
 export function fmtPct(value, decimals = 2) {
@@ -87,17 +98,336 @@ function portfolioHasEquity(portfolio) {
   return num(portfolio?.total_equity_usdc) !== null;
 }
 
+function equityByBookSumFromResolved(equityUsdByBook) {
+  let sum = 0;
+  let any = false;
+  for (const book of CORE_BOOKS) {
+    const v = num(equityUsdByBook?.[book]);
+    if (v !== null) {
+      sum += v;
+      any = true;
+    }
+  }
+  return any ? sum : null;
+}
+
+function equityByBookSum(portfolio, status = STATE.status) {
+  const { equityUsdByBook } = overviewEquityBreakdown(portfolio, status);
+  return equityByBookSumFromResolved(equityUsdByBook);
+}
+
+export function isPortfolioBreakdownConsistent(portfolio, status = STATE.status) {
+  const total = num(portfolio?.total_equity_usdc);
+  if (total === null) return false;
+  const sum = equityByBookSum(portfolio, status);
+  if (sum === null) return false;
+  const tolerance = Math.max(2, Math.abs(total) * 0.05);
+  return Math.abs(sum - total) <= tolerance;
+}
+
+export function isStatusBreakdownConsistent(status) {
+  const total = num(status?.portfolio?.total_equity_usdc);
+  if (total === null) return false;
+  const usdByBook = bookEquityUsdByBook(status);
+  let sum = 0;
+  let any = false;
+  for (const book of CORE_BOOKS) {
+    const v = num(usdByBook[book]);
+    if (v !== null) {
+      sum += v;
+      any = true;
+    }
+  }
+  if (!any) return false;
+  const tolerance = Math.max(2, Math.abs(total) * 0.05);
+  return Math.abs(sum - total) <= tolerance;
+}
+
+function livePortfolioDisplayReady() {
+  const live = STATE.status?.portfolio;
+  if (!live || !portfolioHasEquity(live)) return false;
+  return isPortfolioBreakdownConsistent(live) || isStatusBreakdownConsistent(STATE.status);
+}
+
+function investorSpotMarksReady() {
+  return (
+    num(STATE.status?.underlying_index_usd?.BTC) !== null ||
+    num(STATE.lastSpotUsd?.BTC) !== null
+  );
+}
+
+/** True when overview KPIs (especially realized P&L) can be shown without partial/stale math. */
+export function isInvestorOverviewDisplayReady() {
+  if (!INVESTOR) return true;
+  if (!STATE.report?.summary) return false;
+  const { portfolio } = resolvedPortfolio();
+  if (!portfolio || !portfolioHasEquity(portfolio)) return false;
+  const portfolioOk =
+    isPortfolioBreakdownConsistent(portfolio) ||
+    (STATE.status && isStatusBreakdownConsistent(STATE.status));
+  if (!portfolioOk) return false;
+  if (STATE.health?.has_private_creds !== false) {
+    if (!STATE.groups || !Array.isArray(STATE.groups.closed)) return false;
+    if (!investorSpotMarksReady()) return false;
+  }
+  return true;
+}
+
+function bookSpotUsd(status, book) {
+  const b = String(book || "").toUpperCase();
+  if (b === "USDC" || b === "USDT") return 1;
+  return num(status?.underlying_index_usd?.[b]) ?? num(STATE.lastSpotUsd?.[b]);
+}
+
+/** Spot USD for a book (exported for profit composition / swap alignment). */
+export function spotUsdForBook(status, book) {
+  return bookSpotUsd(status, book);
+}
+
+const CRYPTO_NATIVE_HINT_MAX = { BTC: 10, ETH: 100 };
+
+function bookEquityHintLooksLikeNative(hint, book) {
+  const b = String(book || "").toUpperCase();
+  if (b === "USDC" || b === "USDT") return false;
+  const cap = CRYPTO_NATIVE_HINT_MAX[b];
+  if (cap === undefined || hint === null || hint <= 0) return false;
+  return hint < cap;
+}
+
+/** ``equity_by_book`` for BTC/ETH is USDC; ledger/cache rows may still hold native units. */
+function isLikelyNativeMislabeledAsUsd(bookUsd, native, book) {
+  const b = String(book || "").toUpperCase();
+  if (b === "USDC" || b === "USDT") return false;
+  if (bookUsd === null || native === null || native <= 0) return false;
+  const rel = Math.abs(bookUsd - native) / Math.max(Math.abs(native), 1e-12);
+  if (rel < 0.05) return true;
+  return bookUsd < 500 && native < 500;
+}
+
+function cryptoUsdFromNative(native, spot) {
+  if (native === null || spot === null || spot <= 0) return null;
+  return native * spot;
+}
+
+function resolveBookEquityUsdNative(status, book, byBookUsdHint, totalEquityUsdc = null) {
+  const b = String(book || "").toUpperCase();
+  const nativeFromAcct = bookEquityNative(status, b);
+  const spot = bookSpotUsd(status, b);
+  const hint = num(byBookUsdHint);
+
+  if (b === "USDC" || b === "USDT") {
+    const usd = hint ?? nativeFromAcct;
+    return { equityUsdByBook: usd, equityNativeByBook: usd, needsReconcile: false };
+  }
+
+  if (nativeFromAcct !== null && spot !== null && spot > 0) {
+    return {
+      equityUsdByBook: nativeFromAcct * spot,
+      equityNativeByBook: nativeFromAcct,
+      needsReconcile: false,
+    };
+  }
+
+  if (hint === null) {
+    const usd = cryptoUsdFromNative(nativeFromAcct, spot);
+    return {
+      equityUsdByBook: usd,
+      equityNativeByBook: nativeFromAcct,
+      needsReconcile: false,
+    };
+  }
+
+  const hintLooksNative = bookEquityHintLooksLikeNative(hint, b);
+  const hintMatchesAcctNative =
+    nativeFromAcct !== null && isLikelyNativeMislabeledAsUsd(hint, nativeFromAcct, b);
+
+  if ((hintLooksNative || hintMatchesAcctNative) && spot !== null && spot > 0) {
+    const impliedUsd = hint * spot;
+    if (impliedUsd <= num(totalEquityUsdc) * 0.35) {
+      return {
+        equityUsdByBook: impliedUsd,
+        equityNativeByBook: hint,
+        needsReconcile: false,
+      };
+    }
+    return {
+      equityUsdByBook: null,
+      equityNativeByBook: nativeFromAcct ?? hint,
+      needsReconcile: true,
+    };
+  }
+
+  if (hintLooksNative || hintMatchesAcctNative) {
+    return {
+      equityUsdByBook: null,
+      equityNativeByBook: nativeFromAcct ?? hint,
+      needsReconcile: true,
+    };
+  }
+
+  return {
+    equityUsdByBook: hint,
+    equityNativeByBook:
+      spot !== null && spot > 0 ? hint / spot : nativeFromAcct,
+    needsReconcile: false,
+  };
+}
+
+function reconcileOverviewEquityBreakdown(equityUsdByBook, equityNativeByBook, reconcileBooks, portfolio, status) {
+  if (!reconcileBooks.length) return;
+  const total = num(portfolio?.total_equity_usdc);
+  if (total === null) return;
+
+  let stableUsd = 0;
+  let resolvedCryptoUsd = 0;
+  for (const book of CORE_BOOKS) {
+    const usd = num(equityUsdByBook[book]);
+    if (usd === null) continue;
+    if (book === "USDC" || book === "USDT") stableUsd += usd;
+    else if (!reconcileBooks.includes(book)) resolvedCryptoUsd += usd;
+  }
+
+  let residual = total - stableUsd - resolvedCryptoUsd;
+  if (residual < 0) residual = 0;
+
+  const hints = reconcileBooks.map((book) => {
+    const hint = num(portfolio?.equity_by_book?.[book]);
+    return hint !== null && hint > 0 ? hint : null;
+  });
+  const hintSum = hints.reduce((sum, h) => sum + (h ?? 0), 0);
+  const weightFallback = reconcileBooks.length ? 1 / reconcileBooks.length : 0;
+
+  reconcileBooks.forEach((book, idx) => {
+    const spot = bookSpotUsd(status, book);
+    const acctNative = bookEquityNative(status, book);
+    const weight =
+      hintSum > 0 && hints[idx] !== null ? hints[idx] / hintSum : weightFallback;
+    const usd = residual * weight;
+    equityUsdByBook[book] = usd;
+    if (acctNative !== null) {
+      equityNativeByBook[book] = acctNative;
+    } else if (spot !== null && spot > 0 && usd > 0) {
+      equityNativeByBook[book] = usd / spot;
+    } else {
+      equityNativeByBook[book] = hints[idx];
+    }
+  });
+}
+
+export function overviewEquityBreakdown(portfolio, status) {
+  const byBook = portfolio?.equity_by_book;
+  const hasByBook =
+    byBook &&
+    typeof byBook === "object" &&
+    CORE_BOOKS.some((book) => num(byBook[book]) !== null);
+
+  const equityUsdByBook = {};
+  const equityNativeByBook = {};
+  const reconcileBooks = [];
+
+  const totalEquityUsdc = num(portfolio?.total_equity_usdc);
+  const books = hasByBook ? CORE_BOOKS : CORE_BOOKS;
+  for (const book of books) {
+    const resolved = resolveBookEquityUsdNative(
+      status,
+      book,
+      hasByBook ? byBook[book] : null,
+      totalEquityUsdc
+    );
+    equityUsdByBook[book] = resolved.equityUsdByBook;
+    equityNativeByBook[book] = resolved.equityNativeByBook;
+    if (resolved.needsReconcile) reconcileBooks.push(book);
+  }
+
+  if (!hasByBook) {
+    for (const book of CORE_BOOKS) {
+      if (equityUsdByBook[book] === null) {
+        equityUsdByBook[book] = bookEquityUsdForDisplay(book, status);
+      }
+      if (equityNativeByBook[book] === null) {
+        equityNativeByBook[book] = bookEquityNative(status, book);
+      }
+    }
+  }
+
+  reconcileOverviewEquityBreakdown(
+    equityUsdByBook,
+    equityNativeByBook,
+    reconcileBooks,
+    portfolio,
+    status
+  );
+  return { equityUsdByBook, equityNativeByBook };
+}
+
 export function resolvedPortfolio() {
   const live = STATE.status?.portfolio;
   const snap = STATE.portfolioSnapshot?.portfolio;
   const snapUsable = snap && Object.keys(snap).length > 0;
   const liveUsable = live && Object.keys(live).length > 0;
+  const cacheMode = STATE.dataFreshness.source === "cache";
+  const cacheAgeMs =
+    STATE.dataFreshness.cacheSavedAt != null
+      ? Math.max(0, Date.now() - STATE.dataFreshness.cacheSavedAt)
+      : STATE.dataFreshness.cacheAgeMs;
 
-  if (liveUsable && portfolioHasEquity(live)) {
+  if (cacheMode) {
+    if (liveUsable && portfolioHasEquity(live) && livePortfolioDisplayReady()) {
+      return { portfolio: live, source: "cache", freshnessMs: cacheAgeMs };
+    }
+    if (snapUsable && portfolioHasEquity(snap)) {
+      return {
+        portfolio: snap,
+        source: "cache",
+        freshnessMs: num(STATE.portfolioSnapshot?.freshness_ms) ?? cacheAgeMs,
+      };
+    }
+    if (liveUsable && portfolioHasEquity(live)) {
+      return { portfolio: live, source: "cache", freshnessMs: cacheAgeMs };
+    }
+    if (snapUsable) {
+      return {
+        portfolio: snap,
+        source: "cache",
+        freshnessMs: num(STATE.portfolioSnapshot?.freshness_ms) ?? cacheAgeMs,
+      };
+    }
+    return { portfolio: null, source: null, freshnessMs: null };
+  }
+
+  if (
+    INVESTOR &&
+    STATE.refreshInFlight &&
+    liveUsable &&
+    portfolioHasEquity(live) &&
+    !livePortfolioDisplayReady()
+  ) {
+    if (snapUsable && portfolioHasEquity(snap) && isPortfolioBreakdownConsistent(snap)) {
+      return {
+        portfolio: snap,
+        source: "snapshot",
+        freshnessMs: num(STATE.portfolioSnapshot?.freshness_ms),
+      };
+    }
+  }
+
+  if (liveUsable && portfolioHasEquity(live) && (!INVESTOR || livePortfolioDisplayReady())) {
     return {
       portfolio: live,
       source: "live",
       freshnessMs: STATE.dataFreshness.statusMs ?? 0,
+    };
+  }
+  if (
+    STATE.dataFreshness.live &&
+    snapUsable &&
+    portfolioHasEquity(snap) &&
+    (STATE.portfolioSnapshot?.source === "portal_cache" || STATE.portfolioSnapshot?.cache_kind === "live")
+  ) {
+    return {
+      portfolio: snap,
+      source: "live",
+      freshnessMs: num(STATE.portfolioSnapshot?.freshness_ms) ?? 0,
     };
   }
   if (snapUsable && portfolioHasEquity(snap)) {
@@ -133,10 +463,24 @@ export function fmtFreshnessMinutes(ms) {
 
 export function dataFreshnessBadgeHtml() {
   const resolved = resolvedPortfolio();
+  if (resolved.source === "cache") {
+    if (STATE.refreshInFlight) {
+      return `<span id="data-freshness-badge" class="freshness-badge freshness-badge--stale">${i18n(
+        "Last visit · syncing…",
+        "上次瀏覽 · 同步中…"
+      )}</span>`;
+    }
+    const mins = fmtFreshnessMinutes(resolved.freshnessMs);
+    const label =
+      mins !== null
+        ? i18n(`Last visit · ~${mins}m ago`, `上次瀏覽 · 約 ${mins} 分鐘前`)
+        : i18n("Last visit", "上次瀏覽");
+    return `<span id="data-freshness-badge" class="freshness-badge freshness-badge--stale">${label}</span>`;
+  }
   if (resolved.source === "live") {
     const age = num(STATE.dataFreshness.statusMs);
     if (age !== null && age < 30_000) {
-      return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-200">${i18n("Live", "即時")}</span>`;
+      return `<span id="data-freshness-badge" class="freshness-badge freshness-badge--live">${i18n("Live", "即時")}</span>`;
     }
   }
   if (resolved.source === "snapshot") {
@@ -145,15 +489,18 @@ export function dataFreshnessBadgeHtml() {
       mins !== null
         ? i18n(`Snapshot · ~${mins}m ago`, `快照 · 約 ${mins} 分鐘前`)
         : i18n("Snapshot", "快照");
-    return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-200">${label}</span>`;
+    return `<span id="data-freshness-badge" class="freshness-badge freshness-badge--stale">${label}</span>`;
   }
   if (STATE.summaryLoadPending) {
-    return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-200">${i18n("Syncing summary…", "摘要同步中…")}</span>`;
+    return `<span id="data-freshness-badge" class="freshness-badge freshness-badge--stale">${i18n("Syncing summary…", "摘要同步中…")}</span>`;
+  }
+  if (INVESTOR && STATE.groupsLivePending && STATE.refreshInFlight) {
+    return `<span id="data-freshness-badge" class="freshness-badge freshness-badge--stale">${i18n("Syncing live marks…", "即時標價同步中…")}</span>`;
   }
   if (STATE.refreshInFlight) {
-    return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-800/60 text-slate-400">${i18n("Loading…", "載入中…")}</span>`;
+    return `<span id="data-freshness-badge" class="freshness-badge">${i18n("Loading…", "載入中…")}</span>`;
   }
-  return `<span id="data-freshness-badge" class="text-xs px-2 py-0.5 rounded-full border border-slate-600 bg-slate-800/60 text-slate-400">${i18n("—", "—")}</span>`;
+  return `<span id="data-freshness-badge" class="freshness-badge">${i18n("—", "—")}</span>`;
 }
 
 export function renderDataFreshnessBadge() {
@@ -182,25 +529,333 @@ export function setRefreshControlsDisabled(disabled) {
   if (refreshBtn) refreshBtn.disabled = disabled;
 }
 
+function profitNativeToUsdApprox(book, native) {
+  const n = num(native);
+  if (n === null) return null;
+  const b = String(book || "").toUpperCase();
+  if (b === "USDC" || b === "USDT") return n;
+  const spot = bookSpotUsd(STATE.status, b);
+  if (spot === null || spot <= 0) return null;
+  return n * spot;
+}
+
+function fmtUsdAbsForPnlCue(value) {
+  const n = num(value);
+  if (n === null) return "—";
+  return fmtUsd(n);
+}
+
+function fmtAprBlockHtml(apr, label, variant = "hero") {
+  const tone = pnlClass(apr);
+  const tag = variant === "inline" ? "span" : "div";
+  return `<${tag} class="overview-apr overview-apr--${variant} ${tone}">
+    <span class="overview-apr-value font-mono tabular-nums">${fmtPct(apr)}</span>
+    <span class="overview-apr-label">${label}</span>
+  </${tag}>`;
+}
+
+function overviewBreakdownRowHtml(row) {
+  const headPct = row.isLoss
+    ? ""
+    : `<span class="overview-breakdown-pct font-mono tabular-nums">${row.pctText}</span>`;
+  const valuesBlock = `<div class="overview-breakdown-values">
+        <span class="overview-breakdown-detail font-mono tabular-nums ${row.detailTone ?? ""}">${row.detailText}</span>
+        <span class="overview-breakdown-primary font-mono tabular-nums ${row.tone ?? ""}">${row.primaryText}</span>
+      </div>`;
+  return `<div class="overview-breakdown-row overview-breakdown-row--${row.book.toLowerCase()}${row.isLoss ? " overview-breakdown-row--loss" : ""}">
+      <div class="overview-breakdown-head">
+        <span class="overview-breakdown-label">${bookNativeSymbolHtml(row.book)}<span class="overview-breakdown-book">${row.book}</span></span>
+        ${headPct}
+      </div>
+      ${row.showBar === false ? "" : `<div class="overview-breakdown-bar" aria-hidden="true"><span class="overview-breakdown-bar-fill ${row.barFillClass ?? `overview-breakdown-bar-fill--${row.book.toLowerCase()}`}" style="width:${row.barWidth}"></span></div>`}
+      ${valuesBlock}
+    </div>`;
+}
+
+function overviewBreakdownRowsHtml(rows, { emptyLabel, sectionLabel = "" } = {}) {
+  if (!rows.length) {
+    return `<p class="overview-breakdown-empty">${emptyLabel ?? i18n("—", "—")}</p>`;
+  }
+  const label = sectionLabel
+    ? `<p class="overview-breakdown-section-label">${sectionLabel}</p>`
+    : "";
+  return `${label}<div class="overview-breakdown">${rows.map((row) => overviewBreakdownRowHtml(row)).join("")}</div>`;
+}
+
+export function overviewEquityCompositionHtml(totalEquity, nativeByBook, usdByBook) {
+  const total = num(totalEquity);
+  const places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 };
+  const rows = CORE_BOOKS.map((book) => {
+    const usd = num(usdByBook?.[book]);
+    const native = num(nativeByBook?.[book]);
+    if (usd === null && native === null) return null;
+    if (usd !== null && Math.abs(usd) < 0.005 && (native === null || Math.abs(native) < 1e-8)) {
+      return null;
+    }
+    const isStable = book === "USDC" || book === "USDT";
+    const pct = total && usd !== null && total > 0 ? usd / total : null;
+    const pctText = pct !== null ? fmtPct(pct, 1) : "—";
+    const barWidth = pct !== null ? `${Math.min(100, Math.max(pct * 100, 2)).toFixed(1)}%` : "0%";
+    const primaryText = usd !== null ? fmtUsd(usd) : i18n("pending", "待更新");
+    const detailText = isStable
+      ? i18n("stablecoin", "穩定幣")
+      : native !== null
+      ? fmtNum(native, places[book])
+      : "—";
+    return { book, pctText, barWidth, detailText, primaryText };
+  }).filter(Boolean);
+  return overviewBreakdownRowsHtml(rows, { emptyLabel: i18n("No book balances", "尚無帳本餘額") });
+}
+
+function compositionRowUsd({ book, swappedUsdt, native, totalUsd, earnedUsd }) {
+  if (book === "USDC" || book === "USDT") {
+    return totalUsd ?? earnedUsd ?? 0;
+  }
+  const unsweptUsd = isMeaningfulNativeForBook(native, book)
+    ? profitNativeToUsdApprox(book, native) ?? 0
+    : 0;
+  if (swappedUsdt > 0.005) {
+    if (unsweptUsd > 0.005) {
+      return totalUsd ?? swappedUsdt + unsweptUsd;
+    }
+    // Fully swapped: match Profit swap → SOLD USDT (spotSoldQuote).
+    return swappedUsdt;
+  }
+  return totalUsd ?? earnedUsd ?? unsweptUsd;
+}
+
+function buildProfitCompositionRows(ctx) {
+  const { summary, profitCompositionByBook } = ctx;
+  if (!summary || !profitCompositionByBook) return "";
+  const {
+    nativeByBook,
+    earnedNativeByBook,
+    earnedUsdByBook,
+    swappedNativeByBook,
+    swappedUsdtByBook,
+    usdByBook,
+  } = profitCompositionByBook;
+  const places = { BTC: 5, ETH: 4, USDC: 2 };
+  const entries = PROFIT_HELD_BOOKS.map((book) => {
+    const native = num(nativeByBook?.[book]);
+    const earnedNative = num(earnedNativeByBook?.[book]) ?? 0;
+    const swappedNative = num(swappedNativeByBook?.[book]) ?? 0;
+    const earnedUsd =
+      num(earnedUsdByBook?.[book]) ??
+      (native !== null && native !== 0 ? profitNativeToUsdApprox(book, native) : null);
+    const swappedUsdt = num(swappedUsdtByBook?.[book]) ?? 0;
+    if (earnedUsd === null && (native === null || native === 0) && earnedNative === 0) return null;
+    if (
+      earnedUsd !== null &&
+      Math.abs(earnedUsd) < 0.005 &&
+      (native === null || Math.abs(native) < 1e-8) &&
+      Math.abs(earnedNative) < 1e-8
+    ) {
+      return null;
+    }
+    const totalUsd =
+      num(usdByBook?.[book]) ??
+      (swappedUsdt > 0.005 && isMeaningfulNativeForBook(native, book)
+        ? swappedUsdt + (profitNativeToUsdApprox(book, native) ?? 0)
+        : null) ??
+      earnedUsd ??
+      (native !== null && native !== 0 ? profitNativeToUsdApprox(book, native) : null);
+    return {
+      book,
+      native: native ?? 0,
+      earnedNative,
+      swappedNative,
+      earnedUsd,
+      swappedUsdt,
+      totalUsd,
+    };
+  }).filter(Boolean);
+
+  const rowUsd = (e) => compositionRowUsd(e);
+  const gains = entries.filter((e) => rowUsd(e) > 0);
+  const losses = entries.filter((e) => rowUsd(e) < 0);
+  const gainUsdTotal = gains.reduce((sum, e) => sum + Math.abs(rowUsd(e)), 0);
+  const lossUsdTotal = losses.reduce((sum, e) => sum + Math.abs(rowUsd(e)), 0);
+  const byBook = Object.fromEntries(entries.map((entry) => [entry.book, entry]));
+
+  function profitRow(entry, { isLoss, usdDenom }) {
+    const { book, native, earnedNative, swappedNative, earnedUsd, swappedUsdt } = entry;
+    const displayUsd = compositionRowUsd(entry);
+    const pct = displayUsd !== null && usdDenom > 0 ? Math.abs(displayUsd) / usdDenom : null;
+    const pctText = pct !== null ? fmtPct(pct, 1) : "—";
+    const barWidth =
+      pct !== null ? `${Math.min(100, Math.max(pct * 100, isLoss ? 8 : 2)).toFixed(1)}%` : "0%";
+    const tone = pnlClass(displayUsd ?? native);
+    const nativeText = fmtNum(native, places[book] ?? 4);
+    const earnedNativeText = fmtNum(earnedNative, places[book] ?? 4);
+    const swappedNativeText = fmtNum(swappedNative, places[book] ?? 4);
+    const isStable = book === "USDC" || book === "USDT";
+    let detailText;
+    let primaryText;
+    if (displayUsd === null && earnedUsd === null) {
+      detailText = i18n("native · USD pending", "原幣 · USD 待更新");
+      primaryText = nativeText;
+    } else if (isStable) {
+      detailText = i18n("stablecoin", "穩定幣");
+      primaryText = displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : nativeText;
+    } else if (swappedUsdt > 0.005 && isMeaningfulNativeForBook(swappedNative, book)) {
+      const swappedLabel = i18n("swapped", "已兌");
+      detailText = `${earnedNativeText} ${book} (${swappedNativeText} ${book} ${swappedLabel})`;
+      if (isMeaningfulNativeForBook(native, book)) {
+        detailText += ` · ${nativeText} ${i18n("unswept", "待兌")}`;
+      }
+      primaryText = fmtUsdAbsForPnlCue(displayUsd ?? swappedUsdt);
+    } else if (isMeaningfulNativeForBook(earnedNative, book) && isMeaningfulNativeForBook(native, book)) {
+      detailText = `${earnedNativeText} ${book} · ${nativeText} ${i18n("unswept", "待兌")}`;
+      primaryText =
+        displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : `${earnedNativeText} ${book}`;
+    } else if (isMeaningfulNativeForBook(earnedNative, book)) {
+      detailText = `${earnedNativeText} ${book}`;
+      primaryText =
+        displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : `${earnedNativeText} ${book}`;
+    } else if (isMeaningfulNativeForBook(native, book)) {
+      detailText = `${nativeText} ${book} · ${i18n("unswept", "待兌")}`;
+      primaryText =
+        displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : `${nativeText} ${book}`;
+    } else {
+      detailText = `${nativeText} ${book}`;
+      primaryText = displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : nativeText;
+    }
+    return {
+      book,
+      pctText,
+      barWidth,
+      detailText,
+      primaryText,
+      tone,
+      isLoss,
+      barFillClass: isLoss ? "overview-breakdown-bar-fill--loss" : undefined,
+    };
+  }
+
+  const rows = CORE_BOOKS.map((book) => {
+    const entry = byBook[book];
+    if (!entry) return null;
+    const isLoss = rowUsd(entry) < 0;
+    return profitRow(entry, {
+      isLoss,
+      usdDenom: isLoss ? lossUsdTotal : gainUsdTotal,
+    });
+  }).filter(Boolean);
+
+  return overviewBreakdownRowsHtml(rows, {
+    emptyLabel: i18n("No realized profit yet", "尚無已實現獲利"),
+  });
+}
+
+export function overviewProfitCompositionHtml(ctx) {
+  if (!ctx.summary) {
+    return `<p class="overview-breakdown-empty">${i18n("Loading performance…", "績效摘要載入中…")}</p>`;
+  }
+  return buildProfitCompositionRows(ctx);
+}
+
+export function overviewCompositionGridHtml(ctx) {
+  const { totalEquity, equityNativeByBook, equityUsdByBook } = ctx;
+  return `<div class="overview-composition-grid">
+    <section class="overview-composition-card overview-composition-card--equity" aria-label="${i18n("Equity composition", "權益組成")}">
+      <header class="overview-composition-head">
+        <h3 class="overview-composition-title">${i18n("Equity composition", "權益組成")}</h3>
+        <span class="overview-composition-sub">${i18n("By collateral book · USDC eq.", "依帳本 · USDC 約當")}</span>
+      </header>
+      ${overviewEquityCompositionHtml(totalEquity, equityNativeByBook, equityUsdByBook)}
+    </section>
+    <section class="overview-composition-card overview-composition-card--profit" aria-label="${i18n("Profit composition", "獲利組成")}">
+      <header class="overview-composition-head">
+        <h3 class="overview-composition-title">${i18n("Profit composition", "獲利組成")}</h3>
+        <span class="overview-composition-sub">${i18n("Realized · lifetime", "已實現 · 存續")}</span>
+      </header>
+      ${overviewProfitCompositionHtml(ctx)}
+    </section>
+  </div>`;
+}
+
+export function fmtBookEquityAllocationChips(nativeByBook, usdByBook) {
+  const places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 };
+  const chips = CORE_BOOKS.map((book) => {
+    const native = num(nativeByBook?.[book]);
+    const usd = num(usdByBook?.[book]);
+    const isStable = book === "USDC" || book === "USDT";
+    const usdVal = isStable ? (usd ?? native) : usd;
+    const hasNative = native !== null && Math.abs(native) >= 1e-8;
+    const hasUsd = usdVal !== null && Math.abs(usdVal) >= 0.005;
+    if (!hasNative && !hasUsd) return "";
+    const sym = bookNativeSymbolHtml(book);
+    let val;
+    if (isStable) {
+      val = hasUsd ? fmtUsd(usdVal) : "—";
+    } else if (hasNative && hasUsd) {
+      val = `${fmtNum(native, places[book])} · ${fmtUsd(usdVal)}`;
+    } else if (hasNative) {
+      val = `${fmtNum(native, places[book])} <span class="overview-alloc-pending">${i18n("(USD pending)", "（USD 待更新）")}</span>`;
+    } else if (hasUsd) {
+      val = fmtUsd(usdVal);
+    } else {
+      return "";
+    }
+    return `<span class="overview-alloc-chip overview-alloc-chip--${book.toLowerCase()}">${sym}<span class="overview-alloc-chip-val font-mono tabular-nums">${val}</span></span>`;
+  }).filter(Boolean);
+  if (!chips.length) {
+    return `<span class="overview-alloc-empty">${i18n("—", "—")}</span>`;
+  }
+  return `<div class="overview-alloc-chips">${chips.join("")}</div>`;
+}
+
+function profitSwapScopesEquivalent(lifetimeDisposition, windowDisposition) {
+  if (!lifetimeDisposition || !windowDisposition) return false;
+  const left = summarizeProfitDisposition(lifetimeDisposition, { status: STATE.status });
+  const right = summarizeProfitDisposition(windowDisposition, { status: STATE.status });
+  if (!left?.hasSwap && !left?.hasPending) return false;
+  if (!right?.hasSwap && !right?.hasPending) return false;
+  if (left.hasPending !== right.hasPending) return false;
+  if (Math.abs((left.usdtSwapped ?? 0) - (right.usdtSwapped ?? 0)) > 0.005) return false;
+  for (const book of PROFIT_SWEEP_BOOKS) {
+    for (const key of ["spotEarned", "spotSold", "spotHeld", "spotPending"]) {
+      const a = num(left[key]?.[book]) ?? 0;
+      const b = num(right[key]?.[book]) ?? 0;
+      if (Math.abs(a - b) > 1e-8) return false;
+    }
+  }
+  return true;
+}
+
 export function aggregateSkeletonHtml() {
-  const cell = `<div class="skeleton-block h-16 rounded-lg"></div>`;
-  const desktop = `<div class="overview-metrics-grid">${cell.repeat(8)}</div>`;
+  const hero = `<div class="overview-hero skeleton-block" style="min-height:6.5rem;border-radius:16px"></div>`;
+  const stats = `<div class="overview-stat-row">${`<div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>`.repeat(3)}</div>`;
+  const headline = `<div class="overview-headline">${hero}${profitSkeletonHtml()}${stats}</div>`;
+  const desktopContent = `<div class="overview-stack">${headline}</div>`;
   const inner = INVESTOR
-    ? `<div class="investor-view-desktop">${desktop}</div><div class="investor-view-mobile"><div class="inv-dashboard">
+    ? `<div class="investor-view-desktop">${desktopContent}</div><div class="investor-view-mobile"><div class="inv-dashboard">
       <div class="inv-panel skeleton-block" style="height:5.5rem"></div>
       <div class="inv-panel skeleton-block" style="height:4rem"></div>
-      <div class="inv-panel skeleton-block" style="height:7rem"></div>
+      <div class="inv-panel skeleton-block" style="height:6rem"></div>
+      <div class="inv-panel skeleton-block" style="height:10rem"></div>
     </div></div>`
-    : desktop;
+    : desktopContent;
   return `<div class="overview-panel-inner">${inner}<div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
+}
+
+export function profitSkeletonHtml() {
+  const card = (h) =>
+    `<section class="overview-composition-card skeleton-block" style="min-height:${h};border-radius:14px"></section>`;
+  return `<div class="overview-composition-grid">${card("11rem")}${card("11rem")}</div>`;
+}
+
+export function overviewDesktopContentHtml(ctx) {
+  return `<div class="overview-stack">
+    ${overviewMetricsGridHtml(ctx)}
+    ${overviewProfitSectionHtml(ctx)}
+  </div>`;
 }
 
 export function overviewMetricsGridHtml(ctx) {
   const {
     totalEquity,
-    dayStart,
-    dayPnl,
-    dayDrawdown,
     openCredit,
     creditByStrategy,
     summary,
@@ -208,84 +863,176 @@ export function overviewMetricsGridHtml(ctx) {
     avgHolding,
     sinceLine,
     lifetimePnl,
+    lifetimeApr,
+  } = ctx;
+  const winHold = summary
+    ? `${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}${INVESTOR_ZH ? " 天" : "d"}`
+    : "—";
+  const winSub = summary ? sinceLine : i18n("Loading…", "載入中…");
+  return `
+    <div class="overview-headline">
+      <section class="overview-hero" aria-label="${i18n("Portfolio summary", "投資組合摘要")}">
+        <div class="overview-hero-primary">
+          <span class="overview-hero-label">${i18n("Total equity", "總權益")}</span>
+          <span class="overview-hero-value font-mono tabular-nums">${fmtUsd(totalEquity)}</span>
+          <span class="overview-hero-foot">${i18n("USDC equivalent · all books", "USDC 約當 · 全帳本")}</span>
+        </div>
+        <div class="overview-hero-secondary overview-hero-secondary--profit">
+          <span class="overview-hero-label">${i18n("Total profit", "累計獲利")}</span>
+          <span class="overview-hero-value font-mono tabular-nums ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</span>
+          ${summary ? fmtAprBlockHtml(lifetimeApr, i18n("APR · lifetime", "年化 · 存續"), "hero") : `<span class="overview-hero-foot">${winSub}</span>`}
+        </div>
+      </section>
+      ${overviewCompositionGridHtml(ctx)}
+      <div class="overview-stat-row">
+        <div class="overview-stat">
+          <span class="overview-stat-label">${i18n("Open credit", "未實現權利金")}</span>
+          <span class="overview-stat-value font-mono tabular-nums">${fmtUsd(openCredit)}</span>
+          <span class="overview-stat-sub">${fmtOpenCreditStrategyBreakdown(creditByStrategy)}</span>
+        </div>
+        <div class="overview-stat">
+          <span class="overview-stat-label">${i18n("Win rate · hold", "勝率 · 持有")}</span>
+          <span class="overview-stat-value font-mono tabular-nums">${winHold}</span>
+          <span class="overview-stat-sub">${winSub}</span>
+        </div>
+        <div class="overview-stat">
+          <span class="overview-stat-label">${i18n("Closed groups", "已平倉")}</span>
+          <span class="overview-stat-value font-mono tabular-nums">${summary ? String(ctx.closedCount ?? 0) : "—"}</span>
+          <span class="overview-stat-sub">${summary ? i18n("lifetime realized", "存續期已實現") : winSub}</span>
+        </div>
+      </div>
+    </div>`;
+}
+
+export function overviewProfitSummaryCardHtml(ctx) {
+  const {
+    summary,
+    lifetimePnl,
     lifetimeNativeByBook,
-    lifetimeProfitDisposition,
     closedCount,
     windowLabelDays,
     windowPnl,
     windowNativeByBook,
-    windowProfitDisposition,
     lifetimeApr,
     windowApr,
-    equityNativeByBook,
-    equityUsdByBook,
   } = ctx;
-  return `
-    <div class="overview-metrics-grid">
-      <div class="overview-metric-cell overview-metric-cell--equity">
-        <div class="text-xs text-slate-400">${i18n("Total equity", "總權益")}</div>
-        <div class="text-2xl font-mono tabular-nums">${fmtUsd(totalEquity)}</div>
-        <div class="text-[11px] text-slate-500">${i18n("USDC equivalent (all books)", "USDC 約當（全帳本合計）")}</div>
-        <div class="overview-metric-meta overview-metric-meta--equity">
-          ${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}
-          <div class="overview-metric-line">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
+  const windowDays = Math.round(windowLabelDays ?? 30);
+  const sameWindowPnl =
+    summary &&
+    lifetimePnl !== null &&
+    windowPnl !== null &&
+    Math.abs(lifetimePnl - windowPnl) < 0.005;
+  const compareHtml = summary
+    ? `<div class="overview-profit-compare">
+        <div class="overview-profit-compare-item">
+          <span class="overview-profit-compare-label">${i18n("Last", "近")} ${windowDays}${INVESTOR_ZH ? " 日" : "d"}</span>
+          <span class="overview-profit-compare-value font-mono tabular-nums ${pnlClass(windowPnl)}">${fmtUsd(windowPnl)}</span>
         </div>
-      </div>
-      <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${i18n("Day P&L", "本日損益")}</div>
-        <div class="text-2xl font-mono ${pnlClass(dayPnl)}">${fmtUsd(dayPnl)}</div>
-        <div class="overview-metric-meta">
-          <div class="overview-metric-line">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</div>
+        <div class="overview-profit-compare-item">
+          <span class="overview-profit-compare-label">${i18n("APR", "年化")} ${windowDays}${INVESTOR_ZH ? " 日" : "d"}</span>
+          <span class="overview-profit-compare-value font-mono tabular-nums">${fmtPct(windowApr)}</span>
         </div>
+      </div>`
+    : "";
+  const metaHtml = summary
+    ? `<div class="overview-profit-meta">
+        <span class="overview-profit-meta-note">${closedCount ?? 0} ${i18n("closed", "筆平倉")} · ${fmtPct(lifetimeApr)} ${i18n("APR lifetime", "年化·存續")}</span>
+        <div class="overview-profit-chips">${investorNativeChipsHtml(lifetimeNativeByBook, { pnl: true })}</div>
+        ${sameWindowPnl ? `<span class="overview-profit-meta-hint">${i18n(`Rolling ${windowDays}d matches lifetime`, `近 ${windowDays} 日與存續期相同`)}</span>` : `<div class="overview-profit-chips overview-profit-chips--window">${investorNativeChipsHtml(windowNativeByBook, { pnl: true })}</div>`}
+      </div>`
+    : `<p class="overview-profit-empty">${i18n("Loading performance…", "績效摘要載入中…")}</p>`;
+  return `<section class="overview-profit-card overview-profit-card--realized" aria-label="${i18n("Realized profit", "已實現損益")}">
+    <header class="overview-profit-card-head">
+      <p class="overview-profit-eyebrow">${i18n("Realized P&L", "已實現損益")}</p>
+      <h3 class="overview-profit-title">${i18n("Profit", "獲利")}</h3>
+    </header>
+    <div class="overview-profit-hero">
+      <div class="overview-profit-hero-main">
+        <span class="overview-profit-hero-label">${i18n("Lifetime", "存續")}</span>
+        <span class="overview-profit-hero-value font-mono tabular-nums ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</span>
       </div>
-      <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${i18n("Open credit", "未實現權利金（進場收斂）")}</div>
-        <div class="text-2xl font-mono">${fmtUsd(openCredit)}</div>
-        <div class="overview-metric-meta">
-          <div class="overview-metric-line">${fmtOpenCreditStrategyBreakdown(creditByStrategy)}</div>
-        </div>
-      </div>
-      <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${i18n("Win rate · avg holding", "勝率 · 平均持有")}</div>
-        <div class="text-2xl font-mono">${summary ? `${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}${INVESTOR_ZH ? " 天" : "d"}` : "—"}</div>
-        <div class="overview-metric-meta">
-          <div class="overview-metric-line">${summary ? sinceLine : i18n("Loading performance…", "績效摘要載入中…")}</div>
-        </div>
-      </div>
+      ${compareHtml}
+    </div>
+    ${metaHtml}
+  </section>`;
+}
 
-      <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${i18n("Total profit (lifetime)", "累計已實現損益")}</div>
-        <div class="text-2xl font-mono ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</div>
-        <div class="overview-metric-meta">
-          ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(lifetimeProfitDisposition?.heldNative ?? lifetimeNativeByBook)}</div>` : ""}
-          ${summary ? fmtProfitSwappedLine(lifetimeProfitDisposition) : ""}
-          <div class="overview-metric-line">${summary ? `${closedCount ?? 0} ${i18n("closed groups", "筆已平倉部位")}` : ""}</div>
-        </div>
-      </div>
-      <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${rollingWindowProfitLabel(windowLabelDays)}</div>
-        <div class="text-2xl font-mono ${pnlClass(windowPnl)}">${summary ? fmtUsd(windowPnl) : "—"}</div>
-        <div class="overview-metric-meta">
-          ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(windowProfitDisposition?.heldNative ?? windowNativeByBook)}</div>` : ""}
-          ${summary ? fmtProfitSwappedLine(windowProfitDisposition) : ""}
-          <div class="overview-metric-line">${summary ? rollingWindowPnlHint(windowLabelDays) : ""}</div>
-        </div>
-      </div>
-      <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${i18n("Realized APR (lifetime)", "已實現年化（存續期）")}</div>
-        <div class="text-2xl font-mono">${summary ? fmtPct(lifetimeApr) : "—"}</div>
-        <div class="overview-metric-meta">
-          <div class="overview-metric-line">${summary ? i18n("annualized on actual span", "依實際區間年化") : ""}</div>
-        </div>
-      </div>
-      <div class="overview-metric-cell">
-        <div class="text-xs text-slate-400">${rollingWindowAprLabel(windowLabelDays)}</div>
-        <div class="text-2xl font-mono">${summary ? fmtPct(windowApr) : "—"}</div>
-        <div class="overview-metric-meta">
-          <div class="overview-metric-line overview-metric-line--hint">${summary ? rollingWindowAprHint(windowLabelDays) : ""}</div>
-        </div>
-      </div>
-    </div>`;
+export function overviewProfitSectionHtml(ctx) {
+  const swapBody = profitSwapDetailBodyHtml(ctx);
+  const hasSwap = swapBody && !swapBody.includes("overview-profit-empty");
+  if (!hasSwap) return "";
+  return `<section class="overview-composition-card overview-composition-card--swap" aria-label="${i18n("Profit swap", "獲利兌換")}">
+    <header class="overview-composition-head">
+      <h3 class="overview-composition-title">${i18n("Profit swap", "獲利兌換")}</h3>
+      <span class="overview-composition-sub">${i18n("Spot → USDT", "現貨 → USDT")}</span>
+    </header>
+    ${swapBody}
+  </section>`;
+}
+
+export function overviewLayoutHtml(ctx) {
+  return overviewDesktopContentHtml(ctx);
+}
+
+function fmtProfitSwapScopePanelOnly(disposition) {
+  if (!disposition) return "";
+  const summary = summarizeProfitDisposition(disposition, { status: STATE.status });
+  if (!summary?.hasSwap && !summary?.hasPending) return "";
+  return fmtProfitSwapPanel(disposition, summary) || "";
+}
+
+function profitSwapScopePanelSectionHtml(disposition, scopeLabel) {
+  const content = fmtProfitSwapScopePanelOnly(disposition);
+  if (!content) return "";
+  return `<section class="overview-profit-scope">
+    <span class="profit-swap-scope-label">${scopeLabel}</span>
+    ${content}
+  </section>`;
+}
+
+export function profitSwapDetailBodyHtml(ctx) {
+  const { summary, lifetimeProfitDisposition, windowProfitDisposition, windowLabelDays } = ctx;
+  if (!summary) {
+    return `<p class="overview-profit-empty">${i18n("Loading performance…", "績效摘要載入中…")}</p>`;
+  }
+  const lifetime = profitSwapScopePanelSectionHtml(
+    lifetimeProfitDisposition,
+    i18n("Lifetime", "存續")
+  );
+  const windowDays = Math.round(windowLabelDays ?? 30);
+  const windowScope = profitSwapScopePanelSectionHtml(
+    windowProfitDisposition,
+    `${i18n("Last", "近")} ${windowDays}${INVESTOR_ZH ? " 日" : "d"}`
+  );
+  if (!lifetime && !windowScope) {
+    return `<p class="overview-profit-empty">${i18n("No profit swaps yet", "尚未進行獲利兌換")}</p>`;
+  }
+  const dedupe =
+    lifetime &&
+    windowScope &&
+    profitSwapScopesEquivalent(lifetimeProfitDisposition, windowProfitDisposition);
+  if (dedupe) {
+    return `<div class="overview-profit-scopes overview-profit-scopes--swap overview-profit-scopes--single">${lifetime}</div>`;
+  }
+  return `<div class="overview-profit-scopes overview-profit-scopes--swap">${lifetime}${windowScope}</div>`;
+}
+
+export function overviewProfitSwapDetailHtml(ctx) {
+  return `<section class="overview-profit-card overview-profit-card--swap" aria-label="${i18n("Profit swap", "獲利兌換")}">
+    <header class="overview-profit-card-head">
+      <p class="overview-profit-eyebrow">${i18n("Profit swap", "獲利兌換")}</p>
+      <h3 class="overview-profit-title">${i18n("Spot → USDT", "現貨 → USDT")}</h3>
+    </header>
+    <div class="overview-profit-swap-body">${profitSwapDetailBodyHtml(ctx)}</div>
+  </section>`;
+}
+
+export function profitSwapCardBodyHtml(ctx) {
+  return profitSwapDetailBodyHtml(ctx);
+}
+
+export function profitSwapSideCardHtml(ctx) {
+  return overviewProfitSwapDetailHtml(ctx);
 }
 
 export function investorNativeChipsHtml(byBook, { pnl = false, places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 }, books = CORE_BOOKS } = {}) {
@@ -317,9 +1064,6 @@ export function investorOpenCreditMiniHtml(byStrategy) {
 export function investorOverviewHtml(ctx) {
   const {
     totalEquity,
-    dayStart,
-    dayPnl,
-    dayDrawdown,
     openCredit,
     creditByStrategy,
     summary,
@@ -327,94 +1071,45 @@ export function investorOverviewHtml(ctx) {
     avgHolding,
     sinceLine,
     lifetimePnl,
-    lifetimeNativeByBook,
-    lifetimeProfitDisposition,
-    closedCount,
-    windowLabelDays,
-    windowPnl,
-    windowNativeByBook,
-    windowProfitDisposition,
     lifetimeApr,
-    windowApr,
-    equityNativeByBook,
-    equityUsdByBook,
   } = ctx;
   const winHold =
     summary !== null && summary !== undefined
       ? `${fmtPct(winRate, 1)} · ${fmtNum(avgHolding, 2)}${INVESTOR_ZH ? " 天" : "d"}`
       : "—";
-  const winSub = summary
-    ? sinceLine
-    : i18n("Loading performance…", "績效摘要載入中…");
+  const winSub = summary ? sinceLine : i18n("Loading…", "載入中…");
+  const swapSection = overviewProfitSectionHtml(ctx);
   return `<div class="inv-dashboard">
-    <section class="inv-panel inv-panel--hero" aria-label="${i18n("Account snapshot", "帳戶快照")}">
+    <section class="inv-panel inv-panel--hero" aria-label="${i18n("Portfolio summary", "投資組合摘要")}">
       <div class="inv-split">
         <div class="inv-kpi inv-kpi--equity">
           <span class="inv-kpi-label">${i18n("Total equity", "總權益")}</span>
-          <span class="inv-kpi-value font-mono tabular-nums">${fmtUsd(totalEquity)}</span>
-          <span class="inv-kpi-foot">${i18n("USDC equivalent (all books)", "USDC 約當（全帳本合計）")}</span>
+          <span class="inv-kpi-value inv-kpi-value--hero font-mono tabular-nums">${fmtUsd(totalEquity)}</span>
         </div>
         <div class="inv-kpi">
-          <span class="inv-kpi-label">${i18n("Day P&L", "本日損益")}</span>
-          <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(dayPnl)}">${fmtUsd(dayPnl)}</span>
-          <span class="inv-kpi-foot">${i18n("drawdown", "回撤")} ${fmtPct(dayDrawdown)}</span>
-        </div>
-      </div>
-      <div class="inv-equity-breakdown">
-        ${fmtBookEquityDualBreakdown(equityNativeByBook, equityUsdByBook)}
-        <div class="overview-metric-line">${i18n("day-start", "日初")} ${fmtUsd(dayStart)}</div>
-      </div>
-    </section>
-
-    <section class="inv-panel" aria-label="${i18n("Open risk", "未平倉風險")}">
-      <div class="inv-split">
-        <div class="inv-kpi">
-          <span class="inv-kpi-label">${i18n("Open credit", "未實現權利金")}</span>
-          <span class="inv-kpi-value font-mono tabular-nums">${fmtUsd(openCredit)}</span>
-          <div class="inv-mini-list">${investorOpenCreditMiniHtml(creditByStrategy)}</div>
-        </div>
-        <div class="inv-kpi">
-          <span class="inv-kpi-label">${i18n("Win rate · hold", "勝率 · 持有")}</span>
-          <span class="inv-kpi-value font-mono tabular-nums">${winHold}</span>
-          <span class="inv-kpi-foot">${winSub}</span>
+          <span class="inv-kpi-label">${i18n("Total profit", "累計獲利")}</span>
+          <span class="inv-kpi-value inv-kpi-value--hero font-mono tabular-nums ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</span>
+          ${summary ? fmtAprBlockHtml(lifetimeApr, "APR", "mobile") : `<span class="inv-kpi-foot">${winSub}</span>`}
         </div>
       </div>
     </section>
 
-    <section class="inv-panel" aria-label="${i18n("Realized performance", "已實現績效")}">
-      <h3 class="inv-panel-title">${i18n("Realized P&L", "已實現損益")}</h3>
-      <div class="inv-compare">
-        <div class="inv-compare-col">
-          <span class="inv-compare-tag">${i18n("Lifetime", "存續")}</span>
-          <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(lifetimePnl)}">${summary ? fmtUsd(lifetimePnl) : "—"}</span>
-          <div class="inv-profit-detail">
-            ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(lifetimeProfitDisposition?.heldNative ?? lifetimeNativeByBook)}</div>` : ""}
-            ${summary ? fmtProfitSwappedLine(lifetimeProfitDisposition) : ""}
-          </div>
-          <span class="inv-kpi-foot">${summary ? `${closedCount ?? 0} ${i18n("closed", "筆平倉")}` : ""}</span>
-        </div>
-        <div class="inv-compare-col">
-          <span class="inv-compare-tag">${i18n("Last", "近")} ${windowLabelDays}${INVESTOR_ZH ? " 日" : "d"}</span>
-          <span class="inv-kpi-value font-mono tabular-nums ${pnlClass(windowPnl)}">${summary ? fmtUsd(windowPnl) : "—"}</span>
-          <div class="inv-profit-detail">
-            ${summary ? `<div class="overview-metric-line">${fmtHeldProfitBreakdown(windowProfitDisposition?.heldNative ?? windowNativeByBook)}</div>` : ""}
-            ${summary ? fmtProfitSwappedLine(windowProfitDisposition) : ""}
-          </div>
-          <span class="inv-kpi-foot">${summary ? rollingWindowPnlHint(windowLabelDays) : ""}</span>
-        </div>
+    ${overviewCompositionGridHtml(ctx)}
+
+    <div class="inv-stat-row">
+      <div class="inv-stat">
+        <span class="inv-stat-label">${i18n("Open credit", "未實現權利金")}</span>
+        <span class="inv-stat-value font-mono tabular-nums">${fmtUsd(openCredit)}</span>
+        <div class="inv-mini-list">${investorOpenCreditMiniHtml(creditByStrategy)}</div>
       </div>
-      <div class="inv-split inv-split--apr">
-        <div class="inv-kpi inv-kpi--compact">
-          <span class="inv-kpi-label">${i18n("APR lifetime", "年化·存續")}</span>
-          <span class="inv-kpi-value font-mono tabular-nums">${summary ? fmtPct(lifetimeApr) : "—"}</span>
-        </div>
-        <div class="inv-kpi inv-kpi--compact">
-          <span class="inv-kpi-label">${i18n("APR", "年化")} ${windowLabelDays}${INVESTOR_ZH ? " 日" : "d"}</span>
-          <span class="inv-kpi-value font-mono tabular-nums">${summary ? fmtPct(windowApr) : "—"}</span>
-          <span class="inv-kpi-foot">${summary ? rollingWindowAprHint(windowLabelDays) : ""}</span>
-        </div>
+      <div class="inv-stat">
+        <span class="inv-stat-label">${i18n("Win rate", "勝率")}</span>
+        <span class="inv-stat-value font-mono tabular-nums">${winHold}</span>
+        <span class="inv-kpi-foot">${winSub}</span>
       </div>
-    </section>
+    </div>
+
+    ${swapSection}
   </div>`;
 }
 
@@ -1174,6 +1869,479 @@ export function fmtLifetimeRealizedNativeBreakdown(byBook) {
 }
 
 const PROFIT_HELD_BOOKS = ["BTC", "ETH", "USDC"];
+const PROFIT_SWEEP_BOOKS = ["BTC", "ETH"];
+const PROFIT_DISP_PLACES = { BTC: 8, ETH: 8, USDC: 2, USDT: 4 };
+
+/** Truncate toward zero — profit-swap display never rounds up vs exchange/journal math. */
+export function truncateDecimal(value, places) {
+  const n = num(value);
+  if (n === null) return null;
+  if (places <= 0) return Math.trunc(n);
+  const factor = 10 ** places;
+  return Math.trunc(n * factor) / factor;
+}
+
+function profitNativePrecision(book) {
+  const b = String(book || "").toUpperCase();
+  if (b === "BTC" || b === "ETH") return 8;
+  if (b === "USDC" || b === "USDT") return 4;
+  return 8;
+}
+
+/** Strip trailing zeros after a fixed-decimal string (keeps all significant digits). */
+function stripTrailingZeros(fixed) {
+  if (!fixed.includes(".")) return fixed;
+  return fixed.replace(/0+$/, "").replace(/\.$/, "");
+}
+
+/** Subtract decimals at fixed precision without float drift (truncates result toward zero). */
+function subtractDecimals(a, b, places) {
+  const factor = 10 ** places;
+  const toUnits = (value) => {
+    const n = num(value);
+    if (n === null) return 0;
+    const sign = n < 0 ? -1 : 1;
+    const abs = Math.abs(n);
+    const units = Math.trunc(abs * factor + 1e-9);
+    return sign * units;
+  };
+  return Math.max(0, (toUnits(a) - toUnits(b)) / factor);
+}
+
+/** Native BTC/ETH qty in profit-swap panel: up to 8 dp, truncated not rounded. */
+export function fmtProfitNative(book, value) {
+  const places = profitNativePrecision(book);
+  const t = truncateDecimal(value, places);
+  if (t === null) return "—";
+  return stripTrailingZeros(t.toFixed(places));
+}
+
+/** USDT in profit-swap panel: up to 4 dp (Deribit quote proceeds), truncated. */
+export function fmtProfitUsdt(value) {
+  const t = truncateDecimal(value, 4);
+  if (t === null) return "—";
+  return `$${stripTrailingZeros(t.toFixed(4))}`;
+}
+
+/** Execution avg in profit-swap panel: up to 2 dp, truncated (matches exchange avg fields). */
+export function fmtProfitAvgUsd(book, value) {
+  const t = truncateDecimal(value, 2);
+  if (t === null) return "—";
+  return `$${stripTrailingZeros(t.toFixed(2))}`;
+}
+
+/** Avg from displayed USDT ÷ native (same truncation as fmtProfitUsdt / fmtProfitNative). */
+export function profitSwapDisplayAvg(book, quote, sold) {
+  const q = truncateDecimal(quote, 4);
+  const s = truncateDecimal(sold, profitNativePrecision(book));
+  if (q === null || s === null || s <= 0) return null;
+  return truncateDecimal(q / s, 2);
+}
+
+/** When live USDT wallet differs from summed lifetime swap proceeds, keep lifetime totals for display. */
+export function alignProfitDispositionToUsdtWallet(disposition, _status) {
+  return disposition;
+}
+
+/** True when native amount is large enough to show at book display precision. */
+export function isMeaningfulNativeForBook(native, book) {
+  const n = num(native);
+  if (n === null || Math.abs(n) < 1e-12) return false;
+  const places = PROFIT_DISP_PLACES[String(book || "").toUpperCase()] ?? 4;
+  return Math.abs(n) >= 0.5 * 10 ** -places;
+}
+
+/** Lifetime USDT high-water from journal reconcile (may exceed actual fill quote). */
+export function profitSweepLifetimeQuoteUsdt(g) {
+  const lifetime = num(g?.profit_sweep_quote_proceeds_lifetime);
+  if (lifetime !== null && lifetime > 0) return lifetime;
+  const quote = num(g?.profit_sweep_quote_proceeds);
+  const status = String(g?.profit_sweep_status || "").toLowerCase();
+  if (status === "filled" && quote !== null && quote > 0) return quote;
+  return null;
+}
+
+/** USDT actually received from premium swap fills (exchange quote, not reconcile high-water). */
+export function profitSweepRealizedQuoteUsdt(g) {
+  const quote = num(g?.profit_sweep_quote_proceeds);
+  const status = String(g?.profit_sweep_status || "").toLowerCase();
+  if (status === "filled" && quote !== null && quote > 0) return quote;
+  return profitSweepLifetimeQuoteUsdt(g);
+}
+
+/** Exchange VWAP stats from status (premium-sweep spot fills). */
+export function premiumSweepFillStatsByBook(status) {
+  return status?.premium_sweep_fill_stats_by_book ?? null;
+}
+
+/** Merge live status; retain exchange fill stats when a fast refresh omits them. */
+export function mergeStatusPayload(prev, next) {
+  if (!next || typeof next !== "object") return prev ?? next ?? null;
+  const merged = { ...(prev && typeof prev === "object" ? prev : {}), ...next };
+  const nextFill = premiumSweepFillStatsByBook(next);
+  const prevFill = premiumSweepFillStatsByBook(prev);
+  if (!nextFill && prevFill) {
+    merged.premium_sweep_fill_stats_by_book = prevFill;
+  }
+  return merged;
+}
+
+/** Manual / pre-label premium swaps excluded from labeled exchange reconcile pool. */
+export function isPremiumProceedsPoolExcludedGroup(g) {
+  const reason = String(g?.profit_sweep_reason || "").toLowerCase();
+  if (reason.includes("unlabeled_premium_reconciled")) return true;
+  if (reason.includes("manual_swap")) return true;
+  return false;
+}
+
+/** Book-level premium-sweep display: exchange net native/USDT when fills exist, else journal. */
+export function resolvePremiumSweepBookDisplay({ journalSold, journalQuote, exchange, earned }) {
+  const netUsdt = num(exchange?.net_usdt);
+  const netNative = num(exchange?.net_native_sold);
+  const hasExchange = netNative !== null && netNative > 0;
+
+  let soldNative = journalSold;
+  if (hasExchange) {
+    soldNative = netNative;
+  } else if (soldNative <= 0 && netNative !== null && netNative > 0) {
+    soldNative = netNative;
+  }
+  // Journal attribution cap only when exchange fills are unavailable.
+  if (!hasExchange && earned > 0 && soldNative > earned) {
+    soldNative = earned;
+  }
+
+  let soldQuote = journalQuote;
+  if (netUsdt !== null && netUsdt > 0) {
+    soldQuote = netUsdt;
+  }
+
+  const avg =
+    netUsdt !== null && netUsdt > 0 && netNative !== null && netNative > 0
+      ? netUsdt / netNative
+      : soldNative > 0 && soldQuote > 0
+      ? soldQuote / soldNative
+      : null;
+  return { soldNative, soldQuote, avg };
+}
+
+/** Roll up held / pending / sold coin profit for the swap panel. */
+export function summarizeProfitDisposition(disposition, { status = null } = {}) {
+  if (!disposition) return null;
+  const fillStats = premiumSweepFillStatsByBook(status ?? STATE.status);
+  const spotEarned = {};
+  const spotHeld = {};
+  const spotPending = {};
+  const spotSold = {};
+  const spotSoldQuote = {};
+  const spotSoldAvg = {};
+  let hasPending = false;
+  let hasSwap = false;
+  let hasCoinProfit = false;
+  for (const book of PROFIT_SWEEP_BOOKS) {
+    const held = num(disposition.heldNative?.[book]) ?? 0;
+    const pending = num(disposition.pendingSweepNative?.[book]) ?? 0;
+    const journalSold = num(disposition.sweptNativeRef?.[book]) ?? 0;
+    const journalQuote = num(disposition.sweptQuoteProceedsByBook?.[book]) ?? 0;
+    spotHeld[book] = held;
+    spotPending[book] = pending;
+
+    const exchange = fillStats?.[book];
+    const earned = held + pending + journalSold;
+    const display = resolvePremiumSweepBookDisplay({
+      journalSold,
+      journalQuote,
+      exchange,
+      earned,
+    });
+
+    const excludedQuote = num(disposition.excludedSweptQuoteProceedsByBook?.[book]) ?? 0;
+    const excludedNative = num(disposition.excludedSweptNativeRefByBook?.[book]) ?? 0;
+    const displayUsdt = num(exchange?.display_usdt);
+    const displayNative = num(exchange?.display_native_sold);
+    if (displayNative !== null && displayNative > 0 && displayUsdt !== null && displayUsdt > 0) {
+      spotSold[book] = displayNative;
+      spotSoldQuote[book] = displayUsdt;
+    } else {
+      spotSold[book] = display.soldNative + excludedNative;
+      spotSoldQuote[book] = display.soldQuote + excludedQuote;
+    }
+    if (spotSold[book] > 0 && spotSoldQuote[book] > 0) {
+      spotSoldAvg[book] = profitSwapDisplayAvg(book, spotSoldQuote[book], spotSold[book]);
+    }
+
+    if (Math.abs(earned) > 0) {
+      spotEarned[book] = earned;
+      hasCoinProfit = true;
+    }
+    if (pending > 0) hasPending = true;
+    if (spotSold[book] > 0 || spotSoldQuote[book] > 0) hasSwap = true;
+  }
+  for (const book of PROFIT_SWEEP_BOOKS) {
+    const earned = num(spotEarned[book]) ?? 0;
+    const sold = num(spotSold[book]) ?? 0;
+    const pending = num(spotPending[book]) ?? 0;
+    const places = profitNativePrecision(book);
+    const impliedRemainder = subtractDecimals(subtractDecimals(earned, sold, places), pending, places);
+    if (impliedRemainder > 0 && isMeaningfulNativeForBook(impliedRemainder, book)) {
+      spotHeld[book] = impliedRemainder;
+    } else if (!isMeaningfulNativeForBook(spotHeld[book], book)) {
+      spotHeld[book] = 0;
+    }
+  }
+  const exchangeQuoteTotal = PROFIT_SWEEP_BOOKS.reduce(
+    (sum, book) => sum + (num(spotSoldQuote[book]) ?? 0),
+    0,
+  );
+  const journalUsdt = num(disposition.sweptUsdt) ?? 0;
+  const usdtSwapped =
+    fillStats && exchangeQuoteTotal > 0.005 ? exchangeQuoteTotal : journalUsdt;
+  if (usdtSwapped > 0) hasSwap = true;
+  const displayUsdtSwapped = usdtSwapped;
+  const usdcHeld = num(disposition.heldNative?.USDC) ?? 0;
+  return {
+    spotEarned,
+    spotHeld,
+    spotPending,
+    spotSold,
+    spotSoldQuote,
+    spotSoldAvg,
+    usdcHeld,
+    usdtSwapped: displayUsdtSwapped,
+    hasPending,
+    hasSwap,
+    hasCoinProfit,
+  };
+}
+
+function fmtProfitDispositionCoinValues(byBook, books, { abs = false, showSign = false } = {}) {
+  return books
+    .filter((book) => {
+      const n = num(byBook?.[book]);
+      return n !== null && n !== 0;
+    })
+    .map((book) => {
+      const raw = num(byBook[book]);
+      const display = abs && raw !== null ? Math.abs(raw) : raw;
+      const prefix = showSign && raw !== null && raw > 0 ? "+" : "";
+      const text = display === null ? "—" : `${prefix}${fmtProfitNative(book, display)}`;
+      const cls = raw === null ? "" : pnlClass(raw);
+      return `<span class="native-book-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums ${cls}">${text}</span></span>`;
+    })
+    .join("");
+}
+
+function fmtProfitDispositionRow(label, valuesHtml, { rowClass = "" } = {}) {
+  if (!valuesHtml) return "";
+  const cls = rowClass ? ` ${rowClass}` : "";
+  return `<div class="profit-disposition-row${cls}">
+    <span class="profit-disposition-label">${label}</span>
+    <span class="profit-disposition-values native-book-breakdown">${valuesHtml}</span>
+  </div>`;
+}
+
+function fmtProfitDispositionSoldValues(summary) {
+  return PROFIT_SWEEP_BOOKS.filter((book) => {
+    const sold = num(summary.spotSold[book]);
+    return sold !== null && sold > 0;
+  })
+    .map((book) => {
+      const sold = num(summary.spotSold[book]);
+      const soldText = fmtProfitNative(book, sold);
+      const quote = summary.spotSoldQuote[book];
+      const usdtHtml = fmtProfitSweepUsdtProceedsHtml(quote);
+      const avgHtml = fmtProfitSweepAvgPriceHtml(book, quote, sold, summary.spotSoldAvg?.[book]);
+      return `<span class="native-book-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums pnl-neg">-${soldText}</span>${usdtHtml}${avgHtml}</span>`;
+    })
+    .join("");
+}
+
+function fmtProfitSwapRemainingValues(summary) {
+  const parts = [];
+  for (const book of PROFIT_SWEEP_BOOKS) {
+    const held = num(summary.spotHeld[book]) ?? 0;
+    const pending = num(summary.spotPending[book]) ?? 0;
+    if (held !== 0) {
+      const prefix = held > 0 ? "+" : "";
+      parts.push(
+        `<span class="native-book-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums ${pnlClass(held)}">${prefix}${fmtProfitNative(book, held)}</span></span>`
+      );
+    }
+    if (pending > 0) {
+      parts.push(
+        `<span class="native-book-item profit-swap-pending-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums text-amber-200/90">${fmtProfitNative(book, pending)}</span><span class="profit-disposition-pending-arrow">${i18n("pending", "待兌")}</span></span>`
+      );
+    }
+  }
+  return parts.join("");
+}
+
+function profitSwapActiveBooks(summary) {
+  return PROFIT_SWEEP_BOOKS.filter((book) => {
+    const earned = num(summary.spotEarned?.[book]) ?? 0;
+    const sold = num(summary.spotSold?.[book]) ?? 0;
+    const held = num(summary.spotHeld?.[book]) ?? 0;
+    const pending = num(summary.spotPending?.[book]) ?? 0;
+    return earned !== 0 || sold > 0 || held !== 0 || pending > 0;
+  });
+}
+
+function fmtProfitSwapEmptySlot() {
+  return `<div class="profit-swap-book-slot profit-swap-book-slot--pad" aria-hidden="true"><div class="profit-swap-book-slot-main">&nbsp;</div><div class="profit-swap-book-slot-sub">&nbsp;</div></div>`;
+}
+
+function fmtProfitSwapEarnedSlot(summary, book) {
+  const raw = num(summary.spotEarned?.[book]);
+  if (raw === null || raw === 0) return fmtProfitSwapEmptySlot();
+  const prefix = raw > 0 ? "+" : "";
+  const cls = pnlClass(raw);
+  return `<div class="profit-swap-book-slot">
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums ${cls}">${prefix}${fmtProfitNative(book, raw)}</span></div>
+    <div class="profit-swap-book-slot-sub profit-swap-book-slot-sub--empty" aria-hidden="true">&nbsp;</div>
+  </div>`;
+}
+
+function fmtProfitSwapSoldSlot(summary, book) {
+  const sold = num(summary.spotSold?.[book]);
+  if (sold === null || sold <= 0) return fmtProfitSwapEmptySlot();
+  const quote = num(summary.spotSoldQuote?.[book]);
+  const subParts = [];
+  if (quote !== null && quote > 0) {
+    subParts.push(`<span class="font-mono tabular-nums pnl-pos">${fmtProfitUsdt(quote)} USDT</span>`);
+    const avgOverride = num(summary.spotSoldAvg?.[book]);
+    const avg =
+      avgOverride !== null && avgOverride > 0
+        ? avgOverride
+        : profitSwapDisplayAvg(book, quote, sold);
+    subParts.push(
+      `<span class="profit-sweep-avg-price font-mono tabular-nums">${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}</span>`
+    );
+  }
+  return `<div class="profit-swap-book-slot">
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums pnl-neg">-${fmtProfitNative(book, sold)}</span></div>
+    <div class="profit-swap-book-slot-sub">${subParts.join('<span class="profit-swap-book-slot-sep" aria-hidden="true">·</span>')}</div>
+  </div>`;
+}
+
+function fmtProfitSwapRemainingSlot(summary, book) {
+  const held = num(summary.spotHeld?.[book]) ?? 0;
+  const pending = num(summary.spotPending?.[book]) ?? 0;
+  if (held === 0 && pending === 0) return fmtProfitSwapEmptySlot();
+  if (pending > 0 && held === 0) {
+    return `<div class="profit-swap-book-slot">
+      <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums text-amber-200/90">${fmtProfitNative(book, pending)}</span></div>
+      <div class="profit-swap-book-slot-sub"><span class="profit-disposition-pending-arrow">${i18n("pending", "待兌")}</span></div>
+    </div>`;
+  }
+  const prefix = held > 0 ? "+" : "";
+  const pendingSub =
+    pending > 0
+      ? `<span class="profit-swap-pending-item"><span class="font-mono tabular-nums text-amber-200/90">${fmtProfitNative(book, pending)}</span> <span class="profit-disposition-pending-arrow">${i18n("pending", "待兌")}</span></span>`
+      : `<span class="profit-swap-book-slot-sub--empty" aria-hidden="true">&nbsp;</span>`;
+  return `<div class="profit-swap-book-slot">
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums ${pnlClass(held)}">${prefix}${fmtProfitNative(book, held)}</span></div>
+    <div class="profit-swap-book-slot-sub">${pendingSub}</div>
+  </div>`;
+}
+
+function fmtProfitSwapColumnHtml(summary, label, books, slotFn) {
+  const slots = books.map((book) => slotFn(summary, book)).join("");
+  return fmtProfitSwapLedgerRow(label, slots);
+}
+
+function fmtProfitSwapLedgerRow(label, valuesHtml, { emptyText = "—" } = {}) {
+  const value = valuesHtml
+    ? `<div class="profit-swap-col-values native-book-breakdown">${valuesHtml}</div>`
+    : `<div class="profit-swap-col-empty font-mono tabular-nums">${emptyText}</div>`;
+  return `<div class="profit-swap-col">
+    <span class="profit-swap-col-label">${label}</span>
+    ${value}
+  </div>`;
+}
+
+/** Profit-sweep panel: USDT headline + earned / sold / remaining ledger. */
+export function fmtProfitSwapPanel(disposition, summary = null) {
+  if (!disposition) return "";
+  const totals = summary ?? summarizeProfitDisposition(disposition, { status: STATE.status });
+  if (!totals || (!totals.hasSwap && !totals.hasPending)) return "";
+
+  const activeBooks = profitSwapActiveBooks(totals);
+  if (!activeBooks.length) return "";
+
+  const walletUsdt = bookEquityNative(STATE.status, "USDT");
+  const journalUsdt = totals.usdtSwapped > 0 ? totals.usdtSwapped : null;
+  const displayUsdt =
+    walletUsdt !== null &&
+    journalUsdt !== null &&
+    !totals.hasPending &&
+    walletUsdt > journalUsdt + 0.5
+      ? walletUsdt
+      : journalUsdt;
+  const usdtHeroClass =
+    displayUsdt !== null && displayUsdt > 0
+      ? "pnl-pos"
+      : totals.hasPending
+      ? "profit-swap-hero-pending"
+      : "";
+  const usdtHeroText =
+    displayUsdt !== null && displayUsdt > 0
+      ? fmtProfitUsdt(displayUsdt)
+      : totals.hasPending
+      ? i18n("Pending", "待兌")
+      : "—";
+
+  const walletFootnote =
+    walletUsdt !== null &&
+    journalUsdt !== null &&
+    journalUsdt > 0.005 &&
+    walletUsdt + 0.01 < journalUsdt
+      ? `<p class="profit-swap-wallet-footnote text-slate-500">${i18n(
+          "USDT wallet now (withdrawals do not reduce lifetime total above)",
+          "USDT 錢包現餘（提領不影響上方累計）"
+        )}: <span class="font-mono tabular-nums">${fmtUsd(walletUsdt)}</span></p>`
+      : walletUsdt !== null &&
+        journalUsdt !== null &&
+        !totals.hasPending &&
+        walletUsdt > journalUsdt + 0.5
+      ? `<p class="profit-swap-wallet-footnote text-slate-500">${i18n(
+          "Includes pre-label premium swaps in wallet not yet split per trade group",
+          "含尚未逐筆分攤的早期現貨兌換 USDT"
+        )}: <span class="font-mono tabular-nums">${fmtUsd(walletUsdt)}</span></p>`
+      : "";
+
+  const detailRows = [
+    fmtProfitSwapColumnHtml(totals, i18n("Earned", "兌換前"), activeBooks, fmtProfitSwapEarnedSlot),
+    fmtProfitSwapColumnHtml(totals, i18n("Sold", "已賣出"), activeBooks, fmtProfitSwapSoldSlot),
+    fmtProfitSwapColumnHtml(totals, i18n("Remaining", "剩餘"), activeBooks, fmtProfitSwapRemainingSlot),
+  ];
+
+  const detailsHtml = detailRows.length
+    ? `<div class="profit-swap-detail">${detailRows.join("")}</div>`
+    : "";
+
+  return `<div class="profit-disposition-panel profit-swap-panel">
+    <div class="profit-swap-kpi">
+      <span class="profit-swap-kpi-label">${i18n("USDT received", "兌得 USDT")}</span>
+      <span class="profit-swap-kpi-value font-mono tabular-nums ${usdtHeroClass}">${usdtHeroText}</span>
+    </div>
+    ${walletFootnote}
+    ${detailsHtml}
+  </div>`;
+}
+
+/** Realized P&L meta: simple book chips, or full swap panel when profit sweep applies. */
+export function fmtRealizedProfitBreakdown(disposition, nativeByBookFallback) {
+  if (!disposition) {
+    return `<div class="overview-metric-line">${fmtHeldProfitBreakdown(nativeByBookFallback)}</div>`;
+  }
+  const summary = summarizeProfitDisposition(disposition, { status: STATE.status });
+  if (summary?.hasSwap || summary?.hasPending) {
+    const panel = fmtProfitSwapPanel(disposition, summary);
+    if (panel) return panel;
+  }
+  const held = disposition.heldNative ?? nativeByBookFallback;
+  return `<div class="overview-metric-line">${fmtHeldProfitBreakdown(held)}</div>`;
+}
 
 /** Per closed group: held spot profit vs profit-sweep disposition (coin books only). */
 export function profitDispositionForGroup(g, status) {
@@ -1189,18 +2357,29 @@ export function profitDispositionForGroup(g, status) {
   }
   const sweep = String(g?.profit_sweep_status || "").toLowerCase();
   const sweepAmtRaw = num(g?.profit_sweep_amount);
+  const sweptUsdt = profitSweepRealizedQuoteUsdt(g) ?? 0;
   const sweepAmt = sweepAmtRaw !== null && sweepAmtRaw > 0 ? sweepAmtRaw : native;
-  const sweptUsdt = num(g?.profit_sweep_quote_proceeds) ?? 0;
-  const sweptNativeDisplay =
-    sweepAmt !== null && native !== null && native > 0
-      ? Math.min(sweepAmt, native)
-      : sweepAmt;
+
   if (sweep === "filled") {
-    return { held: 0, pending: 0, sweptNative: sweptNativeDisplay, sweptUsdt, book };
+    const sweptNative = Math.min(sweepAmt, native);
+    let remainder = Math.max(0, native - sweptNative);
+    if (!isMeaningfulNativeForBook(remainder, book)) remainder = 0;
+    return { held: remainder, pending: 0, sweptNative, sweptUsdt, book };
   }
   if (sweep === "pending" || sweep === "submitted") {
+    // amount < native: prior partial sweep done; only remainder is queued.
+    if (sweepAmtRaw !== null && sweepAmtRaw > 0 && sweepAmtRaw < native) {
+      const remainder = Math.max(0, native - sweepAmtRaw);
+      return {
+        held: 0,
+        pending: remainder,
+        sweptNative: sweepAmtRaw,
+        sweptUsdt,
+        book,
+      };
+    }
     return {
-      held: Math.max(0, native - sweepAmt),
+      held: 0,
       pending: sweepAmt,
       sweptNative: 0,
       sweptUsdt: 0,
@@ -1215,6 +2394,9 @@ export function emptyProfitDisposition() {
     heldNative: { BTC: 0, ETH: 0, USDC: 0 },
     pendingSweepNative: { BTC: 0, ETH: 0 },
     sweptNativeRef: { BTC: 0, ETH: 0 },
+    sweptQuoteProceedsByBook: { BTC: 0, ETH: 0 },
+    excludedSweptNativeRefByBook: { BTC: 0, ETH: 0 },
+    excludedSweptQuoteProceedsByBook: { BTC: 0, ETH: 0 },
     sweptUsdt: 0,
   };
 }
@@ -1236,49 +2418,26 @@ export function fmtHeldProfitBreakdown(heldNative) {
   return `<span class="native-book-breakdown">${items.join("")}</span>`;
 }
 
+export function fmtProfitSweepUsdtProceedsHtml(quoteProceeds) {
+  const quote = num(quoteProceeds);
+  if (quote === null || quote <= 0) return "";
+  return `<span class="profit-sweep-usdt-proceeds font-mono tabular-nums pnl-pos">· ${fmtProfitUsdt(quoteProceeds)} USDT</span>`;
+}
+
+export function fmtProfitSweepAvgPriceHtml(book, quoteProceeds, nativeSold, avgOverride = null) {
+  const override = num(avgOverride);
+  const quote = num(quoteProceeds);
+  const native = num(nativeSold);
+  const avg =
+    override !== null && override > 0
+      ? override
+      : profitSwapDisplayAvg(book, quoteProceeds, nativeSold);
+  if (avg === null) return "";
+  return `<span class="profit-sweep-avg-price text-slate-500 font-mono tabular-nums">· ${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}</span>`;
+}
+
 export function fmtProfitSwappedLine(disposition) {
-  if (!disposition) return "";
-  const { sweptUsdt, sweptNativeRef, pendingSweepNative } = disposition;
-  const places = { BTC: 5, ETH: 4 };
-  const sweptUsdtNum = num(sweptUsdt);
-  const pendingBooks = ["BTC", "ETH"].filter((book) => {
-    const n = num(pendingSweepNative?.[book]);
-    return n !== null && n > 0;
-  });
-  const sweptBooks = ["BTC", "ETH"].filter((book) => {
-    const n = num(sweptNativeRef?.[book]);
-    return n !== null && n > 0;
-  });
-  if ((sweptUsdtNum === null || sweptUsdtNum <= 0) && !pendingBooks.length) return "";
-
-  const nativeLineBooks = pendingBooks.length ? pendingBooks : sweptBooks;
-  const nativeByBook = Object.fromEntries(
-    nativeLineBooks.map((book) => {
-      const raw = pendingBooks.length ? pendingSweepNative[book] : sweptNativeRef[book];
-      return [book, raw];
-    })
-  );
-  const nativeItems = nativeLineBooks
-    .map((book) => {
-      const n = num(nativeByBook[book]);
-      const out = n === null ? null : -Math.abs(n);
-      const text = fmtNum(out, places[book] ?? 4);
-      const cls = out === null ? "" : pnlClass(out);
-      return `<span class="native-book-item">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums ${cls}">${text}</span></span>`;
-    })
-    .join("");
-  const nativeLine = nativeItems
-    ? `<div class="overview-metric-line profit-swapped-native-line"><span class="native-book-breakdown">${nativeItems}</span></div>`
-    : "";
-
-  const usdtLine =
-    sweptUsdtNum !== null && sweptUsdtNum > 0
-      ? `<div class="overview-metric-line profit-swapped-line"><span class="profit-swapped-label">${i18n("Profit swapped", "獲利已兌")}</span> <span class="native-book-item">${bookNativeSymbolHtml("USDT")} <span class="font-mono tabular-nums pnl-pos">${fmtUsd(sweptUsdtNum)}</span></span></div>`
-      : pendingBooks.length
-      ? `<div class="overview-metric-line profit-swapped-line"><span class="text-slate-500">${i18n("Profit swapped", "獲利已兌")}</span> <span class="font-mono tabular-nums text-amber-200/90">${i18n("pending", "待兌")}</span></div>`
-      : "";
-
-  return `<div class="profit-swapped-block">${usdtLine}${nativeLine}</div>`;
+  return fmtProfitSwapPanel(disposition);
 }
 
 export function fmtBookEquityNativeBreakdown(byBook) {
@@ -1344,6 +2503,18 @@ export function dashboardBundleUrl(days = 30, { sections = null } = {}) {
   return url;
 }
 
+export function transfersUrl(days = 90, limit = 100) {
+  return `/api/transfers?days=${days}&limit=${limit}`;
+}
+
+export function applyDiskGroupsPayload(groups) {
+  if (!groups) return;
+  STATE.groups = groups;
+  if (INVESTOR && !STATE.dataFreshness.live) {
+    STATE.groupsLivePending = true;
+  }
+}
+
 export function applyDashboardBundlePayload(d) {
   let changed = false;
   if (d?.groups) {
@@ -1351,11 +2522,12 @@ export function applyDashboardBundlePayload(d) {
     changed = true;
   }
   if (d?.status) {
-    STATE.status = d.status;
+    STATE.status = mergeStatusPayload(STATE.status, d.status);
     STATE.statusErrorOnce = false;
     STATE.dataFreshness.source = "live";
     STATE.dataFreshness.live = true;
     STATE.dataFreshness.statusMs = 0;
+    STATE.groupsLivePending = false;
     changed = true;
   }
   if (d?.realized_summary) {
@@ -1571,6 +2743,24 @@ export function isOpenTradeGroup(g) {
   return st !== "closed";
 }
 
+/** Live exchange shows no open short leg (manual close / flat row with size 0). */
+export function exchangeShortLegIsFlat(status, g) {
+  if (!status?.positions) return false;
+  const instrument = String(g?.short_instrument_name || "").trim();
+  if (!instrument) return false;
+  const account = String(g?.account_name || "").trim();
+  const rows = status.positions.filter((p) => {
+    if (String(p?.instrument_name || "") !== instrument) return false;
+    if (account && String(p?.account_name || "") !== account) return false;
+    return true;
+  });
+  if (!rows.length) return true;
+  return rows.every((p) => {
+    const size = num(p?.size);
+    return size !== null && size === 0;
+  });
+}
+
 export function isClosedTradeGroup(g) {
   const st = String(g?.status || "").toLowerCase();
   if (st === "closed") return true;
@@ -1617,6 +2807,7 @@ export function currentOpenRows(status, groups) {
   }
   for (const g of groups?.open || []) {
     if (!isOpenTradeGroup(g)) continue;
+    if (exchangeShortLegIsFlat(status, g)) continue;
     const key = tradeGroupKey(g);
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1787,8 +2978,16 @@ export function groupEntryDteDaysAtOpen(g) {
 export function bookEquityNative(status, book) {
   const b = String(book || "USDC").toUpperCase();
   const eq = num(status?.accounts?.[b]?.equity);
-  if (eq === null || eq <= 0) return null;
-  return eq;
+  if (eq !== null && eq > 0) return eq;
+  // Read portfolio inline — never call resolvedPortfolio() here (overviewEquityBreakdown → bookEquityNative cycle).
+  const portfolio =
+    status?.portfolio ||
+    (status === STATE.status ? STATE.portfolioSnapshot?.portfolio : null);
+  const fromNative = num(portfolio?.equity_native_by_book?.[b]);
+  if (fromNative !== null && fromNative > 0) return fromNative;
+  const fromUsd = num(portfolio?.equity_by_book?.[b]);
+  if (fromUsd !== null && fromUsd > 0 && (b === "USDC" || b === "USDT")) return fromUsd;
+  return null;
 }
 
 /** APR 分母帳本：逆線 BTC/ETH、線性 USDC（與 ``openRowBookCollateralUpper`` 一致，非標的 ``currency``）。 */
@@ -2009,8 +3208,8 @@ export function isInverseCoinBookGroup(g) {
   return book === "BTC" || book === "ETH";
 }
 
-/** 逆線：USDC 標記 = 幣本位 × 現價（不用平倉指數）；USDC 帳本直接用 stored USDC。
- *  幣本位獲利若已 swap 成 USDT，以實際兌換所得計（不再用現價重估已賣現貨）。 */
+/** Coin collateral PnL in USDT terms: swapped portion uses actual USDT received;
+ *  unswept/pending portion uses live index × native. USDC book uses stored USDC PnL. */
 export function realizedPnlDisplayUsdc(g, status) {
   const book = tradeGroupAprBook(g);
   if (book === "USDC") return num(g?.realized_pnl);
@@ -2018,18 +3217,17 @@ export function realizedPnlDisplayUsdc(g, status) {
   const disp = profitDispositionForGroup(g, status);
   if (disp) {
     const sweptUsdt = num(disp.sweptUsdt) ?? 0;
+    const held = num(disp.held) ?? 0;
+    const pending = num(disp.pending) ?? 0;
+    const unsweptNative = held + pending;
     if (sweptUsdt > 0) {
-      const held = num(disp.held) ?? 0;
-      if (held > 0 && spot !== null && spot > 0) {
-        return sweptUsdt + held * spot;
+      if (unsweptNative > 0 && spot !== null && spot > 0) {
+        return sweptUsdt + unsweptNative * spot;
       }
       return sweptUsdt;
     }
-    const held = num(disp.held) ?? 0;
-    const pending = num(disp.pending) ?? 0;
-    const totalNative = held + pending;
-    if (totalNative !== 0 && spot !== null && spot > 0) {
-      return totalNative * spot;
+    if (unsweptNative !== 0 && spot !== null && spot > 0) {
+      return unsweptNative * spot;
     }
   }
   const native = realizedPnlCoinNative(g, status);
@@ -2630,19 +3828,43 @@ export async function promisePool(factories, limit) {
   await Promise.all(Array.from({ length: cap }, () => worker()));
 }
 
+export function isFetchNetworkError(err) {
+  if (!err) return false;
+  if (err.name === "AbortError") return true;
+  const msg = String(err.message || err).toLowerCase();
+  return (
+    msg.includes("failed to fetch") ||
+    msg.includes("networkerror") ||
+    msg.includes("load failed") ||
+    msg.includes("network request failed")
+  );
+}
+
+export function formatFetchError(err, fallback = "Request failed") {
+  if (isFetchNetworkError(err)) {
+    return i18n(
+      "Cannot reach dashboard server — check that the service is running.",
+      "無法連線至 Dashboard 伺服器，請確認服務是否正在執行。"
+    );
+  }
+  return String(err?.message || err || fallback);
+}
+
 export async function fetchJson(url, options = {}) {
   const targetUrl = resolveApiUrl(url);
-  const maxAttempts = FETCH_JSON_MAX_RETRIES + 1;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  let httpAttempt = 0;
+  let networkAttempt = 0;
+  while (true) {
     let res;
     try {
       res = await fetch(targetUrl, options);
     } catch (err) {
-      if (attempt < maxAttempts - 1) {
-        await delay(FETCH_JSON_RETRY_BASE_MS * (attempt + 1));
+      if (networkAttempt < FETCH_JSON_NETWORK_MAX_RETRIES) {
+        networkAttempt += 1;
+        await delay(FETCH_JSON_NETWORK_RETRY_BASE_MS * networkAttempt);
         continue;
       }
-      throw err;
+      throw new Error(formatFetchError(err));
     }
     if (res.ok) return res.json();
     let detail = `${res.status} ${res.statusText}`;
@@ -2650,8 +3872,9 @@ export async function fetchJson(url, options = {}) {
       const body = await res.json();
       if (body?.detail) detail = `${res.status} ${body.detail}`;
     } catch (_) {}
-    if (FETCH_JSON_RETRYABLE_STATUS.has(res.status) && attempt < maxAttempts - 1) {
-      await delay(FETCH_JSON_RETRY_BASE_MS * (attempt + 1));
+    if (FETCH_JSON_RETRYABLE_STATUS.has(res.status) && httpAttempt < FETCH_JSON_MAX_RETRIES) {
+      httpAttempt += 1;
+      await delay(FETCH_JSON_RETRY_BASE_MS * httpAttempt);
       continue;
     }
     throw new Error(detail);

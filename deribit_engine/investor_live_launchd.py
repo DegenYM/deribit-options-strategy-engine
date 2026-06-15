@@ -14,6 +14,7 @@ from .investor_launchd_common import (
     bootout_plist,
     bootstrap_plist,
     install_plist_file,
+    investor_live_launchd_log_paths,
     is_launchd_loaded,
     launch_agents_dir,
     reload_plist,
@@ -67,7 +68,9 @@ def installed_live_plist_path(investor_id: str) -> Path:
 
 
 def supervisor_log_path(repo_root: Path, investor_id: str) -> Path:
-    return repo_root / "logs" / "live" / investor_id / "supervisor.log"
+    del repo_root
+    stdout, _ = investor_live_launchd_log_paths(investor_id)
+    return stdout
 
 
 def live_targets(

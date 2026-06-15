@@ -5,7 +5,7 @@ Baseline / HWM net subscription (per investor)::
     sum(deposit + withdrawal + transfer)   # USDC-equivalent per book, then summed
 
 across every **operational** sub-account in ``accounts.toml`` (unique API logins,
-books BTC/ETH/USDC). Internal moves between configured subs appear as signed
+books BTC/ETH/USDC/USDT). Internal moves between configured subs appear as signed
 ``transfer`` rows on each API and **net to zero** in the aggregate. Capital that
 lands on the main account first, then ``transfer`` into a configured sub, is
 counted via that sub's inbound ``transfer`` (no main-account API required).
@@ -100,6 +100,21 @@ class SubscriptionFlowLine:
 
 
 @dataclass(frozen=True)
+class FlowPeriodSummary:
+    """USDC-equivalent breakdown of subscription-relevant flows in a time window."""
+
+    deposit_usdc: Decimal
+    withdrawal_usdc: Decimal
+    transfer_in_usdc: Decimal
+    transfer_out_usdc: Decimal
+    net_subscription_usdc: Decimal
+    line_count: int
+    deposit_count: int
+    withdrawal_count: int
+    transfer_count: int
+
+
+@dataclass(frozen=True)
 class CumulativeNetFlow:
     cumulative_net_flow_usdc: Decimal
     net_flow_native_by_book: dict[str, Decimal]
@@ -174,12 +189,26 @@ def _api_identity_key(config: BotConfig) -> str:
     return f"{config.client_id.strip().lower()}\0{config.client_secret.strip()}"
 
 
-_FEE_FLOW_BOOKS: tuple[str, ...] = ("BTC", "ETH", "USDC")
+_FEE_FLOW_BOOKS: tuple[str, ...] = ("BTC", "ETH", "USDC", "USDT")
 
 
 def _fee_flow_books() -> tuple[str, ...]:
     """Books scanned for investor fee baseline (independent of strategy traded_collaterals)."""
     return _FEE_FLOW_BOOKS
+
+
+def cash_flow_scan_currencies(traded_collaterals: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """Currencies whose transaction logs are scanned for external cash flow.
+
+    Inverse margin accounts (BTC/ETH) can hold USDT from premium profit sweeps even
+    when ``TRADED_COLLATERALS`` omits USDT; always scan USDT there so withdrawals
+    do not masquerade as trading losses.
+    """
+    traded = [c.upper() for c in traded_collaterals]
+    books = set(traded)
+    if ("BTC" in books or "ETH" in books) and "USDT" not in books:
+        traded = [*traded, "USDT"]
+    return tuple(traded)
 
 
 def _group_accounts_by_api_identity(
@@ -213,7 +242,7 @@ def _native_to_usdc(amount_native: Decimal, book: str, index_by_ccy: dict[str, D
     return native_book_amount_to_usdc(amount_native, book, index_by_ccy)
 
 
-_FEE_REPORT_BOOK_ORDER: tuple[str, ...] = ("BTC", "ETH", "USDC")
+_FEE_REPORT_BOOK_ORDER: tuple[str, ...] = ("BTC", "ETH", "USDC", "USDT")
 
 
 def ordered_net_flow_books(native_by_book: dict[str, Decimal]) -> tuple[str, ...]:
@@ -280,6 +309,104 @@ def _collect_identity_flow_lines(
                 )
             )
     return lines
+
+
+def summarize_subscription_flow_lines(
+    lines: tuple[SubscriptionFlowLine, ...] | list[SubscriptionFlowLine],
+) -> FlowPeriodSummary:
+    """Aggregate period flows by type (deposit / withdrawal / transfer in-out)."""
+    deposit_usdc = Decimal("0")
+    withdrawal_usdc = Decimal("0")
+    transfer_in_usdc = Decimal("0")
+    transfer_out_usdc = Decimal("0")
+    deposit_count = 0
+    withdrawal_count = 0
+    transfer_count = 0
+    included_count = 0
+
+    for line in lines:
+        if not line.included_in_subscription:
+            continue
+        included_count += 1
+        usdc = line.usdc_equiv
+        if line.flow_type == "deposit":
+            deposit_usdc += usdc
+            deposit_count += 1
+        elif line.flow_type == "withdrawal":
+            withdrawal_usdc += -usdc if usdc < 0 else usdc
+            withdrawal_count += 1
+        elif line.flow_type == "transfer_in":
+            transfer_in_usdc += usdc
+            transfer_count += 1
+        elif line.flow_type == "transfer_out":
+            transfer_out_usdc += -usdc if usdc < 0 else usdc
+            transfer_count += 1
+        elif usdc > 0:
+            deposit_usdc += usdc
+            deposit_count += 1
+        elif usdc < 0:
+            withdrawal_usdc += -usdc
+            withdrawal_count += 1
+
+    net_subscription = sum(
+        (line.usdc_equiv for line in lines if line.included_in_subscription),
+        Decimal("0"),
+    )
+    return FlowPeriodSummary(
+        deposit_usdc=deposit_usdc,
+        withdrawal_usdc=withdrawal_usdc,
+        transfer_in_usdc=transfer_in_usdc,
+        transfer_out_usdc=transfer_out_usdc,
+        net_subscription_usdc=net_subscription,
+        line_count=included_count,
+        deposit_count=deposit_count,
+        withdrawal_count=withdrawal_count,
+        transfer_count=transfer_count,
+    )
+
+
+def period_flow_report_dict(
+    lines: tuple[SubscriptionFlowLine, ...] | list[SubscriptionFlowLine],
+    *,
+    start_timestamp_ms: int,
+    end_timestamp_ms: int,
+) -> dict[str, Any]:
+    """JSON-friendly period cash-flow preview for fee-flow-report."""
+    summary = summarize_subscription_flow_lines(lines)
+    return {
+        "start_timestamp_ms": start_timestamp_ms,
+        "end_timestamp_ms": end_timestamp_ms,
+        "summary": {
+            "deposit_usdc": str(summary.deposit_usdc),
+            "withdrawal_usdc": str(summary.withdrawal_usdc),
+            "transfer_in_usdc": str(summary.transfer_in_usdc),
+            "transfer_out_usdc": str(summary.transfer_out_usdc),
+            "net_subscription_usdc": str(summary.net_subscription_usdc),
+            "line_count": summary.line_count,
+            "deposit_count": summary.deposit_count,
+            "withdrawal_count": summary.withdrawal_count,
+            "transfer_count": summary.transfer_count,
+        },
+        "lines": [
+            {
+                "timestamp_ms": row.timestamp_ms,
+                "identity_label": row.identity_label,
+                "client_id": row.client_id,
+                "book": row.book,
+                "flow_type": row.flow_type,
+                "amount_native": str(row.amount_native),
+                "usdc_equiv": str(row.usdc_equiv),
+                "included_in_subscription": row.included_in_subscription,
+            }
+            for row in lines
+        ],
+        "note": (
+            "deposit / transfer_in = capital inflow; withdrawal / transfer_out = capital outflow. "
+            "Deribit withdrawals used only to pay fees off-exchange should be excluded at settlement "
+            "via --fee-payment-usdc (they are not capital redemptions). "
+            "External wallet fee payments do not appear here and do not affect net subscription."
+        ),
+    }
 
 
 def fetch_subscription_flow_lines(

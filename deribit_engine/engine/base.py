@@ -240,18 +240,14 @@ class EngineBase:
         return realized_pnl_usdc / index_price_usd
 
     def _coin_profit_native_for_sweep(self, group: TradeGroup) -> Decimal | None:
-        """Authoritative fee-aware coin profit for profit-sweep sizing (premium ledger only)."""
-        if not group.is_coin_collateral() or group.status != "closed":
-            return None
-        native = group.compute_coin_profit_native(allow_ledger_spot_infer=False)
-        close_idx = group.close_index_usd
-        if (native is None or native <= 0) and close_idx is not None and close_idx > 0:
-            native = group.compute_coin_profit_native(allow_ledger_spot_infer=True)
-        if (native is None or native <= 0) and group.realized_pnl_collateral_native is not None:
-            native = group.realized_pnl_collateral_native
-        if native is None or native <= 0:
+        """Authoritative realized premium profit for profit-sweep sizing."""
+        from ..profit_sweep_ops import realized_spot_profit_native_for_group
+
+        native = realized_spot_profit_native_for_group(group)
+        if native is None:
             return None
         group.realized_pnl_collateral_native = native
+        close_idx = group.close_index_usd
         if close_idx is not None and close_idx > 0:
             group.backfill_realized_pnl_usdc(spot_index_usd=close_idx)
         return native
@@ -720,8 +716,12 @@ class EngineBase:
         *,
         dashboard_display: bool = False,
     ) -> dict[str, Any]:
-        context = self._load_runtime_from_exchange(prefetch, dashboard_display=dashboard_display)
-        self.state_store.save(context.state)
+        context, reconcile_closed = self._load_runtime_from_exchange(
+            prefetch,
+            dashboard_display=dashboard_display,
+        )
+        if not dashboard_display or reconcile_closed:
+            self.state_store.save(context.state)
         return self._status_payload(context)
 
     def report(self, *, days: int = 30) -> dict[str, Any]:
@@ -809,7 +809,7 @@ class EngineBase:
         for sym in ("BTC", "ETH"):
             idx = self._currency_index_price(sym, context.orderbook_cache)
             underlying_index_usd[sym] = format_decimal(idx, 4) if idx > 0 else "0"
-        return {
+        payload: dict[str, Any] = {
             "env": self.config.env,
             "portfolio": context.snapshot.to_dict(),
             "underlying_index_usd": underlying_index_usd,
@@ -833,6 +833,19 @@ class EngineBase:
             "open_orders": [self._order_payload(order) for order in context.open_orders],
             "positions": [self._position_payload(position) for position in context.positions],
         }
+        if self.config.option_strategy == "covered_call" and self.config.has_private_credentials:
+            try:
+                from ..profit_sweep_repair import premium_sweep_fill_stats_by_book
+
+                fill_stats = premium_sweep_fill_stats_by_book(
+                    self.client,
+                    self.config.order_label_prefix,
+                )
+                if fill_stats:
+                    payload["premium_sweep_fill_stats_by_book"] = fill_stats
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("premium_sweep_fill_stats_by_book failed", exc_info=True)
+        return payload
 
     def _filled_amounts_by_instrument(self, responses: list[dict[str, Any]]) -> dict[str, Decimal]:
         totals: dict[str, Decimal] = {}
@@ -1958,6 +1971,9 @@ class EngineBase:
             "profit_sweep_order_id": group.profit_sweep_order_id or None,
             "profit_sweep_quote_proceeds": format_decimal(group.profit_sweep_quote_proceeds, 4)
             if group.profit_sweep_quote_proceeds > 0
+            else None,
+            "profit_sweep_quote_proceeds_lifetime": format_decimal(group.profit_sweep_quote_proceeds_lifetime, 4)
+            if group.profit_sweep_quote_proceeds_lifetime > 0
             else None,
             "profit_sweep_reason": group.profit_sweep_reason or None,
         }

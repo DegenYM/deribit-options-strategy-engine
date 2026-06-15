@@ -127,6 +127,14 @@ def _load_closed_groups_payload(
         return {"open": [], "closed": [], "performance_excluded_closed_group_count": 0, "next_group_id": None}
     store = StrategyStateStore(state_path)
     state = store.load()
+    state_repaired = False
+    try:
+        from ..trade_journal_backfill import repair_manual_swap_proceeds_in_groups
+
+        if repair_manual_swap_proceeds_in_groups(state.groups):
+            state_repaired = True
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("manual swap proceeds repair failed for %s: %s", state_path.name, exc)
     fee_rate, fee_cap_rate = Decimal("0.0003"), Decimal("0.125")
     try:
         from ..trade_journal_backfill import _fee_rates_for_state
@@ -147,7 +155,6 @@ def _load_closed_groups_payload(
     open_groups = [g.to_dict() for g in state.groups if g.status != "closed"]
     all_closed_groups = [g for g in state.groups if g.status == "closed"]
     closed_groups = []
-    state_repaired = False
     for g in all_closed_groups:
         if g.group_id in excluded_group_ids:
             continue
@@ -193,6 +200,22 @@ def _load_closed_groups_payload(
                 state_repaired = True
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("reconciled bot income exit repair failed for %s: %s", g.group_id, exc)
+        try:
+            from ..client import DeribitClient
+            from ..trade_journal_backfill import _config_for_state, repair_reconciled_manual_close_pnl
+
+            cfg = _config_for_state(state_path)
+            if cfg is not None and cfg.has_private_credentials:
+                client = DeribitClient(cfg)
+                if repair_reconciled_manual_close_pnl(
+                    g,
+                    client=client,
+                    fee_rate=fee_rate,
+                    fee_cap_rate=fee_cap_rate,
+                ):
+                    state_repaired = True
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("reconciled manual close repair failed for %s: %s", g.group_id, exc)
         closed_groups.append(g.to_dict())
     if state_repaired:
         try:
@@ -318,8 +341,7 @@ def _ensure_realized_apr_on_equity(
         closed_timestamp_ms=closed_ms,
     )
     group["realized_apr_on_equity"] = format_decimal(apr, 8)
-    if not group.get("realized_annualized_return"):
-        group["realized_annualized_return"] = group["realized_apr_on_equity"]
+    group["realized_annualized_return"] = group["realized_apr_on_equity"]
 
 
 def _enrich_groups_payload_open_unrealized(
@@ -439,6 +461,50 @@ def _groups_payload_for_account(
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("groups enrich skipped for %s: %s", account.name, exc)
     return payload
+
+
+def _aggregate_groups_disk_only(
+    accounts: list[DashboardAccount],
+    *,
+    spot_index: dict[str, Decimal] | None = None,
+) -> dict[str, Any]:
+    """Merge open/closed groups from on-disk state only (no Deribit prefetch)."""
+    merged_open: list[dict[str, Any]] = []
+    merged_closed: list[dict[str, Any]] = []
+    underlying_index_usd: dict[str, str] = {}
+    next_group_id: dict[str, Any] = {}
+    excluded_closed_count = 0
+
+    def _fetch(account: DashboardAccount) -> tuple[DashboardAccount, dict[str, Any]]:
+        return account, copy.deepcopy(_closed_groups_payload(account.state_path, spot_index=spot_index))
+
+    if len(accounts) <= 1:
+        pairs = [_fetch(account) for account in accounts]
+    else:
+        with ThreadPoolExecutor(max_workers=min(len(accounts), 4)) as pool:
+            pairs = list(pool.map(_fetch, accounts))
+
+    for account, payload in pairs:
+        for key, value in (payload.get("underlying_index_usd") or {}).items():
+            if _dec(value) > 0:
+                underlying_index_usd[str(key).upper()] = str(value)
+        merged_open.extend(_tag_rows(payload.get("open") or [], account))
+        merged_closed.extend(_tag_rows(payload.get("closed") or [], account))
+        next_group_id[account.name] = payload.get("next_group_id")
+        excluded_closed_count += int(payload.get("performance_excluded_closed_group_count") or 0)
+
+    merged_open = _dedupe_trade_group_rows(merged_open)
+    merged_closed = _dedupe_trade_group_rows(merged_closed)
+
+    return {
+        "open": merged_open,
+        "closed": merged_closed,
+        "performance_excluded_closed_group_count": excluded_closed_count,
+        "next_group_id": next_group_id if len(accounts) > 1 else (next(iter(next_group_id.values()), None)),
+        "underlying_index_usd": underlying_index_usd,
+        "accounts": [{"name": account.name, "state_file": str(account.state_path)} for account in accounts],
+        "source": "disk",
+    }
 
 
 def _aggregate_groups(

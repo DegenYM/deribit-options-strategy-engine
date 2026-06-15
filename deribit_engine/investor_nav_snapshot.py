@@ -553,6 +553,7 @@ def settle_period(
     start_ms: int | None = None,
     period: str | None = None,
     net_flow_usdc: Decimal | None = None,
+    fee_payment_usdc: Decimal | None = None,
     repo_root: Path | str | None = None,
     persist: bool = True,
     force: bool = False,
@@ -622,6 +623,8 @@ def settle_period(
         "USDC": Decimal("1"),
     }
     period_flow_lines: tuple[Any, ...] | None = None
+    fee_payment_excluded = max(Decimal("0"), fee_payment_usdc or Decimal("0"))
+    net_flow_usdc_raw: Decimal | None = None
     if net_flow_usdc is None:
         from .investor_cash_flow import fetch_subscription_flow_lines
 
@@ -633,13 +636,19 @@ def settle_period(
             end_timestamp_ms=end_ms,
         )
         period_flow_lines = tuple(lines)
-        net_flow_usdc = sum(
+        net_flow_usdc_raw = sum(
             (row.usdc_equiv for row in lines if row.included_in_subscription),
             Decimal("0"),
         )
+        net_flow_usdc = net_flow_usdc_raw + fee_payment_excluded
         net_flow_source = "transaction_log"
     else:
         net_flow_source = "manual"
+        if fee_payment_excluded > 0:
+            raise ValueError(
+                "--fee-payment-usdc cannot be combined with --net-flow-usdc; "
+                "include fee-payment exclusion in the manual net-flow value"
+            )
 
     flow_baseline = store.load_flow_baseline(manifest.investor_id)
     start_bd = (
@@ -684,6 +693,8 @@ def settle_period(
         "nav_perf_end": nav_perf_end,
         "period_nav_perf_pnl": period_nav_perf_pnl,
         "net_flow_usdc": net_flow_usdc,
+        "net_flow_usdc_raw": net_flow_usdc_raw,
+        "fee_payment_usdc_excluded": fee_payment_excluded,
         "net_flow_source": net_flow_source,
         "distributable_profit": distributable,
         "performance_fee": performance_fee,
@@ -768,6 +779,7 @@ def settle_quarter(
     period: str,
     *,
     net_flow_usdc: Decimal | None = None,
+    fee_payment_usdc: Decimal | None = None,
     repo_root: Path | str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -777,7 +789,8 @@ def settle_quarter(
         start_ms=quarter_start_ts_ms(period),
         end_ms=quarter_end_settlement_ts_ms(period),
         period=period,
-        net_flow_usdc=net_flow_usdc if net_flow_usdc is not None else Decimal("0"),
+        net_flow_usdc=net_flow_usdc if net_flow_usdc is not None else None,
+        fee_payment_usdc=fee_payment_usdc,
         repo_root=repo_root,
         persist=True,
         force=force,

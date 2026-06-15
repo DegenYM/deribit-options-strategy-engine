@@ -35,7 +35,6 @@ def _write_layout(repo: Path) -> Path:
         "\n".join(
             [
                 "DERIBIT_ENV=mainnet",
-                "OPTION_STRATEGY=bull_put_spread",
                 "SHORT_PUT_DELTA_MAX=0.11",
                 "REFERENCE_CAPITAL_USDC=2000",
                 "STATE_FILE=.state/alpha/bull_put.json",
@@ -256,7 +255,7 @@ def test_legacy_root_strategy_profile_emits_deprecation_warning(tmp_path: Path):
     assert tmp_path / ".env.naked_short" in layers
 
 
-def test_env_layer_paths_applies_risk_tier_override(tmp_path: Path):
+def test_env_layer_paths_applies_manifest_risk_tier(tmp_path: Path):
     (tmp_path / "deribit_engine").mkdir()
     (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
     (tmp_path / "config" / "shared" / "strategies" / ".env.bull_put_spread").write_text(
@@ -274,9 +273,16 @@ def test_env_layer_paths_applies_risk_tier_override(tmp_path: Path):
         "\n".join(
             [
                 "DERIBIT_ENV=mainnet",
-                "OPTION_STRATEGY=bull_put_spread",
-                "RISK_TIER=low",
                 "STATE_FILE=.state/alpha/bull_put.json",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (investor / "accounts.toml").write_text(
+        "\n".join(
+            [
+                '[investor]\nid = "alpha"\ndisplay_name = "Alpha"\n',
+                '[[accounts]]\nslug = "bull_put"\nstrategy = "bull_put_spread"\nrisk_tier = "low"\n',
             ]
         ),
         encoding="utf-8",
@@ -287,6 +293,35 @@ def test_env_layer_paths_applies_risk_tier_override(tmp_path: Path):
     config = load_config(account, require_private=False)
     assert config.risk_tier == "low"
     assert config.short_put_delta_max == Decimal("0.12")
+
+
+def test_env_layer_paths_defaults_manifest_risk_tier_to_medium(tmp_path: Path):
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / "config" / "shared" / "strategies").mkdir(parents=True)
+    (tmp_path / "config" / "shared" / "strategies" / ".env.naked_short").write_text(
+        "OPTION_STRATEGY=naked_short\n",
+        encoding="utf-8",
+    )
+    tiers_dir = tmp_path / "config" / "shared" / "strategies" / "tiers" / "naked_short"
+    tiers_dir.mkdir(parents=True)
+    (tiers_dir / ".env.medium").write_text("MIN_NET_APR=0.08\n", encoding="utf-8")
+    (tiers_dir / ".env.high").write_text("MIN_NET_APR=0.12\n", encoding="utf-8")
+    investor = tmp_path / "config" / "investors" / "alpha"
+    (investor / "accounts").mkdir(parents=True)
+    account = investor / "accounts" / ".env.naked"
+    account.write_text("DERIBIT_ENV=mainnet\nSTATE_FILE=.state/alpha/naked.json\n", encoding="utf-8")
+    (investor / "accounts.toml").write_text(
+        "\n".join(
+            [
+                '[investor]\nid = "alpha"\ndisplay_name = "Alpha"\n',
+                '[[accounts]]\nslug = "naked"\nstrategy = "naked_short"\n',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(account, require_private=False)
+    assert config.risk_tier == "medium"
+    assert config.min_net_apr == Decimal("0.08")
 
 
 def test_load_investor_manifest_reads_risk_tier(tmp_path: Path):

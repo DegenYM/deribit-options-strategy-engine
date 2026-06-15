@@ -104,6 +104,7 @@ const fixtures = {
     source: "ledger",
     freshness_ms: 120000,
     portfolio: { total_equity_usdc: 9000, equity_by_book: { USDC: 9000 }, regime: "normal" },
+    groups: { open: [], closed: [], underlying_index_usd: { BTC: 65000, ETH: 3500 }, source: "disk" },
   },
   "/api/groups": { open: [], closed: [], underlying_index_usd: { BTC: 65000, ETH: 3500 } },
   "/api/status": {

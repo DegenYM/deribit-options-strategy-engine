@@ -405,6 +405,10 @@ enabled = true
         raise AssertionError("live capture should not run when end snapshot exists")
 
     monkeypatch.setattr("deribit_engine.investor_nav_snapshot.capture_investor_nav", _fake_capture)
+    monkeypatch.setattr(
+        "deribit_engine.investor_cash_flow.fetch_subscription_flow_lines",
+        lambda *_args, **_kwargs: [],
+    )
 
     result = settle_quarter("demo", "2026-Q1", repo_root=tmp_path)
     assert Decimal(result["distributable_profit"]) == Decimal("16000")
@@ -518,3 +522,97 @@ enabled = true
     assert Decimal(result["distributable_profit"]) == Decimal("13000")
     assert Decimal(result["performance_fee"]) == Decimal("1300")
     assert store.load_hwm("demo") == Decimal("100000")
+
+
+def test_settle_period_excludes_fee_payment_withdrawal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    investor_dir = tmp_path / "config" / "investors" / "demo"
+    accounts_dir = investor_dir / "accounts"
+    accounts_dir.mkdir(parents=True)
+    (investor_dir / "accounts.toml").write_text(
+        """
+[investor]
+id = "demo"
+display_name = "demo"
+
+[[accounts]]
+slug = "naked"
+strategy = "naked_short"
+enabled = true
+""".strip(),
+        encoding="utf-8",
+    )
+    (investor_dir / ".env.investor").write_text(
+        "INITIAL_HWM_NAV_PERF=100000\nPERFORMANCE_FEE_RATE=0.10\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / ".env.example").write_text("", encoding="utf-8")
+
+    store = FeeSnapshotStore(tmp_path / "data" / "fee_ledger" / "demo" / "snapshots.db")
+    store.save_hwm(investor_id="demo", hwm_nav_perf=Decimal("100000"), updated_at_ms=1)
+    for ts, nav in ((1_000, "100000"), (3_000, "110000")):
+        store.append_snapshot(
+            ts_ms=ts,
+            investor_id="demo",
+            snapshot_kind="scheduled",
+            total_equity_usdc=Decimal(nav),
+            collateral_spot_usdc=Decimal("0"),
+            nav_perf=Decimal(nav),
+            aum_mgmt=Decimal(nav),
+            index_btc_usd=Decimal("50000"),
+            index_eth_usd=Decimal("3000"),
+            collateral_spot_btc=Decimal("0"),
+            collateral_spot_eth=Decimal("0"),
+            equity_by_book={"USDC": Decimal(nav)},
+        )
+
+    def _fake_flow_lines(*_args, **_kwargs):
+        from deribit_engine.investor_cash_flow import SubscriptionFlowLine
+
+        return [
+            SubscriptionFlowLine(
+                identity_label="naked",
+                client_id="id",
+                book="USDC",
+                timestamp_ms=2_500,
+                flow_type="withdrawal",
+                amount_native=Decimal("-1500"),
+                usdc_equiv=Decimal("-1500"),
+                included_in_subscription=True,
+            )
+        ]
+
+    monkeypatch.setattr(
+        "deribit_engine.investor_cash_flow.fetch_subscription_flow_lines",
+        _fake_flow_lines,
+    )
+
+    def _no_capture(*_args, **_kwargs):
+        raise AssertionError("no live capture")
+
+    monkeypatch.setattr("deribit_engine.investor_nav_snapshot.capture_investor_nav", _no_capture)
+
+    without_exclude = settle_period(
+        "demo",
+        start_ms=1_000,
+        end_ms=3_000,
+        repo_root=tmp_path,
+        persist=False,
+        write_report=False,
+    )
+    assert without_exclude["net_flow_usdc"] == "-1500"
+    assert Decimal(without_exclude["distributable_profit"]) == Decimal("11500")
+
+    with_exclude = settle_period(
+        "demo",
+        start_ms=1_000,
+        end_ms=3_000,
+        fee_payment_usdc=Decimal("1500"),
+        repo_root=tmp_path,
+        persist=False,
+        write_report=False,
+    )
+    assert with_exclude["net_flow_usdc_raw"] == "-1500"
+    assert with_exclude["fee_payment_usdc_excluded"] == "1500"
+    assert with_exclude["net_flow_usdc"] == "0"
+    assert Decimal(with_exclude["distributable_profit"]) == Decimal("10000")

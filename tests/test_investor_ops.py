@@ -89,7 +89,7 @@ def test_parse_risk_tier_map_per_slug_and_default():
     assert tiers == {"naked": "low"}
 
 
-def test_investor_init_writes_risk_tier_to_manifest_and_env(tmp_path: Path):
+def test_investor_init_writes_risk_tier_to_manifest_only(tmp_path: Path):
     repo = _bootstrap_repo(tmp_path)
     investor_init(
         "tiered",
@@ -103,8 +103,10 @@ def test_investor_init_writes_risk_tier_to_manifest_and_env(tmp_path: Path):
     assert 'risk_tier = "high"' in manifest
     naked_env = (repo / "config/investors/tiered/accounts/.env.naked").read_text(encoding="utf-8")
     covered_env = (repo / "config/investors/tiered/accounts/.env.covered_call").read_text(encoding="utf-8")
-    assert "RISK_TIER=low" in naked_env
-    assert "RISK_TIER=high" in covered_env
+    assert "OPTION_STRATEGY=" not in naked_env
+    assert "RISK_TIER=" not in naked_env
+    assert "OPTION_STRATEGY=" not in covered_env
+    assert "RISK_TIER=" not in covered_env
 
 
 def test_render_launchd_plists_uses_distinct_live_and_frontend_labels(tmp_path: Path):
@@ -114,8 +116,15 @@ def test_render_launchd_plists_uses_distinct_live_and_frontend_labels(tmp_path: 
     live_path = repo / "config/platform/generated/launchd/com.deribit.live.alice.plist"
     frontend_path = repo / "config/platform/generated/launchd/com.deribit.frontend.alice.plist"
     assert paths == (live_path, frontend_path)
-    assert "<string>com.deribit.live.alice</string>" in live_path.read_text(encoding="utf-8")
-    assert "<string>com.deribit.frontend.alice</string>" in frontend_path.read_text(encoding="utf-8")
+    live_text = live_path.read_text(encoding="utf-8")
+    frontend_text = frontend_path.read_text(encoding="utf-8")
+    assert "<string>com.deribit.live.alice</string>" in live_text
+    assert "<string>com.deribit.frontend.alice</string>" in frontend_text
+    home = Path.home()
+    assert f"<string>{home}/Library/Logs/deribit/live/alice/supervisor.log</string>" in live_text
+    assert f"<string>{home}/Library/Logs/deribit/frontend/alice/frontend.log</string>" in frontend_text
+    assert "/logs/live/alice/" not in live_text
+    assert "/logs/frontend/alice/" not in frontend_text
 
 
 def test_investor_init_scaffolds_manifest_and_registry(tmp_path: Path):

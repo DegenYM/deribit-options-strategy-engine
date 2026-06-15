@@ -26,9 +26,9 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>__REPO_ROOT__/logs/frontend/__INVESTOR_ID__/frontend.log</string>
+  <string>__STDOUT_PATH__</string>
 
   <key>StandardErrorPath</key>
-  <string>__REPO_ROOT__/logs/frontend/__INVESTOR_ID__/frontend.err.log</string>
+  <string>__STDERR_PATH__</string>
 </dict>
 </plist>
