@@ -35,6 +35,16 @@ function invokeRenderDashboard() {
   (activeRenderDashboard ?? persistentRenderDashboard)?.();
 }
 
+function showRefreshFetchToast(
+  label,
+  err,
+  { retry, hasCachedData = false, silentIfLimited = false } = {},
+) {
+  if (silentIfLimited && hasCachedData && STATE.lastRefreshMs) return;
+  const msg = formatFetchError(err);
+  showToast(`${label}: ${msg}`, retry ? { retry } : undefined);
+}
+
 let lastRefreshTickHandle = null;
 
 function relativeRefreshText(deltaMs) {
@@ -721,11 +731,6 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
   STATE.refreshInFlight = true;
   STATE.lastRefreshStartedMs = Date.now();
   const investorFirstLoad = INVESTOR && !STATE.investorReady;
-  function showRefreshFetchToast(label, err, { retry, hasCachedData = false } = {}) {
-    if (silentIfLimited && hasCachedData && STATE.lastRefreshMs) return;
-    const msg = formatFetchError(err);
-    showToast(`${label}: ${msg}`, retry ? { retry } : undefined);
-  }
   if (investorFirstLoad) {
     if (!STATE.investorLoadStartedMs) {
       beginInvestorLoad({ blocking: true });
@@ -818,6 +823,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
           .catch((err) => {
             showRefreshFetchToast(i18n("realized summary", "已實現損益"), err, {
               hasCachedData: Boolean(STATE.report?.summary),
+              silentIfLimited,
             });
             return false;
           });
@@ -862,6 +868,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     } catch (err) {
       showRefreshFetchToast(i18n("health", "連線狀態"), err, {
         hasCachedData: Boolean(STATE.health),
+        silentIfLimited,
       });
     }
 
@@ -917,6 +924,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         .catch((err) => {
           showRefreshFetchToast(i18n("groups", "持倉"), err, {
             hasCachedData: Boolean(STATE.groups?.open?.length || STATE.groups?.closed?.length),
+            silentIfLimited,
           });
         });
     }

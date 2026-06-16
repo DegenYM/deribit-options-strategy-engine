@@ -2539,17 +2539,22 @@ export function applyDashboardBundlePayload(d) {
   if (changed) STATE.dashboardRenderHook?.();
 }
 
-/** Earliest entry among realized closed groups (lifetime APR sample start). */
+/** Earliest entry among realized closed and open groups (lifetime APR sample start). */
 export function lifetimePerformanceStartMs(report, groups) {
   let min = null;
   const consider = (g) => {
-    if (!g || num(g.realized_pnl) === null) return;
-    if (!isDisplayableClosedTradeGroup(g, STATE.status, groups)) return;
+    if (!g) return;
     const entry = entryTimestampMs(g);
     if (entry === null || entry <= 0) return;
+    const isOpen = String(g?.status || "").toLowerCase() === "open";
+    if (!isOpen) {
+      if (num(g.realized_pnl) === null) return;
+      if (!isDisplayableClosedTradeGroup(g, STATE.status, groups)) return;
+    }
     if (min === null || entry < min) min = entry;
   };
   for (const g of groups?.closed || []) consider(g);
+  for (const g of groups?.open || []) consider(g);
   for (const g of report?.recent_closed_trades || []) consider(g);
   return min;
 }

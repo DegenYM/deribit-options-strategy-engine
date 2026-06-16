@@ -425,7 +425,7 @@ assert.ok(Math.abs(entryUsd(jackComposition, "ETH") - jackSummary.spotSoldQuote.
 
 const entryMs = 1_699_000_000_000;
 const closedMs = 1_700_000_000_000;
-const sampleDays = (closedMs - entryMs) / (24 * 3600 * 1000);
+const sampleDays = (Date.now() - entryMs) / (24 * 3600 * 1000);
 const capital = 10000;
 const recentClosedMs = Date.now() - 5 * 24 * 3600 * 1000;
 const recentEntryMs = recentClosedMs - sampleDays * 24 * 3600 * 1000;

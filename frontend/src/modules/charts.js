@@ -467,19 +467,18 @@ export function annualizeRealizedApr(pnl, sampleDays, capital) {
   return (p / cap) * (365 / days);
 }
 
-/** Match backend ``_realized_sample_days`` (earliest entry → latest close). */
-export function realizedSampleDaysFromRows(rows) {
+/** Match backend ``_realized_sample_days`` (earliest entry → live UTC now). */
+export function realizedSampleDaysFromRows(rows, openRows = [], nowMs = Date.now()) {
   let startMs = null;
-  let endMs = null;
-  for (const g of rows) {
-    const closed = closedTimestampMs(g);
+  const considerEntry = (g) => {
     const entry = entryTimestampMs(g);
-    if (closed === null || entry === null || entry <= 0) continue;
+    if (entry === null || entry <= 0) return;
     if (startMs === null || entry < startMs) startMs = entry;
-    if (endMs === null || closed > endMs) endMs = closed;
-  }
-  if (startMs === null || endMs === null || endMs <= startMs) return null;
-  return (endMs - startMs) / (24 * 3600 * 1000);
+  };
+  for (const g of rows) considerEntry(g);
+  for (const g of openRows) considerEntry(g);
+  if (startMs === null || nowMs <= startMs) return null;
+  return (nowMs - startMs) / (24 * 3600 * 1000);
 }
 
 export function resolveAprEffectiveCapital(summary, status) {
@@ -496,7 +495,9 @@ export function computeLifetimeRealizedApr(report, groups, status, summary) {
   const rows = lifetimeRealizedClosedRows(report, groups, status);
   const pnl = sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status);
   if (pnl === null) return null;
-  const sampleDays = realizedSampleDaysFromRows(rows) ?? num(summary?.lifetime_sample_days);
+  const sampleDays =
+    realizedSampleDaysFromRows(rows, groups?.open || []) ??
+    num(summary?.lifetime_sample_days);
   const capital = resolveAprEffectiveCapital(summary, status);
   return annualizeRealizedApr(pnl, sampleDays, capital);
 }

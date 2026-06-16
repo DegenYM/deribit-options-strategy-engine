@@ -744,7 +744,7 @@ class EngineBase:
         total_holding_days = sum((group.holding_days for group in realized_groups), Decimal("0"))
         win_count = len([group for group in realized_groups if (group.realized_pnl or Decimal("0")) > 0])
         realized_count = Decimal(str(len(realized_groups)))
-        lifetime_sample_days = self._realized_sample_days(realized_groups)
+        lifetime_sample_days = self._realized_sample_days(realized_groups, open_groups=open_groups)
         window_groups, window_days = self._window_realized_groups(realized_groups, days)
         window_realized_pnl = sum((group.realized_pnl or Decimal("0") for group in window_groups), Decimal("0"))
 
@@ -1860,16 +1860,21 @@ class EngineBase:
         order = response.get("order") or response
         return order if isinstance(order, dict) else {}
 
-    def _realized_sample_days(self, groups: list[TradeGroup]) -> Decimal:
-        timestamps = [
-            (group.entry_timestamp_ms, group.closed_timestamp_ms)
-            for group in groups
-            if group.closed_timestamp_ms is not None and group.entry_timestamp_ms > 0
-        ]
-        if not timestamps:
+    def _realized_sample_days(
+        self,
+        groups: list[TradeGroup],
+        *,
+        open_groups: list[TradeGroup] | None = None,
+        now_ms: int | None = None,
+    ) -> Decimal:
+        """Earliest entry (closed or open) through live UTC now (not last close)."""
+        entries = [group.entry_timestamp_ms for group in groups if group.entry_timestamp_ms > 0]
+        if open_groups:
+            entries.extend(group.entry_timestamp_ms for group in open_groups if group.entry_timestamp_ms > 0)
+        if not entries:
             return Decimal("0")
-        start_ms = min(entry_ms for entry_ms, _ in timestamps)
-        end_ms = max(close_ms for _, close_ms in timestamps if close_ms is not None)
+        start_ms = min(entries)
+        end_ms = now_ms if now_ms is not None else utc_now_ms()
         if end_ms <= start_ms:
             return Decimal("0")
         return Decimal(str(end_ms - start_ms)) / Decimal("86400000")

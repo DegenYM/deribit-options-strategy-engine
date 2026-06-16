@@ -497,11 +497,13 @@ def _aggregate_realized_summary(
 ) -> dict[str, Any]:
     """Lightweight report summary from on-disk closed groups (no per-account bot.report())."""
     closed: list[dict[str, Any]] = []
+    open_rows: list[dict[str, Any]] = []
     excluded = 0
     open_count = 0
     for account in accounts:
         payload = _closed_groups_payload(account.state_path, spot_index=spot_index)
         closed.extend(_tag_rows(payload.get("closed") or [], account))
+        open_rows.extend(_tag_rows(payload.get("open") or [], account))
         excluded += int(payload.get("performance_excluded_closed_group_count") or 0)
         open_count += len(payload.get("open") or [])
     closed = _dedupe_trade_group_rows(closed)
@@ -525,6 +527,7 @@ def _aggregate_realized_summary(
         target_portfolio_apr=target_apr,
         window_days=days,
         spot_index=spot_index,
+        open_rows=open_rows,
     )
     summary["open_group_count"] = str(open_count)
     summary["performance_excluded_closed_group_count"] = str(excluded)

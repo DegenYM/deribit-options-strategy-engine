@@ -78,6 +78,36 @@ def test_profit_sweep_realized_usdt_prefers_fill_quote_over_lifetime() -> None:
     assert at_live == Decimal("0.90955257")
 
 
+def test_realized_sample_days_uses_live_now_not_last_close() -> None:
+    entry_ms = 1_699_000_000_000
+    closed_ms = 1_700_000_000_000
+    now_ms = closed_ms + 10 * 24 * 3600 * 1000
+    rows = [
+        {
+            "status": "closed",
+            "realized_pnl": "10",
+            "closed_timestamp_ms": closed_ms,
+            "entry_timestamp_ms": entry_ms,
+        }
+    ]
+    open_rows = [
+        {
+            "status": "open",
+            "entry_timestamp_ms": entry_ms - 5 * 24 * 3600 * 1000,
+        }
+    ]
+    summary = realized_summary_from_closed(
+        rows,
+        effective_capital_usdc=Decimal("10000"),
+        target_portfolio_apr=Decimal("0"),
+        open_rows=open_rows,
+        now_ms=now_ms,
+    )
+    expected_days = Decimal(str(now_ms - (entry_ms - 5 * 24 * 3600 * 1000))) / Decimal("86400000")
+    assert abs(Decimal(summary["lifetime_sample_days"]) - expected_days) < Decimal("1e-6")
+    assert Decimal(summary["lifetime_sample_days"]) > Decimal(str(closed_ms - entry_ms)) / Decimal("86400000")
+
+
 def test_realized_summary_from_closed_sums_at_spot() -> None:
     rows = [
         {

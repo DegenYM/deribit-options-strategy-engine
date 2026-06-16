@@ -31,17 +31,35 @@ def _holding_days(row: dict[str, Any]) -> Decimal:
     return Decimal(str(max(closed - entry, 0))) / Decimal("86400000")
 
 
-def _realized_sample_days(rows: list[dict[str, Any]]) -> Decimal:
-    timestamps = [
-        (entry, closed)
-        for row in rows
-        for entry, closed in [(_entry_timestamp_ms(row), _closed_timestamp_ms(row))]
-        if closed is not None and entry is not None and entry > 0
-    ]
-    if not timestamps:
+def _entry_timestamps_ms(
+    rows: list[dict[str, Any]],
+    *,
+    open_rows: list[dict[str, Any]] | None = None,
+) -> list[int]:
+    entries: list[int] = []
+    for row in rows:
+        entry = _entry_timestamp_ms(row)
+        if entry is not None and entry > 0:
+            entries.append(entry)
+    for row in open_rows or []:
+        entry = _entry_timestamp_ms(row)
+        if entry is not None and entry > 0:
+            entries.append(entry)
+    return entries
+
+
+def _realized_sample_days(
+    rows: list[dict[str, Any]],
+    *,
+    open_rows: list[dict[str, Any]] | None = None,
+    now_ms: int | None = None,
+) -> Decimal:
+    """Earliest entry (closed or open) through live UTC now (not last close)."""
+    entries = _entry_timestamps_ms(rows, open_rows=open_rows)
+    if not entries:
         return Decimal("0")
-    start_ms = min(entry for entry, _ in timestamps)
-    end_ms = max(closed for _, closed in timestamps if closed is not None)
+    start_ms = min(entries)
+    end_ms = now_ms if now_ms is not None else utc_now_ms()
     if end_ms <= start_ms:
         return Decimal("0")
     return Decimal(str(end_ms - start_ms)) / Decimal("86400000")
@@ -146,6 +164,8 @@ def realized_summary_from_closed(
     target_portfolio_apr: Decimal,
     window_days: int = 30,
     spot_index: dict[str, Decimal] | None = None,
+    open_rows: list[dict[str, Any]] | None = None,
+    now_ms: int | None = None,
 ) -> dict[str, Any]:
     """Build the same ``summary`` shape as ``bot.report()`` from closed group dicts."""
     realized = [
@@ -156,7 +176,7 @@ def realized_summary_from_closed(
     total_holding = sum((_holding_days(row) for row in realized), Decimal("0"))
     wins = sum(1 for row in realized if _row_realized_pnl_usdc(row, spot_index) > 0)
     realized_count = Decimal(str(len(realized)))
-    lifetime_days = _realized_sample_days(realized)
+    lifetime_days = _realized_sample_days(realized, open_rows=open_rows, now_ms=now_ms)
     window_rows, window_days_used = _window_rows(realized, window_days)
     window_pnl = sum((_row_realized_pnl_usdc(row, spot_index) for row in window_rows), Decimal("0"))
 
