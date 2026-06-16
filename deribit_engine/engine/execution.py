@@ -336,7 +336,8 @@ class ExecutionMixin:
             }
 
         instrument_name = self._covered_call_spot_instrument(group.currency)
-        amount = self._covered_call_spot_exit_amount(context, group, live=live)
+        spot_plan = self._plan_covered_call_spot_exit(context, group, live=live, reason=reason)
+        amount = spot_plan["amount"]
         if amount <= 0:
             if live:
                 group.spot_exit_status = "skipped"
@@ -356,6 +357,9 @@ class ExecutionMixin:
             "reason": reason,
             "instrument_name": instrument_name,
             "amount": format_decimal(amount, 8),
+            "covered_underlying_quantity": format_decimal(spot_plan["cover"], 8),
+            "settlement_loss": format_decimal(spot_plan["settlement_loss"], 8),
+            "settlement_loss_source": spot_plan["settlement_loss_source"],
             "order_type": self.config.covered_call_spot_order_type,
             "live": live,
         }

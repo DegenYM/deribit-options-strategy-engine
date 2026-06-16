@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from ..covered_call_settlement import resolve_covered_call_settlement_loss
 from ..exit_reasons import INCOME_EXIT_REASONS
 from ..models import (
     AccountSummary,
@@ -610,29 +611,112 @@ class CoveredCallMixin:
                     return instrument.contract_size, instrument.min_trade_amount
         return Decimal("0"), Decimal("0")
 
+    def _spot_exit_index_price_usd(
+        self,
+        group: TradeGroup,
+        orderbook_cache: dict[str, OrderBookSnapshot],
+    ) -> Decimal:
+        if group.close_index_usd and group.close_index_usd > 0:
+            return group.close_index_usd
+        index_price = self._currency_index_price(group.currency, orderbook_cache)
+        if index_price > 0:
+            return index_price
+        try:
+            return self._get_orderbook(group.short_instrument_name, orderbook_cache).index_price
+        except Exception:
+            return Decimal("0")
+
+    def _spot_exit_short_instrument(
+        self,
+        group: TradeGroup,
+        markets_by_currency: dict[str, list[OptionInstrument]] | None,
+    ) -> OptionInstrument | None:
+        if not markets_by_currency:
+            return None
+        try:
+            return self._find_or_fetch_instrument(markets_by_currency, group.short_instrument_name)
+        except Exception:
+            return None
+
+    def _plan_covered_call_spot_exit(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        live: bool,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        return self._plan_covered_call_spot_exit_fields(
+            group,
+            orderbook_cache=context.orderbook_cache,
+            markets_by_currency=context.markets_by_currency,
+            summaries=context.summaries,
+            live=live,
+            reason=reason,
+        )
+
+    def _plan_covered_call_spot_exit_fields(
+        self,
+        group: TradeGroup,
+        *,
+        orderbook_cache: dict[str, OrderBookSnapshot],
+        markets_by_currency: dict[str, list[OptionInstrument]] | None,
+        summaries: dict[str, AccountSummary],
+        live: bool,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        cover = group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
+        if cover <= 0:
+            return {
+                "amount": Decimal("0"),
+                "cover": Decimal("0"),
+                "settlement_loss": Decimal("0"),
+                "settlement_loss_source": "none",
+            }
+
+        index_price = self._spot_exit_index_price_usd(group, orderbook_cache)
+        short_instrument = self._spot_exit_short_instrument(group, markets_by_currency)
+        settlement_loss, settlement_loss_source = resolve_covered_call_settlement_loss(
+            group,
+            index_price_usd=index_price,
+            short_instrument=short_instrument,
+            client=self.client,
+            reason=reason,
+            prefer_log=self.config.has_private_credentials,
+        )
+        target = max(cover - settlement_loss, Decimal("0"))
+
+        summary = summaries.get(group.currency)
+        if live:
+            summary = self._account_summaries_by_currency().get(group.currency, summary)
+        if summary is not None:
+            available = max(summary.available_funds, summary.available_withdrawal_funds, summary.balance)
+            if available <= 0:
+                return {
+                    "amount": Decimal("0"),
+                    "cover": cover,
+                    "settlement_loss": settlement_loss,
+                    "settlement_loss_source": settlement_loss_source,
+                }
+            target = min(target, available)
+
+        instrument_name = self._covered_call_spot_instrument(group.currency)
+        contract_size, min_trade_amount = self._spot_min_trade_amount(instrument_name, group.currency)
+        aligned = align_option_order_amount(target, contract_size, min_trade_amount)
+        amount = aligned if contract_size > 0 or min_trade_amount > 0 else target
+        return {
+            "amount": amount,
+            "cover": cover,
+            "settlement_loss": settlement_loss,
+            "settlement_loss_source": settlement_loss_source,
+        }
+
     def _covered_call_spot_exit_amount(
         self,
         context: RuntimeContext,
         group: TradeGroup,
         *,
         live: bool,
+        reason: str = "",
     ) -> Decimal:
-        target = group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
-        if target <= 0:
-            return Decimal("0")
-
-        summary = context.summaries.get(group.currency)
-        if live:
-            summary = self._account_summaries_by_currency().get(group.currency, summary)
-        if summary is not None:
-            available = max(summary.available_funds, summary.available_withdrawal_funds, summary.balance)
-            if available <= 0:
-                return Decimal("0")
-            target = min(target, available)
-
-        instrument_name = self._covered_call_spot_instrument(group.currency)
-        contract_size, min_trade_amount = self._spot_min_trade_amount(instrument_name, group.currency)
-        aligned = align_option_order_amount(target, contract_size, min_trade_amount)
-        if contract_size > 0 or min_trade_amount > 0:
-            return aligned
-        return target
+        return self._plan_covered_call_spot_exit(context, group, live=live, reason=reason)["amount"]

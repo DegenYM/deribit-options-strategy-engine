@@ -652,9 +652,15 @@ class StateReconcileMixin:
                 and self._covered_call_itm_from_cache(group, orderbook_cache)
             ):
                 group.spot_exit_status = "pending"
-                group.spot_exit_amount = (
-                    group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
+                spot_plan = self._plan_covered_call_spot_exit_fields(
+                    group,
+                    orderbook_cache=orderbook_cache,
+                    markets_by_currency=markets_by_currency,
+                    summaries={},
+                    live=live,
+                    reason="covered_call_settlement_exit",
                 )
+                group.spot_exit_amount = spot_plan["amount"]
                 group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
                 group.spot_exit_reason = "covered_call_settlement_exit"
             journal_rows: list[dict[str, Any]] = []

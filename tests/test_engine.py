@@ -384,6 +384,42 @@ def test_covered_call_robust_exit_dry_run_previews_call_close_and_spot_sell(tmp_
     assert actions[1]["action"] == "covered_call_spot_exit_preview"
     assert actions[1]["instrument_name"] == "BTC_USDT"
     assert actions[1]["amount"] == "0.1"
+    assert actions[1]["settlement_loss"] == "0"
+    assert actions[1]["settlement_loss_source"] == "skipped_robust"
+
+
+def test_covered_call_settlement_exit_prefers_transaction_log_for_spot_amount(tmp_path):
+    client = FakeClient(btc_book_equity="0.5")
+    group = _covered_call_group(strike=Decimal("69000"))
+    group.expiration_timestamp_ms = 2_000_000
+    client.transaction_log = {
+        "BTC": [
+            {
+                "timestamp": 2_000_000,
+                "type": "settlement",
+                "instrument_name": group.short_instrument_name,
+                "change": "-0.00909",
+            }
+        ]
+    }
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        time_exit_dte=0,
+        covered_call_spot_exit_enabled=True,
+        covered_call_robust_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    preview = engine.manage(live=False)["actions"][0]
+
+    assert preview["settlement_loss_source"] == "transaction_log"
+    assert preview["settlement_loss"] == "0.00909"
+    assert preview["amount"] == "0.0909"
 
 
 def test_covered_call_itm_confirm_cycles_delays_robust_exit(tmp_path):
@@ -1024,6 +1060,11 @@ def test_covered_call_settlement_exit_marks_pending_and_previews_spot_sell(tmp_p
     result = engine.manage(live=False)
 
     assert result["actions"][0]["action"] == "covered_call_spot_exit_preview"
+    preview = result["actions"][0]
+    assert preview["covered_underlying_quantity"] == "0.1"
+    assert preview["settlement_loss_source"] == "intrinsic"
+    assert preview["settlement_loss"] == "0.00142857"
+    assert preview["amount"] == "0.0985"
     saved = engine.state_store.load().groups[0]
     assert saved.status == "closed"
     assert saved.spot_exit_status == "pending"
