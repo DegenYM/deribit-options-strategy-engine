@@ -13,10 +13,11 @@
 ## 掃描與風控
 
 - 掃描 `Deribit Linear USDC Options` 與 `BTC/ETH-settled reversed options`
-- 進場窗口預設為 `10-21 DTE`
+- 進場 DTE 由策略 **tier profile** 的 `PUT_DTE_MIN` / `PUT_DTE_MAX` 決定（例如 covered call / naked short 多為 **7–35 天**；bull put spread low tier 為 **12–21 天**）。`.env.example` 的 10–21 僅作 legacy 單檔 fallback
 - short leg 會先過 delta、OTM、OI、book notional、spread ratio、APR 與 book IM/MM 門檻
 - `bull_put_spread` 的 long put 以 `BULL_PUT_LONG_DELTA_MIN/MAX` 選擇，同到期且 strike 低於 short put
-- `covered_call` 只使用 BTC/ETH 本位 book 的既有可用庫存作 cover，不會自動買現貨或用 perp 補 cover；spot exit 開關預設關閉
+- `covered_call` 只使用 BTC/ETH 本位 book 的既有可用庫存作 cover，不會自動買現貨或用 perp 補 cover；tier profile 預設 **`COVERED_CALL_SPOT_EXIT_ENABLED=true`**（ITM 結算後賣 Deribit spot）
+- 投資人 layout 下 **IV Rank 進場閘門**預設開啟（`config/shared/.env.defaults` 的 `ENABLE_IV_ENTRY_GATE=true`）
 - 只做流動性足夠的 short leg：`OI`、`book notional`、`spread ratio` 都要過門檻
 - `MIN_LIQUID_EXPIRIES_REQUIRED` 可控制 DTE 視窗內至少需要幾個可交易 expiry 才允許開倉
 - regime 分為 `normal / elevated / crisis`
@@ -40,7 +41,12 @@
 
 ### `covered_call`
 
-只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險，所以 call delta 可選較大。風險是上漲收益被履約價封頂，以及現金/幣本位結算後仍可能留下 spot exposure；若要鎖定 ITM 退場，可開啟 spot exit，robust 模式會先買回 call、再賣 BTC_USDT / ETH_USDT spot。
+只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險，所以 call delta 可選較大（依 tier 調整）。風險是上漲收益被履約價封頂，以及 ITM 結算後仍可能留下 spot exposure。
+
+**ITM 退場（預設 tier 設定）**：
+
+- **Settlement spot exit**（`COVERED_CALL_SPOT_EXIT_ENABLED=true`）：short call 到期 ITM 結算後，引擎標記 pending，下一輪 `manage` market 賣 **BTC_USDT / ETH_USDT**。賣出數量 = `cover − settlement_loss`（優先 Deribit transaction log，否則 intrinsic 估算），避免結算扣幣後 oversell。
+- **Robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=false` 為 tier 預設）：接近到期且 ITM 時**先買回** short call，再賣 spot；啟用時不扣 settlement loss（call 已買回）。可設 `COVERED_CALL_ITM_CONFIRM_CYCLES` 避免 wick 假觸發。
 
 預設啟用 **槽位分配**（`COVERED_CALL_SLOT_SIZING=true`）：每筆進場數量 ≈ `剩餘可用 cover ÷ 剩餘 MAX_GROUPS_PER_CURRENCY 槽位`，隨現貨規模放大，無固定 QTY 上限。例如 0.5 BTC、`MAX_GROUPS_PER_CURRENCY=3` 時第一筆約 0.1～0.17 BTC，後續 cycle 逐步補滿不同合約。
 
@@ -62,4 +68,4 @@
 
 ## 策略參數
 
-各策略的 tuning 檔案位於 [`config/shared/strategies/`](../config/shared/strategies/)。完整 env 範例見 [設定與環境變數](configuration-zh-TW.md#策略-profile-範例)。
+各策略骨架位於 [`config/shared/strategies/`](../config/shared/strategies/)；delta / APR / IM 等 tier 參數在 [`config/shared/strategies/tiers/`](../config/shared/strategies/tiers/)。投資人視角對照見 [風險分級與 APR 說明](investor-risk-tiers-apr-zh-TW.md)；載入順序見 [設定與環境變數](configuration-zh-TW.md#策略-profile-與-tier)。

@@ -7,8 +7,7 @@
 - `DERIBIT_ENV=mainnet`
 - `DERIBIT_CLIENT_ID`
 - `DERIBIT_CLIENT_SECRET`
-- `ENABLE_PERP_HEDGE=false` 可停用 perpetual hedge；目前預設即為關閉
-- `OPTION_STRATEGY` 選擇 `naked_short`、`bull_put_spread` 或 `covered_call`（舊名 `naked_short_put` / `naked_short_call` 會被解析為 `naked_short`）
+- `OPTION_STRATEGY` 選擇 `naked_short`、`bull_put_spread` 或 `covered_call`（舊名 `naked_short_put` / `naked_short_call` 會被解析為 `naked_short`）— **投資人 layout 下由 `accounts.toml` 的 `strategy` 注入，子帳 env 不必填**
 - 其餘共用參數可直接從 [`.env.example`](../.env.example) 複製
 
 ## 相關文件
@@ -133,7 +132,9 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 
 **Covered call 獲利兌 USDT（可選）**：在 `.env.investor` 設 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`（預設 false）。啟用後，covered_call 子帳在 income exit（take profit / time exit / early exit）獲利平倉時，會將該筆 native premium profit 自動 market 賣成 **USDT**；僅賣該筆 realized PnL，不動約定備兌現貨。修改後需**重啟**該子帳 live bot。Dashboard 會唯讀顯示開關狀態與每筆 sweep 紀錄。季末付費時若 profit 已在 USDT，通常只需兌剩餘 BTC/ETH 獲利。
 
-**Covered call ITM spot exit**：策略 profile 設 `COVERED_CALL_SPOT_EXIT_ENABLED=true` 時，ITM 退場（robust 或 settlement pending）也會 market 賣成 **BTC_USDT / ETH_USDT**，與 profit sweep 相同 quote。啟用 `COVERED_CALL_SPOT_EXIT_ENABLED` 或 `COVERED_CALL_PROFIT_SWEEP_ENABLED` 時，config 會**自動**把 **USDT** 加入 `TRADED_COLLATERALS`，無需手動改 strategy env。
+**Covered call ITM spot exit**：tier profile 預設 `COVERED_CALL_SPOT_EXIT_ENABLED=true`。ITM **結算後** pending spot 會 market 賣 **BTC_USDT / ETH_USDT**（與 profit sweep 相同 quote）。賣出數量 = `cover − settlement_loss`：優先讀 Deribit **transaction log** 的 settlement/delivery 扣幣，否則以 intrinsic 估算；避免結算已扣幣後 oversell。若改走 **robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=true`），會先買回 short call 再賣 spot，且不扣 settlement loss。
+
+啟用 `COVERED_CALL_SPOT_EXIT_ENABLED` 或 `COVERED_CALL_PROFIT_SWEEP_ENABLED` 時，config 會**自動**把 **USDT** 加入 `TRADED_COLLATERALS`，無需手動改 strategy env。
 
 **Spot 滑價保護**：策略 profile 可設 `COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT`（例如 `0.005` = 相對 mark 最多賣低 0.5%）。大於 0 時，market 賣出會改為 **limit IOC**，底價 = `mark × (1 − pct)`；若當下 best bid 低於底價則**跳過**並下個 cycle 重試（profit sweep / ITM spot exit 維持 pending）。
 
@@ -280,7 +281,7 @@ REQUEST_TIMEOUT_SECONDS=20
 STATE_FILE=.state/investors/<investor_id>/naked.json
 ```
 
-策略專屬值請放在對應 profile 檔；切換策略時改 account env 的 `OPTION_STRATEGY`，並同步使用該策略自己的 `STATE_FILE`。
+策略專屬 tuning 在 `config/shared/strategies/` 骨架 + `tiers/<strategy>/` 分級檔；切換策略時改 **`accounts.toml` 的 `strategy`**（或新增子帳 slug），並使用對應的 `STATE_FILE`。
 
 ### State 分流
 
@@ -294,159 +295,43 @@ bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json       
 
 > **Legacy**：單一 `.env` 工作流曾用 `.state/<strategy>.json`（如 `.state/naked_short.json`）；新部署請勿使用，詳見 [`repo-layout-zh-TW.md`](repo-layout-zh-TW.md)。
 
-## 策略 profile 範例
+## 策略 profile 與 tier
 
-下列三組策略參數在 `config/shared/strategies/`（`.env.naked_short`、`.env.bull_put_spread`、`.env.covered_call`）。
+投資人 layout 下，策略參數分兩層：
 
-### `naked_short`
+1. **骨架** — `config/shared/strategies/.env.<strategy>`：只放 `OPTION_STRATEGY`、市場 profile、擔保幣、`SHORT_OPTION_SIDE` 等與 tier 無關的設定。
+2. **風險分級** — `config/shared/strategies/tiers/<strategy>/.env.{low,medium,high}`：delta / OTM / APR / IM / covered-call spot exit 等完整 tuning。
 
-尾端風險最大，但收益性排在 covered call 之後、bull put spread 之前。`SHORT_OPTION_SIDE` 可選 `put` / `call` / `both`：選 `both` 時 put 與 call 候選會用同一個 sort key 一起排序、競爭 `TOP_N` 名額。
+`accounts.toml` 的 `strategy` 決定骨架；`risk_tier`（預設 `medium`）決定 tier 檔。子帳 env **不必**填 `OPTION_STRATEGY` 或 `RISK_TIER`；需要偏離 tier 時在最後一層覆寫同名鍵即可。
 
-```dotenv
-OPTION_STRATEGY=naked_short
-OPTION_MARKETS_PROFILE=all
-TRADED_COLLATERALS=BTC,ETH,USDC
-SHORT_OPTION_SIDE=both
+### 骨架一覽
 
-SHORT_PUT_DELTA_MIN=0.08
-SHORT_PUT_DELTA_MAX=0.14
-PREFERRED_SHORT_PUT_DELTA_MIN=0.09
-PREFERRED_SHORT_PUT_DELTA_MAX=0.12
-PUT_OTM_MIN=0.09
-PUT_OTM_MAX=0.24
+| 策略 | 骨架檔 | 重點 |
+|------|--------|------|
+| `naked_short` | [`.env.naked_short`](../config/shared/strategies/.env.naked_short) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=both` |
+| `bull_put_spread` | [`.env.bull_put_spread`](../config/shared/strategies/.env.bull_put_spread) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put` |
+| `covered_call` | [`.env.covered_call`](../config/shared/strategies/.env.covered_call) | `inverse_native`；`TRADED_COLLATERALS=BTC,ETH`；`SHORT_OPTION_SIDE=call` |
 
-BTC_PUT_DELTA_MIN=0.08
-BTC_PUT_DELTA_MAX=0.15
-BTC_PREFERRED_PUT_DELTA_MIN=0.09
-BTC_PREFERRED_PUT_DELTA_MAX=0.12
-BTC_PUT_OTM_MIN=0.08
-BTC_PUT_OTM_MAX=0.22
-BTC_PREFERRED_OTM_MIN=0.10
-BTC_PREFERRED_OTM_MAX=0.16
+各 tier 的 delta、APR、IM 白話對照見 [風險分級與 APR 說明](investor-risk-tiers-apr-zh-TW.md)；**以 tier 檔為準**，勿沿用下方 legacy 單檔範例中的舊數字。
 
-ETH_PUT_DELTA_MIN=0.07
-ETH_PUT_DELTA_MAX=0.13
-ETH_PREFERRED_PUT_DELTA_MIN=0.08
-ETH_PREFERRED_PUT_DELTA_MAX=0.11
-ETH_PUT_OTM_MIN=0.10
-ETH_PUT_OTM_MAX=0.24
-ETH_PREFERRED_OTM_MIN=0.12
-ETH_PREFERRED_OTM_MAX=0.18
+### Covered call tier 共通預設
 
-MIN_NET_APR=0.08
-TARGET_NET_APR_MIN=0.10
-TARGET_NET_APR_MAX=0.18
-PER_LEG_IM_CAP_PUT=0.14
-BOOK_IM_TARGET=0.30
-BOOK_IM_HARD=0.40
-SOFT_DEFENSE_DELTA=0.18
-HARD_DEFENSE_DELTA=0.25
-SOFT_DEFENSE_LOSS_PCT=0.25
-HARD_STOP_LOSS_PCT=0.40
-```
+三個 tier 目前皆：
 
-### `bull_put_spread`
+- `COVERED_CALL_SPOT_EXIT_ENABLED=true`
+- `COVERED_CALL_ROBUST_EXIT_ENABLED=false`（主路徑為 settlement pending → spot；robust 需另行開啟）
+- `PUT_DTE_MIN=7`、`PUT_DTE_MAX=35`
 
-有 long put 保護腿，但雙腿 debit 會犧牲淨 credit，所以 APR 門檻最低。
+### Legacy 單檔 workflow
+
+若仍使用 repo 根目錄單一 `.env`（非 `config/investors/...`），可參考 [`.env.example`](../.env.example) 的 fallback 區塊；delta / APR 仍以策略 tier 檔為 canonical source。
 
 ```dotenv
-OPTION_STRATEGY=bull_put_spread
-OPTION_MARKETS_PROFILE=all
-TRADED_COLLATERALS=BTC,ETH,USDC
-SHORT_OPTION_SIDE=put
-
-SHORT_PUT_DELTA_MIN=0.08
-SHORT_PUT_DELTA_MAX=0.16
-PREFERRED_SHORT_PUT_DELTA_MIN=0.09
-PREFERRED_SHORT_PUT_DELTA_MAX=0.13
-PUT_OTM_MIN=0.08
-PUT_OTM_MAX=0.23
-
-BTC_PUT_DELTA_MIN=0.09
-BTC_PUT_DELTA_MAX=0.17
-BTC_PREFERRED_PUT_DELTA_MIN=0.10
-BTC_PREFERRED_PUT_DELTA_MAX=0.14
-BTC_PUT_OTM_MIN=0.07
-BTC_PUT_OTM_MAX=0.21
-BTC_PREFERRED_OTM_MIN=0.09
-BTC_PREFERRED_OTM_MAX=0.15
-
-ETH_PUT_DELTA_MIN=0.07
-ETH_PUT_DELTA_MAX=0.14
-ETH_PREFERRED_PUT_DELTA_MIN=0.08
-ETH_PREFERRED_PUT_DELTA_MAX=0.12
-ETH_PUT_OTM_MIN=0.10
-ETH_PUT_OTM_MAX=0.23
-ETH_PREFERRED_OTM_MIN=0.12
-ETH_PREFERRED_OTM_MAX=0.17
-
-BULL_PUT_LONG_DELTA_MIN=0.025
-BULL_PUT_LONG_DELTA_MAX=0.07
-MIN_NET_APR=0.06
-TARGET_NET_APR_MIN=0.08
-TARGET_NET_APR_MAX=0.14
-PER_LEG_IM_CAP_PUT=0.16
-BOOK_IM_TARGET=0.35
-BOOK_IM_HARD=0.45
-SOFT_DEFENSE_DELTA=0.22
-HARD_DEFENSE_DELTA=0.32
-```
-
-### `covered_call`
-
-只使用既有 BTC/ETH 現貨 cover，建議只開 inverse native book；這是最積極的收益 profile。
-
-```dotenv
+# 骨架範例（covered_call）— 完整 tuning 見 tiers/covered_call/.env.{low,medium,high}
 OPTION_STRATEGY=covered_call
 OPTION_MARKETS_PROFILE=inverse_native
 TRADED_COLLATERALS=BTC,ETH
 SHORT_OPTION_SIDE=call
-MIN_NET_APR=0.12
-TARGET_NET_APR_MIN=0.15
-TARGET_NET_APR_MAX=0.28
-
-SHORT_CALL_DELTA_MIN=0.18
-SHORT_CALL_DELTA_MAX=0.38
-PREFERRED_SHORT_CALL_DELTA_MIN=0.22
-PREFERRED_SHORT_CALL_DELTA_MAX=0.32
-CALL_OTM_MIN=0.025
-CALL_OTM_MAX=0.18
-
-BTC_CALL_DELTA_MIN=0.18
-BTC_CALL_DELTA_MAX=0.38
-BTC_PREFERRED_CALL_DELTA_MIN=0.22
-BTC_PREFERRED_CALL_DELTA_MAX=0.32
-BTC_CALL_OTM_MIN=0.025
-BTC_CALL_OTM_MAX=0.16
-BTC_PREFERRED_CALL_OTM_MIN=0.04
-BTC_PREFERRED_CALL_OTM_MAX=0.10
-
-ETH_CALL_DELTA_MIN=0.16
-ETH_CALL_DELTA_MAX=0.34
-ETH_PREFERRED_CALL_DELTA_MIN=0.20
-ETH_PREFERRED_CALL_DELTA_MAX=0.30
-ETH_CALL_OTM_MIN=0.035
-ETH_CALL_OTM_MAX=0.20
-ETH_PREFERRED_CALL_OTM_MIN=0.05
-ETH_PREFERRED_CALL_OTM_MAX=0.12
-
-SOFT_DEFENSE_DELTA_CALL=0.35
-HARD_DEFENSE_DELTA_CALL=0.50
-PER_LEG_IM_CAP_CALL=0.20
-
-COVERED_CALL_SPOT_EXIT_ENABLED=false
-COVERED_CALL_ROBUST_EXIT_ENABLED=false
-COVERED_CALL_ROBUST_EXIT_DTE=0.5
-COVERED_CALL_ITM_BUFFER_PCT=0
-# ITM robust exit 的確認窗（cycle 數）；留空 = 沿用 DEFENSE_CONFIRM_CYCLES。
-# 避免 index 短暫戳破 strike 的 wick 就買回 call + 賣 spot 賣在頂點。
-# COVERED_CALL_ITM_CONFIRM_CYCLES=
-COVERED_CALL_SPOT_ORDER_TYPE=market
-
-MAX_GROUPS_PER_CURRENCY=3
-MAX_CONCURRENT_GROUPS=6
-# 槽位分配（預設 true）：每筆進場 ≈ 剩餘 cover / 剩餘 MAX_GROUPS_PER_CURRENCY 槽位
-# COVERED_CALL_SLOT_SIZING=true
 ```
 
 ## 憑證需求

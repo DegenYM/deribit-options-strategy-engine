@@ -47,10 +47,11 @@ ruff format --check deribit_engine tests scripts
 - `DERIBIT_ENV=mainnet`
 - `DERIBIT_CLIENT_ID`
 - `DERIBIT_CLIENT_SECRET`
-- `OPTION_STRATEGY`：`naked_short`、`bull_put_spread` 或 `covered_call`
-- `ENABLE_PERP_HEDGE=false`（預設即關閉）
+- `STATE_FILE`、`REFERENCE_CAPITAL_USDC` 等（見 `accounts/.env.<slug>.example`）
 
-投資人層級費率等可選設定見 `config/investors/<id>/.env.investor`；共用 fallback 見 `config/shared/.env.defaults`。其餘參數見 [設定與環境變數](configuration-zh-TW.md)。
+策略種類與風險分級在 **`accounts.toml`** 指定（`strategy` = `naked_short` / `bull_put_spread` / `covered_call`；`risk_tier` 預設 `medium`），**不要**在子帳 env 重複填 `OPTION_STRATEGY` 或 `RISK_TIER`。
+
+投資人層級費率等可選設定見 `config/investors/<id>/.env.investor`；共用 fallback 見 `config/shared/.env.defaults`（含 `ENABLE_IV_ENTRY_GATE=true` 等 pacing 預設）。其餘參數見 [設定與環境變數](configuration-zh-TW.md)。
 
 ## 第一次執行
 
