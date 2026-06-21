@@ -806,24 +806,6 @@ export function fmtBookEquityAllocationChips(nativeByBook, usdByBook) {
   return `<div class="overview-alloc-chips">${chips.join("")}</div>`;
 }
 
-function profitSwapScopesEquivalent(lifetimeDisposition, windowDisposition) {
-  if (!lifetimeDisposition || !windowDisposition) return false;
-  const left = summarizeProfitDisposition(lifetimeDisposition, { status: STATE.status });
-  const right = summarizeProfitDisposition(windowDisposition, { status: STATE.status });
-  if (!left?.hasSwap && !left?.hasPending) return false;
-  if (!right?.hasSwap && !right?.hasPending) return false;
-  if (left.hasPending !== right.hasPending) return false;
-  if (Math.abs((left.usdtSwapped ?? 0) - (right.usdtSwapped ?? 0)) > 0.005) return false;
-  for (const book of PROFIT_SWEEP_BOOKS) {
-    for (const key of ["spotEarned", "spotSold", "spotHeld", "spotPending"]) {
-      const a = num(left[key]?.[book]) ?? 0;
-      const b = num(right[key]?.[book]) ?? 0;
-      if (Math.abs(a - b) > 1e-8) return false;
-    }
-  }
-  return true;
-}
-
 export function aggregateSkeletonHtml() {
   const hero = `<div class="overview-hero skeleton-block" style="min-height:6.5rem;border-radius:16px"></div>`;
   const stats = `<div class="overview-stat-row">${`<div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>`.repeat(3)}</div>`;
@@ -991,7 +973,7 @@ function profitSwapScopePanelSectionHtml(disposition, scopeLabel) {
 }
 
 export function profitSwapDetailBodyHtml(ctx) {
-  const { summary, lifetimeProfitDisposition, windowProfitDisposition, windowLabelDays } = ctx;
+  const { summary, lifetimeProfitDisposition } = ctx;
   if (!summary) {
     return `<p class="overview-profit-empty">${i18n("Loading performance…", "績效摘要載入中…")}</p>`;
   }
@@ -999,22 +981,10 @@ export function profitSwapDetailBodyHtml(ctx) {
     lifetimeProfitDisposition,
     i18n("Lifetime", "存續")
   );
-  const windowDays = Math.round(windowLabelDays ?? 30);
-  const windowScope = profitSwapScopePanelSectionHtml(
-    windowProfitDisposition,
-    `${i18n("Last", "近")} ${windowDays}${INVESTOR_ZH ? " 日" : "d"}`
-  );
-  if (!lifetime && !windowScope) {
+  if (!lifetime) {
     return `<p class="overview-profit-empty">${i18n("No profit swaps yet", "尚未進行獲利兌換")}</p>`;
   }
-  const dedupe =
-    lifetime &&
-    windowScope &&
-    profitSwapScopesEquivalent(lifetimeProfitDisposition, windowProfitDisposition);
-  if (dedupe) {
-    return `<div class="overview-profit-scopes overview-profit-scopes--swap overview-profit-scopes--single">${lifetime}</div>`;
-  }
-  return `<div class="overview-profit-scopes overview-profit-scopes--swap">${lifetime}${windowScope}</div>`;
+  return `<div class="overview-profit-scopes overview-profit-scopes--swap overview-profit-scopes--single">${lifetime}</div>`;
 }
 
 export function overviewProfitSwapDetailHtml(ctx) {
