@@ -198,6 +198,7 @@ def test_reconcile_profit_sweep_skips_locked_proceeds_reconciled():
         status="closed",
         closed_timestamp_ms=3,
         profit_sweep_status="filled",
+        profit_sweep_order_id="exchange-fill-0048",
         profit_sweep_amount=Decimal("0.001"),
         profit_sweep_quote_proceeds=Decimal("90"),
         profit_sweep_reason="proceeds_reconciled",

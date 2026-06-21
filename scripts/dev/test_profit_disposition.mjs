@@ -12,6 +12,8 @@ import {
   fmtProfitNative,
   fmtProfitUsdt,
   profitDispositionForGroup,
+  profitSweepHasExchangeFill,
+  profitSweepMetaLine,
   profitSwapDisplayAvg,
   realizedPnlDisplayUsdc,
   resolvePremiumSweepBookDisplay,
@@ -160,8 +162,9 @@ const withdrawnCase = profitCompositionByBook(
   },
   status,
 );
-assert.ok(Math.abs(withdrawnCase.swappedUsdtByBook.BTC - 0.0806) < 0.01);
-assert.ok(Math.abs(withdrawnCase.usdByBook.BTC - 0.0806) < 0.01);
+assert.ok(Math.abs(withdrawnCase.swappedUsdtByBook.BTC - 0) < 0.01);
+assert.ok(Math.abs(withdrawnCase.usdByBook.BTC - 0.00048072 * 63000) < 0.1);
+assert.ok(Math.abs(withdrawnCase.nativeByBook.BTC - 0.00048072) < 1e-10);
 
 const actualProceedsField = profitCompositionByBook(
   report,
@@ -181,8 +184,8 @@ const actualProceedsField = profitCompositionByBook(
   },
   status,
 );
-assert.ok(Math.abs(actualProceedsField.swappedUsdtByBook.BTC - 0.08) < 0.01);
-assert.ok(Math.abs(actualProceedsField.usdByBook.BTC - 0.08) < 0.01);
+assert.ok(Math.abs(actualProceedsField.swappedUsdtByBook.BTC - 0) < 0.01);
+assert.ok(Math.abs(actualProceedsField.usdByBook.BTC - 63) < 0.1);
 
 const dustLifetime = profitCompositionByBook(
   report,
@@ -203,8 +206,8 @@ const dustLifetime = profitCompositionByBook(
   },
   status,
 );
-assert.ok(Math.abs(dustLifetime.swappedUsdtByBook.BTC - 0.08355164) < 0.0001);
-assert.equal(dustLifetime.nativeByBook.BTC, 0);
+assert.ok(Math.abs(dustLifetime.swappedUsdtByBook.BTC - 0) < 0.0001);
+assert.ok(Math.abs(dustLifetime.nativeByBook.BTC - 0.00048072) < 1e-10);
 
 const jackLike = profitCompositionByBook(
   report,
@@ -236,8 +239,10 @@ const jackLike = profitCompositionByBook(
   },
   status,
 );
-assert.ok(Math.abs(jackLike.swappedUsdtByBook.BTC - 0.08355164) < 0.0001);
-assert.ok(Math.abs(jackLike.swappedUsdtByBook.ETH - 0.0215) < 0.0001);
+assert.ok(Math.abs(jackLike.swappedUsdtByBook.BTC - 0) < 0.0001);
+assert.ok(Math.abs(jackLike.swappedUsdtByBook.ETH - 0) < 0.0001);
+assert.ok(Math.abs(jackLike.usdByBook.BTC - 0.00048072 * 63000) < 0.1);
+assert.ok(Math.abs(jackLike.usdByBook.ETH - 0.0044 * 1675) < 0.1);
 
 const maLikeStatus = {
   ...status,
@@ -446,7 +451,7 @@ const reconciledGroups = {
 };
 const summaryStub = { effective_capital_usdc: String(capital), lifetime_sample_days: String(sampleDays) };
 const lifetimeApr = computeLifetimeRealizedApr(report, reconciledGroups, status, summaryStub);
-const expectedApr = annualizeRealizedApr(1.43, sampleDays, capital);
+const expectedApr = annualizeRealizedApr(63, sampleDays, capital);
 assert.ok(Math.abs(lifetimeApr - expectedApr) < 1e-10);
 assert.ok(lifetimeApr > 0);
 
@@ -466,7 +471,7 @@ const recentGroups = {
   open: [],
 };
 const windowApr = computeWindowRealizedApr(report, recentGroups, status, summaryStub, 30);
-const expectedWindowApr = annualizeRealizedApr(1.43, 30, capital);
+const expectedWindowApr = annualizeRealizedApr(63, 30, capital);
 assert.ok(Math.abs(windowApr - expectedWindowApr) < 1e-10);
 
 // ma: manual swap + reconcile lifetime drift must not double-count or inflate income.
@@ -538,5 +543,26 @@ assert.equal(fmtProfitNative("BTC", 0.0000965), "0.0000965");
 assert.equal(fmtProfitUsdt(113.3305), "$113.3305");
 assert.equal(fmtProfitUsdt(113.3399), "$113.3399");
 assert.equal(truncateDecimal(62961.389, 2), 62961.38);
+
+const reconciledOnly = group({
+  group_id: "0034",
+  profit_sweep_status: "filled",
+  profit_sweep_amount: "0.000406",
+  profit_sweep_quote_proceeds: "14.08540529",
+  realized_pnl_collateral_native: "0.000406",
+  profit_sweep_reason: "take_profit; proceeds_reconciled",
+});
+assert.equal(profitSweepHasExchangeFill(reconciledOnly), false);
+assert.equal(profitSweepMetaLine(reconciledOnly), null);
+assert.ok(Math.abs(realizedPnlDisplayUsdc(reconciledOnly, status) - 0.000406 * 63000) < 0.1);
+
+const exchangeFilled = group({
+  profit_sweep_status: "filled",
+  profit_sweep_amount: "0.000406",
+  profit_sweep_quote_proceeds: "25.58",
+  profit_sweep_order_id: "BTC_USDT-123",
+});
+assert.equal(profitSweepHasExchangeFill(exchangeFilled), true);
+assert.ok(profitSweepMetaLine(exchangeFilled));
 
 console.log("test_profit_disposition: ok");

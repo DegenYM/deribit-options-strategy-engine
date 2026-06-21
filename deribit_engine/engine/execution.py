@@ -110,7 +110,7 @@ class ExecutionMixin:
                     )
                 )
             elif is_perp:
-                action = self._close_perp_position(position, live=True)
+                action = self._close_perp_position(context, position, live=True)
                 if action is None:
                     skipped.append({"instrument_name": instrument_name, "reason": "zero_size"})
                 else:
@@ -292,7 +292,7 @@ class ExecutionMixin:
         for position in context.future_positions:
             if "PERPETUAL" not in position.instrument_name:
                 continue
-            preview = self._close_perp_position(position, live=live)
+            preview = self._close_perp_position(context, position, live=live)
             if preview is not None:
                 actions.append(preview)
 
@@ -1081,21 +1081,29 @@ class ExecutionMixin:
         return {"order": {"filled_amount": "0", "average_price": "0", "order_state": "filled"}}
 
     def _execute_hedge_plan(self, context: RuntimeContext, plan: HedgePlan, *, live: bool) -> dict[str, Any]:
-        payload = {"action": "hedge", "plan": plan.to_dict(), "live": live}
+        payload = {
+            "action": "hedge",
+            "plan": plan.to_dict(),
+            "live": live,
+            "hedge_order_type": self.config.hedge_order_type,
+        }
         if not live:
             return payload
-        response = self.client.place_order(
+        response = self._place_hedge_perp_order(
+            context,
             direction=plan.side,
             instrument_name=plan.instrument_name,
             amount=plan.order_amount,
             label=self._hedge_label(plan.currency, plan.mode),
-            order_type="market",
             reduce_only=plan.side == "buy" and plan.current_hedge_base < 0,
         )
         payload["response"] = response
+        if isinstance(response, dict) and response.get("skipped"):
+            payload["skipped"] = True
+            payload["skip_reason"] = response.get("reason")
         return payload
 
-    def _close_perp_position(self, position: Position, *, live: bool) -> dict[str, Any] | None:
+    def _close_perp_position(self, context: RuntimeContext, position: Position, *, live: bool) -> dict[str, Any] | None:
         if position.size == 0:
             return None
         if not live:
@@ -1103,8 +1111,28 @@ class ExecutionMixin:
                 "action": "close_perp_preview",
                 "instrument_name": position.instrument_name,
                 "direction": position.direction,
+                "hedge_order_type": self.config.hedge_order_type,
             }
-        response = self.client.close_position(position.instrument_name, order_type="market")
+        close_side = "buy" if position.direction == "sell" else "sell"
+        response = self._place_hedge_perp_order(
+            context,
+            direction=close_side,
+            instrument_name=position.instrument_name,
+            amount=abs(position.size),
+            label=self._hedge_label(
+                position.instrument_name.split("_")[0],
+                "close",
+            ),
+            reduce_only=True,
+        )
+        if isinstance(response, dict) and response.get("skipped"):
+            return {
+                "action": "close_perp",
+                "instrument_name": position.instrument_name,
+                "skipped": True,
+                "skip_reason": response.get("reason"),
+                "response": response,
+            }
         return {"action": "close_perp", "instrument_name": position.instrument_name, "response": response}
 
     def _option_exit_request(

@@ -416,3 +416,33 @@ def test_guard_allows_partial_exchange_remainder() -> None:
     rows = list_remaining_profit_sweeps([group])
     assert len(rows) == 1
     assert rows[0].to_sweep_native == Decimal("0.000086")
+
+
+def test_reschedule_ledger_only_profit_sweeps_requeues_proceeds_reconciled() -> None:
+    from unittest.mock import MagicMock
+
+    from deribit_engine.profit_sweep_ops import (
+        list_remaining_profit_sweeps,
+        reschedule_ledger_only_profit_sweeps,
+    )
+
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.000406",
+        profit_sweep_quote_proceeds="14.08540529",
+        realized_pnl_collateral_native="0.000406",
+        profit_sweep_reason="take_profit; proceeds_reconciled",
+    )
+    bot = MagicMock()
+    bot.config.order_label_prefix = "cc"
+    bot.client = MagicMock()
+    bot.client.get_user_trades_by_currency.return_value = {"trades": []}
+
+    assert reschedule_ledger_only_profit_sweeps(bot, [group]) == 1
+    assert group.profit_sweep_status == "pending"
+    assert group.profit_sweep_amount == Decimal("0.000406")
+    assert group.profit_sweep_quote_proceeds == Decimal("0")
+    assert "proceeds_reconciled" not in group.profit_sweep_reason
+    rows = list_remaining_profit_sweeps([group])
+    assert len(rows) == 1
+    assert rows[0].to_sweep_native == Decimal("0.000406")

@@ -397,7 +397,33 @@ def _aggregate_status(
     }
     if fill_stats:
         aggregated["premium_sweep_fill_stats_by_book"] = fill_stats
+    hedge_summary = _aggregate_hedge_pnl(active_accounts)
+    if hedge_summary:
+        aggregated["hedge_pnl_summary"] = hedge_summary
     return aggregated
+
+
+def _aggregate_hedge_pnl(
+    accounts: list[DashboardAccount],
+    *,
+    since_ms: int | None = None,
+) -> dict[str, Any] | None:
+    from ..hedge_pnl import attach_hedge_performance_windows, merge_hedge_pnl_summaries, summarize_hedge_pnl_for_state
+
+    parts: list[dict[str, Any]] = []
+    state_files = []
+    for account in accounts:
+        try:
+            parts.append(summarize_hedge_pnl_for_state(account.state_path, since_ms=since_ms))
+            state_files.append(account.state_path)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("hedge pnl for %s skipped: %s", account.name, exc)
+    merged = merge_hedge_pnl_summaries(parts)
+    if int(merged.get("trade_count") or 0) <= 0:
+        return None
+    if since_ms is None:
+        return attach_hedge_performance_windows(merged, state_files)
+    return merged
 
 
 _FILL_STAT_SUM_KEYS = (
@@ -521,6 +547,10 @@ def _aggregate_realized_summary(
         Decimal("0"),
     )
     target_apr = _ratio(target_num, reference_capital)
+    state_files = [account.state_path for account in accounts]
+    from ..hedge_pnl import hedge_performance_adjustments
+
+    hedge_lifetime, hedge_window = hedge_performance_adjustments(state_files, window_days=days)
     summary = realized_summary_from_closed(
         closed,
         effective_capital_usdc=capital,
@@ -528,6 +558,8 @@ def _aggregate_realized_summary(
         window_days=days,
         spot_index=spot_index,
         open_rows=open_rows,
+        hedge_lifetime_usdc=hedge_lifetime,
+        hedge_window_usdc=hedge_window,
     )
     summary["open_group_count"] = str(open_count)
     summary["performance_excluded_closed_group_count"] = str(excluded)
@@ -536,7 +568,7 @@ def _aggregate_realized_summary(
     return {
         "action": "report",
         "generated_at": utc_now(),
-        "note": "Summary from local state; trade journal stores API fills incrementally.",
+        "note": "Summary from local state; includes spread and perp-hedge realized PnL.",
         "summary": summary,
         "recent_closed_trades": recent_closed[:20],
         "open_trades": [],
@@ -584,7 +616,7 @@ def _aggregate_report(accounts: list[DashboardAccount], *, days: int) -> dict[st
     return {
         "action": "report",
         "generated_at": utc_now(),
-        "note": "Aggregated multi-account realized report. Perpetual hedge PnL is not included.",
+        "note": "Aggregated multi-account realized report. Includes spread and perp-hedge PnL.",
         "summary": {
             "effective_capital_usdc": effective_capital,
             "target_portfolio_apr": _ratio(target_num, effective_capital),

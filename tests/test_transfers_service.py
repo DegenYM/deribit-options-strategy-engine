@@ -107,6 +107,32 @@ def test_aggregate_transfers_filters_transfer_rows_only(tmp_path: Path, monkeypa
     assert row["transfers"][1]["amount_native"] == "-0.005"
 
 
+def test_fetch_transfer_rows_stops_after_max_transfers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from deribit_engine.frontend_server.transfers_service import fetch_transfer_rows_for_currency
+
+    class _PagingClient:
+        def iter_transaction_log(self, *, currency: str, start_timestamp: int, end_timestamp: int, count: int = 100):
+            del currency, start_timestamp, end_timestamp, count
+            for i in range(500):
+                yield {
+                    "id": i,
+                    "timestamp": 1_700_000_000_000 - i * 1000,
+                    "type": "trade" if i % 2 else "transfer",
+                    "currency": "USDC",
+                    "change": "1",
+                }
+
+    rows = fetch_transfer_rows_for_currency(
+        _PagingClient(),
+        currency="USDC",
+        start_ms=1_699_000_000_000,
+        end_ms=1_700_000_000_000,
+        max_transfers=3,
+    )
+    assert len(rows) == 3
+    assert all(row.type == "transfer" for row in rows)
+
+
 def test_aggregate_transfers_dedupes_shared_api_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from conftest import make_config
 

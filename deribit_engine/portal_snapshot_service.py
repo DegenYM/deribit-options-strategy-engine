@@ -187,12 +187,14 @@ class PortalSnapshotService:
         payload["live_status"] = {
             "underlying_index_usd": status.get("underlying_index_usd") or {},
             "premium_sweep_fill_stats_by_book": status.get("premium_sweep_fill_stats_by_book") or {},
+            "hedge_pnl_summary": status.get("hedge_pnl_summary") or {},
         }
         fp = _fingerprint(
             {
                 **payload["_fingerprint_basis"],
                 "live": status.get("underlying_index_usd"),
                 "fill_stats": status.get("premium_sweep_fill_stats_by_book"),
+                "hedge_pnl": status.get("hedge_pnl_summary"),
             }
         )
         row_id = self._portal.append(
@@ -329,11 +331,19 @@ def attach_realized_summary_to_ledger_snapshot(
 
             spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", fetch_spot))
             closed_rows = pkg._all_closed_group_rows(accounts, spot_index=spot_idx)
+            from .hedge_pnl import hedge_performance_adjustments
+
+            hedge_lifetime, hedge_window = hedge_performance_adjustments(
+                [account.state_path for account in accounts],
+                window_days=days,
+            )
             patch_realized_report_spot_pnl(
                 report_payload,
                 closed_rows,
                 spot_index=spot_idx,
                 window_days=days,
+                hedge_lifetime_usdc=hedge_lifetime,
+                hedge_window_usdc=hedge_window,
             )
         except Exception as spot_exc:  # noqa: BLE001
             LOGGER.debug("snapshot realized_summary spot patch skipped: %s", spot_exc)

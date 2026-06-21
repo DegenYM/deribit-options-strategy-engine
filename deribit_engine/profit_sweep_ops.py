@@ -25,6 +25,27 @@ def record_profit_sweep_lifetime_proceeds(group: TradeGroup, proceeds: Decimal) 
         group.profit_sweep_quote_proceeds_lifetime = proceeds
 
 
+def profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
+    """True when Deribit has a labeled premium spot sell for this group (not ledger pool split)."""
+    status = str(group.profit_sweep_status or "").lower()
+    if status != "filled":
+        return False
+    if str(group.profit_sweep_order_id or "").strip():
+        return True
+    reason = str(group.profit_sweep_reason or "").lower()
+    if "exchange_fully_swept" in reason:
+        return True
+    if "unlabeled_premium_reconciled" in reason:
+        return True
+    if "manual_swap" in reason:
+        return True
+    if "dust_pool_sweep" in reason:
+        return True
+    if "proceeds_reconciled" in reason:
+        return False
+    return True
+
+
 @dataclass
 class ProfitSweepTradeCache:
     """Fetch each currency's profit-sweep spot sells once per sweep run."""
@@ -227,15 +248,15 @@ def _first_day_profit_sweep_trades(trades: list[dict[str, Any]]) -> list[dict[st
 
 def _profit_sweep_state_locked(group: TradeGroup) -> bool:
     """Groups reconciled/repaired manually — do not overwrite amount/proceeds from per-label fills."""
-    reason = str(group.profit_sweep_reason or "")
-    return any(
-        token in reason
-        for token in (
-            "duplicate_sweep_repaired",
-            "proceeds_reconciled",
-            "premium_amount_synced",
-        )
-    )
+    reason = str(group.profit_sweep_reason or "").lower()
+    if "duplicate_sweep_repaired" in reason:
+        return True
+    if "premium_amount_synced" in reason:
+        return True
+    # Ledger pool split without exchange fill must stay unlocked so live sweep can run.
+    if "proceeds_reconciled" in reason and profit_sweep_has_exchange_fill(group):
+        return True
+    return False
 
 
 def guard_profit_sweep_against_oversell(
@@ -420,6 +441,8 @@ def remaining_spot_profit_native(group: TradeGroup) -> Decimal:
     sweep = str(group.profit_sweep_status or "").lower()
     sweep_amt = group.profit_sweep_amount if group.profit_sweep_amount > 0 else native
     if sweep == "filled":
+        if not profit_sweep_has_exchange_fill(group):
+            return native
         return max(Decimal("0"), native - min(sweep_amt, native))
     if sweep in {"pending", "submitted"}:
         return max(Decimal("0"), native - sweep_amt)
@@ -602,6 +625,38 @@ def reschedule_failed_profit_sweeps(
             continue
         if _ensure_pending_for_manual_sweep(bot, group, trade_cache=cache):
             rescheduled += 1
+    return rescheduled
+
+
+def reschedule_ledger_only_profit_sweeps(
+    bot: DeribitOptionTrialBot,
+    groups: list[TradeGroup],
+    *,
+    trade_cache: ProfitSweepTradeCache | None = None,
+) -> int:
+    """Re-queue groups marked filled by proceeds_reconciled without an exchange spot fill."""
+    cache = trade_cache or ProfitSweepTradeCache(bot.client)
+    prefix = bot.config.order_label_prefix
+    rescheduled = 0
+    for group in groups:
+        if group.status != "closed" or not group.is_covered_call_group():
+            continue
+        if str(group.profit_sweep_status or "").lower() != "filled":
+            continue
+        if profit_sweep_has_exchange_fill(group):
+            continue
+        native = native_profit_for_group(group)
+        if native is None or native <= 0:
+            continue
+        if exchange_swept_native_for_group(bot.client, group, prefix, trade_cache=cache) > 0:
+            continue
+        group.profit_sweep_status = "pending"
+        group.profit_sweep_amount = native
+        group.profit_sweep_quote_proceeds = Decimal("0")
+        reason = str(group.profit_sweep_reason or "")
+        tokens = [part.strip() for part in reason.split(";") if part.strip() and part.strip() != "proceeds_reconciled"]
+        group.profit_sweep_reason = "; ".join(tokens) or "take_profit"
+        rescheduled += 1
     return rescheduled
 
 

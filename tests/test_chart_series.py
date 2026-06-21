@@ -10,8 +10,9 @@ from deribit_engine.frontend_server.helpers import (
     _cumulative_pnl_series,
     _cumulative_spot_pnl_series,
     _equity_native_by_book_series,
+    _spot_series_cache_key,
 )
-from deribit_engine.frontend_server.types import DashboardAccount
+from deribit_engine.frontend_server.types import DashboardAccount, _TtlCache
 
 
 def _dashboard_account(name: str, ledger_root: Path, *, client_id: str = "cid") -> DashboardAccount:
@@ -32,6 +33,13 @@ def _dashboard_account(name: str, ledger_root: Path, *, client_id: str = "cid") 
         state_path=ledger_root / f"{name}.json",
         ledger_root=ledger_root,
     )
+
+
+def test_spot_series_cache_key_is_hashable_for_ttl_cache() -> None:
+    spot = {"BTC": "105000", "ETH": "3500"}
+    cache_key = ("cumulative_pnl_stable", (), _spot_series_cache_key(spot))
+    cache = _TtlCache(60.0)
+    assert cache.get_or_set(cache_key, lambda: {"ok": True}) == {"ok": True}
 
 
 def test_cumulative_stable_pnl_uses_sweep_proceeds(tmp_path: Path) -> None:

@@ -691,15 +691,16 @@ export async function loadTransfersIfNeeded({ force = false } = {}) {
   if (STATE.transfersLoadInFlight) return;
   if (!STATE.health?.has_private_creds) return;
   STATE.transfersLoadInFlight = true;
+  STATE.transfersLoadError = null;
   try {
     const d = await fetchJson(transfersUrl(90, 100));
     STATE.transfers = d;
     STATE.transfersDataLoaded = true;
+    STATE.transfersLoadError = null;
     renderTransferCards(STATE.transfers);
   } catch (err) {
-    showRefreshFetchToast(i18n("asset transfers", "資產劃轉"), err, {
-      hasCachedData: Boolean(STATE.transfers),
-    });
+    STATE.transfersLoadError = err;
+    renderTransferCards(null);
   } finally {
     STATE.transfersLoadInFlight = false;
   }

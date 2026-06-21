@@ -634,7 +634,10 @@ function buildProfitCompositionRows(ctx) {
     swappedNativeByBook,
     swappedUsdtByBook,
     usdByBook,
+    hedgeTotalUsd,
   } = profitCompositionByBook;
+  const hedgeUsd = num(hedgeTotalUsd) ?? 0;
+  const hasHedge = Math.abs(hedgeUsd) >= 0.005;
   const places = { BTC: 5, ETH: 4, USDC: 2 };
   const entries = PROFIT_HELD_BOOKS.map((book) => {
     const native = num(nativeByBook?.[book]);
@@ -672,10 +675,12 @@ function buildProfitCompositionRows(ctx) {
   }).filter(Boolean);
 
   const rowUsd = (e) => compositionRowUsd(e);
-  const gains = entries.filter((e) => rowUsd(e) > 0);
-  const losses = entries.filter((e) => rowUsd(e) < 0);
-  const gainUsdTotal = gains.reduce((sum, e) => sum + Math.abs(rowUsd(e)), 0);
-  const lossUsdTotal = losses.reduce((sum, e) => sum + Math.abs(rowUsd(e)), 0);
+  let gainUsdTotal = entries.filter((e) => rowUsd(e) > 0).reduce((sum, e) => sum + Math.abs(rowUsd(e)), 0);
+  let lossUsdTotal = entries.filter((e) => rowUsd(e) < 0).reduce((sum, e) => sum + Math.abs(rowUsd(e)), 0);
+  if (hasHedge) {
+    if (hedgeUsd > 0) gainUsdTotal += hedgeUsd;
+    else if (hedgeUsd < 0) lossUsdTotal += Math.abs(hedgeUsd);
+  }
   const byBook = Object.fromEntries(entries.map((entry) => [entry.book, entry]));
 
   function profitRow(entry, { isLoss, usdDenom }) {
@@ -701,12 +706,9 @@ function buildProfitCompositionRows(ctx) {
     } else if (swappedUsdt > 0.005 && isMeaningfulNativeForBook(swappedNative, book)) {
       const swappedLabel = i18n("swapped", "已兌");
       detailText = `${earnedNativeText} ${book} (${swappedNativeText} ${book} ${swappedLabel})`;
-      if (isMeaningfulNativeForBook(native, book)) {
-        detailText += ` · ${nativeText} ${i18n("unswept", "待兌")}`;
-      }
       primaryText = fmtUsdAbsForPnlCue(displayUsd ?? swappedUsdt);
     } else if (isMeaningfulNativeForBook(earnedNative, book) && isMeaningfulNativeForBook(native, book)) {
-      detailText = `${earnedNativeText} ${book} · ${nativeText} ${i18n("unswept", "待兌")}`;
+      detailText = `${earnedNativeText} ${book}`;
       primaryText =
         displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : `${earnedNativeText} ${book}`;
     } else if (isMeaningfulNativeForBook(earnedNative, book)) {
@@ -714,7 +716,7 @@ function buildProfitCompositionRows(ctx) {
       primaryText =
         displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : `${earnedNativeText} ${book}`;
     } else if (isMeaningfulNativeForBook(native, book)) {
-      detailText = `${nativeText} ${book} · ${i18n("unswept", "待兌")}`;
+      detailText = `${nativeText} ${book}`;
       primaryText =
         displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : `${nativeText} ${book}`;
     } else {
@@ -733,15 +735,41 @@ function buildProfitCompositionRows(ctx) {
     };
   }
 
-  const rows = CORE_BOOKS.map((book) => {
-    const entry = byBook[book];
-    if (!entry) return null;
-    const isLoss = rowUsd(entry) < 0;
-    return profitRow(entry, {
+  function hedgeProfitRow(usd, usdDenom, isLoss) {
+    const pct = usdDenom > 0 ? Math.abs(usd) / usdDenom : null;
+    const pctText = pct !== null ? fmtPct(pct, 1) : "—";
+    const barWidth =
+      pct !== null ? `${Math.min(100, Math.max(pct * 100, isLoss ? 8 : 2)).toFixed(1)}%` : "0%";
+    return {
+      book: "USDC",
+      pctText,
+      barWidth,
+      detailText: "perp hedge",
+      primaryText: fmtUsdAbsForPnlCue(usd),
+      tone: pnlClass(usd),
       isLoss,
-      usdDenom: isLoss ? lossUsdTotal : gainUsdTotal,
-    });
-  }).filter(Boolean);
+      barFillClass: isLoss ? "overview-breakdown-bar-fill--loss" : undefined,
+    };
+  }
+
+  const rows = [];
+  for (const book of CORE_BOOKS) {
+    const entry = byBook[book];
+    if (entry) {
+      const isLoss = rowUsd(entry) < 0;
+      rows.push(
+        profitRow(entry, {
+          isLoss,
+          usdDenom: isLoss ? lossUsdTotal : gainUsdTotal,
+        })
+      );
+    }
+    if (book === "USDC" && hasHedge) {
+      rows.push(
+        hedgeProfitRow(hedgeUsd, hedgeUsd < 0 ? lossUsdTotal : gainUsdTotal, hedgeUsd < 0)
+      );
+    }
+  }
 
   return overviewBreakdownRowsHtml(rows, {
     emptyLabel: i18n("No realized profit yet", "尚無已實現獲利"),
@@ -1134,6 +1162,73 @@ export function hedgePerpInstrumentForCurrency(currency) {
   const cur = String(currency || "").toUpperCase();
   if (!cur) return "";
   return `${cur}_USDC-PERPETUAL`;
+}
+
+/** True when hedge summary carries no displayable lifetime PnL. */
+export function hedgePnlSummaryIsEmpty(hedge) {
+  if (!hedge || typeof hedge !== "object") return true;
+  const tradeCount = num(hedge.trade_count);
+  const net = num(hedge.net_pnl_usdc);
+  if (tradeCount !== null && tradeCount > 0) return false;
+  return net === null || Math.abs(net) < 0.005;
+}
+
+/** Lifetime realized perp-hedge PnL from trade journal (engine status payload). */
+export function hedgeLifetimePnlSummary(status) {
+  const raw = status?.hedge_pnl_summary;
+  if (!raw || typeof raw !== "object") return null;
+  const tradeCount = num(raw.trade_count);
+  const netPnlUsd = num(raw.net_pnl_usdc);
+  if (hedgePnlSummaryIsEmpty(raw)) return null;
+  return {
+    tradeCount: tradeCount ?? 0,
+    realizedPnlUsd: num(raw.realized_pnl_usdc),
+    feesUsd: num(raw.fees_usdc),
+    netPnlUsd,
+    byCurrency: raw.by_currency || {},
+    windowNetPnlByDays: raw.window_net_pnl_by_days || {},
+  };
+}
+
+/** Net realized perp-hedge PnL included in performance totals (lifetime). */
+export function hedgeLifetimeNetPnlUsd(status) {
+  const summary = hedgeLifetimePnlSummary(status);
+  if (summary?.netPnlUsd !== null && summary?.netPnlUsd !== undefined) {
+    return summary.netPnlUsd;
+  }
+  const raw = status?.hedge_pnl_summary;
+  if (!raw || typeof raw !== "object") return null;
+  return num(raw.net_pnl_usdc);
+}
+
+/** Prefer live status hedge summary; fall back to realized report summary. */
+export function resolveHedgeNetPnlUsd(status, report) {
+  const fromStatus = hedgeLifetimeNetPnlUsd(status);
+  if (fromStatus !== null) return fromStatus;
+  return num(report?.summary?.hedge_net_pnl_usdc);
+}
+
+/** Net realized perp-hedge PnL for a rolling window (matches chart APR windows). */
+export function hedgeWindowNetPnlUsd(status, windowDays) {
+  const summary = hedgeLifetimePnlSummary(status);
+  if (!summary) return null;
+  const days = Math.round(windowDays ?? 30);
+  const raw = summary.windowNetPnlByDays?.[String(days)];
+  return raw === undefined || raw === null ? null : num(raw);
+}
+
+/** Per-book lifetime net perp-hedge PnL (USDC) for profit composition. */
+export function hedgeUsdByBook(status) {
+  const summary = hedgeLifetimePnlSummary(status);
+  const out = { BTC: 0, ETH: 0, USDC: 0 };
+  if (!summary) return out;
+  for (const [cur, row] of Object.entries(summary.byCurrency || {})) {
+    const book = String(cur).toUpperCase();
+    if (!(book in out)) continue;
+    const net = num(row?.net_pnl_usdc);
+    if (net !== null) out[book] = net;
+  }
+  return out;
 }
 
 /**
@@ -1921,6 +2016,22 @@ export function isMeaningfulNativeForBook(native, book) {
   return Math.abs(n) >= 0.5 * 10 ** -places;
 }
 
+/** True when this group has an exchange-confirmed premium spot sell (not ledger pool split). */
+export function profitSweepHasExchangeFill(g) {
+  const status = String(g?.profit_sweep_status || "").toLowerCase();
+  if (status !== "filled") return false;
+  const orderId = String(g?.profit_sweep_order_id || "").trim();
+  if (orderId) return true;
+  const reason = String(g?.profit_sweep_reason || "").toLowerCase();
+  if (reason.includes("exchange_fully_swept")) return true;
+  if (reason.includes("unlabeled_premium_reconciled")) return true;
+  if (reason.includes("manual_swap")) return true;
+  if (reason.includes("dust_pool_sweep")) return true;
+  // proceeds_reconciled alone = journal pool attribution, not a per-group fill.
+  if (reason.includes("proceeds_reconciled")) return false;
+  return true;
+}
+
 /** Lifetime USDT high-water from journal reconcile (may exceed actual fill quote). */
 export function profitSweepLifetimeQuoteUsdt(g) {
   const lifetime = num(g?.profit_sweep_quote_proceeds_lifetime);
@@ -1933,9 +2044,9 @@ export function profitSweepLifetimeQuoteUsdt(g) {
 
 /** USDT actually received from premium swap fills (exchange quote, not reconcile high-water). */
 export function profitSweepRealizedQuoteUsdt(g) {
+  if (!profitSweepHasExchangeFill(g)) return null;
   const quote = num(g?.profit_sweep_quote_proceeds);
-  const status = String(g?.profit_sweep_status || "").toLowerCase();
-  if (status === "filled" && quote !== null && quote > 0) return quote;
+  if (quote !== null && quote > 0) return quote;
   return profitSweepLifetimeQuoteUsdt(g);
 }
 
@@ -1952,6 +2063,11 @@ export function mergeStatusPayload(prev, next) {
   const prevFill = premiumSweepFillStatsByBook(prev);
   if (!nextFill && prevFill) {
     merged.premium_sweep_fill_stats_by_book = prevFill;
+  }
+  const nextHedge = next.hedge_pnl_summary;
+  const prevHedge = prev?.hedge_pnl_summary;
+  if (hedgePnlSummaryIsEmpty(nextHedge) && !hedgePnlSummaryIsEmpty(prevHedge)) {
+    merged.hedge_pnl_summary = prevHedge;
   }
   return merged;
 }
@@ -2331,6 +2447,9 @@ export function profitDispositionForGroup(g, status) {
   const sweepAmt = sweepAmtRaw !== null && sweepAmtRaw > 0 ? sweepAmtRaw : native;
 
   if (sweep === "filled") {
+    if (!profitSweepHasExchangeFill(g)) {
+      return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book };
+    }
     const sweptNative = Math.min(sweepAmt, native);
     let remainder = Math.max(0, native - sweptNative);
     if (!isMeaningfulNativeForBook(remainder, book)) remainder = 0;
@@ -3525,6 +3644,7 @@ export function profitSweepMetaLine(g) {
   const amt = g?.profit_sweep_amount;
   const amtDisplay = amt !== undefined && amt !== null && amt !== "" ? String(amt) : "—";
   if (status === "filled") {
+    if (!profitSweepHasExchangeFill(g)) return null;
     const quoteRaw = g?.profit_sweep_quote_proceeds;
     const quoteNum = quoteRaw !== undefined && quoteRaw !== null && quoteRaw !== "" ? Number(quoteRaw) : NaN;
     const quoteDisplay = Number.isFinite(quoteNum) && quoteNum > 0 ? fmtNum(quoteNum, 2) : null;
@@ -3822,7 +3942,20 @@ export function formatFetchError(err, fallback = "Request failed") {
       "無法連線至 Dashboard 伺服器，請確認服務是否正在執行。"
     );
   }
-  return String(err?.message || err || fallback);
+  const raw = String(err?.message || err || fallback);
+  if (/\b524\b/.test(raw)) {
+    return i18n(
+      "Request timed out — try again in a moment.",
+      "請求逾時，請稍後再試。"
+    );
+  }
+  if (/\b(522|504)\b/.test(raw)) {
+    return i18n(
+      "Server is slow to respond — try again shortly.",
+      "伺服器回應較慢，請稍後再試。"
+    );
+  }
+  return raw;
 }
 
 export async function fetchJson(url, options = {}) {

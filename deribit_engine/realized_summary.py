@@ -166,6 +166,8 @@ def realized_summary_from_closed(
     spot_index: dict[str, Decimal] | None = None,
     open_rows: list[dict[str, Any]] | None = None,
     now_ms: int | None = None,
+    hedge_lifetime_usdc: Decimal = Decimal("0"),
+    hedge_window_usdc: Decimal = Decimal("0"),
 ) -> dict[str, Any]:
     """Build the same ``summary`` shape as ``bot.report()`` from closed group dicts."""
     realized = [
@@ -173,12 +175,14 @@ def realized_summary_from_closed(
     ]
     unresolved = [row for row in closed_rows if row not in realized]
     total_realized = sum((_row_realized_pnl_usdc(row, spot_index) for row in realized), Decimal("0"))
+    total_realized += hedge_lifetime_usdc
     total_holding = sum((_holding_days(row) for row in realized), Decimal("0"))
     wins = sum(1 for row in realized if _row_realized_pnl_usdc(row, spot_index) > 0)
     realized_count = Decimal(str(len(realized)))
     lifetime_days = _realized_sample_days(realized, open_rows=open_rows, now_ms=now_ms)
     window_rows, window_days_used = _window_rows(realized, window_days)
     window_pnl = sum((_row_realized_pnl_usdc(row, spot_index) for row in window_rows), Decimal("0"))
+    window_pnl += hedge_window_usdc
 
     capital = effective_capital_usdc if effective_capital_usdc > 0 else Decimal("0")
 
@@ -205,6 +209,7 @@ def realized_summary_from_closed(
             _annualize_apr(window_pnl, window_days_used, capital),
             8,
         ),
+        "hedge_net_pnl_usdc": format_decimal(hedge_lifetime_usdc, 4),
     }
 
 
@@ -217,6 +222,7 @@ _SPOT_PATCHED_SUMMARY_KEYS = (
     "window_realized_apr",
     "window_realized_closed_group_count",
     "window_days_used",
+    "hedge_net_pnl_usdc",
 )
 
 
@@ -226,6 +232,8 @@ def patch_realized_report_spot_pnl(
     *,
     spot_index: dict[str, Decimal] | None,
     window_days: int,
+    hedge_lifetime_usdc: Decimal = Decimal("0"),
+    hedge_window_usdc: Decimal = Decimal("0"),
 ) -> None:
     """Refresh lifetime/window USD PnL and APR on a cached report using live index."""
     if not spot_index:
@@ -241,6 +249,8 @@ def patch_realized_report_spot_pnl(
         target_portfolio_apr=target,
         window_days=window_days,
         spot_index=spot_index,
+        hedge_lifetime_usdc=hedge_lifetime_usdc,
+        hedge_window_usdc=hedge_window_usdc,
     )
     for key in _SPOT_PATCHED_SUMMARY_KEYS:
         if key in patched:

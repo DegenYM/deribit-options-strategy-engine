@@ -17,7 +17,7 @@ from deribit_engine.investor_fee_report import (
     write_initial_fee_report,
 )
 from deribit_engine.investor_fee_report_csv import write_initial_fee_report_csv
-from deribit_engine.investor_fee_report_pdf import write_initial_fee_report_pdf
+from deribit_engine.investor_fee_report_pdf import write_initial_fee_report_pdf, write_settlement_fee_report_pdf
 
 
 def test_report_paths_use_initial_and_date_folders(tmp_path: Path) -> None:
@@ -142,7 +142,26 @@ def test_render_initial_fee_report_md_english() -> None:
 def test_render_settlement_fee_report_md_english(tmp_path: Path) -> None:
     (tmp_path / "deribit_engine").mkdir()
     (tmp_path / ".env.example").write_text("", encoding="utf-8")
-    ctx = SettlementFeeReportContext(
+    ctx = _settlement_ctx(tmp_path)
+    md = render_settlement_fee_report_md(ctx, repo_root=tmp_path)
+    assert "Quarterly Settlement Statement" in md
+    assert "## Summary" in md
+    assert "Transfers (period)" in md
+    assert "Period comparison" not in md
+    assert "Detailed account balances" in md
+    assert "**Day A**" in md
+    assert "**Day B**" in md
+    assert "Period deposits" in md
+    assert "USDT" in md.split("Detailed account balances")[1]
+    assert "Total profit" in md
+    assert "10% × Total profit" in md
+    assert "Total fees due" in md
+    assert "Performance & fee settlement" not in md
+    assert "Closed option trades" in md
+
+
+def _settlement_ctx(tmp_path: Path) -> SettlementFeeReportContext:
+    return SettlementFeeReportContext(
         investor_id="demo",
         display_name="Demo",
         period="2026-Q1",
@@ -192,20 +211,51 @@ def test_render_settlement_fee_report_md_english(tmp_path: Path) -> None:
         },
         index_by_ccy={"BTC": Decimal("60000"), "ETH": Decimal("2000"), "USDC": Decimal("1")},
     )
-    md = render_settlement_fee_report_md(ctx, repo_root=tmp_path)
-    assert "Period Statement" in md
-    assert "**Day A**" in md
-    assert "**Day B**" in md
-    assert "Period deposits" in md
-    assert "USDC-equivalent balances" in md
-    assert "Change (B − A)" in md
-    assert "NAV & performance fee (USDC)" in md
-    assert "NAV_perf at Day A" in md
-    assert "Distributable profit (above HWM)" in md
-    assert "Strategy P&L (period)" in md
-    assert "Performance fee" in md
-    assert "Period cash movements" in md
-    assert "Closed option trades" in md
+
+
+def test_write_settlement_fee_report_pdf(tmp_path: Path) -> None:
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / ".env.example").write_text("", encoding="utf-8")
+    pdf_path = tmp_path / "settlement.pdf"
+    write_settlement_fee_report_pdf(_settlement_ctx(tmp_path), pdf_path, repo_root=tmp_path)
+    assert pdf_path.exists()
+    assert pdf_path.read_bytes()[:4] == b"%PDF"
+
+
+def test_period_return_pct() -> None:
+    from deribit_engine.investor_fee_report_period import compute_period_return_pct
+
+    assert compute_period_return_pct(
+        nav_perf_start=Decimal("10000"),
+        net_flow_usdc=Decimal("500"),
+        realized_trading_pnl=Decimal("1500"),
+    ) == Decimal("1500") / Decimal("10250") * Decimal("100")
+
+
+def test_trading_profit_performance_fee() -> None:
+    from deribit_engine.investor_fee_report_period import (
+        RealizedTradingPnl,
+        compute_trading_profit_performance_fee,
+        fee_basis_trading_profit_usdc,
+    )
+
+    period = RealizedTradingPnl(
+        options_pnl_usdc=Decimal("243.69"),
+        hedge_pnl_usdc=Decimal("-39.18"),
+        closed_count=58,
+    )
+    lifetime = RealizedTradingPnl(
+        options_pnl_usdc=Decimal("302.65"),
+        hedge_pnl_usdc=Decimal("-39.18"),
+        closed_count=67,
+    )
+    assert fee_basis_trading_profit_usdc(period, lifetime) == Decimal("263.47")
+    distributable, fee = compute_trading_profit_performance_fee(
+        Decimal("263.47"),
+        performance_fee_rate=Decimal("0.10"),
+    )
+    assert distributable == Decimal("263.47")
+    assert fee == Decimal("26.347")
 
 
 def test_write_initial_fee_report_pdf(tmp_path: Path) -> None:

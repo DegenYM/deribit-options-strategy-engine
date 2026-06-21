@@ -1419,27 +1419,33 @@ def test_close_position_live_market_option(tmp_path, fake_client):
 
 
 def test_close_position_live_closes_perp(tmp_path, fake_client):
-    instrument = "BTC-PERPETUAL"
+    instrument = "BTC_USDC-PERPETUAL"
     fake_client.positions = [
         {
             "instrument_name": instrument,
             "direction": "buy",
             "kind": "future",
-            "size": "100",
-            "size_currency": "100",
+            "size": "0.1",
+            "size_currency": "0.1",
             "mark_price": "70000",
             "average_price": "69000",
             "floating_profit_loss": "0",
             "delta": "1",
         }
     ]
-    config = make_config(tmp_path)
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
     engine = DeribitOptionTrialBot(config, fake_client)
 
     result = engine.close_positions(instruments=[instrument], live=True)
 
     assert result["targets"][0]["action"] == "close_perp"
-    assert fake_client.closed_positions == [instrument]
+    assert len(fake_client.placed_orders) == 1
+    order = fake_client.placed_orders[0]
+    assert order["instrument_name"] == instrument
+    assert order["direction"] == "sell"
+    assert order["reduce_only"] is True
+    assert order["order_type"] == "limit"
+    assert order.get("time_in_force") == "immediate_or_cancel"
 
 
 def test_delta_totals_ignore_summary_delta_total(tmp_path, fake_client):
@@ -1944,7 +1950,12 @@ def test_per_position_short_call_targets_long_perp(tmp_path, fake_client):
 
 
 def test_per_position_auto_unwinds_after_recovery_cycles(tmp_path, fake_client):
-    engine = _make_per_position_engine(tmp_path, fake_client, recovery_normal_cycles=3)
+    engine = _make_per_position_engine(
+        tmp_path,
+        fake_client,
+        recovery_normal_cycles=3,
+        hedge_unwind_recovery_cycles=3,
+    )
     group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", quantity=Decimal("1"))
     group.short_delta = Decimal("0.5")
     engine._update_position_hedge(group, raw_soft=True, raw_hard=True, soft_trigger=True, hard_trigger=True)
@@ -2001,6 +2012,35 @@ def test_per_position_reconcile_sums_group_targets_into_one_order(tmp_path, fake
     assert action["side"] == "sell"  # short 0.10 BTC to offset two long-delta short puts
     assert Decimal(action["amount"]) == Decimal("0.10")
     assert action["reduce_only"] is False
+
+
+def test_per_position_reconcile_respects_deadband(tmp_path, fake_client):
+    engine = _make_per_position_engine(tmp_path, fake_client, hedge_reconcile_deadband_btc=Decimal("0.01"))
+    state = StrategyState()
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", currency="BTC")
+    group.hedge_size_base = Decimal("-0.005")
+    state.groups.append(group)
+    perp = Position(
+        instrument_name=engine._perp_instrument("BTC"),
+        direction="sell",
+        kind="future",
+        size=Decimal("0.003"),
+        size_currency=Decimal("0.003"),
+        mark_price=Decimal("70000"),
+        average_price=Decimal("70000"),
+        floating_profit_loss=Decimal("0"),
+        delta=Decimal("0"),
+    )
+    ctx = SimpleNamespace(
+        state=state,
+        future_positions=[perp],
+        orderbook_cache={},
+        future_markets_by_name=engine._load_perpetual_markets(),
+    )
+
+    actions = engine._reconcile_position_hedges(ctx, live=False)
+
+    assert actions == []
 
 
 def test_per_position_reconcile_flattens_orphan_perp(tmp_path, fake_client):

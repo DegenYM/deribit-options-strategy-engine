@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -339,7 +339,7 @@ export function sumLifetimeEarnedUsdByBook(report, groups, status) {
   return out;
 }
 
-/** Per-book profit composition: total earned at spot, unswept native, and swapped USDT. */
+/** Per-book profit composition: spread realized by book, plus total perp hedge (shown under USDC). */
 export function profitCompositionByBook(report, groups, status) {
   const earnedUsdByBook = sumLifetimeEarnedUsdByBook(report, groups, status);
   const earnedNativeByBook = sumLifetimeRealizedPnlNativeByBook(report, groups, status);
@@ -370,6 +370,7 @@ export function profitCompositionByBook(report, groups, status) {
     swappedNativeByBook,
     swappedUsdtByBook,
     usdByBook,
+    hedgeTotalUsd: resolveHedgeNetPnlUsd(status, report),
   };
 }
 
@@ -438,7 +439,9 @@ export function sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status) {
     sum += pnl;
     any = true;
   }
-  return any ? sum : null;
+  const hedge = resolveHedgeNetPnlUsd(status, report);
+  if (!any && hedge === null) return null;
+  return sum + (hedge ?? 0);
 }
 
 export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDays) {
@@ -454,7 +457,9 @@ export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDay
     sum += pnl;
     any = true;
   }
-  return any ? sum : null;
+  const hedge = hedgeWindowNetPnlUsd(status, days);
+  if (!any && hedge === null) return null;
+  return sum + (hedge ?? 0);
 }
 
 /** Match backend ``_annualize_apr``. */

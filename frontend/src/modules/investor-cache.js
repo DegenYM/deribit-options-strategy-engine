@@ -2,7 +2,7 @@ import { INVESTOR, INVESTOR_LOCALE, resolveApiUrl } from "../shared/context.js";
 import { STATE } from "../shared/state.js";
 import { isPortfolioBreakdownConsistent, applyDiskGroupsPayload } from "./domain.js";
 
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 
 function closedProfitSweepQuoteUsdtSum(groups) {
   let sum = 0;

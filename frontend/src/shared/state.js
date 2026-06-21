@@ -25,6 +25,7 @@ export const STATE = {
   stressDataLoaded: false,
   stressLoadInFlight: false,
   transfers: null,
+  transfersLoadError: null,
   transfersDataLoaded: false,
   transfersLoadInFlight: false,
   bookFilter: "ALL",

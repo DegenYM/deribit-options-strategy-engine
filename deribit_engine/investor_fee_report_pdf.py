@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -109,6 +110,68 @@ def _grid_table(headers: list[str], rows: list[list[str]], *, col_widths: list[f
     return table
 
 
+def _para_cell(text: str, style: ParagraphStyle, *, instrument: bool = False) -> Paragraph:
+    raw = str(text)
+    if instrument and len(raw) > 16:
+        break_at = raw.rfind("-", 8, len(raw) - 4)
+        if break_at > 0:
+            html = f"{escape(raw[: break_at + 1])}<br/>{escape(raw[break_at + 1 :])}"
+            return Paragraph(html, style)
+    return Paragraph(escape(raw), style)
+
+
+def _wrap_grid_table(
+    headers: list[str],
+    rows: list[list[str]],
+    *,
+    col_widths: list[float],
+    font_size: int = 7,
+    instrument_col: int | None = None,
+) -> Table:
+    """Table cells as Paragraph so long text wraps instead of overlapping."""
+    cell_style = ParagraphStyle(
+        "WrapCell",
+        fontName="Helvetica",
+        fontSize=font_size,
+        leading=font_size + 2,
+        wordWrap="LTR",
+    )
+    header_style = ParagraphStyle(
+        "WrapHeader",
+        parent=cell_style,
+        fontName="Helvetica-Bold",
+    )
+    data: list[list[Any]] = [
+        [Paragraph(f"<b>{escape(h)}</b>", header_style) for h in headers],
+    ]
+    for row in rows:
+        data.append(
+            [
+                _para_cell(
+                    cell,
+                    cell_style,
+                    instrument=instrument_col is not None and col_idx == instrument_col,
+                )
+                for col_idx, cell in enumerate(row)
+            ]
+        )
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef4")),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 3),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]
+        )
+    )
+    return table
+
+
 def _net_flow_breakdown_table(
     native_by_book: dict[str, Decimal],
     *,
@@ -181,7 +244,6 @@ def _append_flow_section_pdf(
     styles: dict[str, ParagraphStyle],
     period_label: str | None = None,
 ) -> None:
-
     title = f"{section_num}. Cash flow detail"
     if period_label:
         title += f" ({period_label})"
@@ -318,6 +380,37 @@ def _signed_native_pdf(amount: Decimal, book: str) -> str:
     return text
 
 
+def _trade_ts_pdf(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%m-%d %H:%M")
+
+
+def _compact_native_pdf(amount: Decimal, book: str, *, places: int = 4) -> str:
+    """Compact native amounts for trade tables (max 4 dp on coin books)."""
+    value = to_decimal(amount)
+    book = book.upper()
+    if book in ("USDC", "USDT"):
+        if value == value.to_integral_value():
+            return str(int(value))
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    q = value.quantize(Decimal("1").scaleb(-places))
+    text = f"{q:.{places}f}".rstrip("0").rstrip(".") or "0"
+    return text
+
+
+def _trade_pnl_native_pdf(amount: Decimal, book: str) -> str:
+    book = book.upper()
+    if book in ("USDC", "USDT"):
+        return "—"
+    return _signed_compact_native_pdf(amount, book)
+
+
+def _signed_compact_native_pdf(amount: Decimal, book: str) -> str:
+    text = _compact_native_pdf(amount, book)
+    if amount > 0 and not text.startswith("+"):
+        return f"+{text}"
+    return text
+
+
 def _signed_money_pdf(amount: Decimal | str) -> str:
     text = _money(amount)
     value = to_decimal(amount)
@@ -330,24 +423,98 @@ def _usdc_equiv_total_pdf(book_map: dict[str, Decimal]) -> Decimal:
     return sum(book_map.values(), Decimal("0"))
 
 
+def _pct_pdf(amount: Decimal | None, *, places: int = 1) -> str:
+    if amount is None:
+        return "—"
+    return f"{amount:.{places}f}%"
+
+
+def _kpi_summary_table(report) -> Table:
+    profit = report.executive_profit
+    data = [
+        ["Ending total equity", f"${_money(report.day_b.total_equity_usdc)}"],
+        ["Total profit", f"${_signed_money_pdf(profit.total_pnl_usdc)}"],
+        ["  Closed options (incl. profit sweep)", f"${_signed_money_pdf(profit.options_pnl_usdc)}"],
+        ["  Perp hedge (net)", f"${_signed_money_pdf(profit.hedge_pnl_usdc)}"],
+        [
+            f"Performance fee ({float(report.performance_fee_rate) * 100:.0f}% × Total profit)",
+            f"${_money(report.performance_fee)}",
+        ],
+    ]
+    if report.management_fee > 0:
+        data.append(["Management fee", f"${_money(report.management_fee)}"])
+    data.append(["Total fees due", f"${_money(report.total_fees_due)}"])
+    total_row = len(data) - 1
+    table = Table(data, colWidths=[88 * mm, 62 * mm])
+    table.setStyle(
+        TableStyle(
+            [
+                ("FONTNAME", (0, 0), (-1, -1), "Helvetica"),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f4f8")),
+                ("BACKGROUND", (0, total_row), (-1, total_row), colors.HexColor("#e8f4e8")),
+                ("FONTNAME", (0, total_row), (-1, total_row), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
+    return table
+
+
 def write_settlement_fee_report_pdf(
     ctx: SettlementFeeReportContext,
     path: Path,
     *,
     repo_root: Path | str,
 ) -> Path:
-    from .investor_fee_report_period import build_investor_period_report
+    from .investor_fee_report_period import (
+        build_investor_period_report,
+        period_report_title,
+    )
 
     report = build_investor_period_report(ctx, repo_root=repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     styles = _styles()
     story: list[Any] = []
 
-    story.append(Paragraph(f"Period Statement — {report.display_name}", styles["title"]))
+    story.append(Paragraph(period_report_title(report), styles["title"]))
     story.append(Paragraph(f"Investor: {report.investor_id}", styles["small"]))
     story.append(Paragraph(f"Period: {report.period_label}", styles["small"]))
-    story.append(Paragraph(f"Day A: {report.day_a.label}", styles["small"]))
-    story.append(Paragraph(f"Day B: {report.day_b.label}", styles["small"]))
+    story.append(Paragraph(f"Period start: {report.day_a.label}", styles["small"]))
+    story.append(Paragraph(f"Period end: {report.day_b.label}", styles["small"]))
+    story.append(Paragraph(f"Generated: {_ts_fmt(report.generated_at_ms)}", styles["small"]))
+    story.append(Spacer(1, 8))
+
+    story.append(Paragraph("1. Summary", styles["h2"]))
+    story.append(_kpi_summary_table(report))
+    story.append(Spacer(1, 8))
+
+    transfer_rows = [
+        [
+            _trade_ts_pdf(line.timestamp_ms),
+            line.identity_label,
+            line.flow_type,
+            line.book,
+            _signed_native_pdf(line.amount_native, line.book),
+            f"${_money(line.usdc_equiv)}",
+        ]
+        for line in report.period_flow_lines
+    ]
+    if not transfer_rows:
+        transfer_rows = [["—", "—", "—", "—", "—", "—"]]
+    story.append(Paragraph("2. Transfers (period)", styles["h2"]))
+    story.append(
+        _wrap_grid_table(
+            ["Time", "Account", "Type", "CCY", "Amount", "USDC"],
+            transfer_rows,
+            col_widths=[18 * mm, 26 * mm, 18 * mm, 12 * mm, 24 * mm, 20 * mm],
+        )
+    )
+    story.append(Paragraph(f"Net subscription total: ${_money(report.net_flow_usdc)} USDC equivalent", styles["small"]))
     story.append(Spacer(1, 8))
 
     def _balance_row(label: str, native: dict[str, Decimal]) -> list[str]:
@@ -356,15 +523,16 @@ def write_settlement_fee_report_pdf(
             _native(native["BTC"], "BTC"),
             _native(native["ETH"], "ETH"),
             _native(native["USDC"], "USDC"),
+            _native(native["USDT"], "USDT"),
         ]
 
-    story.append(Paragraph("Account balances", styles["h2"]))
+    story.append(Paragraph("3. Detailed account balances", styles["h2"]))
     story.append(
         _grid_table(
-            ["", "BTC", "ETH", "USDC"],
+            ["", "BTC", "ETH", "USDC", "USDT"],
             [
-                _balance_row("Day A", report.day_a.native),
-                _balance_row("Day B", report.day_b.native),
+                _balance_row("Period start", report.day_a.native),
+                _balance_row("Period end", report.day_b.native),
                 _balance_row("Period deposits", report.deposit_native),
                 _balance_row("Period withdrawals", report.withdraw_native),
                 [
@@ -372,133 +540,75 @@ def write_settlement_fee_report_pdf(
                     _signed_native_pdf(report.earned_native["BTC"], "BTC"),
                     _signed_native_pdf(report.earned_native["ETH"], "ETH"),
                     _signed_native_pdf(report.earned_native["USDC"], "USDC"),
-                ],
-                [
-                    "USDC equivalent",
-                    _money(report.earned_usdc["BTC"]),
-                    _money(report.earned_usdc["ETH"]),
-                    _money(report.earned_usdc["USDC"]),
+                    _signed_native_pdf(report.earned_native["USDT"], "USDT"),
                 ],
             ],
-            col_widths=[42 * mm, 32 * mm, 32 * mm, 32 * mm],
+            col_widths=[36 * mm, 30 * mm, 30 * mm, 30 * mm, 30 * mm],
         )
     )
     story.append(Spacer(1, 8))
 
-    story.append(Paragraph("USDC-equivalent balances", styles["h2"]))
-    story.append(
-        _grid_table(
-            ["", "BTC", "ETH", "USDC", "Total"],
-            [
-                [
-                    f"Day A ({report.day_a.label})",
-                    _money(report.day_a.usdc_equiv["BTC"]),
-                    _money(report.day_a.usdc_equiv["ETH"]),
-                    _money(report.day_a.usdc_equiv["USDC"]),
-                    _money(_usdc_equiv_total_pdf(report.day_a.usdc_equiv)),
-                ],
-                [
-                    f"Day B ({report.day_b.label})",
-                    _money(report.day_b.usdc_equiv["BTC"]),
-                    _money(report.day_b.usdc_equiv["ETH"]),
-                    _money(report.day_b.usdc_equiv["USDC"]),
-                    _money(_usdc_equiv_total_pdf(report.day_b.usdc_equiv)),
-                ],
-                [
-                    "Change (B − A)",
-                    _signed_money_pdf(report.usdc_equiv_change["BTC"]),
-                    _signed_money_pdf(report.usdc_equiv_change["ETH"]),
-                    _signed_money_pdf(report.usdc_equiv_change["USDC"]),
-                    _signed_money_pdf(report.total_equity_change),
-                ],
-            ],
-            col_widths=[42 * mm, 28 * mm, 28 * mm, 28 * mm, 28 * mm],
+    scope = "lifetime, matches Total profit" if report.uses_lifetime_profit else "period"
+    summary = report.statement_trade_summary
+    profit = report.executive_profit
+    if summary.closed_count:
+        trade_intro = (
+            f"Closed groups ({scope}): {summary.closed_count} · Win rate: {_pct_pdf(summary.win_rate_pct)} · "
+            f"Options: ${_signed_money_pdf(profit.options_pnl_usdc)} · "
+            f"Hedge: ${_signed_money_pdf(profit.hedge_pnl_usdc)}"
         )
-    )
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("NAV & performance fee (USDC)", styles["h2"]))
-    story.append(
-        _kv_table(
-            [
-                ("Total equity at Day A", _money(_usdc_equiv_total_pdf(report.day_a.usdc_equiv))),
-                ("Total equity at Day B", _money(_usdc_equiv_total_pdf(report.day_b.usdc_equiv))),
-                ("Collateral spot deducted (Day A)", f"-{_money(report.collateral_spot_start)}"),
-                ("Collateral spot deducted (Day B)", f"-{_money(report.collateral_spot_end)}"),
-                ("NAV_perf at Day A", _money(report.nav_perf_start)),
-                ("NAV_perf at Day B", _money(report.nav_perf_end)),
-                ("NAV_perf change (B − A)", _signed_money_pdf(report.nav_perf_change)),
-                ("Net subscription in period", _money(report.net_flow_usdc)),
-                ("Strategy P&L (period)", _money(report.total_usdc_earned)),
-                ("HWM at period start", _money(report.hwm_start)),
-                ("Distributable profit (above HWM)", _money(report.distributable_profit)),
-                (
-                    "Performance fee",
-                    f"{_money(report.performance_fee)} ({float(report.performance_fee_rate) * 100:.0f}%)",
-                ),
-                ("HWM after fee", _money(report.hwm_end)),
-            ]
-        )
-    )
-    story.append(Spacer(1, 8))
-
-    story.append(Paragraph("Fees (USDC)", styles["h2"]))
-    story.append(
-        _kv_table(
-            [
-                ("Strategy P&L (period NAV change)", _money(report.total_usdc_earned)),
-                ("Distributable profit (above HWM)", _money(report.distributable_profit)),
-                (
-                    "Performance fee",
-                    f"{_money(report.performance_fee)} ({float(report.performance_fee_rate) * 100:.0f}%)",
-                ),
-                ("Management fee", _money(report.management_fee)),
-            ]
-        )
-    )
-    _bullet(
-        story,
-        "Strategy P&L = NAV_perf change in the period. Performance fee applies to distributable profit "
-        "(NAV_perf at Day B minus HWM at start minus net subscription).",
-        styles["small"],
-    )
-    story.append(Spacer(1, 8))
-
-    _append_flow_section_pdf(
-        story,
-        report.period_flow_lines,
-        section_num=4,
-        styles=styles,
-        period_label=report.period_label,
-    )
-
-    story.append(Paragraph("5. Closed option trades", styles["h2"]))
+    else:
+        trade_intro = "No closed option groups."
+    story.append(Paragraph("4. Closed option trades", styles["h2"]))
+    story.append(Paragraph(trade_intro, styles["small"]))
     trade_rows = [
         [
-            _ts_fmt_pdf(int(row["closed_timestamp_ms"])),
+            _trade_ts_pdf(int(row["closed_timestamp_ms"])),
             str(row["account"]),
-            str(row["strategy"]),
-            str(row["short_instrument"])[:24],
+            str(row["short_instrument"]),
             str(row["collateral"]),
-            _money(row["realized_pnl_usdc"]),
+            _compact_native_pdf(to_decimal(row["quantity"]), str(row["collateral"])),
+            _trade_pnl_native_pdf(to_decimal(row["realized_pnl_native"]), str(row["collateral"])),
+            f"${_money(row['realized_pnl_usdc'])}",
+            str(row.get("close_reason") or "—"),
         ]
-        for row in report.closed_trades
+        for row in report.statement_closed_trades
     ]
     if not trade_rows:
-        trade_rows = [["—", "—", "—", "—", "—", "—"]]
+        trade_rows = [["—", "—", "—", "—", "—", "—", "—", "—"]]
     story.append(
-        _grid_table(
-            ["Closed (UTC)", "Account", "Strategy", "Instrument", "Book", "PnL USDC"],
+        _wrap_grid_table(
+            [
+                "Closed",
+                "Account",
+                "Instrument",
+                "Book",
+                "Qty",
+                "PnL native",
+                "PnL USDC",
+                "Reason",
+            ],
             trade_rows,
             col_widths=[
-                36 * mm,
-                22 * mm,
-                22 * mm,
-                40 * mm,
-                12 * mm,
-                (178 - 36 - 22 - 22 - 40 - 12) * mm,
+                17 * mm,
+                24 * mm,
+                44 * mm,
+                11 * mm,
+                13 * mm,
+                17 * mm,
+                17 * mm,
+                35 * mm,
             ],
+            instrument_col=2,
         )
+    )
+    story.append(Spacer(1, 8))
+    _bullet(
+        story,
+        "Total profit = closed options (incl. profit-sweep USDT) + net perp hedge, "
+        "matching the investor dashboard. Performance fee = "
+        f"{float(report.performance_fee_rate) * 100:.0f}% × Total profit.",
+        styles["small"],
     )
 
     doc = SimpleDocTemplate(
@@ -508,7 +618,7 @@ def write_settlement_fee_report_pdf(
         rightMargin=16 * mm,
         topMargin=16 * mm,
         bottomMargin=16 * mm,
-        title=f"Period statement — {report.investor_id}",
+        title=f"{period_report_title(report)} — {report.investor_id}",
     )
     doc.build(story)
     return path

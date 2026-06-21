@@ -740,7 +740,7 @@ class ManagementMixin:
         )
         if position is None:
             return None
-        closed = self._close_perp_position(position, live=live)
+        closed = self._close_perp_position(context, position, live=live)
         if closed is None:
             return None
         closed["reason"] = "orphan_hedge_no_open_options"
@@ -779,14 +779,18 @@ class ManagementMixin:
             "live": live,
         }
         if live:
-            response = self.client.place_buy_order(
+            response = self._place_hedge_perp_order(
+                context,
+                direction="buy",
                 instrument_name=self._perp_instrument(currency),
                 amount=amount,
                 label=self._hedge_label(currency, "recovery"),
-                order_type="market",
                 reduce_only=True,
             )
             action["response"] = response
+            if isinstance(response, dict) and response.get("skipped"):
+                action["skipped"] = True
+                action["skip_reason"] = response.get("reason")
         return action
 
     def _group_option_delta(self, group: TradeGroup) -> Decimal:
@@ -835,7 +839,7 @@ class ManagementMixin:
                 group.hedge_recovery_streak = 0
             else:
                 group.hedge_recovery_streak += 1
-                if group.hedge_recovery_streak >= max(self.config.recovery_normal_cycles, 1):
+                if group.hedge_recovery_streak >= max(self.config.hedge_unwind_recovery_cycles, 1):
                     group.hedge_mode = ""
                     group.hedge_recovery_streak = 0
                     group.hedge_size_base = Decimal("0")
@@ -865,7 +869,8 @@ class ManagementMixin:
             )
             current_base = self._current_hedge_base(context.future_positions, currency)
             diff = target_base - current_base
-            if abs(diff) <= Decimal("0.0001"):
+            deadband = self.config.hedge_reconcile_deadband_base(currency)
+            if abs(diff) <= deadband:
                 continue
             perp_name = self._perp_instrument(currency)
             uses_base = self._perp_uses_base_amount(currency)
@@ -897,17 +902,22 @@ class ManagementMixin:
                 "current_hedge_base": format_decimal(current_base, 8),
                 "new_hedge_base": format_decimal(new_base, 8),
                 "reduce_only": reduce_only,
+                "hedge_order_type": self.config.hedge_order_type,
                 "live": live,
             }
             if live:
-                action["response"] = self.client.place_order(
+                response = self._place_hedge_perp_order(
+                    context,
                     direction=side,
                     instrument_name=perp_name,
                     amount=order_amount,
                     label=self._hedge_label(currency, "position"),
-                    order_type="market",
                     reduce_only=reduce_only,
                 )
+                action["response"] = response
+                if isinstance(response, dict) and response.get("skipped"):
+                    action["skipped"] = True
+                    action["skip_reason"] = response.get("reason")
             actions.append(action)
         return actions
 

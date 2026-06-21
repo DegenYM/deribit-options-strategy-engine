@@ -259,6 +259,27 @@ class BotConfig:
     # Fraction of a position's own delta to neutralize on a soft defense
     # trigger when ``per_position_hedge`` is on (hard always neutralizes 100%).
     soft_hedge_neutralize_pct: Decimal = Decimal("0.7")
+    # Minimum |target-current| perp gap (base coin units) before placing a
+    # reconcile order. Reduces fee churn from delta noise near min lot size.
+    hedge_reconcile_deadband_btc: Decimal = Decimal("0.002")
+    hedge_reconcile_deadband_eth: Decimal = Decimal("0.02")
+    # Consecutive clean manage cycles required before fully removing an active
+    # per-position hedge. Defaults higher than ``recovery_normal_cycles`` so
+    # unwind hysteresis cuts whipsaw round-trips around ATM.
+    hedge_unwind_recovery_cycles: int = 6
+    # Perp hedge execution: ``market`` taker, or ``limit_ioc`` (limit +
+    # immediate_or_cancel at best bid/ask with optional slippage cap).
+    hedge_order_type: str = "limit_ioc"
+    hedge_limit_slippage_pct: Decimal = Decimal("0.005")
+
+    def hedge_reconcile_deadband_base(self, currency: str) -> Decimal:
+        book = str(currency or "").upper()
+        if book == "BTC":
+            return self.hedge_reconcile_deadband_btc
+        if book == "ETH":
+            return self.hedge_reconcile_deadband_eth
+        return Decimal("0.0001")
+
     # Raw SCAN_ASSETS override kept alongside managed_currencies for future use.
     scan_assets: tuple[str, ...] = ()
     # --- Collateral routing (Stage C: decouple scan vs book management) -----
@@ -751,6 +772,13 @@ def load_config(
     if (covered_call_profit_sweep_enabled or covered_call_spot_exit_enabled) and "USDT" not in traded_collaterals:
         traded_collaterals = tuple(list(traded_collaterals) + ["USDT"])
 
+    hedge_order_type = str(_optional(values, "HEDGE_ORDER_TYPE", "limit_ioc")).strip().lower()
+    if hedge_order_type not in {"market", "limit_ioc"}:
+        raise ConfigurationError("HEDGE_ORDER_TYPE must be one of: market, limit_ioc")
+    hedge_limit_slippage_pct = to_decimal(_optional(values, "HEDGE_LIMIT_SLIPPAGE_PCT", "0.005"))
+    if hedge_limit_slippage_pct < 0 or hedge_limit_slippage_pct >= 1:
+        raise ConfigurationError("HEDGE_LIMIT_SLIPPAGE_PCT must be in [0, 1)")
+
     put_dte_min = int(_optional(values, "PUT_DTE_MIN", _optional(values, "ENTRY_DTE_MIN", "10")))
     put_dte_max = int(_optional(values, "PUT_DTE_MAX", _optional(values, "ENTRY_DTE_MAX", "21")))
     side_override = _short_option_side_overrides(_optional(values, "SHORT_OPTION_SIDE", ""))
@@ -976,6 +1004,14 @@ def load_config(
         hedge_giveup_loss_pct=to_decimal(_optional(values, "HEDGE_GIVEUP_LOSS_PCT", "0")),
         per_position_hedge=_to_bool(_optional(values, "PER_POSITION_HEDGE", "false")),
         soft_hedge_neutralize_pct=to_decimal(_optional(values, "SOFT_HEDGE_NEUTRALIZE_PCT", "0.7")),
+        hedge_reconcile_deadband_btc=to_decimal(_optional(values, "HEDGE_RECONCILE_DEADBAND_BTC", "0.002")),
+        hedge_reconcile_deadband_eth=to_decimal(_optional(values, "HEDGE_RECONCILE_DEADBAND_ETH", "0.02")),
+        hedge_unwind_recovery_cycles=max(
+            1,
+            int(_optional(values, "HEDGE_UNWIND_RECOVERY_CYCLES", "6")),
+        ),
+        hedge_order_type=hedge_order_type,
+        hedge_limit_slippage_pct=hedge_limit_slippage_pct,
         scan_assets=scan_assets,
         scan_underlyings=scan_underlyings,
         traded_collaterals=traded_collaterals,

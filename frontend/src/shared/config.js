@@ -39,10 +39,13 @@ export const BOOK_COLORS = {
 export const CORE_BOOKS = ["BTC", "ETH", "USDC", "USDT"];
 export const FRONTEND_REFRESH_INTERVAL_MS = 180_000;
 export const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 3;
-export const USE_DASHBOARD_BUNDLE = true;
+// Investor portal uses per-endpoint SWR caches (/api/status, /api/groups). The
+// combined /api/dashboard_bundle holds _heavy_portfolio_lock across Deribit I/O
+// and can stall Snapshot→Live when many refreshes pile up.
+export const USE_DASHBOARD_BUNDLE = !INVESTOR;
 export const INVESTOR_STATUS_TIMEOUT_MS = 45_000;
 export const INVESTOR_OVERLAY_MAX_MS = 6_000;
-export const FETCH_JSON_RETRYABLE_STATUS = new Set([502, 503, 504]);
+export const FETCH_JSON_RETRYABLE_STATUS = new Set([502, 503, 504, 522, 524]);
 export const FETCH_JSON_MAX_RETRIES = 2;
 export const FETCH_JSON_RETRY_BASE_MS = 450;
 /** Extra attempts when the browser reports a network error (e.g. server restart). */

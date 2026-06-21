@@ -372,14 +372,15 @@ def _profit_sweep_state_locked(group: TradeGroup) -> bool:
     reason = str(group.profit_sweep_reason or "")
     if group_excluded_from_premium_proceeds_pool(group):
         return True
-    return any(
-        token in reason
-        for token in (
-            "duplicate_sweep_repaired",
-            "proceeds_reconciled",
-            "premium_amount_synced",
-        )
-    )
+    if "duplicate_sweep_repaired" in reason:
+        return True
+    if "premium_amount_synced" in reason:
+        return True
+    if "proceeds_reconciled" in reason:
+        from .profit_sweep_ops import profit_sweep_has_exchange_fill
+
+        return profit_sweep_has_exchange_fill(group)
+    return False
 
 
 def reconcile_profit_sweep_from_exchange(
@@ -1704,6 +1705,105 @@ def _backfill_from_api(
     return seen, inserted, skipped_label
 
 
+def iter_api_hedge_perp_trades(
+    client: DeribitClient,
+    currencies: tuple[str, ...],
+    *,
+    historical: bool = True,
+    start_timestamp_ms: int | None = None,
+) -> Iterator[dict[str, Any]]:
+    from .hedge_pnl import is_hedge_perp_instrument, is_hedge_perp_label
+
+    managed = {str(c).upper() for c in currencies}
+    seen: set[str] = set()
+    cursor_ts = int(start_timestamp_ms or 0)
+    while True:
+        batch = client.get_user_trades_by_currency(
+            "USDC",
+            kind="future",
+            count=1000,
+            sorting="asc",
+            historical=historical,
+            start_timestamp=cursor_ts if cursor_ts > 0 else None,
+        )
+        trades = list(batch.get("trades") or [])
+        if not trades:
+            break
+        for trade in trades:
+            instrument = str(trade.get("instrument_name") or "")
+            label = str(trade.get("label") or trade.get("order_label") or "")
+            if not is_hedge_perp_instrument(instrument) or not is_hedge_perp_label(label):
+                continue
+            base = instrument.split("_")[0].upper() if "_" in instrument else ""
+            if managed and base not in managed:
+                continue
+            tid = _trade_id(trade)
+            if tid:
+                if tid in seen:
+                    continue
+                seen.add(tid)
+            yield trade
+        if not batch.get("has_more"):
+            break
+        last_ts = int(trades[-1].get("timestamp") or 0)
+        if last_ts <= 0 or last_ts < cursor_ts:
+            break
+        cursor_ts = last_ts + 1
+
+
+def _backfill_hedge_perp_from_api(
+    store: TradeJournalStore,
+    *,
+    scope_key: str,
+    client: DeribitClient,
+    config: BotConfig,
+    currencies: tuple[str, ...],
+    historical: bool,
+    start_timestamp_ms: int | None,
+) -> tuple[int, int]:
+    seen = 0
+    inserted = 0
+    for trade in iter_api_hedge_perp_trades(
+        client,
+        currencies,
+        historical=historical,
+        start_timestamp_ms=start_timestamp_ms,
+    ):
+        seen += 1
+        instrument = str(trade.get("instrument_name") or "")
+        amount = to_decimal(trade.get("amount"))
+        if not instrument or amount <= 0:
+            continue
+        direction = str(trade.get("direction") or "").lower()
+        if not direction:
+            continue
+        ts_raw = trade.get("timestamp")
+        ts_ms = int(ts_raw) if ts_raw is not None else utc_now_ms()
+        pl_raw = trade.get("profit_loss")
+        extra: dict[str, Any] = {"source": "deribit_api", "hedge": True}
+        if pl_raw is not None and str(pl_raw).strip() != "":
+            extra["profit_loss"] = str(pl_raw)
+        if store.record_fill(
+            scope_key=scope_key,
+            event_type="hedge",
+            source_action="backfill_api_hedge",
+            instrument_name=instrument,
+            direction=direction,
+            amount=amount,
+            price=to_decimal(trade.get("price")),
+            fee_usdc=_fee_usdc_from_trade(trade),
+            order_id=str(trade.get("order_id") or ""),
+            trade_id=_trade_id(trade),
+            label=str(trade.get("label") or trade.get("order_label") or ""),
+            strategy=config.option_strategy,
+            reason="deribit_hedge_perp",
+            ts_ms=ts_ms,
+            extra=extra,
+        ):
+            inserted += 1
+    return seen, inserted
+
+
 def _sync_metrics_from_state(
     state_path: Path,
     closed_payloads: list[dict[str, Any]],
@@ -1763,6 +1863,21 @@ def backfill_account(
             api_seen,
             api_inserted,
             api_skipped,
+        )
+        hedge_seen, hedge_inserted = _backfill_hedge_perp_from_api(
+            store,
+            scope_key=scope_key,
+            client=client,
+            config=cfg,
+            currencies=tuple(cfg.managed_currencies),
+            historical=historical,
+            start_timestamp_ms=start_timestamp_ms,
+        )
+        LOGGER.info(
+            "%s hedge perp API backfill: seen=%s inserted=%s",
+            state_path.name,
+            hedge_seen,
+            hedge_inserted,
         )
 
     coin_close_repaired = repair_coin_close_prices_in_state(
@@ -1849,6 +1964,15 @@ def sync_incremental_journal(
         historical=historical,
         start_timestamp_ms=start_timestamp_ms,
     )
+    hedge_seen, hedge_inserted = _backfill_hedge_perp_from_api(
+        store,
+        scope_key=scope_key,
+        client=client,
+        config=cfg,
+        currencies=tuple(cfg.managed_currencies),
+        historical=historical,
+        start_timestamp_ms=start_timestamp_ms,
+    )
     return {
         "env_file": str(env_file.resolve()),
         "state_file": str(state_path),
@@ -1858,6 +1982,8 @@ def sync_incremental_journal(
         "api_trades_seen": api_seen,
         "api_inserted": api_inserted,
         "api_skipped_label": api_skipped,
+        "hedge_trades_seen": hedge_seen,
+        "hedge_inserted": hedge_inserted,
     }
 
 

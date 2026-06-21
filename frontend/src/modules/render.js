@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
@@ -1038,6 +1038,14 @@ export function strategyOpenGroupHtml(id, rows, status, groups) {
     </div>`;
 }
 
+function hedgeMetricTile(label, valueHtml) {
+  return `
+    <div class="stat-tile">
+      <div class="label">${label}</div>
+      <div class="value">${valueHtml}</div>
+    </div>`;
+}
+
 /** One per-currency perp-hedge row: shared across that book's option groups. */
 function hedgeSummaryRowHtml(h) {
   const cur = h.currency;
@@ -1050,40 +1058,102 @@ function hedgeSummaryRowHtml(h) {
     `對沖 ${h.optionGroupCount} 個選擇權群組`
   );
   return `
-    <div class="rounded-xl border border-slate-800 bg-slate-800/30 p-3">
-      <div class="flex flex-wrap items-center justify-between gap-2 min-w-0">
+    <article class="hedge-panel__row">
+      <header class="hedge-panel__row-head">
         <div class="flex items-center gap-2 min-w-0">
           ${sideChip}
-          <span class="font-mono text-sm text-slate-300 truncate">${escapeHtml(h.instrumentName)}</span>
+          <span class="hedge-panel__instrument tabular-nums">${escapeHtml(h.instrumentName)}</span>
         </div>
-        <span class="text-[11px] text-slate-500">${escapeHtml(groupNote)}</span>
+        <span class="hedge-panel__row-note">${escapeHtml(groupNote)}</span>
+      </header>
+      <div class="inv-position-strip" role="list">
+        <div class="inv-pos-metric" role="listitem">
+          <span class="inv-pos-metric-k">${i18n("Hedge size", "避險部位")}</span>
+          <span class="inv-pos-metric-v font-mono tabular-nums">${fmtNum(h.signedSize, 4)} ${cur}</span>
+        </div>
+        <div class="inv-pos-metric" role="listitem">
+          <span class="inv-pos-metric-k">${i18n("Notional", "名目")}</span>
+          <span class="inv-pos-metric-v font-mono tabular-nums">${fmtUsd(h.notionalUsd)}</span>
+        </div>
+        <div class="inv-pos-metric" role="listitem">
+          <span class="inv-pos-metric-k">${i18n("Hedge PnL", "避險損益")}</span>
+          <span class="inv-pos-metric-v font-mono tabular-nums ${pnlClass(h.pnlUsd)}">${h.pnlUsd === null ? "—" : fmtUsd(h.pnlUsd)}</span>
+        </div>
+        <div class="inv-pos-metric" role="listitem">
+          <span class="inv-pos-metric-k">${i18n("Net incl. hedge", "含避險淨額")}</span>
+          <span class="inv-pos-metric-v font-mono tabular-nums ${pnlClass(h.netPnlUsd)}">${h.netPnlUsd === null ? "—" : fmtUsd(h.netPnlUsd)}</span>
+        </div>
       </div>
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 mt-3">
-        <div class="kv"><span class="k">${i18n("Hedge size", "避險部位")}</span><span class="v font-mono tabular-nums">${fmtNum(h.signedSize, 4)} ${cur}</span></div>
-        <div class="kv"><span class="k">${i18n("Notional", "名目")}</span><span class="v font-mono tabular-nums">${fmtUsd(h.notionalUsd)}</span></div>
-        <div class="kv"><span class="k">${i18n("Hedge PnL", "避險損益")}</span><span class="v font-mono tabular-nums ${pnlClass(h.pnlUsd)}">${h.pnlUsd === null ? "—" : fmtUsd(h.pnlUsd)}</span></div>
-        <div class="kv"><span class="k">${i18n("Net incl. hedge", "含避險淨額")}</span><span class="v font-mono tabular-nums ${pnlClass(h.netPnlUsd)}">${h.netPnlUsd === null ? "—" : fmtUsd(h.netPnlUsd)}</span></div>
+    </article>`;
+}
+
+function hedgeLifetimeSummaryHtml(status, lifetime, openRows, groups) {
+  if (!lifetime) return "";
+  let floatingUsd = 0;
+  let hasFloating = false;
+  for (const h of activeHedgeSummaryRows(status, openRows, groups)) {
+    if (h.pnlUsd !== null && h.pnlUsd !== undefined) {
+      floatingUsd += h.pnlUsd;
+      hasFloating = true;
+    }
+  }
+  const totalNet =
+    lifetime.netPnlUsd !== null && lifetime.netPnlUsd !== undefined
+      ? lifetime.netPnlUsd + (hasFloating ? floatingUsd : 0)
+      : null;
+  const byCcy = Object.entries(lifetime.byCurrency || {})
+    .map(([cur, row]) => {
+      const net = num(row?.net_pnl_usdc);
+      return `${cur} ${net === null ? "—" : fmtUsd(net)}`;
+    })
+    .join(" · ");
+  return `
+    <div class="hedge-panel__lifetime">
+      <p class="section-eyebrow">${i18n("Lifetime hedge PnL", "累計避險損益")}</p>
+      <div class="stat-grid stat-grid--hedge">
+        ${hedgeMetricTile(
+          i18n("Realized net", "已實現淨額"),
+          `<span class="font-mono tabular-nums ${pnlClass(lifetime.netPnlUsd)}">${lifetime.netPnlUsd === null ? "—" : fmtUsd(lifetime.netPnlUsd)}</span>`
+        )}
+        ${hedgeMetricTile(
+          i18n("Fees", "手續費"),
+          `<span class="font-mono tabular-nums">${lifetime.feesUsd === null ? "—" : fmtUsd(lifetime.feesUsd)}</span>`
+        )}
+        ${hedgeMetricTile(
+          i18n("Open float", "未平倉浮動"),
+          `<span class="font-mono tabular-nums ${pnlClass(hasFloating ? floatingUsd : null)}">${hasFloating ? fmtUsd(floatingUsd) : "—"}</span>`
+        )}
+        ${hedgeMetricTile(
+          i18n("Total est.", "合計估計"),
+          `<span class="font-mono tabular-nums ${pnlClass(totalNet)}">${totalNet === null ? "—" : fmtUsd(totalNet)}</span>`
+        )}
       </div>
+      <p class="hedge-panel__footnote">${escapeHtml(byCcy)} · ${lifetime.tradeCount} ${i18n("fills", "筆成交")}</p>
     </div>`;
 }
 
 /** Perp-hedge rollup appended below the open-position groups (one row per hedged book). */
 export function hedgeSummaryBlockHtml(status, openRows, groups) {
   const rows = activeHedgeSummaryRows(status, openRows, groups);
-  if (!rows.length) return "";
+  const lifetime = hedgeLifetimePnlSummary(status);
+  if (!rows.length && !lifetime) return "";
   return `
-    <div class="rounded-2xl border border-amber-500/30 bg-slate-900/60 shadow overflow-hidden mt-4">
-      <div class="flex flex-wrap items-baseline justify-between gap-3 px-4 py-3 border-b border-slate-800 bg-slate-950/40">
-        <h3 class="text-sm font-semibold text-slate-200">${i18n("Perp hedge", "永續避險")}</h3>
-        <span class="text-xs text-slate-500">${i18n(
-          "Shared per book · PnL merged into book strategy total",
-          "依幣別共用 · 損益併入該幣別策略合計"
-        )}</span>
-      </div>
-      <div class="p-4 space-y-3">
+    <section
+      class="hedge-panel"
+      aria-label="${i18n("Perpetual hedge summary", "永續避險摘要")}"
+    >
+      <header class="hedge-panel__head">
+        <h3 class="hedge-panel__title">${i18n("Perp hedge", "永續避險")}</h3>
+        <p class="hedge-panel__meta">${i18n(
+          "Journal realized + live perp float · included in performance PnL",
+          "日誌已實現 + 即時 perp 浮動 · 已併入績效損益"
+        )}</p>
+      </header>
+      <div class="hedge-panel__body">
+        ${hedgeLifetimeSummaryHtml(status, lifetime, openRows, groups)}
         ${rows.map(hedgeSummaryRowHtml).join("")}
       </div>
-    </div>`;
+    </section>`;
 }
 
 function countActiveStrategyIds(openRows, report, groups) {
@@ -1133,10 +1203,11 @@ export function renderStrategyGroups(status, report, groups) {
   }
   if (!openRoot) return;
   if (!openRows.length) {
+    const hedgeHtml = hedgeSummaryBlockHtml(status, openRows, groups);
     openRoot.innerHTML = `
       <div class="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 text-sm text-slate-400">
         ${i18n("No open strategy positions.", "目前沒有開倉中的策略部位。")}
-      </div>`;
+      </div>${hedgeHtml}`;
     return;
   }
 
@@ -1532,7 +1603,24 @@ export function renderTransferCards(payload) {
   if (!document.getElementById("transfers-section")?.open) return;
   const data = payload ?? STATE.transfers;
   if (!data) {
-    if (STATE.transfersLoadInFlight || STATE.health?.has_private_creds) {
+    if (STATE.transfersLoadInFlight) {
+      root.innerHTML = `<p class="text-slate-500 text-sm">${i18n("Loading transfer history…", "正在載入劃轉紀錄…")}</p>`;
+      return;
+    }
+    if (STATE.transfersLoadError) {
+      const msg = formatFetchError(STATE.transfersLoadError);
+      root.innerHTML = `<div class="rounded-2xl border border-amber-900/50 bg-amber-950/20 p-5 text-sm text-amber-200/90">
+        <p>${i18n("Could not load transfer history.", "無法載入劃轉紀錄。")} ${msg}</p>
+        <button type="button" id="transfers-retry-btn" class="mt-3 text-xs font-medium text-amber-300 hover:text-amber-200 underline underline-offset-2">
+          ${i18n("Retry", "重試")}
+        </button>
+      </div>`;
+      document.getElementById("transfers-retry-btn")?.addEventListener("click", () => {
+        import("./refresh.js").then((m) => m.loadTransfersIfNeeded({ force: true }));
+      });
+      return;
+    }
+    if (STATE.health?.has_private_creds) {
       root.innerHTML = `<p class="text-slate-500 text-sm">${i18n("Loading transfer history…", "正在載入劃轉紀錄…")}</p>`;
     } else {
       root.innerHTML = `<p class="text-sm text-slate-400">${i18n(

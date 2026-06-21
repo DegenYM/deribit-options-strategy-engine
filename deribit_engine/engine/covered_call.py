@@ -176,8 +176,11 @@ class CoveredCallMixin:
         if not self.config.covered_call_profit_sweep_enabled:
             return []
         if live:
-            from ..profit_sweep_dust import reconcile_dust_sweep_from_exchange
-            from ..profit_sweep_ops import heal_reconciled_proceeds_drift, reschedule_failed_profit_sweeps
+            from ..profit_sweep_ops import (
+                heal_reconciled_proceeds_drift,
+                reschedule_failed_profit_sweeps,
+                reschedule_ledger_only_profit_sweeps,
+            )
             from ..trade_journal_backfill import (
                 repair_manual_swap_proceeds_in_groups,
                 repair_unlabeled_profit_sweeps_in_groups,
@@ -189,10 +192,8 @@ class CoveredCallMixin:
                 self.client,
                 self.config.order_label_prefix,
             )
-            heal_reconciled_proceeds_drift(self, context.state.groups)
-            self._reconcile_profit_sweep_quote_proceeds(context)
             self._reconcile_profit_sweeps_from_exchange(context)
-            reconcile_dust_sweep_from_exchange(self, context.state.groups)
+            reschedule_ledger_only_profit_sweeps(self, context.state.groups)
             reschedule_failed_profit_sweeps(self, context.state.groups)
         actions: list[dict[str, Any]] = []
         for group in context.state.groups:
@@ -205,6 +206,13 @@ class CoveredCallMixin:
         from ..profit_sweep_dust import run_dust_pool_profit_sweeps
 
         actions.extend(run_dust_pool_profit_sweeps(self, context, live=live))
+        if live:
+            from ..profit_sweep_dust import reconcile_dust_sweep_from_exchange
+            from ..profit_sweep_ops import heal_reconciled_proceeds_drift
+
+            heal_reconciled_proceeds_drift(self, context.state.groups)
+            self._reconcile_profit_sweep_quote_proceeds(context)
+            reconcile_dust_sweep_from_exchange(self, context.state.groups)
         return actions
 
     def _reconcile_profit_sweeps_from_exchange(self, context: RuntimeContext) -> None:
@@ -277,6 +285,10 @@ class CoveredCallMixin:
         status = str(group.profit_sweep_status or "").lower()
         swept = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal("0")
         if status == "filled":
+            from ..profit_sweep_ops import profit_sweep_has_exchange_fill
+
+            if not profit_sweep_has_exchange_fill(group):
+                return native_cap
             return max(native_cap - min(swept, native_cap), Decimal("0"))
         if status in {"pending", "submitted"} and swept > 0 and swept < native_cap:
             return max(native_cap - swept, Decimal("0"))

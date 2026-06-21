@@ -360,6 +360,18 @@ def test_nav_from_equity_uses_bootstrap_spot_when_config_zero() -> None:
     assert aum == Decimal("25000")
 
 
+from deribit_engine.investor_fee_report_period import RealizedTradingPnl
+
+
+def _mock_trading_pnl(profit_usdc: Decimal) -> tuple[RealizedTradingPnl, RealizedTradingPnl, tuple]:
+    rt = RealizedTradingPnl(
+        options_pnl_usdc=profit_usdc,
+        hedge_pnl_usdc=Decimal("0"),
+        closed_count=1,
+    )
+    return rt, rt, ()
+
+
 def test_settle_quarter_computes_performance_fee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     investor_dir = tmp_path / "config" / "investors" / "demo"
     accounts_dir = investor_dir / "accounts"
@@ -408,6 +420,10 @@ enabled = true
     monkeypatch.setattr(
         "deribit_engine.investor_cash_flow.fetch_subscription_flow_lines",
         lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        "deribit_engine.investor_fee_report_period.build_realized_trading_pnl",
+        lambda *_args, **_kwargs: _mock_trading_pnl(Decimal("16000")),
     )
 
     result = settle_quarter("demo", "2026-Q1", repo_root=tmp_path)
@@ -508,6 +524,10 @@ enabled = true
         raise AssertionError("no live capture")
 
     monkeypatch.setattr("deribit_engine.investor_nav_snapshot.capture_investor_nav", _no_capture)
+    monkeypatch.setattr(
+        "deribit_engine.investor_fee_report_period.build_realized_trading_pnl",
+        lambda *_args, **_kwargs: _mock_trading_pnl(Decimal("13000")),
+    )
 
     result = settle_period(
         "demo",
@@ -591,6 +611,10 @@ enabled = true
         raise AssertionError("no live capture")
 
     monkeypatch.setattr("deribit_engine.investor_nav_snapshot.capture_investor_nav", _no_capture)
+    monkeypatch.setattr(
+        "deribit_engine.investor_fee_report_period.build_realized_trading_pnl",
+        lambda *_args, **_kwargs: _mock_trading_pnl(Decimal("10000")),
+    )
 
     without_exclude = settle_period(
         "demo",
@@ -601,7 +625,8 @@ enabled = true
         write_report=False,
     )
     assert without_exclude["net_flow_usdc"] == "-1500"
-    assert Decimal(without_exclude["distributable_profit"]) == Decimal("11500")
+    assert Decimal(without_exclude["distributable_profit"]) == Decimal("10000")
+    assert Decimal(without_exclude["performance_fee"]) == Decimal("1000")
 
     with_exclude = settle_period(
         "demo",
@@ -616,3 +641,4 @@ enabled = true
     assert with_exclude["fee_payment_usdc_excluded"] == "1500"
     assert with_exclude["net_flow_usdc"] == "0"
     assert Decimal(with_exclude["distributable_profit"]) == Decimal("10000")
+    assert Decimal(with_exclude["performance_fee"]) == Decimal("1000")

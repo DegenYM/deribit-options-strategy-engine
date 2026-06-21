@@ -663,11 +663,24 @@ def settle_period(
     nav_perf_end = end_bd["nav_perf"]
     period_nav_perf_pnl = nav_perf_end - nav_perf_start - net_flow_usdc
 
-    distributable = max(
-        Decimal("0"),
-        nav_perf_end - hwm_start - net_flow_usdc,
+    from .investor_fee_report_period import (
+        build_realized_trading_pnl,
+        compute_trading_profit_performance_fee,
+        fee_basis_trading_profit_usdc,
     )
-    performance_fee = distributable * fee_config.performance_fee_rate
+
+    period_rt, lifetime_rt, _ = build_realized_trading_pnl(
+        manifest.investor_id,
+        repo_root=root,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        index_by_ccy=index_by_ccy,
+    )
+    trading_profit_fee_basis = fee_basis_trading_profit_usdc(period_rt, lifetime_rt)
+    distributable, performance_fee = compute_trading_profit_performance_fee(
+        trading_profit_fee_basis,
+        performance_fee_rate=fee_config.performance_fee_rate,
+    )
     hwm_end = nav_perf_end - performance_fee
     avg_aum = average_aum_mgmt(
         store,
@@ -692,6 +705,7 @@ def settle_period(
         "nav_perf_start": nav_perf_start,
         "nav_perf_end": nav_perf_end,
         "period_nav_perf_pnl": period_nav_perf_pnl,
+        "trading_profit_fee_basis_usdc": trading_profit_fee_basis,
         "net_flow_usdc": net_flow_usdc,
         "net_flow_usdc_raw": net_flow_usdc_raw,
         "fee_payment_usdc_excluded": fee_payment_excluded,

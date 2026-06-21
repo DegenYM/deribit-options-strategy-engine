@@ -1296,6 +1296,112 @@ table tbody tr:hover {
   text-align: center;
 }
 
+/* Perp hedge rollup — matches strategy group + stat-tile language */
+.hedge-panel {
+  margin-top: 1rem;
+  border-radius: var(--radius-xl);
+  border: 1px solid color-mix(in srgb, var(--color-border-default) 70%, transparent);
+  background: color-mix(in srgb, var(--color-bg-surface) 60%, transparent);
+  box-shadow: var(--shadow-section);
+  overflow: hidden;
+}
+
+.hedge-panel__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.65rem 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-default) 55%, transparent);
+  background: color-mix(in srgb, var(--color-bg-surface-elevated) 42%, transparent);
+}
+
+.hedge-panel__title {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text-primary);
+}
+
+.hedge-panel__meta {
+  margin: 0;
+  max-width: 44ch;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.hedge-panel__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+}
+
+.hedge-panel__lifetime {
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-default) 40%, transparent);
+}
+
+.hedge-panel__lifetime .section-eyebrow {
+  margin-bottom: 0.65rem;
+}
+
+.stat-grid--hedge {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (min-width: 640px) {
+  .stat-grid--hedge {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+.hedge-panel__footnote {
+  margin: 0.55rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hedge-panel__row {
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--color-border-default) 55%, transparent);
+  background: color-mix(in srgb, var(--color-bg-surface) 48%, transparent);
+  padding: 0.75rem;
+}
+
+.hedge-panel__row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.45rem 0.65rem;
+  min-width: 0;
+}
+
+.hedge-panel__instrument {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hedge-panel__row-note {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.hedge-panel__row .inv-position-strip {
+  margin-top: 0.65rem;
+}
+
 .open-position-card {
   --position-accent: var(--rgb-asset-usdc);
   position: relative;

@@ -37,7 +37,6 @@ _FLOW_HEADERS = [
 _TRADE_HEADERS = [
     "closed_utc",
     "account",
-    "strategy",
     "instrument",
     "collateral",
     "quantity",
@@ -210,12 +209,33 @@ def write_settlement_fee_report_csv(
         ("collateral_spot_end_usdc", _money(report.collateral_spot_end)),
         ("net_flow_usdc", _money(report.net_flow_usdc)),
         ("strategy_pnl_period_usdc", _money(report.total_usdc_earned)),
+        ("realized_trading_pnl_period_usdc", _money(report.realized_trading_pnl.total_pnl_usdc)),
+        ("realized_options_pnl_period_usdc", _money(report.realized_trading_pnl.options_pnl_usdc)),
+        ("realized_hedge_pnl_period_usdc", _money(report.realized_trading_pnl.hedge_pnl_usdc)),
+        ("realized_options_pnl_lifetime_usdc", _money(report.lifetime_realized_trading_pnl.options_pnl_usdc)),
+        ("realized_hedge_pnl_lifetime_usdc", _money(report.lifetime_realized_trading_pnl.hedge_pnl_usdc)),
+        ("dashboard_total_profit_usdc", _money(report.dashboard_total_profit_usdc)),
+        ("trading_profit_fee_basis_usdc", _money(report.fee_basis_trading_profit_usdc)),
         ("hwm_start", _money(report.hwm_start)),
         ("distributable_profit_usdc", _money(report.distributable_profit)),
         ("hwm_end", _money(report.hwm_end)),
         ("total_usdc_earned", _money(report.total_usdc_earned)),
         ("performance_fee_usdc", _money(report.performance_fee)),
         ("management_fee_usdc", _money(report.management_fee)),
+        ("total_fees_due_usdc", _money(report.total_fees_due)),
+        ("avg_aum_mgmt_usdc", _money(report.avg_aum_mgmt)),
+        ("period_return_pct", _money(report.period_return_pct) if report.period_return_pct is not None else ""),
+        ("equity_return_pct", _money(report.equity_return_pct) if report.equity_return_pct is not None else ""),
+        ("closed_trade_count", str(report.statement_trade_summary.closed_count)),
+        (
+            "closed_trade_win_rate_pct",
+            _money(report.statement_trade_summary.win_rate_pct)
+            if report.statement_trade_summary.win_rate_pct is not None
+            else "",
+        ),
+        ("closed_trade_pnl_usdc", _money(report.executive_profit.options_pnl_usdc)),
+        ("closed_trade_count_period", str(report.trade_summary.closed_count)),
+        ("closed_trade_pnl_usdc_period", _money(report.trade_summary.total_pnl_usdc)),
         ("index_btc_usd_end", _money(report.index_end["BTC"])),
         ("index_eth_usd_end", _money(report.index_end["ETH"])),
     ]
@@ -224,7 +244,6 @@ def write_settlement_fee_report_csv(
         [
             _ts_fmt(int(row["closed_timestamp_ms"])),
             row["account"],
-            row["strategy"],
             row["short_instrument"],
             row["collateral"],
             _native(to_decimal(row["quantity"]), str(row["collateral"])),
@@ -232,7 +251,7 @@ def write_settlement_fee_report_csv(
             _money(row["realized_pnl_usdc"]),
             row.get("close_reason") or "",
         ]
-        for row in report.closed_trades
+        for row in report.statement_closed_trades
     ]
 
     _write_csv(flows_path, _FLOW_HEADERS, _flow_rows(ctx.quarter_flow_lines))

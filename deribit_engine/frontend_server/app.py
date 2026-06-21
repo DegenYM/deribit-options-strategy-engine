@@ -56,6 +56,7 @@ from .helpers import (
     _read_ledger,
     _rolling_apr_series_from_store,
     _spot_index_decimals,
+    _spot_series_cache_key,
 )
 from .market_vol import fetch_index_price_change_24h_pct, fetch_iv_rank_snapshot
 from .portal_snapshot_scheduler import (
@@ -156,7 +157,7 @@ def create_app(
     exchange_prefetch_cache = _TtlCache(status_ttl)
     spot_cache = _TtlCache(SPOT_CACHE_TTL_SEC)
     stress_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
-    transfers_cache = _TtlCache(TRANSFERS_CACHE_TTL_SEC)
+    transfers_cache = _TtlCache(TRANSFERS_CACHE_TTL_SEC, stale_while_revalidate=True)
     series_cache = _TtlCache(SERIES_CACHE_TTL_SEC)
     # Serialize heavy portfolio endpoints so parallel browser tabs / dashboard waves
     # do not stack duplicate Deribit JSON-RPC bursts (often surfaced as 502/timeouts).
@@ -481,11 +482,16 @@ def create_app(
 
     def _enrich_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
         fill_stats = _fill_stats_for_snapshot()
-        if not fill_stats:
+        cached_status = status_cache.try_get("status") or {}
+        hedge_summary = cached_status.get("hedge_pnl_summary")
+        if not fill_stats and not hedge_summary:
             return payload
         out = dict(payload)
         live_status = dict(out.get("live_status") or {})
-        live_status["premium_sweep_fill_stats_by_book"] = fill_stats
+        if fill_stats:
+            live_status["premium_sweep_fill_stats_by_book"] = fill_stats
+        if hedge_summary:
+            live_status["hedge_pnl_summary"] = hedge_summary
         out["live_status"] = live_status
         return out
 
@@ -634,11 +640,19 @@ def create_app(
             if report_payload and closed_rows and spot_idx:
                 summary = report_payload.get("summary") or {}
                 window_days = int(to_decimal(summary.get("window_days_requested") or 30))
+                from ..hedge_pnl import hedge_performance_adjustments
+
+                hedge_lifetime, hedge_window = hedge_performance_adjustments(
+                    [account.state_path for account in accounts],
+                    window_days=window_days,
+                )
                 patch_realized_report_spot_pnl(
                     report_payload,
                     closed_rows,
                     spot_index=spot_idx,
                     window_days=window_days,
+                    hedge_lifetime_usdc=hedge_lifetime,
+                    hedge_window_usdc=hedge_window,
                 )
             for row in (report_payload or {}).get("recent_closed_trades") or []:
                 if isinstance(row, dict):
@@ -808,11 +822,19 @@ def create_app(
 
             spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
             closed_rows = pkg._all_closed_group_rows(accounts, spot_index=spot_idx)
+            from ..hedge_pnl import hedge_performance_adjustments
+
+            hedge_lifetime, hedge_window = hedge_performance_adjustments(
+                [account.state_path for account in accounts],
+                window_days=days,
+            )
             patch_realized_report_spot_pnl(
                 payload,
                 closed_rows,
                 spot_index=spot_idx,
                 window_days=days,
+                hedge_lifetime_usdc=hedge_lifetime,
+                hedge_window_usdc=hedge_window,
             )
             for row in payload.get("recent_closed_trades") or []:
                 if isinstance(row, dict):
@@ -855,7 +877,7 @@ def create_app(
         cache_key = (
             "cumulative_spot_pnl",
             _closed_groups_cache_key(accounts),
-            spot_cache.try_get("spot"),
+            _spot_series_cache_key(spot_cache.try_get("spot")),
         )
 
         def _compute() -> dict[str, Any]:
@@ -873,7 +895,7 @@ def create_app(
         cache_key = (
             "cumulative_pnl_stable",
             _closed_groups_cache_key(accounts),
-            spot_cache.try_get("spot"),
+            _spot_series_cache_key(spot_cache.try_get("spot")),
         )
 
         def _compute() -> dict[str, Any]:

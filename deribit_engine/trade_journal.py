@@ -216,6 +216,10 @@ class TradeJournalStore:
                 direction = "sell" if event_type == "open" else "buy"
             ts_raw = trade.get("timestamp")
             ts_ms = int(ts_raw) if ts_raw is not None else None
+            trade_extra = dict(extra or {})
+            pl_raw = trade.get("profit_loss")
+            if pl_raw is not None and str(pl_raw).strip() != "":
+                trade_extra["profit_loss"] = str(pl_raw)
             if self.record_fill(
                 scope_key=scope_key,
                 event_type=event_type,
@@ -233,7 +237,7 @@ class TradeJournalStore:
                 strategy=strategy,
                 reason=reason,
                 ts_ms=ts_ms,
-                extra=extra,
+                extra=trade_extra,
             ):
                 inserted += 1
         return inserted
@@ -497,6 +501,15 @@ _CLOSE_ACTIONS = frozenset(
         "close_perp_preview",
     }
 )
+_HEDGE_ACTIONS = frozenset(
+    {
+        "hedge",
+        "hedge_position_reconcile",
+        "hedge_unwind",
+        "close_perp",
+        "close_perp_preview",
+    }
+)
 
 
 def _event_type_for_action(action_name: str) -> str | None:
@@ -504,7 +517,7 @@ def _event_type_for_action(action_name: str) -> str | None:
         return "close"
     if any(action_name.endswith(suffix) for suffix in _OPEN_ACTION_SUFFIXES):
         return "open"
-    if action_name in {"hedge", "close_perp"}:
+    if action_name in _HEDGE_ACTIONS:
         return "hedge"
     return None
 
@@ -611,6 +624,20 @@ def ingest_engine_action(
                         reason=reason,
                         extra=meta,
                     )
+    response = action.get("response")
+    if isinstance(response, dict):
+        for leg, leg_trades in _trades_from_responses({"response": response}):
+            inserted += store.record_fills(
+                scope_key=scope_key,
+                event_type=event_type,
+                source_action=action_name,
+                trades=leg_trades,
+                group_id=group_id,
+                leg=leg,
+                strategy=strategy,
+                reason=reason,
+                extra=meta,
+            )
     return inserted
 
 

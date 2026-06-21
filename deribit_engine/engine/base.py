@@ -764,10 +764,31 @@ class EngineBase:
         report_equity = self._total_equity_usdc(summaries, {})
         effective_capital = self._effective_capital(report_equity)
 
+        hedge_lifetime = Decimal("0")
+        hedge_window = Decimal("0")
+        try:
+            from ..hedge_pnl import hedge_window_since_ms, summarize_hedge_pnl_for_scope
+
+            store = self._trade_journal()
+            scope = self._journal_scope_key()
+            lifetime_summary = summarize_hedge_pnl_for_scope(store, scope)
+            window_summary = summarize_hedge_pnl_for_scope(
+                store,
+                scope,
+                since_ms=hedge_window_since_ms(int(window_days)),
+            )
+            hedge_lifetime = to_decimal(lifetime_summary.get("net_pnl_usdc"))
+            hedge_window = to_decimal(window_summary.get("net_pnl_usdc"))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("hedge pnl for report skipped: %s", exc)
+
+        total_realized_pnl += hedge_lifetime
+        window_realized_pnl += hedge_window
+
         return {
             "action": "report",
             "generated_at": utc_now(),
-            "note": "Naked short option realized report. Perpetual hedge PnL is not included.",
+            "note": "Realized spread and perp-hedge performance report.",
             "summary": {
                 "effective_capital_usdc": effective_capital,
                 "target_portfolio_apr": self.config.target_portfolio_apr,
@@ -796,6 +817,7 @@ class EngineBase:
                     window_days,
                     effective_capital,
                 ),
+                "hedge_net_pnl_usdc": format_decimal(hedge_lifetime, 4),
             },
             "recent_closed_trades": [
                 self._report_group_payload(group)
@@ -845,6 +867,17 @@ class EngineBase:
                     payload["premium_sweep_fill_stats_by_book"] = fill_stats
             except Exception:  # noqa: BLE001
                 LOGGER.debug("premium_sweep_fill_stats_by_book failed", exc_info=True)
+        try:
+            from ..hedge_pnl import attach_hedge_performance_windows, summarize_hedge_pnl_for_scope
+
+            hedge_summary = summarize_hedge_pnl_for_scope(self._trade_journal(), self._journal_scope_key())
+            if int(hedge_summary.get("trade_count") or 0) > 0:
+                payload["hedge_pnl_summary"] = attach_hedge_performance_windows(
+                    hedge_summary,
+                    [self.config.state_file],
+                )
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("hedge_pnl_summary failed", exc_info=True)
         return payload
 
     def _filled_amounts_by_instrument(self, responses: list[dict[str, Any]]) -> dict[str, Decimal]:
@@ -1580,6 +1613,47 @@ class EngineBase:
         inverse coin-margined perps take ``amount`` as a USD notional.
         """
         return self._perp_instrument(currency).endswith("_USDC-PERPETUAL")
+
+    def _place_hedge_perp_order(
+        self,
+        context: RuntimeContext,
+        *,
+        direction: str,
+        instrument_name: str,
+        amount: Decimal,
+        label: str,
+        reduce_only: bool,
+    ) -> dict[str, Any]:
+        from ..hedge_orders import hedge_order_action_meta, place_hedge_perp_order
+
+        instrument = context.future_markets_by_name.get(instrument_name)
+        if instrument is None:
+            return {"skipped": True, "reason": "hedge_future_metadata_missing"}
+        book = self._get_orderbook(instrument_name, context.orderbook_cache)
+        response = place_hedge_perp_order(
+            self.client,
+            hedge_order_type=self.config.hedge_order_type,
+            hedge_limit_slippage_pct=self.config.hedge_limit_slippage_pct,
+            book=book,
+            instrument=instrument,
+            direction=direction,
+            instrument_name=instrument_name,
+            amount=amount,
+            label=label,
+            reduce_only=reduce_only,
+        )
+        if isinstance(response, dict) and response.get("skipped"):
+            return response
+        meta = hedge_order_action_meta(
+            hedge_order_type=self.config.hedge_order_type,
+            book=book,
+            instrument=instrument,
+            direction=direction,
+            hedge_limit_slippage_pct=self.config.hedge_limit_slippage_pct,
+        )
+        if isinstance(response, dict):
+            response = {**response, **meta}
+        return response
 
     def _day_start_ms_from_key(self, day_key: str) -> int:
         """Convert a ``YYYY-MM-DD`` key back to its UTC-midnight epoch ms.

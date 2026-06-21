@@ -13,6 +13,7 @@ from .profit_sweep_dust import dust_sweep_order_label
 from .profit_sweep_ops import (
     _first_day_profit_sweep_trades,
     native_profit_for_group,
+    profit_sweep_has_exchange_fill,
     realized_spot_profit_native_for_group,
     record_profit_sweep_lifetime_proceeds,
 )
@@ -695,6 +696,16 @@ def _exchange_gross_usdt_weights(
     return weights
 
 
+def _should_skip_proceeds_reconcile_apply(group: TradeGroup) -> bool:
+    """Do not ledger-mark groups that still need a live premium spot sell."""
+    status = str(group.profit_sweep_status or "").lower()
+    if status in {"pending", "submitted"}:
+        return True
+    if status == "filled" and not profit_sweep_has_exchange_fill(group):
+        return True
+    return False
+
+
 def reconcile_premium_proceeds_to_groups(
     groups: list[TradeGroup],
     client: DeribitClient,
@@ -789,6 +800,8 @@ def reconcile_premium_proceeds_to_groups(
         summary["groups"].append(row)
         if not apply or group_excluded_from_premium_proceeds_pool(group):
             continue
+        if _should_skip_proceeds_reconcile_apply(group):
+            continue
         group.profit_sweep_status = "filled"
         group.profit_sweep_amount = premium
         group.profit_sweep_quote_proceeds = proceeds
@@ -853,6 +866,8 @@ def _reconcile_premium_proceeds_by_premium_weight(
             summary["groups"].append(row)
 
             if not apply or group_excluded_from_premium_proceeds_pool(group):
+                continue
+            if _should_skip_proceeds_reconcile_apply(group):
                 continue
             group.profit_sweep_status = "filled"
             group.profit_sweep_amount = premium

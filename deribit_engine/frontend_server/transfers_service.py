@@ -38,7 +38,9 @@ def fetch_transfer_rows_for_currency(
     currency: str,
     start_ms: int,
     end_ms: int,
+    max_transfers: int | None = None,
 ) -> list[TransactionEntry]:
+    """Collect transfer rows newest-first; stop once ``max_transfers`` reached."""
     rows: list[TransactionEntry] = []
     for payload in client.iter_transaction_log(
         currency=currency.upper(),
@@ -47,8 +49,11 @@ def fetch_transfer_rows_for_currency(
         count=100,
     ):
         entry = TransactionEntry.from_api(payload)
-        if entry.type == "transfer":
-            rows.append(entry)
+        if entry.type != "transfer":
+            continue
+        rows.append(entry)
+        if max_transfers is not None and len(rows) >= max_transfers:
+            break
     return rows
 
 
@@ -86,6 +91,7 @@ def aggregate_transfers_for_accounts(
                     currency=book,
                     start_ms=start_ms,
                     end_ms=end_ms,
+                    max_transfers=limit_per_account,
                 )
             for entry in rows_by_identity_book[cache_key]:
                 all_rows.append((entry, book))

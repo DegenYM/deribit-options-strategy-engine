@@ -380,6 +380,16 @@ def _spot_index_decimals(spot_payload: dict[str, Any] | None) -> dict[str, Decim
     return out
 
 
+def _spot_series_cache_key(spot_payload: dict[str, Any] | None) -> tuple[tuple[str, str], ...] | None:
+    """Hashable spot fingerprint for ``_TtlCache`` keys (raw spot dicts are unhashable)."""
+    if spot_payload is None:
+        return None
+    idx = _spot_index_decimals(spot_payload)
+    if not idx:
+        return None
+    return tuple(sorted((sym, str(px)) for sym, px in idx.items()))
+
+
 def _backfill_row_collateral_native(
     row: dict[str, Any],
     spot_index: dict[str, Decimal],
