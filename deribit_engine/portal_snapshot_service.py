@@ -344,6 +344,7 @@ def attach_realized_summary_to_ledger_snapshot(
                 window_days=days,
                 hedge_lifetime_usdc=hedge_lifetime,
                 hedge_window_usdc=hedge_window,
+                fill_stats=(status_for_summary or {}).get("premium_sweep_fill_stats_by_book"),
             )
         except Exception as spot_exc:  # noqa: BLE001
             LOGGER.debug("snapshot realized_summary spot patch skipped: %s", spot_exc)

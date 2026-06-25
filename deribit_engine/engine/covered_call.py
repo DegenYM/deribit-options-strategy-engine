@@ -177,6 +177,7 @@ class CoveredCallMixin:
             return []
         if live:
             from ..profit_sweep_ops import (
+                ProfitSweepTradeCache,
                 heal_reconciled_proceeds_drift,
                 reschedule_failed_profit_sweeps,
                 reschedule_ledger_only_profit_sweeps,
@@ -186,13 +187,14 @@ class CoveredCallMixin:
                 repair_unlabeled_profit_sweeps_in_groups,
             )
 
+            trade_cache = ProfitSweepTradeCache(self.client)
             repair_manual_swap_proceeds_in_groups(context.state.groups)
             repair_unlabeled_profit_sweeps_in_groups(
                 context.state.groups,
                 self.client,
                 self.config.order_label_prefix,
             )
-            self._reconcile_profit_sweeps_from_exchange(context)
+            self._reconcile_profit_sweeps_from_exchange(context, trade_cache=trade_cache)
             reschedule_ledger_only_profit_sweeps(self, context.state.groups)
             reschedule_failed_profit_sweeps(self, context.state.groups)
         actions: list[dict[str, Any]] = []
@@ -212,10 +214,15 @@ class CoveredCallMixin:
 
             heal_reconciled_proceeds_drift(self, context.state.groups)
             self._reconcile_profit_sweep_quote_proceeds(context)
-            reconcile_dust_sweep_from_exchange(self, context.state.groups)
+            reconcile_dust_sweep_from_exchange(self, context.state.groups, trade_cache=trade_cache)
         return actions
 
-    def _reconcile_profit_sweeps_from_exchange(self, context: RuntimeContext) -> None:
+    def _reconcile_profit_sweeps_from_exchange(
+        self,
+        context: RuntimeContext,
+        *,
+        trade_cache: Any | None = None,
+    ) -> None:
         from ..trade_journal_backfill import reconcile_profit_sweep_from_exchange
 
         for group in context.state.groups:
@@ -223,6 +230,7 @@ class CoveredCallMixin:
                 group,
                 client=self.client,
                 order_label_prefix=self.config.order_label_prefix,
+                trade_cache=trade_cache,
             )
 
     def _reconcile_profit_sweep_quote_proceeds(self, context: RuntimeContext) -> None:

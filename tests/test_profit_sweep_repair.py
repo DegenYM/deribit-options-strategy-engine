@@ -303,10 +303,8 @@ def test_reconcile_premium_proceeds_allocates_by_premium_share() -> None:
         target_total_usdt=Decimal("200"),
     )
     assert summary["updated_groups"] == 2
-    assert g1.profit_sweep_quote_proceeds > Decimal("199")
-    assert g2.profit_sweep_quote_proceeds > Decimal("0")
-    assert g1.profit_sweep_quote_proceeds + g2.profit_sweep_quote_proceeds == Decimal("200")
+    assert g1.profit_sweep_quote_proceeds == Decimal("200")
+    assert g2.profit_sweep_quote_proceeds == Decimal("0")
     assert g1.profit_sweep_quote_proceeds_lifetime == g1.profit_sweep_quote_proceeds
-    assert g2.profit_sweep_quote_proceeds_lifetime == g2.profit_sweep_quote_proceeds
     assert g1.profit_sweep_amount == Decimal("0.002")
     assert "proceeds_reconciled" in g1.profit_sweep_reason

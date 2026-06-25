@@ -1935,7 +1935,19 @@ export function fmtLifetimeRealizedNativeBreakdown(byBook) {
 
 const PROFIT_HELD_BOOKS = ["BTC", "ETH", "USDC"];
 const PROFIT_SWEEP_BOOKS = ["BTC", "ETH"];
-const PROFIT_DISP_PLACES = { BTC: 8, ETH: 8, USDC: 2, USDT: 4 };
+const PROFIT_USD_PLACES = 3;
+const PROFIT_NATIVE_INTERNAL_PLACES = 8;
+const PROFIT_DISP_PLACES = { BTC: 6, ETH: 6, USDC: PROFIT_USD_PLACES, USDT: PROFIT_USD_PLACES };
+
+/** Exchange fill qty for closed-trade display (falls back to journal amount). */
+export function profitSweepExchangeNativeSold(g, book) {
+  const exchange = num(g?.profit_sweep_exchange_native);
+  if (exchange !== null && exchange > 0) return exchange;
+  const journal = num(g?.profit_sweep_amount);
+  if (journal === null || journal <= 0) return null;
+  if (!profitSweepHasExchangeFill(g)) return journal;
+  return journal;
+}
 
 /** Truncate toward zero — profit-swap display never rounds up vs exchange/journal math. */
 export function truncateDecimal(value, places) {
@@ -1946,11 +1958,56 @@ export function truncateDecimal(value, places) {
   return Math.trunc(n * factor) / factor;
 }
 
+/** Truncate a decimal literal toward zero without float drift (prefers string digits). */
+export function truncateDecimalLiteral(value, places) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return null;
+    const m = s.match(/^(-?)(\d+)(?:\.(\d*))?$/);
+    if (m) {
+      const [, sign, intPart, frac = ""] = m;
+      const clipped = frac.slice(0, Math.max(0, places));
+      const text = clipped.length ? `${sign}${intPart}.${clipped}` : `${sign}${intPart}`;
+      const n = Number(text);
+      return Number.isFinite(n) ? n : null;
+    }
+  }
+  return truncateDecimal(value, places);
+}
+
+/** Format stored decimal for display: truncate toward zero, strip trailing zeros, no Intl rounding. */
+function fmtDecimalLiteral(value, places) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (!s) return null;
+    const m = s.match(/^(-?)(\d+)(?:\.(\d*))?$/);
+    if (m) {
+      const [, sign, intPart, frac = ""] = m;
+      const clipped = frac.slice(0, Math.max(0, places));
+      const text = clipped.length ? `${sign}${intPart}.${clipped}` : `${sign}${intPart}`;
+      return stripTrailingZeros(text);
+    }
+  }
+  const t = truncateDecimal(value, places);
+  if (t === null) return null;
+  return stripTrailingZeros(t.toFixed(places));
+}
+
 function profitNativePrecision(book) {
   const b = String(book || "").toUpperCase();
-  if (b === "BTC" || b === "ETH") return 8;
-  if (b === "USDC" || b === "USDT") return 4;
-  return 8;
+  if (b === "BTC" || b === "ETH") return PROFIT_DISP_PLACES.BTC;
+  if (b === "USDC" || b === "USDT") return PROFIT_USD_PLACES;
+  return 6;
+}
+
+function profitUsdPlaces() {
+  return PROFIT_USD_PLACES;
+}
+
+function profitInternalNativePrecision(_book) {
+  return PROFIT_NATIVE_INTERNAL_PLACES;
 }
 
 /** Strip trailing zeros after a fixed-decimal string (keeps all significant digits). */
@@ -1959,48 +2016,82 @@ function stripTrailingZeros(fixed) {
   return fixed.replace(/0+$/, "").replace(/\.$/, "");
 }
 
+/** Convert a decimal to integer units at `places` without float drift. */
+function decimalToUnits(value, places) {
+  if (value === null || value === undefined || value === "") return 0;
+  let text;
+  if (typeof value === "string") {
+    const s = value.trim();
+    const m = s.match(/^(-?)(\d+)(?:\.(\d*))?$/);
+    if (!m) return 0;
+    const [, sign, intPart, frac = ""] = m;
+    const clipped = frac.slice(0, Math.max(0, places));
+    text = clipped.length ? `${sign}${intPart}.${clipped}` : `${sign}${intPart}`;
+  } else {
+    const n = num(value);
+    if (n === null) return 0;
+    const raw = stripTrailingZeros(n.toFixed(12));
+    const m = raw.match(/^(-?)(\d+)(?:\.(\d*))?$/);
+    if (!m) return 0;
+    const [, sign, intPart, frac = ""] = m;
+    const clipped = frac.slice(0, Math.max(0, places));
+    text = clipped.length ? `${sign}${intPart}.${clipped}` : `${sign}${intPart}`;
+  }
+  const neg = text.startsWith("-");
+  const body = neg ? text.slice(1) : text;
+  const [intPart, frac = ""] = body.split(".");
+  const fracPadded = (frac + "0".repeat(places)).slice(0, places);
+  const units = BigInt(intPart || "0") * BigInt(10 ** places) + BigInt(fracPadded || "0");
+  const n = Number(units);
+  return neg ? -n : n;
+}
+
 /** Subtract decimals at fixed precision without float drift (truncates result toward zero). */
 function subtractDecimals(a, b, places) {
   const factor = 10 ** places;
-  const toUnits = (value) => {
-    const n = num(value);
-    if (n === null) return 0;
-    const sign = n < 0 ? -1 : 1;
-    const abs = Math.abs(n);
-    const units = Math.trunc(abs * factor + 1e-9);
-    return sign * units;
-  };
-  return Math.max(0, (toUnits(a) - toUnits(b)) / factor);
+  const diff = decimalToUnits(a, places) - decimalToUnits(b, places);
+  return Math.max(0, diff / factor);
 }
 
-/** Native BTC/ETH qty in profit-swap panel: up to 8 dp, truncated not rounded. */
+/** Native BTC/ETH qty in profit-swap panel: up to 6 dp, truncated not rounded. */
 export function fmtProfitNative(book, value) {
   const places = profitNativePrecision(book);
+  const text = fmtDecimalLiteral(value, places);
+  return text === null ? "—" : text;
+}
+
+/** USDT in profit-swap panel: up to 3 dp, truncated (no Intl rounding). */
+export function fmtProfitUsdt(value) {
+  const text = fmtDecimalLiteral(value, profitUsdPlaces());
+  if (text === null) return "—";
+  return `$${text}`;
+}
+
+function profitAvgUsdPlaces(_book) {
+  return profitUsdPlaces();
+}
+
+/** Execution avg in profit-swap panel: truncated (no Intl rounding). */
+export function fmtProfitAvgUsd(book, value) {
+  const places = profitAvgUsdPlaces(book);
   const t = truncateDecimal(value, places);
   if (t === null) return "—";
-  return stripTrailingZeros(t.toFixed(places));
+  return `$${stripTrailingZeros(t.toFixed(places))}`;
 }
 
-/** USDT in profit-swap panel: up to 4 dp (Deribit quote proceeds), truncated. */
-export function fmtProfitUsdt(value) {
-  const t = truncateDecimal(value, 4);
-  if (t === null) return "—";
-  return `$${stripTrailingZeros(t.toFixed(4))}`;
-}
-
-/** Execution avg in profit-swap panel: up to 2 dp, truncated (matches exchange avg fields). */
-export function fmtProfitAvgUsd(book, value) {
-  const t = truncateDecimal(value, 2);
-  if (t === null) return "—";
-  return `$${stripTrailingZeros(t.toFixed(2))}`;
-}
-
-/** Avg from displayed USDT ÷ native (same truncation as fmtProfitUsdt / fmtProfitNative). */
+/** Avg from full quote ÷ native; USD result truncated to display precision. */
 export function profitSwapDisplayAvg(book, quote, sold) {
-  const q = truncateDecimal(quote, 4);
-  const s = truncateDecimal(sold, profitNativePrecision(book));
+  const q = num(quote);
+  const s = truncateDecimalLiteral(sold, profitNativePrecision(book));
   if (q === null || s === null || s <= 0) return null;
-  return truncateDecimal(q / s, 2);
+  return truncateDecimal(q / s, profitUsdPlaces());
+}
+
+/** USD/USDC from stored engine fields: truncate toward zero, strip trailing zeros. */
+export function fmtUsdPrecise(value, maxPlaces = profitUsdPlaces()) {
+  const text = fmtDecimalLiteral(value, maxPlaces);
+  if (text === null) return "—";
+  return `$${text}`;
 }
 
 /** When live USDT wallet differs from summed lifetime swap proceeds, keep lifetime totals for display. */
@@ -2167,7 +2258,7 @@ export function summarizeProfitDisposition(disposition, { status = null } = {}) 
     const earned = num(spotEarned[book]) ?? 0;
     const sold = num(spotSold[book]) ?? 0;
     const pending = num(spotPending[book]) ?? 0;
-    const places = profitNativePrecision(book);
+    const places = profitInternalNativePrecision(book);
     const impliedRemainder = subtractDecimals(subtractDecimals(earned, sold, places), pending, places);
     if (impliedRemainder > 0 && isMeaningfulNativeForBook(impliedRemainder, book)) {
       spotHeld[book] = impliedRemainder;
@@ -2198,6 +2289,41 @@ export function summarizeProfitDisposition(disposition, { status = null } = {}) 
     hasSwap,
     hasCoinProfit,
   };
+}
+
+/** Per-book USD: swapped USDT + unswept native × live spot; USDC uses held realized. */
+export function realizedUsdByBookFromProfitDisposition(disposition, status) {
+  const out = { BTC: 0, ETH: 0, USDC: 0 };
+  if (!disposition) return null;
+  const summary = summarizeProfitDisposition(disposition, { status });
+  if (!summary) return null;
+  let any = false;
+  for (const book of PROFIT_SWEEP_BOOKS) {
+    const swapped = num(summary.spotSoldQuote?.[book]) ?? 0;
+    const held = num(summary.spotHeld?.[book]) ?? 0;
+    const pending = num(summary.spotPending?.[book]) ?? 0;
+    const unswept = held + pending;
+    const spot = spotUsdForBook(status, book);
+    const unsweptUsd =
+      spot !== null && spot > 0 && isMeaningfulNativeForBook(unswept, book) ? unswept * spot : 0;
+    if (swapped > 0.005 || Math.abs(unsweptUsd) >= 0.005) {
+      out[book] = swapped + unsweptUsd;
+      any = true;
+    }
+  }
+  const usdc = num(disposition.heldNative?.USDC) ?? 0;
+  if (Math.abs(usdc) >= 0.005) {
+    out.USDC = usdc;
+    any = true;
+  }
+  return any ? out : null;
+}
+
+/** Total profit: Σ (swapped USDT + unswept native × live spot) + USDC realized. */
+export function realizedUsdFromProfitDisposition(disposition, status) {
+  const byBook = realizedUsdByBookFromProfitDisposition(disposition, status);
+  if (!byBook) return null;
+  return PROFIT_HELD_BOOKS.reduce((sum, book) => sum + (num(byBook[book]) ?? 0), 0);
 }
 
 function fmtProfitDispositionCoinValues(byBook, books, { abs = false, showSign = false } = {}) {
@@ -2800,6 +2926,8 @@ const TRADE_GROUP_ENRICH_KEYS = [
   "short_strike",
   "profit_sweep_status",
   "profit_sweep_amount",
+  "profit_sweep_exchange_native",
+  "profit_sweep_exchange_quote_proceeds",
   "profit_sweep_instrument_name",
   "profit_sweep_order_id",
   "profit_sweep_quote_proceeds",
@@ -3407,30 +3535,41 @@ export function fmtRealizedPnlDisplay(g, status) {
   const book = tradeGroupAprBook(g);
   if (!isInverseCoinBookGroup(g)) {
     const pnlUsd = num(g?.realized_pnl);
-    return pnlUsd === null ? "—" : fmtUsd(pnlUsd);
+    return pnlUsd === null ? "—" : fmtUsdPrecise(pnlUsd);
   }
-  const native = realizedPnlCoinNative(g, status);
-  if (native === null) {
-    const pnlUsd = num(g?.realized_pnl);
-    return pnlUsd === null ? "—" : fmtUsd(pnlUsd);
+  const native =
+    g?.realized_pnl_collateral_native !== undefined &&
+    g?.realized_pnl_collateral_native !== null &&
+    g?.realized_pnl_collateral_native !== ""
+      ? g.realized_pnl_collateral_native
+      : realizedPnlInAprBookNative(g, status);
+  const storedUsd = g?.realized_pnl;
+  if (native === null || (typeof native !== "string" && num(native) === null)) {
+    const pnlUsd = storedUsd;
+    return pnlUsd === null || pnlUsd === undefined || pnlUsd === ""
+      ? "—"
+      : fmtUsdPrecise(pnlUsd);
   }
-  const usdc = realizedPnlDisplayUsdc(g, status);
-  const places = book === "BTC" ? 5 : 4;
-  const nativeStr = `${fmtNum(native, places)} ${book}`;
-  return INVESTOR_ZH
-    ? `${fmtUsd(usdc)}（${nativeStr}）`
-    : `${fmtUsd(usdc)} (${nativeStr})`;
+  const usdc =
+    isClosedTradeGroup(g) &&
+    storedUsd !== undefined &&
+    storedUsd !== null &&
+    storedUsd !== ""
+      ? storedUsd
+      : realizedPnlDisplayUsdc(g, status);
+  const nativeStr = `${fmtProfitNative(book, native)} ${book}`;
+  const usdStr = fmtUsdPrecise(usdc);
+  return INVESTOR_ZH ? `${usdStr}（${nativeStr}）` : `${usdStr} (${nativeStr})`;
 }
 
 export function fmtNativeBookAmount(native, book) {
   const n = num(native);
   if (n === null) return `— ${book || ""}`.trim();
-  const body = new Intl.NumberFormat("en-US", { maximumFractionDigits: 8 }).format(n);
-  return `${body} ${book}`;
+  return `${fmtProfitNative(book || "", n)} ${book}`;
 }
 
 export function fmtUsdWithNativeBookAmount(usd, native, book) {
-  const usdStr = fmtUsd(usd);
+  const usdStr = fmtUsdPrecise(usd);
   if (native === null || !book || book === "USDC") return usdStr;
   const nativeStr = fmtNativeBookAmount(native, book);
   return INVESTOR_ZH ? `${usdStr}（${nativeStr}）` : `${usdStr} (${nativeStr})`;
@@ -3636,25 +3775,62 @@ export function activityOpenRows(status, groups) {
     .sort((a, b) => (entryTimestampMs(b) || 0) - (entryTimestampMs(a) || 0));
 }
 
+function profitSweepAvgSuffix(g, book, soldNative) {
+  const quoteRaw =
+    g?.profit_sweep_exchange_quote_proceeds ?? g?.profit_sweep_quote_proceeds;
+  const quote = num(quoteRaw);
+  const sold = num(soldNative);
+  if (quote === null || quote <= 0 || sold === null || sold <= 0) return "";
+  const avg = profitSwapDisplayAvg(book, quoteRaw ?? quote, soldNative ?? sold);
+  if (avg === null) return "";
+  return ` · ${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}`;
+}
+
+function profitSweepDisplayQuoteUsdt(g) {
+  const exchange = num(g?.profit_sweep_exchange_quote_proceeds);
+  if (exchange !== null && exchange > 0) return exchange;
+  return profitSweepRealizedQuoteUsdt(g);
+}
+
 export function profitSweepMetaLine(g) {
   const status = String(g?.profit_sweep_status || "").toLowerCase();
   if (!status) return null;
   const inst = String(g?.profit_sweep_instrument_name || "");
   const base = inst.split("_")[0] || String(g?.currency || "").toUpperCase() || "—";
-  const amt = g?.profit_sweep_amount;
-  const amtDisplay = amt !== undefined && amt !== null && amt !== "" ? String(amt) : "—";
   if (status === "filled") {
     if (!profitSweepHasExchangeFill(g)) return null;
-    const quoteRaw = g?.profit_sweep_quote_proceeds;
-    const quoteNum = quoteRaw !== undefined && quoteRaw !== null && quoteRaw !== "" ? Number(quoteRaw) : NaN;
-    const quoteDisplay = Number.isFinite(quoteNum) && quoteNum > 0 ? fmtNum(quoteNum, 2) : null;
+    const soldRaw =
+      g?.profit_sweep_exchange_native ??
+      (profitSweepHasExchangeFill(g) ? g?.profit_sweep_amount : null);
+    const soldNative = num(soldRaw);
+    const amtDisplay =
+      soldRaw === null || soldRaw === undefined || soldRaw === "" || soldNative === null
+        ? "—"
+        : fmtProfitNative(base, soldRaw);
+    const quoteRaw =
+      g?.profit_sweep_exchange_quote_proceeds ?? g?.profit_sweep_quote_proceeds;
+    const quoteNum = num(quoteRaw);
+    const quoteDisplay =
+      quoteRaw !== undefined &&
+      quoteRaw !== null &&
+      quoteRaw !== "" &&
+      quoteNum !== null &&
+      quoteNum > 0
+        ? fmtProfitUsdt(quoteRaw).replace(/^\$/, "")
+        : null;
+    const avgSuffix = profitSweepAvgSuffix(g, base, soldRaw ?? soldNative);
     return [
       i18n("Profit swapped", "獲利已兌"),
       quoteDisplay
-        ? `${amtDisplay} ${base} → ${quoteDisplay} USDT`
-        : `${amtDisplay} ${base} → USDT`,
+        ? `${amtDisplay} ${base} → ${quoteDisplay} USDT${avgSuffix}`
+        : `${amtDisplay} ${base} → USDT${avgSuffix}`,
     ];
   }
+  const amt = g?.profit_sweep_amount;
+  const amtDisplay =
+    amt !== undefined && amt !== null && amt !== ""
+      ? fmtProfitNative(base, amt)
+      : "—";
   if (status === "pending" || status === "submitted") {
     return [
       i18n("Profit swapped", "獲利已兌"),

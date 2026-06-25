@@ -507,6 +507,52 @@ def test_session_not_found_on_http_400_forces_reauth(tmp_path):
     assert summary_calls[-1]["headers"].get("Authorization") == "Bearer token-fresh"
 
 
+def test_idempotent_request_retries_on_jsonrpc_too_many_requests(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda s: sleeps.append(s))
+    session = FakeSession(
+        [
+            FakeResponse(_error_body(code=10028, message="too_many_requests", data={"wait": 1.5})),
+            FakeResponse(_ok_body({"ok": True})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    result = client.get_order_book("BTC-PERPETUAL")
+
+    assert result == {"ok": True}
+    assert len(session.calls) == 2
+    assert sleeps == [1.5]
+
+
+def test_idempotent_request_jsonrpc_too_many_requests_widens_adaptive_interval(tmp_path, monkeypatch):
+    from deribit_engine import exchange_throttle
+
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
+    monkeypatch.setenv("DERIBIT_MIN_REQUEST_INTERVAL_SEC", "0.10")
+    monkeypatch.setenv("DERIBIT_MAX_REQUEST_INTERVAL_SEC", "0.50")
+    exchange_throttle.reset_adaptive_backoff()
+    try:
+        session = FakeSession(
+            [FakeResponse(_error_body(code=10028, message="too_many_requests", data={"wait": 1}))] * 5
+        )
+        client = _make_client(tmp_path, session)
+        with pytest.raises(TransientExchangeError):
+            client.get_order_book("BTC-PERPETUAL")
+        assert exchange_throttle.adaptive_interval_seconds("id") > 0.10
+    finally:
+        exchange_throttle.reset_adaptive_backoff()
+
+
+def test_idempotent_request_raises_after_jsonrpc_too_many_requests_exhausted(tmp_path, monkeypatch):
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
+    session = FakeSession([FakeResponse(_error_body(code=10028, message="too_many_requests", data={"wait": 1}))] * 5)
+    client = _make_client(tmp_path, session)
+
+    with pytest.raises(TransientExchangeError, match="too_many_requests"):
+        client.get_order_book("BTC-PERPETUAL")
+
+
 def test_deribit_http_error_without_jsonrpc_id_raises_classified_error(tmp_path):
     session = FakeSession(
         [

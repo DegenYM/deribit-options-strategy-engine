@@ -9,10 +9,12 @@ import {
 } from "../../frontend/src/modules/charts.js";
 import {
   emptyProfitDisposition,
+  fmtProfitAvgUsd,
   fmtProfitNative,
   fmtProfitUsdt,
   profitDispositionForGroup,
   profitSweepHasExchangeFill,
+  profitSweepExchangeNativeSold,
   profitSweepMetaLine,
   profitSwapDisplayAvg,
   realizedPnlDisplayUsdc,
@@ -276,9 +278,9 @@ assert.ok(Math.abs(maLike.spotSold.BTC - 0.0029) < 1e-10);
 assert.ok(Math.abs(maLike.spotHeld.BTC) < 1e-10);
 assert.ok(Math.abs(maLike.spotSoldQuote.BTC - 176.5656) < 0.0001);
 assert.ok(Math.abs(maLike.usdtSwapped - 176.5656) < 0.0001);
-assert.ok(Math.abs(maLike.spotSoldAvg.BTC - 60884.68) < 0.01);
-assert.equal(profitSwapDisplayAvg("BTC", 176.5656, 0.0029), 60884.68);
-assert.equal(profitSwapDisplayAvg("BTC", 161.9496, 0.0027), 59981.33);
+assert.ok(Math.abs(maLike.spotSoldAvg.BTC - 60884.689) < 0.001);
+assert.equal(profitSwapDisplayAvg("BTC", 176.5656, 0.0029), 60884.689);
+assert.equal(profitSwapDisplayAvg("BTC", 161.9496, 0.0027), 59981.333);
 
 const maPartialStatus = {
   ...status,
@@ -539,10 +541,10 @@ assert.ok(Math.abs(anSummary.spotHeld.BTC - 0.000096) < 1e-7);
 assert.equal(fmtProfitNative("BTC", anSummary.spotHeld.BTC), "0.000096");
 
 assert.equal(fmtProfitNative("BTC", 0.000096), "0.000096");
-assert.equal(fmtProfitNative("BTC", 0.0000965), "0.0000965");
-assert.equal(fmtProfitUsdt(113.3305), "$113.3305");
-assert.equal(fmtProfitUsdt(113.3399), "$113.3399");
-assert.equal(truncateDecimal(62961.389, 2), 62961.38);
+assert.equal(fmtProfitNative("BTC", 0.0000965), "0.000096");
+assert.equal(fmtProfitUsdt(113.3305), "$113.33");
+assert.equal(fmtProfitUsdt(113.3399), "$113.339");
+assert.equal(truncateDecimal(62961.389, 3), 62961.389);
 
 const reconciledOnly = group({
   group_id: "0034",
@@ -559,10 +561,76 @@ assert.ok(Math.abs(realizedPnlDisplayUsdc(reconciledOnly, status) - 0.000406 * 6
 const exchangeFilled = group({
   profit_sweep_status: "filled",
   profit_sweep_amount: "0.000406",
+  profit_sweep_exchange_native: "0.000406",
   profit_sweep_quote_proceeds: "25.58",
   profit_sweep_order_id: "BTC_USDT-123",
+  realized_pnl_collateral_native: "0.000406",
 });
 assert.equal(profitSweepHasExchangeFill(exchangeFilled), true);
-assert.ok(profitSweepMetaLine(exchangeFilled));
+assert.equal(profitSweepExchangeNativeSold(exchangeFilled, "BTC"), 0.000406);
+const exchangeFilledMeta = profitSweepMetaLine(exchangeFilled);
+assert.ok(exchangeFilledMeta);
+const expectedAvg = fmtProfitAvgUsd("BTC", profitSwapDisplayAvg("BTC", 25.58, 0.000406));
+assert.ok(exchangeFilledMeta[1].includes(`avg ${expectedAvg}`), exchangeFilledMeta[1]);
+assert.ok(exchangeFilledMeta[1].includes("0.000406 BTC"), exchangeFilledMeta[1]);
+
+const jack0042 = group({
+  group_id: "0042",
+  currency: "ETH",
+  collateral_currency: "ETH",
+  profit_sweep_status: "filled",
+  profit_sweep_amount: "0.00096",
+  profit_sweep_exchange_native: "0.0009",
+  profit_sweep_quote_proceeds: "1.5714",
+  profit_sweep_order_id: "ETH_USDT-8545094014",
+  realized_pnl_collateral_native: "0.00096",
+  profit_sweep_reason: "time_exit; dust_pool_sweep; proceeds_reconciled",
+});
+assert.equal(profitSweepExchangeNativeSold(jack0042, "ETH"), 0.0009);
+const jack0042Meta = profitSweepMetaLine(jack0042);
+assert.ok(jack0042Meta);
+assert.ok(jack0042Meta[1].includes("0.0009 ETH"), jack0042Meta[1]);
+const jack0042QuoteDisp = fmtProfitUsdt(jack0042.profit_sweep_quote_proceeds).replace(/^\$/, "");
+assert.ok(jack0042Meta[1].includes(`${jack0042QuoteDisp} USDT`), jack0042Meta[1]);
+const jack0042Avg = fmtProfitAvgUsd(
+  "ETH",
+  profitSwapDisplayAvg("ETH", jack0042.profit_sweep_quote_proceeds, 0.0009)
+);
+assert.ok(jack0042Meta[1].includes(`avg ${jack0042Avg}`), jack0042Meta[1]);
+
+const jack0037 = group({
+  group_id: "0037",
+  currency: "ETH",
+  collateral_currency: "ETH",
+  profit_sweep_status: "filled",
+  profit_sweep_amount: "0.00236",
+  profit_sweep_exchange_native: "0.0023",
+  profit_sweep_exchange_quote_proceeds: "3.77752",
+  profit_sweep_quote_proceeds: "3.77752",
+  profit_sweep_order_id: "ETH_USDT-8436355552",
+  realized_pnl_collateral_native: "0.00236",
+  profit_sweep_reason: "take_profit; exchange_fully_swept",
+});
+const jack0037Meta = profitSweepMetaLine(jack0037);
+assert.ok(jack0037Meta);
+assert.ok(jack0037Meta[1].includes("0.0023 ETH"), jack0037Meta[1]);
+assert.ok(jack0037Meta[1].includes("3.777 USDT"), jack0037Meta[1]);
+
+const jack0036 = group({
+  group_id: "0036",
+  currency: "ETH",
+  collateral_currency: "ETH",
+  profit_sweep_status: "filled",
+  profit_sweep_amount: "0.001705",
+  profit_sweep_exchange_native: "0.0017",
+  profit_sweep_exchange_quote_proceeds: "2.78307",
+  profit_sweep_quote_proceeds: "2.78307",
+  profit_sweep_order_id: "ETH_USDT-8434278007",
+  realized_pnl_collateral_native: "0.001705",
+  profit_sweep_reason: "take_profit; exchange_fully_swept",
+});
+const jack0036Meta = profitSweepMetaLine(jack0036);
+assert.ok(jack0036Meta);
+assert.ok(jack0036Meta[1].includes("0.0017 ETH"), jack0036Meta[1]);
 
 console.log("test_profit_disposition: ok");

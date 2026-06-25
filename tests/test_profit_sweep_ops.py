@@ -446,3 +446,115 @@ def test_reschedule_ledger_only_profit_sweeps_requeues_proceeds_reconciled() -> 
     rows = list_remaining_profit_sweeps([group])
     assert len(rows) == 1
     assert rows[0].to_sweep_native == Decimal("0.000406")
+
+
+def test_refresh_profit_sweep_exchange_native_from_labeled_trades() -> None:
+    from unittest.mock import MagicMock
+
+    from deribit_engine.profit_sweep_ops import refresh_profit_sweep_exchange_native
+
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.000526",
+        profit_sweep_quote_proceeds="31.691",
+        profit_sweep_order_id="BTC_USDT-8509193211",
+        realized_pnl_collateral_native="0.000526",
+        profit_sweep_reason="take_profit; premium_amount_synced; proceeds_reconciled",
+    )
+    client = MagicMock()
+    client.get_user_trades_by_currency.return_value = {
+        "trades": [
+            {
+                "trade_id": "t1",
+                "label": "cc-profit-sweep-btc-g1",
+                "direction": "sell",
+                "instrument_name": "BTC_USDT",
+                "amount": "0.0005",
+                "price": "63382",
+                "timestamp": 1,
+                "order_id": "BTC_USDT-8509193211",
+            }
+        ]
+    }
+    assert refresh_profit_sweep_exchange_native(group, client, "cc") is True
+    assert group.profit_sweep_exchange_native == Decimal("0.0005")
+    assert group.profit_sweep_exchange_quote_proceeds == Decimal("31.691")
+    assert refresh_profit_sweep_exchange_native(group, client, "cc") is False
+
+
+def test_attributed_profit_sweep_ignores_later_resweep_day() -> None:
+    from unittest.mock import MagicMock
+
+    from deribit_engine.profit_sweep_ops import attributed_profit_sweep_fill_for_group
+
+    group = _group(
+        currency="ETH",
+        collateral_currency="ETH",
+        short_instrument_name="ETH-26JUN26-2000-C",
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.00236",
+        profit_sweep_quote_proceeds="3.77752",
+        profit_sweep_order_id="ETH_USDT-8436355552",
+        realized_pnl_collateral_native="0.00236",
+        profit_sweep_reason="take_profit; exchange_fully_swept",
+    )
+    client = MagicMock()
+    client.get_user_trades_by_currency.return_value = {
+        "trades": [
+            {
+                "trade_id": "t1",
+                "label": "cc-profit-sweep-eth-g1",
+                "direction": "sell",
+                "instrument_name": "ETH_USDT",
+                "amount": "0.0023",
+                "price": "1642.4",
+                "timestamp": 1_781_028_380_462,
+                "order_id": "ETH_USDT-8436355552",
+            },
+            {
+                "trade_id": "t2",
+                "label": "cc-profit-sweep-eth-g1",
+                "direction": "sell",
+                "instrument_name": "ETH_USDT",
+                "amount": "0.0023",
+                "price": "1637.3",
+                "timestamp": 1_781_057_152_746,
+                "order_id": "ETH_USDT-8439450948",
+            },
+        ]
+    }
+    native, quote = attributed_profit_sweep_fill_for_group(group, client, "cc")
+    assert native == Decimal("0.0023")
+    assert quote == Decimal("3.77752")
+
+
+def test_guard_locked_group_still_records_exchange_native() -> None:
+    from unittest.mock import MagicMock
+
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.0009",
+        profit_sweep_quote_proceeds="90",
+        profit_sweep_order_id="BTC_USDT-o1",
+        realized_pnl_collateral_native="0.001",
+        profit_sweep_reason="proceeds_reconciled; premium_amount_synced",
+    )
+    client = MagicMock()
+    client.get_user_trades_by_currency.return_value = {
+        "trades": [
+            {
+                "trade_id": "t1",
+                "label": "cc-profit-sweep-btc-g1",
+                "direction": "sell",
+                "instrument_name": "BTC_USDT",
+                "amount": "0.0005",
+                "price": "90000",
+                "timestamp": 1,
+                "order_id": "o1",
+            }
+        ]
+    }
+    blocked = guard_profit_sweep_against_oversell(group, client, "cc")
+    assert blocked is True
+    assert group.profit_sweep_exchange_native == Decimal("0.0005")
+    assert group.profit_sweep_amount == Decimal("0.0009")

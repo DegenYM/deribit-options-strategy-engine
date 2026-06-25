@@ -551,12 +551,16 @@ def _aggregate_realized_summary(
     from ..hedge_pnl import hedge_performance_adjustments
 
     hedge_lifetime, hedge_window = hedge_performance_adjustments(state_files, window_days=days)
+    fill_stats = None
+    if status_payload:
+        fill_stats = status_payload.get("premium_sweep_fill_stats_by_book")
     summary = realized_summary_from_closed(
         closed,
         effective_capital_usdc=capital,
         target_portfolio_apr=target_apr,
         window_days=days,
         spot_index=spot_index,
+        fill_stats=fill_stats,
         open_rows=open_rows,
         hedge_lifetime_usdc=hedge_lifetime,
         hedge_window_usdc=hedge_window,

@@ -486,6 +486,75 @@ class StrategySelector:
         s = (instrument.instrument_state or "").lower()
         return s in {"open", "active", ""}
 
+    def _scan_rejection_metrics_suffix(
+        self,
+        reason: str,
+        *,
+        currency: str,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        option_type: str,
+        collateral_currency: str | None = None,
+    ) -> str:
+        """Measured values vs configured gates for scan ``example_messages``."""
+        min_oi, max_spread, min_notional = self.config.liquidity_gates(
+            instrument.instrument_type, instrument.base_currency
+        )
+        if reason == "spread_ratio_above_max":
+            return f"spread={format_decimal(book.spread_ratio, 4)} max={format_decimal(max_spread, 4)}"
+        if reason == "open_interest_below_min":
+            return f"oi={format_decimal(book.open_interest, 4)} min={format_decimal(min_oi, 4)}"
+        if reason == "book_notional_below_min":
+            return f"notional={format_decimal(book.book_notional_usdc, 2)} min={format_decimal(min_notional, 2)}"
+        if reason == "net_apr_below_min":
+            net_apr = self._screening_net_apr(
+                instrument=instrument,
+                book=book,
+                premium_per_contract=book.best_bid_price,
+                collateral_currency=collateral_currency or currency,
+                option_type=option_type,
+            )
+            return f"apr={format_decimal(net_apr, 4)} min={format_decimal(self.config.min_net_apr, 4)}"
+        if reason == "delta_out_of_range":
+            abs_delta = abs(book.delta)
+            if option_type == "call":
+                dmin, dmax = self.config.call_delta_bounds(currency)
+            else:
+                dmin, dmax = self.config.put_delta_bounds(currency)
+            return f"delta={format_decimal(abs_delta, 4)} range={format_decimal(dmin, 4)}-{format_decimal(dmax, 4)}"
+        if reason == "otm_out_of_range":
+            if option_type == "call":
+                otm = self._call_otm_ratio(instrument, book)
+                omin, omax = self.config.call_otm_bounds(currency)
+            else:
+                otm = self._put_otm_ratio(instrument, book)
+                omin, omax = self.config.put_otm_bounds(currency)
+            return f"otm={format_decimal(otm, 4)} range={format_decimal(omin, 4)}-{format_decimal(omax, 4)}"
+        return ""
+
+    def _scan_example_message(
+        self,
+        instrument_name: str,
+        phase: str,
+        reason: str,
+        *,
+        currency: str,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        option_type: str,
+        collateral_currency: str | None = None,
+    ) -> str:
+        suffix = self._scan_rejection_metrics_suffix(
+            reason,
+            currency=currency,
+            instrument=instrument,
+            book=book,
+            option_type=option_type,
+            collateral_currency=collateral_currency,
+        )
+        message = f"{instrument_name} [{phase}] {reason}"
+        return f"{message} {suffix}" if suffix else message
+
     def _common_book_rejection_reason(
         self,
         currency: str,
@@ -1260,7 +1329,17 @@ class StrategySelector:
             if liq is not None:
                 liquidity_counts[liq] += 1
                 if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [liquidity] {liq}")
+                    examples.append(
+                        self._scan_example_message(
+                            inst.instrument_name,
+                            "liquidity",
+                            liq,
+                            currency=currency,
+                            instrument=inst,
+                            book=book,
+                            option_type=option_type,
+                        )
+                    )
                 continue
 
             mark = book.effective_mark
@@ -1337,7 +1416,18 @@ class StrategySelector:
             elif breason is not None:
                 after_counts[breason] += 1
                 if len(examples) < max_examples:
-                    examples.append(f"{inst.instrument_name} [build] {breason}")
+                    examples.append(
+                        self._scan_example_message(
+                            inst.instrument_name,
+                            "build",
+                            breason,
+                            currency=currency,
+                            instrument=inst,
+                            book=book,
+                            option_type=option_type,
+                            collateral_currency=collateral_currency,
+                        )
+                    )
 
         distinct_expiries = len({m.expiration_timestamp_ms for m in markets_in_window})
         note = (
@@ -1994,7 +2084,19 @@ class StrategySelector:
             liq = self._naked_short_call_rejection_reason(currency, inst, book)
             if liq is not None:
                 liquidity_counts[liq] += 1
-                maybe_append_example(f"{inst.instrument_name} [liquidity] {liq}", inst, book)
+                maybe_append_example(
+                    self._scan_example_message(
+                        inst.instrument_name,
+                        "liquidity",
+                        liq,
+                        currency=currency,
+                        instrument=inst,
+                        book=book,
+                        option_type="call",
+                    ),
+                    inst,
+                    book,
+                )
                 continue
 
             if (
@@ -2057,7 +2159,20 @@ class StrategySelector:
                 buildable_names.append(inst.instrument_name)
             elif breason is not None:
                 after_counts[breason] += 1
-                maybe_append_example(f"{inst.instrument_name} [build] {breason}", inst, book)
+                maybe_append_example(
+                    self._scan_example_message(
+                        inst.instrument_name,
+                        "build",
+                        breason,
+                        currency=currency,
+                        instrument=inst,
+                        book=book,
+                        option_type="call",
+                        collateral_currency=collateral_currency,
+                    ),
+                    inst,
+                    book,
+                )
 
         distinct_expiries = len({c.expiration_timestamp_ms for c in calls})
         note = (

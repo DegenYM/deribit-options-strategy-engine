@@ -15,7 +15,7 @@ import {
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
 import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
-import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
+import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumStrategyRealizedPnlUsdcAtSpot, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
   if (!INVESTOR || !health) return;
@@ -657,10 +657,7 @@ export function buildStrategySummaries(status, report, groups) {
     const s = ensureStrategySummary(summaries, ids, id);
     s.closedCount += 1;
     const pnl = realizedPnlDisplayUsdc(g, status);
-    if (pnl !== null) {
-      s.realizedPnl += pnl;
-      if (pnl > 0) s.wins += 1;
-    }
+    if (pnl !== null && pnl > 0) s.wins += 1;
     const holding = groupHoldingDays(g);
     if (holding !== null) {
       s.holdingSum += holding;
@@ -695,6 +692,12 @@ export function buildStrategySummaries(status, report, groups) {
   }
 
   const ordered = strategyOrder(ids);
+  for (const id of ordered) {
+    const s = summaries.get(id);
+    if (!s) continue;
+    const stratPnl = sumStrategyRealizedPnlUsdcAtSpot(report, groups, status, id);
+    if (stratPnl !== null) s.realizedPnl = stratPnl;
+  }
   return ordered.map((id) => summaries.get(id) || emptyStrategySummary(id));
 }
 

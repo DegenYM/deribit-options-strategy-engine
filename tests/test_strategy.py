@@ -558,6 +558,49 @@ def test_covered_call_scan_rejection_detail_summarizes_reasons(tmp_path):
     assert detail["instrument_names_passing_all_build_gates"] == []
 
 
+def test_covered_call_scan_examples_include_spread_and_apr_metrics(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        min_net_apr=Decimal("1.00"),
+        entry_dte_min=7,
+        entry_dte_max=24,
+        inverse_max_spread_ratio=Decimal("0.05"),
+        btc_call_delta_min=Decimal("0.06"),
+        btc_call_delta_max=Decimal("0.14"),
+        btc_call_otm_min=Decimal("0.10"),
+        btc_call_otm_max=Decimal("0.25"),
+    )
+    selector = StrategySelector(config)
+    spread_payload, spread_book = _make_btc_call_payload(14, 77000, delta="0.11")
+    spread_book["best_ask_price"] = "0.0040"
+    apr_payload, apr_book = _make_btc_call_payload(10, 77000, delta="0.11")
+    apr_book["best_ask_price"] = "0.00325"
+    spread_inst = OptionInstrument.from_api(spread_payload)
+    apr_inst = OptionInstrument.from_api(apr_payload)
+    books = {
+        spread_inst.instrument_name: OrderBookSnapshot.from_api(spread_book),
+        apr_inst.instrument_name: OrderBookSnapshot.from_api(apr_book),
+    }
+
+    def loader(name):
+        return books[name]
+
+    detail = selector.covered_call_scan_rejection_detail(
+        "BTC",
+        [spread_inst, apr_inst],
+        loader,
+        regime=RiskRegime.NORMAL,
+        collateral_currency="BTC",
+        available_cover_quantity=Decimal("0.2"),
+        summary_equity=Decimal("1"),
+    )
+
+    examples = detail["example_messages"]
+    assert any("spread_ratio_above_max" in msg and "spread=" in msg and "max=0.05" in msg for msg in examples)
+    assert any("net_apr_below_min" in msg and "apr=" in msg and "min=1" in msg for msg in examples)
+
+
 def test_covered_call_scan_examples_only_show_otm_calls(tmp_path):
     config = make_config(
         tmp_path,

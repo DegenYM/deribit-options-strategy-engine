@@ -2054,6 +2054,12 @@ class EngineBase:
             "profit_sweep_quote_proceeds_lifetime": format_decimal(group.profit_sweep_quote_proceeds_lifetime, 4)
             if group.profit_sweep_quote_proceeds_lifetime > 0
             else None,
+            "profit_sweep_exchange_native": format_decimal(group.profit_sweep_exchange_native, 8)
+            if group.profit_sweep_exchange_native > 0
+            else None,
+            "profit_sweep_exchange_quote_proceeds": format_decimal(group.profit_sweep_exchange_quote_proceeds, 4)
+            if group.profit_sweep_exchange_quote_proceeds > 0
+            else None,
             "profit_sweep_reason": group.profit_sweep_reason or None,
         }
 

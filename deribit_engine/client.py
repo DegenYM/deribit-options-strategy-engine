@@ -315,6 +315,7 @@ class DeribitClient:
             result = data.get("result")
             if not isinstance(result, dict):
                 raise AuthenticationError("public/auth returned no result")
+            note_success(self.config.client_id or None)
             return result
         raise TransientExchangeError("public/auth failed after retries")
 
@@ -371,12 +372,10 @@ class DeribitClient:
             headers=headers,
             timeout=self.config.request_timeout_seconds,
         )
-        # Feed back into adaptive pacing so future calls slow down after a 429
-        # and recover once the exchange accepts requests again.
+        # HTTP 429 widens adaptive pacing immediately; success decay happens only
+        # after the caller confirms a valid JSON-RPC result (see _idempotent_request).
         if response.status_code == self.RATE_LIMIT_STATUS:
             note_rate_limited(identity)
-        elif response.status_code < 400:
-            note_success(identity)
         return response
 
     def _parse_jsonrpc(self, response: requests.Response, method_name: str) -> dict[str, Any]:
@@ -427,6 +426,45 @@ class DeribitClient:
         if code_int in transient_codes:
             return TransientExchangeError(text)
         return ExchangeError(text)
+
+    @staticmethod
+    def _jsonrpc_transient_wait_seconds(error: dict[str, Any]) -> float | None:
+        data = error.get("data")
+        if not isinstance(data, dict):
+            return None
+        wait = data.get("wait")
+        if wait is None:
+            return None
+        try:
+            return max(float(wait), 0.0)
+        except (TypeError, ValueError):
+            return None
+
+    def _maybe_retry_jsonrpc_transient(
+        self,
+        method_name: str,
+        error: dict[str, Any],
+        *,
+        attempt: int,
+        attempts: int,
+    ) -> bool:
+        """Sleep and return True when a transient JSON-RPC error should be retried."""
+        if attempt >= attempts - 1:
+            return False
+        classified = self._classify_error(method_name, error)
+        if not isinstance(classified, TransientExchangeError):
+            return False
+        try:
+            code_int = int(error.get("code") or 0)
+        except (TypeError, ValueError):
+            code_int = 0
+        if code_int == 10028:
+            note_rate_limited(self.config.client_id or None)
+        wait = self._jsonrpc_transient_wait_seconds(error)
+        if wait is None:
+            wait = self._backoff_with_jitter(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
+        time.sleep(wait)
+        return True
 
     # ------------------------------------------------------------------
     # Idempotent (safe) request path — retries on transient failures.
@@ -480,13 +518,28 @@ class DeribitClient:
                 continue
             if status >= 400:
                 if json_error is not None:
+                    if self._maybe_retry_jsonrpc_transient(
+                        method_name,
+                        json_error,
+                        attempt=attempt,
+                        attempts=attempts,
+                    ):
+                        continue
                     raise self._classify_error(method_name, json_error)
                 raise ExchangeError(f"{method_name} failed: HTTP {status} {response.text}")
 
             if payload is None:
                 payload = self._parse_jsonrpc(response, method_name)
             if json_error is not None:
+                if self._maybe_retry_jsonrpc_transient(
+                    method_name,
+                    json_error,
+                    attempt=attempt,
+                    attempts=attempts,
+                ):
+                    continue
                 raise self._classify_error(method_name, json_error)
+            note_success(self.config.client_id or None)
             return payload.get("result")
 
         raise TransientExchangeError(f"{method_name} failed after retries: {last_error}")
@@ -533,6 +586,7 @@ class DeribitClient:
             error = payload.get("error")
             if isinstance(error, dict) and error:
                 raise self._classify_error(method_name, error)
+            note_success(self.config.client_id or None)
             return payload.get("result")
 
         raise TransientExchangeError(f"{method_name} failed: {last_error}")

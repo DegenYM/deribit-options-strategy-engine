@@ -4,7 +4,82 @@ from deribit_engine.realized_summary import (
     patch_realized_report_spot_pnl,
     realized_pnl_usdc_at_spot,
     realized_summary_from_closed,
+    total_realized_usdc_from_swap_disposition,
 )
+
+
+def test_total_realized_usdc_from_swap_disposition() -> None:
+    """Total profit = swapped USDT + unswept native × live spot."""
+    rows = [
+        {
+            "status": "closed",
+            "collateral_currency": "BTC",
+            "currency": "BTC",
+            "realized_pnl": "100",
+            "realized_pnl_collateral_native": "0.002",
+            "profit_sweep_status": "filled",
+            "profit_sweep_amount": "0.002",
+            "profit_sweep_reason": "proceeds_reconciled",
+            "closed_timestamp_ms": 1_700_000_000_000,
+            "entry_timestamp_ms": 1_699_000_000_000,
+        },
+        {
+            "status": "closed",
+            "collateral_currency": "BTC",
+            "currency": "BTC",
+            "realized_pnl": "44.6",
+            "realized_pnl_collateral_native": "0.00066",
+            "closed_timestamp_ms": 1_700_100_000_000,
+            "entry_timestamp_ms": 1_699_100_000_000,
+        },
+    ]
+    fill_stats = {
+        "BTC": {
+            "display_native_sold": "0.0024",
+            "display_usdt": "157.869",
+            "net_native_sold": "0.0024",
+            "net_usdt": "157.869",
+        }
+    }
+    spot = {"BTC": Decimal("62608")}
+    total = total_realized_usdc_from_swap_disposition(rows, spot_index=spot, fill_stats=fill_stats)
+    assert total is not None
+    expected = Decimal("157.869") + Decimal("0.00026") * Decimal("62608")
+    assert abs(total - expected) < Decimal("0.01")
+
+
+def test_realized_summary_from_closed_uses_swap_disposition_total() -> None:
+    rows = [
+        {
+            "status": "closed",
+            "collateral_currency": "BTC",
+            "currency": "BTC",
+            "realized_pnl": "144.6",
+            "realized_pnl_collateral_native": "0.00266",
+            "profit_sweep_status": "filled",
+            "profit_sweep_amount": "0.0024",
+            "profit_sweep_reason": "proceeds_reconciled",
+            "closed_timestamp_ms": 1_700_000_000_000,
+            "entry_timestamp_ms": 1_699_000_000_000,
+        }
+    ]
+    fill_stats = {
+        "BTC": {
+            "display_native_sold": "0.0024",
+            "display_usdt": "157.869",
+            "net_native_sold": "0.0024",
+            "net_usdt": "157.869",
+        }
+    }
+    summary = realized_summary_from_closed(
+        rows,
+        effective_capital_usdc=Decimal("10000"),
+        target_portfolio_apr=Decimal("0"),
+        spot_index={"BTC": Decimal("62608")},
+        fill_stats=fill_stats,
+    )
+    expected = Decimal("157.869") + Decimal("0.00026") * Decimal("62608")
+    assert abs(Decimal(summary["realized_pnl_usdc"]) - expected) < Decimal("0.01")
 
 
 def test_realized_pnl_usdc_at_spot_uses_native_times_live_index() -> None:

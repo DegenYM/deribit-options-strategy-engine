@@ -451,6 +451,7 @@ def reconcile_profit_sweep_from_exchange(
             group.profit_sweep_order_id = order_id
         if amount > 0:
             group.profit_sweep_amount = amount
+            group.profit_sweep_exchange_native = amount
         if proceeds > 0:
             group.profit_sweep_quote_proceeds = proceeds
             from .profit_sweep_ops import record_profit_sweep_lifetime_proceeds
@@ -486,6 +487,7 @@ def reconcile_profit_sweep_from_exchange(
         group.profit_sweep_order_id = order_id
     if amount > 0:
         group.profit_sweep_amount = amount
+        group.profit_sweep_exchange_native = amount
     proceeds = Decimal("0")
     if order_id:
         try:
@@ -729,6 +731,7 @@ def repair_unlabeled_profit_sweep_from_exchange(
         group.profit_sweep_order_id = order_id
     if amount > 0:
         group.profit_sweep_amount = amount
+        group.profit_sweep_exchange_native = amount
     group.profit_sweep_quote_proceeds = proceeds
     from .profit_sweep_ops import record_profit_sweep_lifetime_proceeds
 

@@ -509,6 +509,50 @@ def _premium_usdt_weight(group: TradeGroup) -> Decimal:
     return native * idx
 
 
+def labeled_fill_proceeds_by_group(
+    client: DeribitClient,
+    order_label_prefix: str,
+) -> dict[str, Decimal]:
+    """Per-group USDT from labeled profit-sweep spot sells (first fill day only)."""
+    out: dict[str, Decimal] = defaultdict(Decimal)
+    for currency in ("BTC", "ETH"):
+        by_gid, _, _ = _classify_profit_sweep_sell_trades(client, order_label_prefix, currency)
+        for gid, trades in by_gid.items():
+            first_day = _first_day_profit_sweep_trades(trades)
+            out[gid] += spot_sell_quote_proceeds_from_trades(first_day, quote_currency="USDT")
+    return dict(out)
+
+
+def repair_labeled_profit_sweep_proceeds_in_groups(
+    groups: list[TradeGroup],
+    client: DeribitClient,
+    order_label_prefix: str,
+) -> int:
+    """Restore profit_sweep_quote_proceeds from per-group labeled exchange fills."""
+    from .trade_journal_backfill import group_excluded_from_premium_proceeds_pool
+
+    direct_by_gid = labeled_fill_proceeds_by_group(client, order_label_prefix)
+    if not direct_by_gid:
+        return 0
+    repaired = 0
+    for group in groups:
+        if group.status != "closed" or not group.is_covered_call_group():
+            continue
+        if group_excluded_from_premium_proceeds_pool(group):
+            continue
+        proceeds = direct_by_gid.get(group.group_id, Decimal("0"))
+        if proceeds <= 0:
+            continue
+        tol = max(Decimal("0.01"), proceeds * Decimal("0.005"))
+        if abs(group.profit_sweep_quote_proceeds - proceeds) <= tol:
+            continue
+        group.profit_sweep_status = "filled"
+        group.profit_sweep_quote_proceeds = proceeds
+        record_profit_sweep_lifetime_proceeds(group, proceeds)
+        repaired += 1
+    return repaired
+
+
 def gross_premium_sweep_usdt_total(
     client: DeribitClient,
     order_label_prefix: str,
@@ -733,6 +777,8 @@ def reconcile_premium_proceeds_to_groups(
 
     repair_manual_swap_proceeds_in_groups(groups)
     repair_unlabeled_profit_sweeps_in_groups(groups, client, order_label_prefix)
+    labeled_repaired = repair_labeled_profit_sweep_proceeds_in_groups(groups, client, order_label_prefix)
+    summary["labeled_fill_repaired_groups"] = labeled_repaired
     exchange_net = actual_premium_sweep_usdt_net(client, order_label_prefix)
     if target_total_usdt is None:
         target_total_usdt = exchange_net
@@ -757,9 +803,32 @@ def reconcile_premium_proceeds_to_groups(
         summary["total_usdt"] = format_decimal(Decimal("0"), 4)
         return summary
 
+    direct_by_gid = labeled_fill_proceeds_by_group(client, order_label_prefix)
+    fixed_direct = sum(
+        (
+            direct_by_gid.get(group.group_id, Decimal("0"))
+            for currency in ("BTC", "ETH")
+            for group, _ in books.get(currency) or []
+        ),
+        Decimal("0"),
+    )
+    remainder = max(Decimal("0"), target_total_usdt - fixed_direct)
+
     weights = _exchange_gross_usdt_weights(client, order_label_prefix, books)
-    total_weight = sum(weights.values(), Decimal("0"))
-    if total_weight <= 0:
+    pool_eligible: list[tuple[TradeGroup, Decimal, str, Decimal]] = []
+    for currency in ("BTC", "ETH"):
+        for group, premium in books.get(currency) or []:
+            if direct_by_gid.get(group.group_id, Decimal("0")) > 0:
+                continue
+            weight = weights.get(group.group_id, Decimal("0"))
+            if weight <= 0:
+                weight = _premium_usdt_weight(group)
+            if weight <= 0:
+                continue
+            pool_eligible.append((group, premium, currency, weight))
+
+    pool_total_weight = sum((weight for _, _, _, weight in pool_eligible), Decimal("0"))
+    if pool_total_weight <= 0 and fixed_direct <= 0:
         return _reconcile_premium_proceeds_by_premium_weight(
             groups,
             books,
@@ -768,49 +837,50 @@ def reconcile_premium_proceeds_to_groups(
             summary=summary,
         )
 
-    total_usdt = Decimal("0")
+    pool_alloc: dict[str, Decimal] = {}
     allocated = Decimal("0")
+    for idx, (group, _premium, _currency, weight) in enumerate(pool_eligible):
+        if pool_total_weight <= 0:
+            pool_alloc[group.group_id] = Decimal("0")
+        elif idx == len(pool_eligible) - 1:
+            pool_alloc[group.group_id] = max(Decimal("0"), remainder - allocated)
+        else:
+            share = (remainder * weight / pool_total_weight).quantize(Decimal("0.00000001"))
+            allocated += share
+            pool_alloc[group.group_id] = share
+
+    total_usdt = Decimal("0")
     net_by_book: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
-    eligible: list[tuple[TradeGroup, Decimal, str, Decimal]] = []
+
     for currency in ("BTC", "ETH"):
         for group, premium in books.get(currency) or []:
-            weight = weights.get(group.group_id, Decimal("0"))
-            if weight <= 0:
-                weight = _premium_usdt_weight(group)
-            if weight <= 0:
+            direct = direct_by_gid.get(group.group_id, Decimal("0"))
+            proceeds = direct if direct > 0 else pool_alloc.get(group.group_id, Decimal("0"))
+            total_usdt += proceeds
+            net_by_book[currency] += proceeds
+            row = {
+                "group_id": group.group_id,
+                "currency": currency,
+                "premium_native": format_decimal(premium, 8),
+                "proceeds_usdt": format_decimal(proceeds, 4),
+                "before_usdt": format_decimal(group.profit_sweep_quote_proceeds, 4),
+                "before_lifetime_usdt": format_decimal(group.profit_sweep_quote_proceeds_lifetime, 4),
+                "labeled_fill_usdt": format_decimal(direct, 4) if direct > 0 else None,
+            }
+            summary["groups"].append(row)
+            if not apply or group_excluded_from_premium_proceeds_pool(group):
                 continue
-            eligible.append((group, premium, currency, weight))
-
-    for idx, (group, premium, currency, weight) in enumerate(eligible):
-        if idx == len(eligible) - 1:
-            proceeds = max(Decimal("0"), target_total_usdt - allocated)
-        else:
-            proceeds = (target_total_usdt * weight / total_weight).quantize(Decimal("0.00000001"))
-            allocated += proceeds
-        total_usdt += proceeds
-        net_by_book[currency] += proceeds
-        row = {
-            "group_id": group.group_id,
-            "currency": currency,
-            "premium_native": format_decimal(premium, 8),
-            "proceeds_usdt": format_decimal(proceeds, 4),
-            "before_usdt": format_decimal(group.profit_sweep_quote_proceeds, 4),
-            "before_lifetime_usdt": format_decimal(group.profit_sweep_quote_proceeds_lifetime, 4),
-        }
-        summary["groups"].append(row)
-        if not apply or group_excluded_from_premium_proceeds_pool(group):
-            continue
-        if _should_skip_proceeds_reconcile_apply(group):
-            continue
-        group.profit_sweep_status = "filled"
-        group.profit_sweep_amount = premium
-        group.profit_sweep_quote_proceeds = proceeds
-        record_profit_sweep_lifetime_proceeds(group, proceeds)
-        group.profit_sweep_instrument_name = f"{currency}_USDT"
-        reason = str(group.profit_sweep_reason or "")
-        if "proceeds_reconciled" not in reason:
-            group.profit_sweep_reason = (reason + "; proceeds_reconciled").strip("; ")
-        summary["updated_groups"] += 1
+            if _should_skip_proceeds_reconcile_apply(group):
+                continue
+            group.profit_sweep_status = "filled"
+            group.profit_sweep_amount = premium
+            group.profit_sweep_quote_proceeds = proceeds
+            record_profit_sweep_lifetime_proceeds(group, proceeds)
+            group.profit_sweep_instrument_name = f"{currency}_USDT"
+            reason = str(group.profit_sweep_reason or "")
+            if "proceeds_reconciled" not in reason:
+                group.profit_sweep_reason = (reason + "; proceeds_reconciled").strip("; ")
+            summary["updated_groups"] += 1
 
     summary["net_usdt_by_book"] = {k: format_decimal(v, 4) for k, v in net_by_book.items() if v > 0}
     summary["total_usdt"] = format_decimal(total_usdt, 4)
@@ -907,7 +977,12 @@ def run_reconcile_premium_proceeds(
 
         synced = sync_filled_profit_sweep_amounts_to_premium(state.groups)
         summary["synced_amount_groups"] = synced
-        if summary.get("updated_groups", 0) > 0 or synced > 0 or unlabeled_repaired > 0:
+        if (
+            summary.get("updated_groups", 0) > 0
+            or synced > 0
+            or unlabeled_repaired > 0
+            or summary.get("labeled_fill_repaired_groups", 0) > 0
+        ):
             bot.state_store.save(state)
             saved = True
     summary["unlabeled_repaired_groups"] = unlabeled_repaired

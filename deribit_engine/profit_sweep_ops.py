@@ -209,6 +209,71 @@ def profit_sweep_sell_trades_for_group(
     return trades
 
 
+def _first_day_profit_sweep_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not trades:
+        return []
+    from datetime import UTC, datetime
+
+    ordered = sorted(trades, key=lambda row: int(row.get("timestamp") or 0))
+    days = sorted(
+        {datetime.fromtimestamp(int(row.get("timestamp") or 0) / 1000, tz=UTC).strftime("%Y-%m-%d") for row in ordered}
+    )
+    if len(days) <= 1:
+        return ordered
+    first_day = days[0]
+    return [
+        row
+        for row in ordered
+        if datetime.fromtimestamp(int(row.get("timestamp") or 0) / 1000, tz=UTC).strftime("%Y-%m-%d") == first_day
+    ]
+
+
+def attributed_profit_sweep_trades_for_group(
+    group: TradeGroup,
+    client: DeribitClient,
+    order_label_prefix: str,
+    *,
+    trade_cache: ProfitSweepTradeCache | None = None,
+) -> list[dict[str, Any]]:
+    """Spot sells attributed to this closed group (order id when known, else first sweep day)."""
+    trades = profit_sweep_sell_trades_for_group(
+        client,
+        group,
+        order_label_prefix,
+        trade_cache=trade_cache,
+    )
+    if not trades:
+        return []
+    order_id = str(group.profit_sweep_order_id or "").strip()
+    if order_id:
+        matched = [row for row in trades if str(row.get("order_id") or "") == order_id]
+        if matched:
+            return matched
+    return _first_day_profit_sweep_trades(trades)
+
+
+def attributed_profit_sweep_fill_for_group(
+    group: TradeGroup,
+    client: DeribitClient,
+    order_label_prefix: str,
+    *,
+    trade_cache: ProfitSweepTradeCache | None = None,
+) -> tuple[Decimal, Decimal]:
+    trades = attributed_profit_sweep_trades_for_group(
+        group,
+        client,
+        order_label_prefix,
+        trade_cache=trade_cache,
+    )
+    if not trades:
+        return Decimal("0"), Decimal("0")
+    from .wallet_ops import spot_sell_quote_proceeds_from_trades
+
+    native = sum(to_decimal(trade.get("amount")) for trade in trades)
+    quote = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
+    return native, quote
+
+
 def exchange_swept_native_for_group(
     client: DeribitClient,
     group: TradeGroup,
@@ -227,23 +292,36 @@ def exchange_swept_native_for_group(
     )
 
 
-def _first_day_profit_sweep_trades(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not trades:
-        return []
-    from datetime import UTC, datetime
-
-    ordered = sorted(trades, key=lambda row: int(row.get("timestamp") or 0))
-    days = sorted(
-        {datetime.fromtimestamp(int(row.get("timestamp") or 0) / 1000, tz=UTC).strftime("%Y-%m-%d") for row in ordered}
+def refresh_profit_sweep_exchange_native(
+    group: TradeGroup,
+    client: DeribitClient,
+    order_label_prefix: str,
+    *,
+    trade_cache: ProfitSweepTradeCache | None = None,
+) -> bool:
+    """Persist attributed spot-sell fill qty/USDT from Deribit for closed-trade display."""
+    if group.status != "closed" or not group.is_covered_call_group():
+        return False
+    if str(group.profit_sweep_status or "").lower() != "filled":
+        return False
+    if not profit_sweep_has_exchange_fill(group):
+        return False
+    native, quote = attributed_profit_sweep_fill_for_group(
+        group,
+        client,
+        order_label_prefix,
+        trade_cache=trade_cache,
     )
-    if len(days) <= 1:
-        return ordered
-    first_day = days[0]
-    return [
-        row
-        for row in ordered
-        if datetime.fromtimestamp(int(row.get("timestamp") or 0) / 1000, tz=UTC).strftime("%Y-%m-%d") == first_day
-    ]
+    if native <= 0:
+        return False
+    changed = False
+    if group.profit_sweep_exchange_native != native:
+        group.profit_sweep_exchange_native = native
+        changed = True
+    if quote > 0 and group.profit_sweep_exchange_quote_proceeds != quote:
+        group.profit_sweep_exchange_quote_proceeds = quote
+        changed = True
+    return changed
 
 
 def _profit_sweep_state_locked(group: TradeGroup) -> bool:
@@ -269,6 +347,12 @@ def guard_profit_sweep_against_oversell(
     """Sync state from exchange fills; return True when nothing remains to sweep."""
     if group.status != "closed" or not group.is_covered_call_group():
         return False
+    refresh_profit_sweep_exchange_native(
+        group,
+        client,
+        order_label_prefix,
+        trade_cache=trade_cache,
+    )
     if _profit_sweep_state_locked(group):
         return True
     native = native_profit_for_group(group)

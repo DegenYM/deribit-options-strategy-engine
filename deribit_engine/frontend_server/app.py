@@ -653,6 +653,7 @@ def create_app(
                     window_days=window_days,
                     hedge_lifetime_usdc=hedge_lifetime,
                     hedge_window_usdc=hedge_window,
+                    fill_stats=(out.get("status") or {}).get("premium_sweep_fill_stats_by_book"),
                 )
             for row in (report_payload or {}).get("recent_closed_trades") or []:
                 if isinstance(row, dict):
@@ -835,6 +836,7 @@ def create_app(
                 window_days=days,
                 hedge_lifetime_usdc=hedge_lifetime,
                 hedge_window_usdc=hedge_window,
+                fill_stats=(status_payload or {}).get("premium_sweep_fill_stats_by_book"),
             )
             for row in payload.get("recent_closed_trades") or []:
                 if isinstance(row, dict):

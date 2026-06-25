@@ -670,6 +670,8 @@ class TradeGroup:
     profit_sweep_order_id: str = ""
     profit_sweep_quote_proceeds: Decimal = Decimal("0")
     profit_sweep_quote_proceeds_lifetime: Decimal = Decimal("0")
+    profit_sweep_exchange_native: Decimal = Decimal("0")
+    profit_sweep_exchange_quote_proceeds: Decimal = Decimal("0")
     profit_sweep_reason: str = ""
 
     @property
@@ -1452,6 +1454,10 @@ class TradeGroup:
             payload["profit_sweep_quote_proceeds"] = self.profit_sweep_quote_proceeds
         if self.profit_sweep_quote_proceeds_lifetime > 0:
             payload["profit_sweep_quote_proceeds_lifetime"] = self.profit_sweep_quote_proceeds_lifetime
+        if self.profit_sweep_exchange_native > 0:
+            payload["profit_sweep_exchange_native"] = self.profit_sweep_exchange_native
+        if self.profit_sweep_exchange_quote_proceeds > 0:
+            payload["profit_sweep_exchange_quote_proceeds"] = self.profit_sweep_exchange_quote_proceeds
         if self.profit_sweep_reason:
             payload["profit_sweep_reason"] = self.profit_sweep_reason
         return payload
@@ -1579,6 +1585,8 @@ class TradeGroup:
             profit_sweep_order_id=str(payload.get("profit_sweep_order_id") or ""),
             profit_sweep_quote_proceeds=to_decimal(payload.get("profit_sweep_quote_proceeds")),
             profit_sweep_quote_proceeds_lifetime=to_decimal(payload.get("profit_sweep_quote_proceeds_lifetime")),
+            profit_sweep_exchange_native=to_decimal(payload.get("profit_sweep_exchange_native")),
+            profit_sweep_exchange_quote_proceeds=to_decimal(payload.get("profit_sweep_exchange_quote_proceeds")),
             profit_sweep_reason=str(payload.get("profit_sweep_reason") or ""),
         )
 

@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -308,8 +308,54 @@ export function lifetimeRealizedClosedRows(report, groups, status = null) {
     .filter((g) => num(g?.realized_pnl) !== null);
 }
 
-/** Per-book lifetime realized USD (same per-group rules as Total profit). */
+function sumRealizedPnlUsdcFromRows(rows, status) {
+  const disposition = _aggregateProfitDispositionRows(rows, status);
+  const fromDisposition = disposition
+    ? realizedUsdFromProfitDisposition(
+        alignProfitDispositionToUsdtWallet(disposition, status),
+        status
+      )
+    : null;
+  if (fromDisposition !== null) return fromDisposition;
+  let sum = 0;
+  let any = false;
+  for (const g of rows) {
+    const pnl = realizedPnlDisplayUsdc(g, status);
+    if (pnl === null) continue;
+    sum += pnl;
+    any = true;
+  }
+  return any ? sum : null;
+}
+
+function sumRealizedPnlUsdcFromDisposition(report, groups, status, { windowDays = null } = {}) {
+  let rows = lifetimeRealizedClosedRows(report, groups, status);
+  if (windowDays != null) {
+    const cutoffMs = Date.now() - windowDays * 24 * 3600 * 1000;
+    rows = rows.filter((g) => {
+      const closedMs = closedTimestampMs(g);
+      return closedMs !== null && closedMs >= cutoffMs;
+    });
+  }
+  return sumRealizedPnlUsdcFromRows(rows, status);
+}
+
+/** Strategy rollup realized PnL: same disposition path as Total profit (no hedge). */
+export function sumStrategyRealizedPnlUsdcAtSpot(report, groups, status, stratId) {
+  const id = normalizeStrategyId(stratId);
+  if (!isDashboardStrategy(id)) return null;
+  const rows = lifetimeRealizedClosedRows(report, groups, status).filter(
+    (g) => strategyId(g) === id
+  );
+  if (!rows.length) return null;
+  return sumRealizedPnlUsdcFromRows(rows, status);
+}
+
+/** Per-book lifetime realized USD (swapped USDT + unswept native × live spot). */
 export function sumLifetimeRealizedPnlUsdcByBook(report, groups, status) {
+  const disposition = aggregateProfitDisposition(report, groups, status);
+  const fromDisposition = realizedUsdByBookFromProfitDisposition(disposition, status);
+  if (fromDisposition) return fromDisposition;
   const out = { BTC: 0, ETH: 0, USDC: 0 };
   for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
     const book = tradeGroupAprBook(g);
@@ -429,37 +475,22 @@ export function aggregateProfitDisposition(report, groups, status, { windowDays 
   return disposition ? alignProfitDispositionToUsdtWallet(disposition, status) : null;
 }
 
-/** Lifetime Total profit in USDC using live index for coin-collateral rows. */
+/** Lifetime Total profit: swapped USDT + unswept native × live spot (+ hedge). */
 export function sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status) {
-  let sum = 0;
-  let any = false;
-  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
-    const pnl = realizedPnlDisplayUsdc(g, status);
-    if (pnl === null) continue;
-    sum += pnl;
-    any = true;
-  }
+  const fromDisposition = sumRealizedPnlUsdcFromDisposition(report, groups, status);
   const hedge = resolveHedgeNetPnlUsd(status, report);
-  if (!any && hedge === null) return null;
-  return sum + (hedge ?? 0);
+  if (fromDisposition === null && hedge === null) return null;
+  return (fromDisposition ?? 0) + (hedge ?? 0);
 }
 
 export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDays) {
   const days = windowDays ?? 30;
-  const cutoffMs = Date.now() - days * 24 * 3600 * 1000;
-  let sum = 0;
-  let any = false;
-  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
-    const closedMs = closedTimestampMs(g);
-    if (closedMs === null || closedMs < cutoffMs) continue;
-    const pnl = realizedPnlDisplayUsdc(g, status);
-    if (pnl === null) continue;
-    sum += pnl;
-    any = true;
-  }
+  const fromDisposition = sumRealizedPnlUsdcFromDisposition(report, groups, status, {
+    windowDays: days,
+  });
   const hedge = hedgeWindowNetPnlUsd(status, days);
-  if (!any && hedge === null) return null;
-  return sum + (hedge ?? 0);
+  if (fromDisposition === null && hedge === null) return null;
+  return (fromDisposition ?? 0) + (hedge ?? 0);
 }
 
 /** Match backend ``_annualize_apr``. */

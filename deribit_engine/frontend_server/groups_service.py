@@ -214,6 +214,10 @@ def _load_closed_groups_payload(
                     fee_cap_rate=fee_cap_rate,
                 ):
                     state_repaired = True
+                from ..profit_sweep_ops import refresh_profit_sweep_exchange_native
+
+                if refresh_profit_sweep_exchange_native(g, client, cfg.order_label_prefix):
+                    state_repaired = True
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("reconciled manual close repair failed for %s: %s", g.group_id, exc)
         closed_groups.append(g.to_dict())
