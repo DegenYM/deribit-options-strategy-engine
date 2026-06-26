@@ -1925,6 +1925,142 @@ def test_per_position_hard_targets_full_position_delta(tmp_path, fake_client):
     assert group.hedge_size_base == Decimal("-0.5")
 
 
+def test_per_position_hedge_scales_linear_usdc_contract_size(tmp_path, fake_client):
+    """ETH_USDC options: quantity is contract count; hedge must multiply contract_size."""
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    group = _build_group(
+        short_instrument_name="ETH_USDC-14APR30-3150-P",
+        currency="ETH",
+        quantity=Decimal("9"),
+    )
+    group.short_delta = Decimal("0.85")
+
+    engine._update_position_hedge(
+        group,
+        raw_soft=True,
+        raw_hard=True,
+        soft_trigger=True,
+        hard_trigger=True,
+        contract_size=Decimal("0.1"),
+    )
+
+    assert group.hedge_mode == "hard"
+    # 9 contracts * 0.1 ETH/contract * 0.85 delta => short 0.765 ETH perp.
+    assert group.hedge_size_base == Decimal("-0.765")
+
+
+def test_delta_totals_scales_linear_usdc_contract_size(tmp_path, fake_client):
+    engine = DeribitOptionTrialBot(
+        make_config(tmp_path, option_markets_profile="linear_usdc"),
+        fake_client,
+    )
+    state = StrategyState()
+    group = _build_group(
+        short_instrument_name="ETH_USDC-14APR30-3150-P",
+        currency="ETH",
+        quantity=Decimal("9"),
+    )
+    group.short_delta = Decimal("0.85")
+    state.groups.append(group)
+    markets = engine._load_supported_option_markets()
+
+    totals = engine._delta_totals_by_currency({}, state, future_positions=[], markets_by_currency=markets)
+
+    assert totals["ETH"] == Decimal("0.765")
+
+
+def test_per_position_reconcile_caps_oversized_hedge_target(tmp_path, fake_client):
+    """A stale/buggy hedge_size_base must not open a perp larger than option delta."""
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    markets = engine._load_supported_option_markets()
+    state = StrategyState()
+    group = _build_group(
+        short_instrument_name="ETH_USDC-14APR30-3150-P",
+        currency="ETH",
+        quantity=Decimal("9"),
+    )
+    group.short_delta = Decimal("0.85")
+    group.hedge_size_base = Decimal("-7.65")  # pre-fix bug magnitude
+    state.groups.append(group)
+    ctx = SimpleNamespace(
+        state=state,
+        future_positions=[],
+        orderbook_cache={},
+        future_markets_by_name=engine._load_perpetual_markets(),
+        markets_by_currency=markets,
+    )
+
+    actions = engine._reconcile_position_hedges(ctx, live=False)
+
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["hedge_target_capped"] is True
+    assert action["raw_target_hedge_base"] == "-7.65"
+    assert Decimal(action["target_hedge_base"]) == Decimal("-0.8415")
+    assert Decimal(action["amount"]) == Decimal("0.841")
+
+
+def test_signed_size_currency_negative_short_perp_not_double_flipped():
+    pos = Position.from_api(
+        {
+            "instrument_name": "ETH_USDC-PERPETUAL",
+            "direction": "sell",
+            "kind": "future",
+            "size": "-1.267",
+            "size_currency": "-1.267",
+            "mark_price": "2500",
+            "average_price": "2500",
+            "floating_profit_loss": "0",
+            "delta": "1",
+        }
+    )
+    assert pos.signed_size_currency == Decimal("-1.267")
+
+
+def test_per_position_reconcile_buys_to_shrink_existing_short_perp(tmp_path, fake_client):
+    """Short 1.267 with target -0.36 must BUY ~0.9, not sell 1.627."""
+    engine = _make_per_position_engine(tmp_path, fake_client)
+    markets = engine._load_supported_option_markets()
+    state = StrategyState()
+    group = _build_group(
+        short_instrument_name="ETH_USDC-14APR30-3150-P",
+        currency="ETH",
+        quantity=Decimal("9"),
+    )
+    group.short_delta = Decimal("0.4")
+    group.hedge_size_base = Decimal("-0.360243")
+    state.groups.append(group)
+    perp = Position.from_api(
+        {
+            "instrument_name": "ETH_USDC-PERPETUAL",
+            "direction": "sell",
+            "kind": "future",
+            "size": "-1.267",
+            "size_currency": "-1.267",
+            "mark_price": "2500",
+            "average_price": "2500",
+            "floating_profit_loss": "0",
+            "delta": "1",
+        }
+    )
+    ctx = SimpleNamespace(
+        state=state,
+        future_positions=[perp],
+        orderbook_cache={},
+        future_markets_by_name=engine._load_perpetual_markets(),
+        markets_by_currency=markets,
+    )
+
+    actions = engine._reconcile_position_hedges(ctx, live=False)
+
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["side"] == "buy"
+    assert Decimal(action["current_hedge_base"]) == Decimal("-1.267")
+    assert Decimal(action["target_hedge_base"]) == Decimal("-0.360243")
+    assert Decimal(action["amount"]) == Decimal("0.906")
+
+
 def test_per_position_soft_targets_partial_delta(tmp_path, fake_client):
     engine = _make_per_position_engine(tmp_path, fake_client)
     group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", quantity=Decimal("1"))

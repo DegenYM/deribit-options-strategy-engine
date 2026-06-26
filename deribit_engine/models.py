@@ -450,8 +450,21 @@ class Position:
 
     @property
     def signed_size_currency(self) -> Decimal:
-        sign = Decimal("-1") if self.direction == "sell" else Decimal("1")
-        return self.size_currency * sign
+        """Signed position size in base (coin) units for futures/perps.
+
+        Deribit may return ``size`` / ``size_currency`` already negative for
+        shorts while ``direction`` is still ``sell``. Do not multiply sign twice.
+        """
+        amount = self.size_currency if self.size_currency != 0 else self.size
+        if amount == 0:
+            return Decimal("0")
+        if amount < 0:
+            return amount
+        if self.direction == "sell":
+            return -abs(amount)
+        if self.direction == "buy":
+            return abs(amount)
+        return amount
 
 
 @dataclass(frozen=True)

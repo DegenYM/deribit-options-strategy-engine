@@ -324,6 +324,7 @@ class ManagementMixin:
             regime_detail_by_currency=regime_detail_by_currency,
             future_positions=future_positions,
             orderbook_cache=orderbook_cache,
+            markets_by_currency=markets_by_currency,
         )
         if not dashboard_display:
             self._prefetch_scan_book_summaries(markets_by_currency, orderbook_cache)
@@ -549,12 +550,17 @@ class ManagementMixin:
             # Refresh this group's intended per-position hedge every cycle
             # (soft=partial, hard=full, auto-unwind on recovery). The perp order
             # itself is reconciled once per currency after the group loop.
+            contract_size = self._contract_size_for_group(
+                group,
+                getattr(context, "markets_by_currency", None) or {},
+            )
             self._update_position_hedge(
                 group,
                 raw_soft=raw_soft,
                 raw_hard=raw_hard,
                 soft_trigger=soft_trigger,
                 hard_trigger=hard_trigger,
+                contract_size=contract_size,
             )
         if hard_trigger and not hold_on_hard:
             if self.config.enable_perp_hedge and not per_position:
@@ -793,14 +799,31 @@ class ManagementMixin:
                 action["skip_reason"] = response.get("reason")
         return action
 
-    def _group_option_delta(self, group: TradeGroup) -> Decimal:
+    def _contract_size_for_group(
+        self,
+        group: TradeGroup,
+        markets_by_currency: dict[str, list[OptionInstrument]],
+    ) -> Decimal:
+        """Return the short leg's contract size in base (coin) units.
+
+        ``TradeGroup.quantity`` is stored in Deribit contract count; linear
+        USDC options use ``contract_size`` < 1 (e.g. 0.1 ETH per contract).
+        """
+        try:
+            instrument = self._find_instrument_by_markets(markets_by_currency, group.short_instrument_name)
+        except KeyError:
+            return Decimal("1")
+        return instrument.contract_size if instrument.contract_size > 0 else Decimal("1")
+
+    def _group_option_delta(self, group: TradeGroup, *, contract_size: Decimal = Decimal("1")) -> Decimal:
         """Signed option delta of a single group in base (coin) units.
 
         +ve = long-delta (short put), -ve = short-delta (short call).
         """
         option_type = getattr(group, "option_type", "put") or "put"
         option_sign = Decimal("-1") if option_type == "call" else Decimal("1")
-        return option_sign * group.short_delta * group.quantity
+        underlying_base = group.quantity * contract_size
+        return option_sign * group.short_delta * underlying_base
 
     def _update_position_hedge(
         self,
@@ -810,6 +833,7 @@ class ManagementMixin:
         raw_hard: bool,
         soft_trigger: bool,
         hard_trigger: bool,
+        contract_size: Decimal = Decimal("1"),
     ) -> None:
         """Refresh a group's intended per-position perp hedge (signed base units).
 
@@ -849,7 +873,48 @@ class ManagementMixin:
             group.hedge_size_base = Decimal("0")
             return
         # The perp offsets the option delta, hence the opposite sign.
-        group.hedge_size_base = -self._group_option_delta(group) * frac
+        group.hedge_size_base = -self._group_option_delta(group, contract_size=contract_size) * frac
+
+    def _max_abs_per_position_hedge_base(
+        self,
+        context: RuntimeContext,
+        *,
+        currency: str,
+        open_groups: list[TradeGroup],
+    ) -> Decimal:
+        """Upper bound on |perp hedge| from tracked option delta (base coin units)."""
+        markets = getattr(context, "markets_by_currency", None) or {}
+        total = Decimal("0")
+        for group in open_groups:
+            if group.currency != currency:
+                continue
+            contract_size = self._contract_size_for_group(group, markets)
+            total += abs(self._group_option_delta(group, contract_size=contract_size))
+        return total
+
+    def _cap_per_position_hedge_target(
+        self,
+        context: RuntimeContext,
+        *,
+        currency: str,
+        target_base: Decimal,
+        open_groups: list[TradeGroup],
+    ) -> tuple[Decimal, bool]:
+        """Clamp a reconcile target so a sizing bug cannot open a naked perp leg."""
+        max_abs = self._max_abs_per_position_hedge_base(context, currency=currency, open_groups=open_groups)
+        if max_abs <= 0:
+            return target_base, False
+        ceiling = max_abs * Decimal("1.1")
+        if abs(target_base) <= ceiling:
+            return target_base, False
+        capped = ceiling if target_base > 0 else -ceiling
+        LOGGER.error(
+            "hedge reconcile capped for %s: target_base=%s exceeds 110%% of option_delta_cap=%s",
+            currency,
+            format_decimal(target_base, 8),
+            format_decimal(max_abs, 8),
+        )
+        return capped, True
 
     def _reconcile_position_hedges(self, context: RuntimeContext, *, live: bool) -> list[dict[str, Any]]:
         """Drive each currency's perp to the sum of every open group's intended hedge.
@@ -866,6 +931,13 @@ class ManagementMixin:
             target_base = sum(
                 (group.hedge_size_base for group in open_groups if group.currency == currency),
                 Decimal("0"),
+            )
+            raw_target_base = target_base
+            target_base, hedge_capped = self._cap_per_position_hedge_target(
+                context,
+                currency=currency,
+                target_base=target_base,
+                open_groups=open_groups,
             )
             current_base = self._current_hedge_base(context.future_positions, currency)
             diff = target_base - current_base
@@ -905,6 +977,9 @@ class ManagementMixin:
                 "hedge_order_type": self.config.hedge_order_type,
                 "live": live,
             }
+            if hedge_capped:
+                action["hedge_target_capped"] = True
+                action["raw_target_hedge_base"] = format_decimal(raw_target_base, 8)
             if live:
                 response = self._place_hedge_perp_order(
                     context,
@@ -930,6 +1005,7 @@ class ManagementMixin:
         regime_detail_by_currency: dict[str, tuple[str, ...]],
         future_positions: list[Position],
         orderbook_cache: dict[str, OrderBookSnapshot],
+        markets_by_currency: dict[str, list[OptionInstrument]] | None = None,
     ) -> PortfolioSnapshot:
         total_equity_usdc = self._total_equity_usdc(summaries, orderbook_cache)
         per_book_equities = self._book_equities_usdc(summaries, orderbook_cache)
@@ -1214,7 +1290,12 @@ class ManagementMixin:
             hard_derisk=hard_derisk,
             cooldown_until_ms=state.cooldown_until_ms,
             cooling_down=cooling_down,
-            delta_totals_by_currency=self._delta_totals_by_currency(summaries, state, future_positions),
+            delta_totals_by_currency=self._delta_totals_by_currency(
+                summaries,
+                state,
+                future_positions,
+                markets_by_currency=markets_by_currency or {},
+            ),
             regime_by_currency=regime_by_currency,
             halt_entry_reasons=tuple(halt_entry_reasons),
             regime_detail_by_currency=regime_detail_by_currency,
@@ -1775,6 +1856,8 @@ class ManagementMixin:
         summaries: dict[str, AccountSummary],
         state: StrategyState,
         future_positions: list[Position],
+        *,
+        markets_by_currency: dict[str, list[OptionInstrument]] | None = None,
     ) -> dict[str, Decimal]:
         """Self-compute per-currency net delta from our own tracked legs + perp hedge.
 
@@ -1785,22 +1868,22 @@ class ManagementMixin:
         summaries for dashboards but hedging decisions run off this value.
 
         Formula per open group:
-            group_delta = option_sign * abs(greek_delta) * quantity
+            group_delta = option_sign * abs(greek_delta) * quantity * contract_size
 
         where ``option_sign`` is +1 for a short put (short puts are long-delta)
-        and -1 for a short call (short calls are short-delta). Stage B introduces
-        ``option_type`` on TradeGroup; until then all groups are short puts.
+        and -1 for a short call (short calls are short-delta). ``quantity`` is
+        Deribit contract count; ``contract_size`` converts to base coin units.
         """
         _ = summaries  # retained for signature parity / future parity checks
+        markets = markets_by_currency or {}
         totals: dict[str, Decimal] = {}
         for currency in self.config.managed_currencies:
             group_delta = Decimal("0")
             for group in self._open_groups(state):
                 if group.currency != currency:
                     continue
-                option_type = getattr(group, "option_type", "put") or "put"
-                option_sign = Decimal("-1") if option_type == "call" else Decimal("1")
-                group_delta += option_sign * group.short_delta * group.quantity
+                contract_size = self._contract_size_for_group(group, markets)
+                group_delta += self._group_option_delta(group, contract_size=contract_size)
             hedge_delta = sum(
                 (
                     position.signed_size_currency
