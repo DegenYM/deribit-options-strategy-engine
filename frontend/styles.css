@@ -1402,6 +1402,12 @@ table tbody tr:hover {
   margin-top: 0.65rem;
 }
 
+@media (min-width: 380px) {
+  .hedge-panel__row .inv-position-strip {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
 .open-position-card {
   --position-accent: var(--rgb-asset-usdc);
   position: relative;

@@ -26,25 +26,56 @@ def is_hedge_perp_instrument(instrument_name: str) -> bool:
     return name.endswith("_USDC-PERPETUAL") or name.endswith("-PERPETUAL")
 
 
+def is_hedge_book_perp_instrument(
+    instrument_name: str,
+    currencies: tuple[str, ...] | None = None,
+) -> bool:
+    """Perp contract used as the account delta-hedge book (USDC linear or coin inverse)."""
+    name = str(instrument_name or "").upper()
+    if name.endswith("_USDC-PERPETUAL"):
+        base = name.split("_")[0]
+    elif name.endswith("-PERPETUAL"):
+        base = name.split("-")[0]
+    else:
+        return False
+    if not currencies:
+        return True
+    allowed = {str(c).upper() for c in currencies}
+    return base in allowed
+
+
+def _row_extra(row: dict[str, Any]) -> dict[str, Any]:
+    extra = row.get("extra")
+    if isinstance(extra, dict):
+        return extra
+    raw = row.get("extra_json")
+    if raw:
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
 def _row_is_hedge_execution(row: dict[str, Any]) -> bool:
     if str(row.get("event_type") or "").lower() == "hedge":
         return True
-    label = str(row.get("label") or "")
     instrument = str(row.get("instrument_name") or "")
-    return is_hedge_perp_label(label) and is_hedge_perp_instrument(instrument)
+    if not is_hedge_perp_instrument(instrument):
+        return False
+    label = str(row.get("label") or "")
+    if is_hedge_perp_label(label):
+        return True
+    extra = _row_extra(row)
+    if str(extra.get("order_type") or "").lower() == "liquidation":
+        return True
+    if extra.get("hedge_book_perp"):
+        return True
+    return False
 
 
 def _profit_loss_usdc_from_row(row: dict[str, Any]) -> Decimal:
-    extra = row.get("extra")
-    if not isinstance(extra, dict):
-        raw = row.get("extra_json")
-        if raw:
-            try:
-                extra = json.loads(raw)
-            except json.JSONDecodeError:
-                extra = {}
-        else:
-            extra = {}
+    extra = _row_extra(row)
     for key in ("profit_loss_usdc", "profit_loss"):
         if key in extra and extra[key] not in (None, ""):
             return to_decimal(extra[key])

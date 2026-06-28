@@ -60,11 +60,15 @@ function setBookFilter(book) {
       }
       charts.scheduleChartResizeAll();
     })
-    .catch((err) =>
+    .catch((err) => {
+      if (INVESTOR) {
+        console.warn("chart vendor load failed", err);
+        return;
+      }
       domain.showToast(`${i18n("charts", "圖表")}: ${domain.formatFetchError(err)}`, {
         retry: () => setBookFilter(book),
-      })
-    );
+      });
+    });
 }
 
 function attachAutoRefresh() {
@@ -108,9 +112,13 @@ function attachControls() {
       await loadChartJs();
       STATE.aprSeries = await domain.fetchJson(charts.aprSeriesUrl());
     } catch (err) {
-      domain.showToast(`${i18n("apr series", "APR 序列")}: ${domain.formatFetchError(err)}`, {
-        retry: reloadAprSeries,
-      });
+      if (!INVESTOR) {
+        domain.showToast(`${i18n("apr series", "APR 序列")}: ${domain.formatFetchError(err)}`, {
+          retry: reloadAprSeries,
+        });
+      } else {
+        console.warn("apr series fetch failed", err);
+      }
     }
     charts.renderAprChart();
   };

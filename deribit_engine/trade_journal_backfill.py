@@ -1715,7 +1715,7 @@ def iter_api_hedge_perp_trades(
     historical: bool = True,
     start_timestamp_ms: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    from .hedge_pnl import is_hedge_perp_instrument, is_hedge_perp_label
+    from .hedge_pnl import is_hedge_book_perp_instrument
 
     managed = {str(c).upper() for c in currencies}
     seen: set[str] = set()
@@ -1734,10 +1734,9 @@ def iter_api_hedge_perp_trades(
             break
         for trade in trades:
             instrument = str(trade.get("instrument_name") or "")
-            label = str(trade.get("label") or trade.get("order_label") or "")
-            if not is_hedge_perp_instrument(instrument) or not is_hedge_perp_label(label):
+            if not is_hedge_book_perp_instrument(instrument, currencies):
                 continue
-            base = instrument.split("_")[0].upper() if "_" in instrument else ""
+            base = instrument.split("_")[0].upper() if "_" in instrument else instrument.split("-")[0].upper()
             if managed and base not in managed:
                 continue
             tid = _trade_id(trade)
@@ -1783,9 +1782,13 @@ def _backfill_hedge_perp_from_api(
         ts_raw = trade.get("timestamp")
         ts_ms = int(ts_raw) if ts_raw is not None else utc_now_ms()
         pl_raw = trade.get("profit_loss")
-        extra: dict[str, Any] = {"source": "deribit_api", "hedge": True}
+        order_type = str(trade.get("order_type") or "")
+        label = str(trade.get("label") or trade.get("order_label") or "")
+        extra: dict[str, Any] = {"source": "deribit_api", "hedge": True, "hedge_book_perp": True}
         if pl_raw is not None and str(pl_raw).strip() != "":
             extra["profit_loss"] = str(pl_raw)
+        if order_type:
+            extra["order_type"] = order_type
         if store.record_fill(
             scope_key=scope_key,
             event_type="hedge",

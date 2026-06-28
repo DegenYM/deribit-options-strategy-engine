@@ -1232,6 +1232,32 @@ export function hedgeUsdByBook(status) {
 }
 
 /**
+ * 永續 / 期貨未實現損益（USDC 等值美元）。
+ * Deribit 僅對**選擇權**提供 ``floating_profit_loss_usd``；USDC 結算 perp 用 ``floating_profit_loss``。
+ * 與 Positions 頁一致：優先 ``(mark−avg)×signed_size``，再退回 API 欄位。
+ */
+export function openRowPerpFloatingPnlUsdc(p) {
+  if (!p) return null;
+  const kind = String(p.kind || "").toLowerCase();
+  if (kind === "option") return null;
+  const avg = num(p.average_price);
+  const mrk = num(p.mark_price);
+  const sz = openRowPositionSignedSizeForDisplay(p);
+  if (avg !== null && mrk !== null && sz !== null) {
+    return (mrk - avg) * sz;
+  }
+  if (p.has_floating_profit_loss) {
+    const v = num(p.floating_profit_loss);
+    if (v !== null) return v;
+  }
+  if (p.has_floating_profit_loss_usd) {
+    const v = num(p.floating_profit_loss_usd);
+    if (v !== null) return v;
+  }
+  return null;
+}
+
+/**
  * 彙整某幣別的避險 perp 部位（跨帳戶合計）。無部位時回 ``null``。
  * 避險是以「幣別」為單位中和整個帳本淨 delta，故同帳多筆合併計算。
  */
@@ -1244,6 +1270,8 @@ export function hedgePerpAggregateForCurrency(status, currency) {
   let pnlUsd = 0;
   let hasPnl = false;
   let markPrice = null;
+  let avgPriceWeighted = 0;
+  let avgPriceWeight = 0;
   let matched = 0;
   for (const p of rows) {
     if (String(p.instrument_name || "") !== name) continue;
@@ -1256,7 +1284,15 @@ export function hedgePerpAggregateForCurrency(status, currency) {
       markPrice = mark;
       notionalUsd += sz * mark;
     }
-    const fpl = num(p.floating_profit_loss_usd);
+    const avg = num(p.average_price);
+    if (avg !== null && avg > 0) {
+      const w = Math.abs(sz);
+      if (w > 0) {
+        avgPriceWeighted += avg * w;
+        avgPriceWeight += w;
+      }
+    }
+    const fpl = openRowPerpFloatingPnlUsdc(p);
     if (fpl !== null) {
       pnlUsd += fpl;
       hasPnl = true;
@@ -1269,6 +1305,7 @@ export function hedgePerpAggregateForCurrency(status, currency) {
     signedSize,
     notionalUsd,
     markPrice,
+    averagePrice: avgPriceWeight > 0 ? avgPriceWeighted / avgPriceWeight : null,
     pnlUsd: hasPnl ? pnlUsd : null,
     side: signedSize < 0 ? "short" : "long",
   };
@@ -4111,6 +4148,14 @@ export function isFetchNetworkError(err) {
   );
 }
 
+function isInternalServerFetchMessage(raw) {
+  const msg = String(raw || "").trim();
+  if (/^(?:[45]\d{2})\b/.test(msg)) return true;
+  return /(?:\bfailed:|database|sqlite|operationalerror|traceback|permission denied|no such (?:file|table|column)|unable to open)/i.test(
+    msg
+  );
+}
+
 export function formatFetchError(err, fallback = "Request failed") {
   if (isFetchNetworkError(err)) {
     return i18n(
@@ -4129,6 +4174,12 @@ export function formatFetchError(err, fallback = "Request failed") {
     return i18n(
       "Server is slow to respond — try again shortly.",
       "伺服器回應較慢，請稍後再試。"
+    );
+  }
+  if (INVESTOR && isInternalServerFetchMessage(raw)) {
+    return i18n(
+      "Data is temporarily unavailable — try again shortly.",
+      "資料暫時無法載入，請稍後再試。"
     );
   }
   return raw;

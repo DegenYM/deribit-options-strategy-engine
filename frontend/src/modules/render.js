@@ -450,14 +450,19 @@ export function renderAggregate(status, report) {
   const root = document.getElementById("aggregate-card");
   if (!root) return;
 
-  if (INVESTOR && !isInvestorOverviewDisplayReady()) {
+  const investorRealizedReady = !INVESTOR || isInvestorOverviewDisplayReady();
+  if (
+    INVESTOR &&
+    !investorRealizedReady &&
+    (!STATE.investorReady || STATE.refreshInFlight)
+  ) {
     root.innerHTML = aggregateSkeletonHtml();
     renderDataFreshnessBadge();
     return;
   }
 
   const { portfolio, source } = resolvedPortfolio();
-  const summary = report?.summary;
+  const summary = investorRealizedReady ? report?.summary : null;
 
   if (!portfolio && !summary) {
     if (INVESTOR && (STATE.refreshInFlight || !STATE.investorReady)) {
@@ -484,30 +489,35 @@ export function renderAggregate(status, report) {
   );
   const creditByStrategy = sumOpenCreditByStrategy(openRows, status, STATE.groups);
 
-  const lifetimePnlAtSpot = sumLifetimeRealizedPnlUsdcAtSpot(report, STATE.groups, status);
-  const lifetimePnl = lifetimePnlAtSpot ?? num(summary?.realized_pnl_usdc);
-  const lifetimeAprAtSpot = computeLifetimeRealizedApr(report, STATE.groups, status, summary);
-  const lifetimeApr = lifetimeAprAtSpot ?? num(summary?.lifetime_realized_apr);
+  const lifetimePnlAtSpot = investorRealizedReady
+    ? sumLifetimeRealizedPnlUsdcAtSpot(report, STATE.groups, status)
+    : null;
+  const lifetimePnl = investorRealizedReady
+    ? lifetimePnlAtSpot ?? num(summary?.realized_pnl_usdc)
+    : null;
+  const lifetimeAprAtSpot = investorRealizedReady
+    ? computeLifetimeRealizedApr(report, STATE.groups, status, summary)
+    : null;
+  const lifetimeApr = investorRealizedReady
+    ? lifetimeAprAtSpot ?? num(summary?.lifetime_realized_apr)
+    : null;
   const winRate = num(summary?.realized_win_rate);
   const avgHolding = num(summary?.avg_holding_days);
   const closedCount = num(summary?.realized_closed_group_count);
   const windowDays = num(summary?.window_days_used);
   const windowLabelDaysForPnl = windowDays ?? 30;
-  const windowPnlAtSpot = sumWindowRealizedPnlUsdcAtSpot(
-    report,
-    STATE.groups,
-    status,
-    windowLabelDaysForPnl
-  );
-  const windowPnl = windowPnlAtSpot ?? num(summary?.window_realized_pnl_usdc);
-  const windowAprAtSpot = computeWindowRealizedApr(
-    report,
-    STATE.groups,
-    status,
-    summary,
-    windowLabelDaysForPnl
-  );
-  const windowApr = windowAprAtSpot ?? num(summary?.window_realized_apr);
+  const windowPnlAtSpot = investorRealizedReady
+    ? sumWindowRealizedPnlUsdcAtSpot(report, STATE.groups, status, windowLabelDaysForPnl)
+    : null;
+  const windowPnl = investorRealizedReady
+    ? windowPnlAtSpot ?? num(summary?.window_realized_pnl_usdc)
+    : null;
+  const windowAprAtSpot = investorRealizedReady
+    ? computeWindowRealizedApr(report, STATE.groups, status, summary, windowLabelDaysForPnl)
+    : null;
+  const windowApr = investorRealizedReady
+    ? windowAprAtSpot ?? num(summary?.window_realized_apr)
+    : null;
   const lifetimeStartMs = summary ? lifetimePerformanceStartMs(report, STATE.groups) : null;
   const lifetimeNativeByBook = summary
     ? sumLifetimeRealizedPnlNativeByBook(report, STATE.groups, status)
@@ -1079,6 +1089,10 @@ function hedgeSummaryRowHtml(h) {
           <span class="inv-pos-metric-v font-mono tabular-nums">${fmtUsd(h.notionalUsd)}</span>
         </div>
         <div class="inv-pos-metric" role="listitem">
+          <span class="inv-pos-metric-k">${i18n("Avg price", "均價")}</span>
+          <span class="inv-pos-metric-v font-mono tabular-nums">${fmtDeribitPriceCell(h.averagePrice, "USDC")}</span>
+        </div>
+        <div class="inv-pos-metric" role="listitem">
           <span class="inv-pos-metric-k">${i18n("Hedge PnL", "避險損益")}</span>
           <span class="inv-pos-metric-v font-mono tabular-nums ${pnlClass(h.pnlUsd)}">${h.pnlUsd === null ? "—" : fmtUsd(h.pnlUsd)}</span>
         </div>
@@ -1115,23 +1129,31 @@ function hedgeLifetimeSummaryHtml(status, lifetime, openRows, groups) {
       <p class="section-eyebrow">${i18n("Lifetime hedge PnL", "累計避險損益")}</p>
       <div class="stat-grid stat-grid--hedge">
         ${hedgeMetricTile(
-          i18n("Realized net", "已實現淨額"),
-          `<span class="font-mono tabular-nums ${pnlClass(lifetime.netPnlUsd)}">${lifetime.netPnlUsd === null ? "—" : fmtUsd(lifetime.netPnlUsd)}</span>`
+          i18n("Price PnL", "價差損益"),
+          `<span class="font-mono tabular-nums ${pnlClass(lifetime.realizedPnlUsd)}" title="${escapeHtml(
+            i18n("Sum of Deribit trade P&L on hedge perp fills", "避險 perp 成交 P&L 加總（與 Deribit 成交 P&L 欄一致）")
+          )}">${lifetime.realizedPnlUsd === null ? "—" : fmtUsd(lifetime.realizedPnlUsd)}</span>`
         )}
         ${hedgeMetricTile(
           i18n("Fees", "手續費"),
           `<span class="font-mono tabular-nums">${lifetime.feesUsd === null ? "—" : fmtUsd(lifetime.feesUsd)}</span>`
         )}
         ${hedgeMetricTile(
+          i18n("Net after fees", "扣費後淨額"),
+          `<span class="font-mono tabular-nums ${pnlClass(lifetime.netPnlUsd)}" title="${escapeHtml(
+            i18n("Price PnL minus fees · used in performance totals", "價差損益減手續費 · 績效已併入此項")
+          )}">${lifetime.netPnlUsd === null ? "—" : fmtUsd(lifetime.netPnlUsd)}</span>`
+        )}
+        ${hedgeMetricTile(
           i18n("Open float", "未平倉浮動"),
           `<span class="font-mono tabular-nums ${pnlClass(hasFloating ? floatingUsd : null)}">${hasFloating ? fmtUsd(floatingUsd) : "—"}</span>`
         )}
-        ${hedgeMetricTile(
-          i18n("Total est.", "合計估計"),
-          `<span class="font-mono tabular-nums ${pnlClass(totalNet)}">${totalNet === null ? "—" : fmtUsd(totalNet)}</span>`
-        )}
       </div>
-      <p class="hedge-panel__footnote">${escapeHtml(byCcy)} · ${lifetime.tradeCount} ${i18n("fills", "筆成交")}</p>
+      <p class="hedge-panel__footnote">${escapeHtml(byCcy)} · ${lifetime.tradeCount} ${i18n("fills", "筆成交")}${
+        totalNet !== null && hasFloating
+          ? ` · ${i18n("Total est.", "合計估計")} ${escapeHtml(fmtUsd(totalNet))}`
+          : ""
+      }</p>
     </div>`;
 }
 

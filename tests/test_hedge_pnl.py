@@ -168,3 +168,43 @@ def test_hedge_performance_adjustments_window(tmp_path):
     )
     assert lifetime == Decimal("-1.8")
     assert window == Decimal("-0.5")
+
+
+def test_summarize_hedge_pnl_includes_liquidation_without_label(tmp_path):
+    state_file = tmp_path / "bot.json"
+    state_file.write_text("{}", encoding="utf-8")
+    store = TradeJournalStore(journal_db_path_for_state(state_file))
+    scope = scope_key_for_state(state_file)
+
+    store.record_fill(
+        scope_key=scope,
+        event_type="hedge",
+        source_action="backfill_api_hedge",
+        instrument_name="ETH_USDC-PERPETUAL",
+        direction="buy",
+        amount=Decimal("3.284"),
+        price=Decimal("1523.25"),
+        fee_usdc=Decimal("37.5176"),
+        label="",
+        trade_id="liq-1",
+        extra={"profit_loss": "4.2962", "order_type": "liquidation", "hedge_book_perp": True},
+    )
+    store.record_fill(
+        scope_key=scope,
+        event_type="hedge",
+        source_action="backfill_api_hedge",
+        instrument_name="ETH_USDC-PERPETUAL",
+        direction="buy",
+        amount=Decimal("1"),
+        price=Decimal("1529"),
+        fee_usdc=Decimal("0"),
+        label="",
+        trade_id="recv-1",
+        extra={"profit_loss": "-4.4418", "hedge_book_perp": True},
+    )
+
+    summary = summarize_hedge_pnl_for_scope(store, scope)
+    assert summary["trade_count"] == 2
+    assert Decimal(summary["realized_pnl_usdc"]) == Decimal("-0.1456")
+    assert Decimal(summary["fees_usdc"]) == Decimal("37.5176")
+    assert Decimal(summary["net_pnl_usdc"]) == Decimal("-37.6632")

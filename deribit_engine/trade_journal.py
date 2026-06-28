@@ -220,6 +220,9 @@ class TradeJournalStore:
             pl_raw = trade.get("profit_loss")
             if pl_raw is not None and str(pl_raw).strip() != "":
                 trade_extra["profit_loss"] = str(pl_raw)
+            order_type = trade.get("order_type")
+            if order_type not in (None, ""):
+                trade_extra["order_type"] = str(order_type)
             if self.record_fill(
                 scope_key=scope_key,
                 event_type=event_type,

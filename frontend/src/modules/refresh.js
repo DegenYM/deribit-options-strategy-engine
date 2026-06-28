@@ -38,8 +38,12 @@ function invokeRenderDashboard() {
 function showRefreshFetchToast(
   label,
   err,
-  { retry, hasCachedData = false, silentIfLimited = false } = {},
+  { retry, hasCachedData = false, silentIfLimited = false, silent = false } = {},
 ) {
+  if (silent) {
+    console.warn(`[dashboard] ${label} fetch failed`, err);
+    return;
+  }
   if (silentIfLimited && hasCachedData && STATE.lastRefreshMs) return;
   const msg = formatFetchError(err);
   showToast(`${label}: ${msg}`, retry ? { retry } : undefined);
@@ -220,7 +224,9 @@ export async function renderPerformanceCharts() {
     await loadChartJs();
   } catch (err) {
     console.error("chart vendor load failed", err);
-    showToast(`${i18n("charts", "圖表")}: ${formatFetchError(err)}`);
+    if (!INVESTOR) {
+      showToast(`${i18n("charts", "圖表")}: ${formatFetchError(err)}`);
+    }
     return;
   }
   const chartFns = [
@@ -594,6 +600,7 @@ async function fetchChartSeries(investorFetchWrap = null) {
       .catch((err) =>
         showRefreshFetchToast(i18n("cumulative pnl", "累積損益"), err, {
           hasCachedData: Boolean(STATE.cumulativePnl),
+          silent: INVESTOR,
         })
       );
 
@@ -605,6 +612,7 @@ async function fetchChartSeries(investorFetchWrap = null) {
       .catch((err) =>
         showRefreshFetchToast(i18n("cumulative spot pnl", "累積 spot 損益"), err, {
           hasCachedData: Boolean(STATE.cumulativeSpotPnl),
+          silent: INVESTOR,
         })
       );
 
@@ -616,6 +624,7 @@ async function fetchChartSeries(investorFetchWrap = null) {
       .catch((err) =>
         showRefreshFetchToast(i18n("apr series", "APR 序列"), err, {
           hasCachedData: Boolean(STATE.aprSeries),
+          silent: INVESTOR,
         })
       );
 
@@ -775,10 +784,10 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
       if (!investorFirstLoad) return;
       const snap = STATE.portfolioSnapshot;
       const hasPortfolio =
-        (snap?.source === "ledger" || snap?.source === "portal_cache") && snap?.portfolio;
-      const hasSummary = Boolean(STATE.report?.summary);
-      if (!hasPortfolio && !hasSummary) return;
-      if (!isInvestorOverviewDisplayReady()) return;
+        (snap?.source === "ledger" || snap?.source === "portal_cache") &&
+        snap?.portfolio &&
+        num(snap.portfolio?.total_equity_usdc) !== null;
+      if (!hasPortfolio && !isInvestorOverviewDisplayReady()) return;
       scheduleInvestorOverlayDismiss(() => {
         if (!STATE.investorReady) {
           setInvestorPageReady(true);
@@ -1075,6 +1084,11 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     setRefreshControlsDisabled(false);
     activeRenderDashboard = null;
     if (INVESTOR) {
+      if (!STATE.investorReady) {
+        scheduleInvestorOverlayDismiss(() => {
+          if (!STATE.investorReady) setInvestorPageReady(true);
+        });
+      }
       saveInvestorCache();
       invokeRenderDashboard();
     }

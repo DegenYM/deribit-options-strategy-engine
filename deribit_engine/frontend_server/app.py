@@ -75,6 +75,12 @@ from .types import (
 LOGGER = logging.getLogger(__name__)
 
 
+def _api_error_detail(label: str, exc: Exception, *, investor_portal: bool) -> str:
+    if investor_portal:
+        return f"{label} unavailable"
+    return f"{label} failed: {exc}"
+
+
 def create_app(
     *,
     env_file: str | Path = ".env",
@@ -348,7 +354,10 @@ def create_app(
                         return row.to_spot_api_payload()
             return spot_cache.get_or_set("spot", _fetch_spot)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"spot failed: {exc}") from exc
+            raise HTTPException(
+                status_code=502,
+                detail=_api_error_detail("spot", exc, investor_portal=investor_portal),
+            ) from exc
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -815,7 +824,10 @@ def create_app(
         try:
             payload = copy.deepcopy(series_cache.get_or_set(cache_key, _compute))
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"realized summary failed: {exc}") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=_api_error_detail("realized summary", exc, investor_portal=investor_portal),
+            ) from exc
         try:
             import deribit_engine.frontend_server as pkg
 
@@ -889,7 +901,10 @@ def create_app(
         try:
             series = series_cache.get_or_set(cache_key, _compute)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"cumulative spot pnl failed: {exc}") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=_api_error_detail("cumulative spot pnl", exc, investor_portal=investor_portal),
+            ) from exc
         return JSONResponse(series)
 
     @app.get("/api/cumulative_pnl_series")
@@ -907,7 +922,10 @@ def create_app(
         try:
             series = series_cache.get_or_set(cache_key, _compute)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"cumulative pnl failed: {exc}") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=_api_error_detail("cumulative pnl", exc, investor_portal=investor_portal),
+            ) from exc
         return JSONResponse(series)
 
     @app.get("/api/apr_series")
@@ -949,7 +967,10 @@ def create_app(
         try:
             payload = series_cache.get_or_set(cache_key, _compute)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=500, detail=f"apr series failed: {exc}") from exc
+            raise HTTPException(
+                status_code=500,
+                detail=_api_error_detail("apr series", exc, investor_portal=investor_portal),
+            ) from exc
         return JSONResponse(payload)
 
     # ------------------------------------------------------------------

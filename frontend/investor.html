@@ -7,7 +7,7 @@
     <!-- <meta name="dashboard-api-base" content="https://your-dashboard.example.com" /> -->
     <title>Investor summary · Deribit options</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=03c102f4b3" as="script" />
+    <link rel="preload" href="/app-investor.js?v=027db132b5" as="script" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -16,7 +16,7 @@
     />
     <link rel="stylesheet" href="/tailwind.css?v=c6fde4d604" />
     <link rel="stylesheet" href="/tokens.css?v=ds003" />
-    <link rel="stylesheet" href="/styles.css?v=e8fe34cef4" />
+    <link rel="stylesheet" href="/styles.css?v=05f4315b36" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -34,7 +34,7 @@
       })();
     </script>
   </head>
-  <body class="app-body investor-portal">
+  <body class="app-body investor-portal investor-blocking-load">
     <script>
       window.__DASHBOARD_MODE__ = "investor";
       window.__INVESTOR_LOCALE__ = "en";
@@ -307,6 +307,6 @@
       class="hidden"
     ></div>
 
-    <script defer src="/app-investor.js?v=03c102f4b3"></script>
+    <script defer src="/app-investor.js?v=027db132b5"></script>
   </body>
 </html>
