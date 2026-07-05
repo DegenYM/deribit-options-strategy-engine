@@ -1,0 +1,51 @@
+name: deribit-option
+
+x-app: &app
+  build:
+    context: .
+  image: deribit-option-engine:local
+  environment:
+    INVESTOR: ${INVESTOR:?Set INVESTOR to a config/investors/<id> value}
+    PYTHONUNBUFFERED: "1"
+  volumes:
+    - ./config:/app/config:ro
+    - ./.state:/app/.state
+    - ./logs:/app/logs
+    - ./data:/app/data
+  restart: unless-stopped
+
+services:
+  live:
+    <<: *app
+    command:
+      - sh
+      - -c
+      - exec python scripts/run_live_profiles.py --investor "$${INVESTOR}" --restart-failed
+
+  frontend:
+    <<: *app
+    command:
+      - sh
+      - -c
+      - |
+        PORT="$(python - <<'PY'
+        import os
+        from pathlib import Path
+
+        from deribit_engine.investor_registry import load_platform_registry
+
+        investor = os.environ["INVESTOR"]
+        registry = load_platform_registry(repo_root=Path.cwd())
+        entry = registry.entry_for(investor)
+        if entry is None:
+            raise SystemExit(f"Investor {investor!r} not found in config/platform/registry.toml")
+        if not entry.frontend_enabled:
+            raise SystemExit(f"Investor {investor!r} has frontend_enabled=false")
+        if entry.frontend_port is None:
+            raise SystemExit(f"Investor {investor!r} has no frontend_port")
+        print(entry.frontend_port)
+        PY
+        )"
+        exec python -m deribit_engine --investor "$${INVESTOR}" frontend --host 0.0.0.0 --port "$${PORT}"
+    ports:
+      - "8765-8799:8765-8799"
