@@ -305,7 +305,16 @@ class ManagementMixin(
         self._refresh_vol_entry_context()
         self._update_recovery_counts(state, regime_by_currency)
         for group in self._open_groups(state):
-            self._refresh_group(context_markets=markets_by_currency, group=group, orderbook_cache=orderbook_cache)
+            try:
+                self._refresh_group(context_markets=markets_by_currency, group=group, orderbook_cache=orderbook_cache)
+            except Exception as exc:
+                LOGGER.warning(
+                    "refresh_group failed group_id=%s short_instrument_name=%s: %s",
+                    group.group_id,
+                    group.short_instrument_name,
+                    exc,
+                )
+                group.last_action = "refresh_failed"
         if self._is_covered_call_strategy():
             self._clear_covered_call_book_cooldowns(state, summaries)
         snapshot = self._build_portfolio_snapshot(

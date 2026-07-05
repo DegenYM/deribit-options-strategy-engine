@@ -122,10 +122,10 @@ def time_exit_triggered(
         return True
     if group.entry_credit <= 0:
         return False
-    if close_debit_usdc is not None:
-        capture = profit_capture_from_close_debit(group.entry_credit, close_debit_usdc)
-        return capture >= ctx.time_exit_min_profit_capture
-    return group.profit_capture >= ctx.time_exit_min_profit_capture
+    if close_debit_usdc is None:
+        return False
+    capture = profit_capture_from_close_debit(group.entry_credit, close_debit_usdc)
+    return capture >= ctx.time_exit_min_profit_capture
 
 
 def evaluate_early_exit_reason(

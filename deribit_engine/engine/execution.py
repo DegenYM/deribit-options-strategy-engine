@@ -505,8 +505,9 @@ class ExecutionMixin:
             collateral_currency=group.collateral_currency,
             at_timestamp_ms=closed_timestamp_ms,
         )
-        group.close_fee_collateral = close_fee_collateral
-        group.current_close_fee_collateral = close_fee_collateral
+        if not group.long_instrument_name:
+            group.close_fee_collateral = close_fee_collateral
+            group.current_close_fee_collateral = close_fee_collateral
         long_response = None
         long_close_price_for_native: Decimal | None = None
         long_instrument_for_native: OptionInstrument | None = None
@@ -532,6 +533,30 @@ class ExecutionMixin:
             long_response = long_result["last_response"]
             if long_result["unfilled"] > 0:
                 LOGGER.warning("close_group %s: long leg unfilled=%s", group.group_id, long_result["unfilled"])
+                if long_result.get("resting_pending"):
+                    group.last_action = f"{reason}_pending"
+                else:
+                    group.last_action = f"{reason}_incomplete"
+                    if long_result.get("streak_bump") or not self._income_exit_uses_resting_limit(reason):
+                        group.close_incomplete_streak += 1
+                action_type = "close_group_pending" if long_result.get("resting_pending") else "close_group_incomplete"
+                return [
+                    {
+                        "action": action_type,
+                        "reason": reason,
+                        "group_id": group.group_id,
+                        "short_filled": short_result["filled"],
+                        "short_unfilled": short_result["unfilled"],
+                        "long_filled": long_result["filled"],
+                        "long_unfilled": long_result["unfilled"],
+                        "responses": {
+                            "short_leg": short_response,
+                            "short_attempts": short_result["responses"],
+                            "long_leg": long_response,
+                            "long_attempts": long_result["responses"],
+                        },
+                    }
+                ]
             long_close_price = long_result["average_price"]
             long_instrument = self._find_instrument(context, group.long_instrument_name)
             long_close_price_for_native = long_close_price
@@ -810,8 +835,13 @@ class ExecutionMixin:
                 incomplete_streak,
             )
             response = self._fallback_close_position_market(
-                instrument_name,
+                instrument=inst,
+                instrument_name=instrument_name,
+                quantity=requested_total - total_filled,
+                direction=direction,
+                label=label,
                 original_error=ExchangeError("income_exit_market_escalation"),
+                option_positions=context.option_positions,
             )
             filled = self._response_filled_amount(response)
             avg = self._response_average_price(response)
@@ -866,6 +896,7 @@ class ExecutionMixin:
             price=initial_price,
             direction=direction,
             time_in_force=close_tif,
+            option_positions=context.option_positions,
         )
         responses.append(response)
         if use_resting:
@@ -935,6 +966,7 @@ class ExecutionMixin:
                 price=retry_price,
                 direction=direction,
                 time_in_force=close_tif,
+                option_positions=context.option_positions,
             )
             responses.append(response)
             filled = self._response_filled_amount(response)
@@ -980,6 +1012,7 @@ class ExecutionMixin:
         price: Decimal,
         direction: str,
         time_in_force: str = "immediate_or_cancel",
+        option_positions: list[Position] | None = None,
     ) -> dict[str, Any]:
         order_kwargs = {
             "instrument_name": instrument_name,
@@ -995,13 +1028,29 @@ class ExecutionMixin:
         except ExchangeError as exc:
             limit = parse_exchange_price_band_limit(str(exc))
             if limit is None:
-                return self._fallback_close_position_market(instrument_name, original_error=exc)
+                return self._fallback_close_position_market(
+                    instrument=instrument,
+                    instrument_name=instrument_name,
+                    quantity=amount,
+                    direction=direction,
+                    label=label,
+                    original_error=exc,
+                    option_positions=option_positions,
+                )
             if direction == "buy":
                 clamped = floor_to_step(limit, instrument.tick_size_for_price(limit))
             else:
                 clamped = ceil_to_step(limit, instrument.tick_size_for_price(limit))
             if clamped <= 0 or clamped == price:
-                return self._fallback_close_position_market(instrument_name, original_error=exc)
+                return self._fallback_close_position_market(
+                    instrument=instrument,
+                    instrument_name=instrument_name,
+                    quantity=amount,
+                    direction=direction,
+                    label=label,
+                    original_error=exc,
+                    option_positions=option_positions,
+                )
             LOGGER.warning(
                 "option close %s on %s clamped from %s to exchange limit %s (%s)",
                 direction,
@@ -1013,20 +1062,49 @@ class ExecutionMixin:
             try:
                 return place_fn(**{**order_kwargs, "price": clamped})
             except ExchangeError as retry_exc:
-                return self._fallback_close_position_market(instrument_name, original_error=retry_exc)
+                return self._fallback_close_position_market(
+                    instrument=instrument,
+                    instrument_name=instrument_name,
+                    quantity=amount,
+                    direction=direction,
+                    label=label,
+                    original_error=retry_exc,
+                    option_positions=option_positions,
+                )
 
     def _fallback_close_position_market(
         self,
-        instrument_name: str,
         *,
+        instrument: OptionInstrument,
+        instrument_name: str,
+        quantity: Decimal,
+        direction: str,
+        label: str,
         original_error: Exception,
+        option_positions: list[Position] | None = None,
     ) -> dict[str, Any]:
         LOGGER.warning(
-            "option close limit rejected for %s; falling back to close_position market (%s)",
+            "option close limit rejected for %s; falling back to reduce_only market close (%s)",
             instrument_name,
             original_error,
         )
-        return self.client.close_position(instrument_name, order_type="market")
+        aligned = align_option_order_amount(quantity, instrument.contract_size, instrument.min_trade_amount)
+        capacity = self._option_reduce_only_capacity(
+            instrument_name, direction, option_positions=option_positions
+        )
+        order_amount = align_option_order_amount(
+            min(aligned, capacity), instrument.contract_size, instrument.min_trade_amount
+        )
+        if order_amount <= 0:
+            return self._noop_option_order_response()
+        place_fn = self.client.place_buy_order if direction == "buy" else self.client.place_sell_order
+        return place_fn(
+            instrument_name=instrument_name,
+            amount=order_amount,
+            label=label,
+            order_type="market",
+            reduce_only=True,
+        )
 
     def _option_reduce_only_capacity(
         self,
