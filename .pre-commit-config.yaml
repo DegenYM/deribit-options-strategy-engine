@@ -6,11 +6,14 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  # pytest: uses pyproject.toml addopts (--disable-socket --allow-unix-socket) so
+  # pre-commit matches CI socket blocking. Coverage (--cov --cov-fail-under=60)
+  # is enforced in GitHub Actions only; omit here to keep commits fast.
   - repo: local
     hooks:
       - id: pytest
         name: pytest
-        entry: pytest tests/ -q
+        entry: .venv/bin/python -m pytest tests/ -q
         language: system
         pass_filenames: false
         stages: [pre-commit]

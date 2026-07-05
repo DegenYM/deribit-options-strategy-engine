@@ -3,7 +3,7 @@
 本文件整理 Deribit Options Strategy Engine 的現況、已完成項、以及建議的分階段優化路線。  
 適用對象：管理方 / 維護者；與 [`repo-layout-zh-TW.md`](repo-layout-zh-TW.md)、[`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md) 互補。
 
-最後更新：2026-06-13（portal snapshot、profit sweep、docs 同步）
+最後更新：2026-07-05（614 tests、巨型檔清單、roadmap 2026 H2）
 
 ---
 
@@ -18,7 +18,7 @@
 | **P4** 前端與對外交付 | ✅ 已完成 | ES modules + Playwright + Access checklist + portal cache |
 | **P5** 規模化 | ⬜ 未開始 | 觸發條件未到 |
 
-**品質指標（本機）**：548 tests 全綠 · coverage **~66%**（門檻 60%） · Ruff 全綠
+**品質指標（本機）**：614 tests 全綠 · coverage **~66%**（門檻 60%） · Ruff 全綠 · pytest-socket 封鎖真實網路
 
 ---
 
@@ -38,7 +38,7 @@
 | **Dashboard 前端** | ES modules + esbuild；Playwright；investor portal disk cache（`portal_snapshots.db`） |
 | **Covered call profit sweep** | 自動 / 手動 sweep、repair 腳本、`./bot profit-sweep` |
 | **API 穩定性** | `exchange_throttle.py` 全进程 pacing |
-| **測試** | 40+ 測試檔、**548** test cases |
+| **測試** | 40+ 測試檔、**614** test cases |
 | **目錄規範** | `docs/repo-layout-zh-TW.md`（canonical vs legacy） |
 | **程式模組** | `deribit_engine/cli/`、`engine/`、`frontend_server/`（Phase 2 拆分後） |
 | **CI coverage** | GitHub Actions `--cov-fail-under=60`（本機 ~66%） |
@@ -55,8 +55,23 @@ _（目前無待收斂項；Phase 0 / 2 已 push 至 main。）_
 
 | 項目 | 風險 |
 |------|------|
-| `engine/management.py` ~2,000 行 | 仍偏大；後續可再拆 |
-| coverage 門檻 60% → 70% | 長期品質目標 |
+| **14 檔 >1,000 行**（2026-07-05 健檢） | Phase 2「engine 各檔 < ~1,500 行」未完全達成；見 [`roadmap-2026H2-zh-TW.md`](roadmap-2026H2-zh-TW.md) Wave 2 |
+| `strategy.py` 2427 行 | 全專案最大；按策略類型拆分 |
+| `engine/base.py` 2232 行 | live cycle 核心；拆分風險高 |
+| `trade_journal_backfill.py` 2051 行 | backfill 邏輯集中 |
+| `engine/management.py` 1927 行 | portfolio / exit 邏輯 |
+| `models.py` 1838 行 | 資料模型與序列化 |
+| `engine/execution.py` 1196 行 | 下單與成交處理 |
+| `frontend_server/app.py` 1152 行（`create_app()` ~1,036 行） | route / scheduler 接線 |
+| `client.py` 1152 行 | Deribit API 客戶端 |
+| `investor_fee_report_period.py` 1136 行 | 季結算報表 |
+| `frontend_server/helpers.py` 1099 行 | 前端 helper |
+| `profit_sweep_repair.py` 1057 行 | profit sweep 修復 |
+| `config.py` 1033 行 | 設定載入 |
+| `backtest.py` 1030 行 | 回測引擎 |
+| `investor_nav_snapshot.py` 1018 行 | NAV 快照 |
+| P3.2 Docker Compose、P3.3 Uptime 監控 | 尚未實作 |
+| coverage 門檻 60% → 70% | 須在主要重構穩定後再升 |
 
 ---
 
@@ -283,13 +298,17 @@ gantt
 | [`telegram-alerts-zh-TW.md`](telegram-alerts-zh-TW.md) | Telegram 設定 |
 | [`cloudflare-access-checklist-zh-TW.md`](cloudflare-access-checklist-zh-TW.md) | Access policy 檢查清單 |
 | [`frontend/README.md`](../frontend/README.md) | Dashboard 前端 build / e2e |
+| [`roadmap-2026H2-zh-TW.md`](roadmap-2026H2-zh-TW.md) | 2026 H2 優化 Roadmap（Wave 1–3） |
 | [`CHANGELOG.md`](../CHANGELOG.md) | 版本變更 |
 
 ---
 
-## 9. 下一步（擇一開工）
+## 9. 下一步
 
-1. **Phase 3.2–3.3**：Docker Compose（可選）、Uptime 監控  
-2. **可選**：再拆 `engine/management.py`；將 coverage 門檻提升至 70%
+後續工作已整理至 **[`roadmap-2026H2-zh-TW.md`](roadmap-2026H2-zh-TW.md)**（2026 H2 優化 Roadmap），摘要如下：
 
-README「文件」一節已連結本計畫。
+1. **Wave 1（可平行）**：dev 環境對齊、Docker Compose、Uptime 監控、拆 `frontend_server/app.py` 的 `create_app()`、拆 `engine/management.py`
+2. **Wave 2（串行）**：拆 `engine/base.py`、`strategy.py`、SQLite Store 基底類、coverage 60% → 70%
+3. **Wave 3（長期）**：拆 `models.py` / `client.py`、mypy、Playwright 擴充、P5 規模化
+
+README「文件」一節已連結本計畫與 roadmap。
