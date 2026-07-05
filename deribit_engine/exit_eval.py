@@ -23,6 +23,7 @@ class ExitEvalContext:
     early_exit_max_spread_ratio: Decimal
     tp_capture_pct: Decimal
     time_exit_dte: int
+    time_exit_min_profit_capture: Decimal
     soft_defense_delta: Decimal
     hard_defense_delta: Decimal
     soft_defense_loss_pct: Decimal
@@ -44,6 +45,7 @@ def exit_eval_context_from_config(config: BotConfig) -> ExitEvalContext:
         early_exit_max_spread_ratio=config.early_exit_max_spread_ratio,
         tp_capture_pct=config.tp_capture_pct,
         time_exit_dte=config.time_exit_dte,
+        time_exit_min_profit_capture=config.time_exit_min_profit_capture,
         soft_defense_delta=config.soft_defense_delta,
         hard_defense_delta=config.hard_defense_delta,
         soft_defense_loss_pct=config.soft_defense_loss_pct,
@@ -105,6 +107,25 @@ def take_profit_triggered(
         return False
     capture = profit_capture_from_close_debit(group.entry_credit, close_debit_usdc)
     return capture >= dynamic_tp_capture_pct(group.dte_days, ctx)
+
+
+def time_exit_triggered(
+    group: TradeGroup,
+    *,
+    close_debit_usdc: Decimal | None,
+    ctx: ExitEvalContext,
+) -> bool:
+    """True when DTE is inside the time-exit window and profit capture meets the floor."""
+    if group.dte_days > Decimal(str(ctx.time_exit_dte)):
+        return False
+    if ctx.time_exit_min_profit_capture <= 0:
+        return True
+    if group.entry_credit <= 0:
+        return False
+    if close_debit_usdc is not None:
+        capture = profit_capture_from_close_debit(group.entry_credit, close_debit_usdc)
+        return capture >= ctx.time_exit_min_profit_capture
+    return group.profit_capture >= ctx.time_exit_min_profit_capture
 
 
 def evaluate_early_exit_reason(
@@ -182,7 +203,7 @@ def evaluate_income_exit_reason(
         early = evaluate_early_exit_reason(group, short_book, ctx)
         if early is not None:
             return early
-    if group.dte_days <= Decimal(str(ctx.time_exit_dte)):
+    if time_exit_triggered(group, close_debit_usdc=income_exit_close_debit_usdc, ctx=ctx):
         return "time_exit"
     return None
 
@@ -221,6 +242,28 @@ def backtest_tp_target_premium(
     """Premium level at which take-profit triggers in backtest."""
     threshold = dynamic_tp_capture_pct(dte_days, ctx)
     return entry_premium * (Decimal("1") - threshold)
+
+
+def backtest_time_exit_gate(
+    *,
+    entry_credit: Decimal,
+    close_debit: Decimal,
+    profit_capture_mark: Decimal,
+    dte_days: Decimal,
+    ctx: ExitEvalContext,
+) -> bool:
+    """True when DTE is inside the time-exit window and profit capture meets the floor."""
+    if dte_days > Decimal(str(ctx.time_exit_dte)):
+        return False
+    if ctx.time_exit_min_profit_capture <= 0:
+        return True
+    if entry_credit <= 0:
+        return False
+    if close_debit > 0:
+        capture = profit_capture_from_close_debit(entry_credit, close_debit)
+        if capture >= ctx.time_exit_min_profit_capture:
+            return True
+    return profit_capture_mark >= ctx.time_exit_min_profit_capture
 
 
 def backtest_remaining_apr_gate(

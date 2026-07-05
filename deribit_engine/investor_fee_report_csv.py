@@ -41,7 +41,7 @@ _TRADE_HEADERS = [
     "collateral",
     "quantity",
     "pnl_native",
-    "pnl_usdc",
+    "pnl_usd",
     "close_reason",
 ]
 
@@ -179,6 +179,10 @@ def write_settlement_fee_report_csv(
         ("investor_id", report.investor_id),
         ("display_name", report.display_name),
         ("period", report.period_label),
+        ("period_start_utc", report.period_start_boundary_label),
+        ("period_end_utc", report.period_end_boundary_label),
+        ("opening_nav_snapshot_at", report.day_a.label if report.day_a.ts_ms > 0 else ""),
+        ("closing_nav_snapshot_at", report.day_b.label),
         ("day_a", report.day_a.label),
         ("day_b", report.day_b.label),
         ("day_a_btc", _native(report.day_a.native["BTC"], "BTC")),

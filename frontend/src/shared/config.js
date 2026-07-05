@@ -38,6 +38,13 @@ export const BOOK_COLORS = {
 };
 export const CORE_BOOKS = ["BTC", "ETH", "USDC", "USDT"];
 export const FRONTEND_REFRESH_INTERVAL_MS = 180_000;
+export const DASHBOARD_WS_ENABLED = true;
+export const DASHBOARD_WS_CHANNELS = "market,portfolio,groups";
+export const DASHBOARD_WS_RECONNECT_BASE_MS = 1_500;
+export const DASHBOARD_WS_RECONNECT_MAX_MS = 30_000;
+export const DASHBOARD_WS_MARKET_SKIP_REST_MS = 15_000;
+export const DASHBOARD_WS_PORTFOLIO_SKIP_REST_MS = 60_000;
+export const DASHBOARD_WS_GROUPS_SKIP_REST_MS = 60_000;
 export const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 3;
 // Investor portal uses per-endpoint SWR caches (/api/status, /api/groups). The
 // combined /api/dashboard_bundle holds _heavy_portfolio_lock across Deribit I/O

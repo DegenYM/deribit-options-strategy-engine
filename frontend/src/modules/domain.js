@@ -2208,6 +2208,24 @@ export function isPremiumProceedsPoolExcludedGroup(g) {
   return false;
 }
 
+/** True when this disposition rollup includes PnL/swap activity on a coin book. */
+function dispositionBookHasAttribution(disposition, book) {
+  const held = num(disposition.heldNative?.[book]) ?? 0;
+  const pending = num(disposition.pendingSweepNative?.[book]) ?? 0;
+  const journalSold = num(disposition.sweptNativeRef?.[book]) ?? 0;
+  const journalQuote = num(disposition.sweptQuoteProceedsByBook?.[book]) ?? 0;
+  const excludedQuote = num(disposition.excludedSweptQuoteProceedsByBook?.[book]) ?? 0;
+  const excludedNative = num(disposition.excludedSweptNativeRefByBook?.[book]) ?? 0;
+  const earned = held + pending + journalSold;
+  return (
+    Math.abs(earned) > 0 ||
+    journalQuote > 0.005 ||
+    excludedQuote > 0.005 ||
+    excludedNative > 0 ||
+    pending > 0
+  );
+}
+
 /** Book-level premium-sweep display: exchange net native/USDT when fills exist, else journal. */
 export function resolvePremiumSweepBookDisplay({ journalSold, journalQuote, exchange, earned }) {
   const netUsdt = num(exchange?.net_usdt);
@@ -2260,7 +2278,8 @@ export function summarizeProfitDisposition(disposition, { status = null } = {}) 
     spotHeld[book] = held;
     spotPending[book] = pending;
 
-    const exchange = fillStats?.[book];
+    const hasAttribution = dispositionBookHasAttribution(disposition, book);
+    const exchange = hasAttribution ? fillStats?.[book] : null;
     const earned = held + pending + journalSold;
     const display = resolvePremiumSweepBookDisplay({
       journalSold,
@@ -2273,7 +2292,13 @@ export function summarizeProfitDisposition(disposition, { status = null } = {}) 
     const excludedNative = num(disposition.excludedSweptNativeRefByBook?.[book]) ?? 0;
     const displayUsdt = num(exchange?.display_usdt);
     const displayNative = num(exchange?.display_native_sold);
-    if (displayNative !== null && displayNative > 0 && displayUsdt !== null && displayUsdt > 0) {
+    if (
+      hasAttribution &&
+      displayNative !== null &&
+      displayNative > 0 &&
+      displayUsdt !== null &&
+      displayUsdt > 0
+    ) {
       spotSold[book] = displayNative;
       spotSoldQuote[book] = displayUsdt;
     } else {

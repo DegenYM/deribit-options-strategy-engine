@@ -1002,6 +1002,39 @@ def test_covered_call_otm_time_exit_near_expiry(tmp_path):
     assert actions[0]["reason"] == "time_exit"
 
 
+def test_covered_call_otm_time_exit_skipped_without_profit(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        tp_capture_pct=Decimal("0.95"),
+        time_exit_dte=4,
+        time_exit_min_profit_capture=Decimal("0.01"),
+        enable_early_exit=False,
+        covered_call_spot_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group(dte_days=3, strike=Decimal("77000"))
+    group.profit_capture = Decimal("-0.05")
+    ctx = SimpleNamespace(
+        orderbook_cache={
+            group.short_instrument_name: _tight_book(
+                group.short_instrument_name,
+                bid="80",
+                ask="82",
+                index_price="70000",
+            )
+        }
+    )
+
+    with patch.object(engine, "_income_exit_close_debit", return_value=Decimal("35")):
+        with patch.object(engine, "_close_group") as close_mock:
+            actions = engine._manage_covered_call_group(ctx, group, live=False)
+
+    close_mock.assert_not_called()
+    assert actions == []
+
+
 def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake_client):
     from datetime import UTC, datetime
 

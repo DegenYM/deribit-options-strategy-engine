@@ -6,6 +6,7 @@ import * as charts from "./modules/charts.js";
 import * as render from "./modules/render.js";
 import * as refresh from "./modules/refresh.js";
 import * as investorCache from "./modules/investor-cache.js";
+import { initDashboardWebSocket } from "./modules/dashboard-ws.js";
 import { loadChartJs } from "./modules/chart-vendor.js";
 import { aggregateSkeletonHtml } from "./modules/domain.js";
 
@@ -243,6 +244,7 @@ export function initDashboard() {
     attachTransfersHoverPrefetch();
     attachAutoRefresh();
     refresh.startLastRefreshTicker();
+    initDashboardWebSocket({ renderDashboard });
     if (INVESTOR) {
       const cached = investorCache.loadInvestorCache();
       if (cached) {

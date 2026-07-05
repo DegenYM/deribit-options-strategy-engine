@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .utils import utc_now_ms
+from .utils import json_default, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
 
@@ -101,7 +101,12 @@ class PortalSnapshotStore:
                         investor_id,
                         snapshot_kind,
                         market_snapshot_id,
-                        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(
+                            payload,
+                            default=json_default,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
                         content_fingerprint,
                     ),
                 )

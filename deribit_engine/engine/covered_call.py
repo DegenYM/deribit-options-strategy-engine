@@ -50,7 +50,7 @@ class CoveredCallMixin:
         if early_exit_reason is not None:
             actions.extend(self._close_group(context, group, reason=early_exit_reason, live=live))
             return actions
-        if group.dte_days <= self.config.time_exit_dte:
+        if self._time_exit_triggered(context, group):
             actions.extend(self._close_group(context, group, reason="time_exit", live=live))
             return actions
         return actions

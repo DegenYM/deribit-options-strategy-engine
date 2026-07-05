@@ -11,6 +11,9 @@ import {
   INVESTOR_OVERLAY_MAX_MS,
   INVESTOR_STATUS_TIMEOUT_MS,
   USE_DASHBOARD_BUNDLE,
+  DASHBOARD_WS_MARKET_SKIP_REST_MS,
+  DASHBOARD_WS_PORTFOLIO_SKIP_REST_MS,
+  DASHBOARD_WS_GROUPS_SKIP_REST_MS,
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
@@ -408,18 +411,33 @@ export function setInvestorPageReady(ready) {
   scheduleChartResizeAll();
 }
 
+export function applySpotPayload(d, { renderDependentViews = false, updateDom = true } = {}) {
+  if (!d || typeof d !== "object") return;
+  STATE.lastSpotUsd.BTC = num(d.BTC);
+  STATE.lastSpotUsd.ETH = num(d.ETH);
+  STATE.lastPriceChangePct24h.BTC = num(d?.price_change_pct_24h?.BTC);
+  STATE.lastPriceChangePct24h.ETH = num(d?.price_change_pct_24h?.ETH);
+  STATE.lastIvRankPct.BTC = resolveIvRankPct(d, "BTC");
+  STATE.lastIvRankPct.ETH = resolveIvRankPct(d, "ETH");
+  STATE.lastDvol.BTC = num(d?.dvol?.BTC);
+  STATE.lastDvol.ETH = num(d?.dvol?.ETH);
+  STATE.ivRankLookbackDays = num(d?.iv_rank_lookback_days);
+  if (updateDom) {
+    updateHeaderSpotDom();
+    if (renderDependentViews && !STATE.refreshInFlight) {
+      renderAggregate(STATE.status, STATE.report);
+      renderStrategyGroups(STATE.status, STATE.report, STATE.groups);
+      renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+    }
+  }
+}
+
 export async function tickHeaderSpot({ renderDependentViews = true, updateDom = true } = {}) {
-  try {
-    const d = await fetchJson("/api/spot");
-    STATE.lastSpotUsd.BTC = num(d.BTC);
-    STATE.lastSpotUsd.ETH = num(d.ETH);
-    STATE.lastPriceChangePct24h.BTC = num(d?.price_change_pct_24h?.BTC);
-    STATE.lastPriceChangePct24h.ETH = num(d?.price_change_pct_24h?.ETH);
-    STATE.lastIvRankPct.BTC = resolveIvRankPct(d, "BTC");
-    STATE.lastIvRankPct.ETH = resolveIvRankPct(d, "ETH");
-    STATE.lastDvol.BTC = num(d?.dvol?.BTC);
-    STATE.lastDvol.ETH = num(d?.dvol?.ETH);
-    STATE.ivRankLookbackDays = num(d?.iv_rank_lookback_days);
+  if (
+    STATE.wsConnected &&
+    STATE.wsLastMarketMs &&
+    Date.now() - STATE.wsLastMarketMs < DASHBOARD_WS_MARKET_SKIP_REST_MS
+  ) {
     if (updateDom) {
       updateHeaderSpotDom();
       if (renderDependentViews && !STATE.refreshInFlight) {
@@ -428,6 +446,11 @@ export async function tickHeaderSpot({ renderDependentViews = true, updateDom = 
         renderRecentActivity(STATE.status, STATE.report, STATE.groups);
       }
     }
+    return;
+  }
+  try {
+    const d = await fetchJson("/api/spot");
+    applySpotPayload(d, { renderDependentViews, updateDom });
   } catch (_) {
     /* ignore */
   }
@@ -970,12 +993,32 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
     }
 
     async function fetchPortfolioDataIndividual() {
-      await wrapStep("groups", fetchGroups);
+      const skipGroups =
+        STATE.wsConnected &&
+        STATE.wsLastGroupsMs &&
+        Date.now() - STATE.wsLastGroupsMs < DASHBOARD_WS_GROUPS_SKIP_REST_MS;
+      const skipStatus =
+        STATE.wsConnected &&
+        STATE.wsLastPortfolioMs &&
+        Date.now() - STATE.wsLastPortfolioMs < DASHBOARD_WS_PORTFOLIO_SKIP_REST_MS;
+
+      if (!skipGroups) {
+        await wrapStep("groups", fetchGroups);
+      } else if (investorFirstLoad) {
+        advanceInvestorLoad("groups");
+      }
+
       if (INVESTOR) {
-        await wrapStep("status", () => fetchStatusWithTimeout().then(() => scheduleRender()));
+        if (!skipStatus) {
+          await wrapStep("status", () => fetchStatusWithTimeout().then(() => scheduleRender()));
+        } else if (investorFirstLoad) {
+          advanceInvestorLoad("status");
+        }
         await ensureSummaryLoad();
-      } else {
+      } else if (!skipStatus) {
         await Promise.all([fetchStatusOp(), ensureSummaryLoad()]);
+      } else {
+        await ensureSummaryLoad();
       }
     }
 

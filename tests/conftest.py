@@ -46,6 +46,7 @@ def make_config(tmp_path: Path, **overrides) -> BotConfig:
         early_exit_min_profit_capture=Decimal("0.25"),
         early_exit_max_spread_ratio=Decimal("0.05"),
         time_exit_dte=5,
+        time_exit_min_profit_capture=Decimal("0"),
         soft_defense_delta=Decimal("0.25"),
         hard_defense_delta=Decimal("0.35"),
         soft_defense_loss_pct=Decimal("0.35"),

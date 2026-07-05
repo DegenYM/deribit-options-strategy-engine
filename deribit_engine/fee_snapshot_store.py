@@ -6,7 +6,7 @@ import json
 import logging
 import sqlite3
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -92,6 +92,7 @@ class NavSnapshotRow:
     collateral_spot_eth: Decimal
     equity_by_book: dict[str, Decimal]
     notes: str | None
+    wallet_native_by_book: dict[str, Decimal] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -148,6 +149,11 @@ class FeeSnapshotStore:
         with self._lock:
             with self._connect() as conn:
                 conn.executescript(_SCHEMA)
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(nav_snapshots)")}
+                if "wallet_native_by_book_json" not in cols:
+                    conn.execute(
+                        "ALTER TABLE nav_snapshots ADD COLUMN wallet_native_by_book_json TEXT NOT NULL DEFAULT '{}'"
+                    )
                 conn.commit()
 
     def append_snapshot(
@@ -165,9 +171,11 @@ class FeeSnapshotStore:
         collateral_spot_btc: Decimal,
         collateral_spot_eth: Decimal,
         equity_by_book: dict[str, Decimal],
+        wallet_native_by_book: dict[str, Decimal] | None = None,
         notes: str | None = None,
     ) -> int:
         equity_json = json.dumps({k: str(v) for k, v in sorted(equity_by_book.items())})
+        wallet_json = json.dumps({k: str(v) for k, v in sorted((wallet_native_by_book or {}).items())})
         with self._lock:
             with self._connect() as conn:
                 cur = conn.execute(
@@ -177,8 +185,8 @@ class FeeSnapshotStore:
                         total_equity_usdc, collateral_spot_usdc, nav_perf, aum_mgmt,
                         index_btc_usd, index_eth_usd,
                         collateral_spot_btc, collateral_spot_eth,
-                        equity_by_book_json, notes
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        equity_by_book_json, wallet_native_by_book_json, notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ts_ms,
@@ -193,6 +201,7 @@ class FeeSnapshotStore:
                         str(collateral_spot_btc),
                         str(collateral_spot_eth),
                         equity_json,
+                        wallet_json,
                         notes,
                     ),
                 )
@@ -343,6 +352,32 @@ class FeeSnapshotStore:
             return None
         return snap
 
+    def snapshot_nearest_with_wallet_balances(
+        self,
+        investor_id: str,
+        *,
+        target_ts_ms: int,
+        max_delta_ms: int | None = None,
+    ) -> NavSnapshotRow | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM nav_snapshots
+                WHERE investor_id = ?
+                  AND wallet_native_by_book_json IS NOT NULL
+                  AND wallet_native_by_book_json NOT IN ('', '{}')
+                ORDER BY ABS(ts_ms - ?) ASC, id DESC
+                LIMIT 1
+                """,
+                (investor_id, target_ts_ms),
+            ).fetchone()
+        snap = _row_to_snapshot(row) if row else None
+        if snap is None or max_delta_ms is None:
+            return snap
+        if abs(snap.ts_ms - target_ts_ms) > max_delta_ms:
+            return None
+        return snap
+
     def snapshots_in_range(
         self,
         investor_id: str,
@@ -433,6 +468,10 @@ class FeeSnapshotStore:
 def _row_to_snapshot(row: sqlite3.Row) -> NavSnapshotRow:
     equity_raw = json.loads(row["equity_by_book_json"] or "{}")
     equity_by_book = {str(k).upper(): to_decimal(v) for k, v in equity_raw.items()}
+    wallet_raw = {}
+    if "wallet_native_by_book_json" in row.keys():
+        wallet_raw = json.loads(row["wallet_native_by_book_json"] or "{}")
+    wallet_native_by_book = {str(k).upper(): to_decimal(v) for k, v in wallet_raw.items()}
     return NavSnapshotRow(
         id=int(row["id"]),
         ts_ms=int(row["ts_ms"]),
@@ -448,6 +487,7 @@ def _row_to_snapshot(row: sqlite3.Row) -> NavSnapshotRow:
         collateral_spot_eth=to_decimal(row["collateral_spot_eth"]),
         equity_by_book=equity_by_book,
         notes=row["notes"],
+        wallet_native_by_book=wallet_native_by_book,
     )
 
 

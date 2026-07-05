@@ -12,6 +12,7 @@ from .backtest_data import BacktestDataClient, pick_nearest_value
 from .config import BotConfig
 from .exit_eval import (
     backtest_remaining_apr_gate,
+    backtest_time_exit_gate,
     backtest_tp_target_premium,
     exit_eval_context_from_config,
 )
@@ -566,21 +567,30 @@ def run_backtest(
                 day_row["closed"] += 1
                 continue
 
-            # Time exit: if DTE <= config.time_exit_dte, close at premium close (approx by TradingView close).
+            # Time exit: if DTE <= config.time_exit_dte and profit capture meets the floor.
             dte = leg_dte
-            if dte <= Decimal(str(config.time_exit_dte)):
-                close = current_premium if current_premium > 0 else leg.entry_premium
-                close_fee = _fee_for_trade(
-                    leg.instrument,
-                    premium=close,
-                    quantity=leg.quantity,
-                    fee_rate=config.option_fee_rate,
-                    fee_cap_rate=config.option_fee_cap_rate,
-                    index_price=leg_spot,
-                    config=config,
-                    at_timestamp_ms=day_ms,
-                    first_option_trade_timestamp_ms=first_option_trade_ms,
-                )
+            close = current_premium if current_premium > 0 else leg.entry_premium
+            close_fee = _fee_for_trade(
+                leg.instrument,
+                premium=close,
+                quantity=leg.quantity,
+                fee_rate=config.option_fee_rate,
+                fee_cap_rate=config.option_fee_cap_rate,
+                index_price=leg_spot,
+                config=config,
+                at_timestamp_ms=day_ms,
+                first_option_trade_timestamp_ms=first_option_trade_ms,
+            )
+            entry_credit = leg.entry_premium * leg.quantity
+            close_debit = close * leg.quantity + close_fee
+            profit_capture_mark = (entry_credit - close_debit) / entry_credit if entry_credit > 0 else Decimal("0")
+            if backtest_time_exit_gate(
+                entry_credit=entry_credit,
+                close_debit=close_debit,
+                profit_capture_mark=profit_capture_mark,
+                dte_days=dte,
+                ctx=exit_ctx,
+            ):
                 pnl_settle = (leg.entry_premium - close) * leg.quantity - leg.entry_fee - close_fee
                 pnl_usdc = pnl_settle if leg.instrument.settlement_currency.upper() == "USDC" else pnl_settle * leg_spot
                 equity_usdc += pnl_usdc

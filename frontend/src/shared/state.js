@@ -54,4 +54,10 @@ export const STATE = {
   activityClosedPage: 1,
   /** Set by refresh.registerRenderDashboard for late async API completions. */
   dashboardRenderHook: null,
+  wsConnected: false,
+  wsChannels: [],
+  wsLastMarketMs: 0,
+  wsLastPortfolioMs: 0,
+  wsLastGroupsMs: 0,
+  wsLastHealthMs: 0,
 };

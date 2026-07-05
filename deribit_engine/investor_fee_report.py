@@ -23,6 +23,7 @@ from .investor_fee_config import load_investor_fee_config
 from .investor_nav_snapshot import (
     InvestorNavCapture,
     _snapshot_dict,
+    _wallet_supplement_snap,
     capture_investor_nav,
     is_quarter_period,
     parse_quarter_period,
@@ -477,10 +478,51 @@ def build_settlement_report_context(
             target_ts_ms=int(settlement_payload["period_end_ms"]),
             max_delta_ms=7 * 86_400_000,
         )
+        end_wallet_supplement = (
+            _wallet_supplement_snap(
+                store,
+                manifest.investor_id,
+                end_row,
+                target_ts_ms=int(settlement_payload["period_end_ms"]),
+                max_delta_ms=7 * 86_400_000,
+            )
+            if end_row is not None
+            else None
+        )
         settlement_payload = {
             **settlement_payload,
-            "end_snapshot": _snapshot_dict(end_row, fee_config=fee_config, flow_baseline=flow_baseline),
+            "end_snapshot": _snapshot_dict(
+                end_row,
+                fee_config=fee_config,
+                flow_baseline=flow_baseline,
+                wallet_supplement=end_wallet_supplement,
+            ),
         }
+    else:
+        end_snapshot = settlement_payload.get("end_snapshot") or {}
+        if not end_snapshot.get("wallet_native_by_book"):
+            end_row = store.snapshot_nearest(
+                manifest.investor_id,
+                target_ts_ms=int(settlement_payload["period_end_ms"]),
+                max_delta_ms=7 * 86_400_000,
+            )
+            if end_row is not None:
+                end_wallet_supplement = _wallet_supplement_snap(
+                    store,
+                    manifest.investor_id,
+                    end_row,
+                    target_ts_ms=int(settlement_payload["period_end_ms"]),
+                    max_delta_ms=7 * 86_400_000,
+                )
+                if end_wallet_supplement is not None:
+                    wallet_native = {k: str(v) for k, v in end_wallet_supplement.wallet_native_by_book.items()}
+                    settlement_payload = {
+                        **settlement_payload,
+                        "end_snapshot": {
+                            **end_snapshot,
+                            "wallet_native_by_book": wallet_native,
+                        },
+                    }
 
     if index_by_ccy is None:
         end_snapshot = settlement_payload.get("end_snapshot") or {}

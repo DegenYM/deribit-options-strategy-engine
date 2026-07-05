@@ -137,6 +137,12 @@ def test_store_nav_capture_writes_capture_nav_on_bootstrap(tmp_path: Path, monke
         index_eth_usd=Decimal("2000"),
         equity_by_book={"USDC": Decimal("25000")},
         equity_native_by_book={"BTC": Decimal("0"), "ETH": Decimal("0"), "USDC": Decimal("25000")},
+        wallet_native_by_book={
+            "BTC": Decimal("0"),
+            "ETH": Decimal("0"),
+            "USDC": Decimal("25000"),
+            "USDT": Decimal("0"),
+        },
         fee_config=InvestorFeeConfig(
             collateral_spot_btc=Decimal("0"),
             collateral_spot_eth=Decimal("0"),
@@ -191,6 +197,12 @@ def test_bootstrap_hwm_from_transaction_log(tmp_path: Path, monkeypatch: pytest.
         index_eth_usd=Decimal("3000"),
         equity_by_book={"USDC": Decimal("106000")},
         equity_native_by_book={"BTC": Decimal("0"), "ETH": Decimal("0"), "USDC": Decimal("106000")},
+        wallet_native_by_book={
+            "BTC": Decimal("0"),
+            "ETH": Decimal("0"),
+            "USDC": Decimal("106000"),
+            "USDT": Decimal("0"),
+        },
         fee_config=InvestorFeeConfig(
             collateral_spot_btc=Decimal("0"),
             collateral_spot_eth=Decimal("0"),
@@ -281,6 +293,75 @@ def test_fee_snapshot_store_roundtrip(tmp_path: Path) -> None:
     assert latest is not None
     assert latest.nav_perf == Decimal("80000")
     assert latest.equity_by_book["USDC"] == Decimal("100000")
+    assert latest.wallet_native_by_book == {}
+
+
+def test_fee_snapshot_store_wallet_roundtrip(tmp_path: Path) -> None:
+    store = FeeSnapshotStore(tmp_path / "snapshots.db")
+    store.append_snapshot(
+        ts_ms=2,
+        investor_id="jack",
+        snapshot_kind="settlement",
+        total_equity_usdc=Decimal("20000"),
+        collateral_spot_usdc=Decimal("15000"),
+        nav_perf=Decimal("5000"),
+        aum_mgmt=Decimal("20000"),
+        index_btc_usd=Decimal("60000"),
+        index_eth_usd=Decimal("2000"),
+        collateral_spot_btc=Decimal("0.25"),
+        collateral_spot_eth=Decimal("0"),
+        equity_by_book={"BTC": Decimal("12000"), "USDT": Decimal("200")},
+        wallet_native_by_book={"BTC": Decimal("0.15"), "USDT": Decimal("180")},
+    )
+    latest = store.latest_snapshot("jack")
+    assert latest is not None
+    assert latest.wallet_native_by_book["BTC"] == Decimal("0.15")
+    assert latest.wallet_native_by_book["USDT"] == Decimal("180")
+
+
+def test_snapshot_nearest_with_wallet_balances(tmp_path: Path) -> None:
+    store = FeeSnapshotStore(tmp_path / "snapshots.db")
+    period_end_ms = int(datetime(2026, 6, 30, 23, 59, tzinfo=UTC).timestamp() * 1000)
+    legacy_ts = int(datetime(2026, 7, 2, 12, 52, tzinfo=UTC).timestamp() * 1000)
+    wallet_ts = int(datetime(2026, 7, 2, 13, 53, tzinfo=UTC).timestamp() * 1000)
+    store.append_snapshot(
+        ts_ms=legacy_ts,
+        investor_id="pat",
+        snapshot_kind="settlement",
+        total_equity_usdc=Decimal("6319.79"),
+        collateral_spot_usdc=Decimal("6182.72"),
+        nav_perf=Decimal("166.84"),
+        aum_mgmt=Decimal("6319.79"),
+        index_btc_usd=Decimal("61827"),
+        index_eth_usd=Decimal("1710"),
+        collateral_spot_btc=Decimal("0.1"),
+        collateral_spot_eth=Decimal("0"),
+        equity_by_book={"BTC": Decimal("6161.96"), "USDT": Decimal("187.61")},
+    )
+    store.append_snapshot(
+        ts_ms=wallet_ts,
+        investor_id="pat",
+        snapshot_kind="settlement",
+        total_equity_usdc=Decimal("6349.57"),
+        collateral_spot_usdc=Decimal("6182.72"),
+        nav_perf=Decimal("166.84"),
+        aum_mgmt=Decimal("6349.57"),
+        index_btc_usd=Decimal("61827"),
+        index_eth_usd=Decimal("1710"),
+        collateral_spot_btc=Decimal("0.1"),
+        collateral_spot_eth=Decimal("0"),
+        equity_by_book={"BTC": Decimal("6161.96"), "USDT": Decimal("187.61")},
+        wallet_native_by_book={"BTC": Decimal("0.09138749"), "USDT": Decimal("187.61")},
+    )
+    nearest = store.snapshot_nearest("pat", target_ts_ms=period_end_ms, max_delta_ms=7 * 86_400_000)
+    assert nearest is not None
+    assert nearest.ts_ms == legacy_ts
+    wallet_snap = store.snapshot_nearest_with_wallet_balances(
+        "pat", target_ts_ms=period_end_ms, max_delta_ms=7 * 86_400_000
+    )
+    assert wallet_snap is not None
+    assert wallet_snap.ts_ms == wallet_ts
+    assert wallet_snap.wallet_native_by_book["BTC"] == Decimal("0.09138749")
 
 
 def test_resolve_hwm_prefers_store_then_config(tmp_path: Path) -> None:

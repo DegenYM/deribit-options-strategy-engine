@@ -280,6 +280,57 @@ class BundleWarmScheduler:
             self.state.last_error = str(exc)
 
 
+class TransferWarmScheduler:
+    """Periodically syncs transfer rows into sqlite and seeds the transfers cache."""
+
+    def __init__(
+        self,
+        *,
+        warm_fn: Callable[[], None],
+        interval_sec: int,
+        has_private_creds: Callable[[], bool],
+    ) -> None:
+        self._warm_fn = warm_fn
+        self._interval_sec = max(60, int(interval_sec))
+        self._has_private_creds = has_private_creds
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.state = SnapshotState()
+
+    def start(self) -> None:
+        if not self._has_private_creds():
+            LOGGER.info("transfer warm scheduler disabled: no private creds in env")
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="transfer-warm", daemon=True)
+        self.state.running = True
+        self._thread.start()
+        LOGGER.info("transfer warm scheduler started (interval=%ss)", self._interval_sec)
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        self.state.running = False
+
+    def _loop(self) -> None:
+        self._tick()
+        while not self._stop.wait(self._interval_sec):
+            self._tick()
+
+    def _tick(self) -> None:
+        self.state.last_attempt_ms = utc_now_ms()
+        try:
+            self._warm_fn()
+            self.state.last_success_ms = utc_now_ms()
+            self.state.last_error = None
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("transfer warm tick failed: %s", exc)
+            self.state.last_error = str(exc)
+
+
 class _TtlCache:
     """Trivial TTL cache — just enough to avoid hammering Deribit.
 

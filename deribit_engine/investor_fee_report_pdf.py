@@ -120,6 +120,63 @@ def _para_cell(text: str, style: ParagraphStyle, *, instrument: bool = False) ->
     return Paragraph(escape(raw), style)
 
 
+def _balance_label_para_cell(text: str, style: ParagraphStyle) -> Paragraph:
+    """Break long NAV row labels after the title so values do not overlap."""
+    raw = str(text).strip()
+    if " (" in raw:
+        title, rest = raw.split(" (", 1)
+        html = f'{escape(title)}<br/><font size="6">{escape("(" + rest)}</font>'
+        return Paragraph(html, style)
+    return Paragraph(escape(raw), style)
+
+
+def _balance_grid_table(headers: list[str], rows: list[list[str]]) -> Table:
+    """Five-column balance grid with wrapped row labels (col 0)."""
+    label_width = 54 * mm
+    asset_width = (A4[0] - 32 * mm - label_width) / 4
+    col_widths = [label_width, asset_width, asset_width, asset_width, asset_width]
+    cell_style = ParagraphStyle(
+        "BalanceCell",
+        fontName="Helvetica",
+        fontSize=7,
+        leading=9,
+        wordWrap="LTR",
+    )
+    header_style = ParagraphStyle(
+        "BalanceHeader",
+        parent=cell_style,
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=10,
+    )
+    data: list[list[Any]] = [
+        [Paragraph(f"<b>{escape(h)}</b>", header_style) if h else "" for h in headers],
+    ]
+    for row in rows:
+        cells: list[Any] = []
+        for col_idx, cell in enumerate(row):
+            if col_idx == 0:
+                cells.append(_balance_label_para_cell(cell, cell_style))
+            else:
+                cells.append(_para_cell(cell, cell_style))
+        data.append(cells)
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8eef4")),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    return table
+
+
 def _wrap_grid_table(
     headers: list[str],
     rows: list[list[str]],
@@ -431,6 +488,11 @@ def _pct_pdf(amount: Decimal | None, *, places: int = 1) -> str:
 
 def _kpi_summary_table(report) -> Table:
     profit = report.executive_profit
+    equity_note = (
+        f"realized, through {report.period_end_boundary_label}"
+        if report.day_b.uses_realized_balance
+        else (f"NAV snapshot {report.closing_mtm_snapshot_label}" if report.shows_closing_nav_snapshot else "")
+    )
     data = [
         ["Ending total equity", f"${_money(report.day_b.total_equity_usdc)}"],
         ["Total profit", f"${_signed_money_pdf(profit.total_pnl_usdc)}"],
@@ -473,6 +535,7 @@ def write_settlement_fee_report_pdf(
 ) -> Path:
     from .investor_fee_report_period import (
         build_investor_period_report,
+        iter_period_header_fields,
         period_report_title,
     )
 
@@ -482,11 +545,19 @@ def write_settlement_fee_report_pdf(
     story: list[Any] = []
 
     story.append(Paragraph(period_report_title(report), styles["title"]))
-    story.append(Paragraph(f"Investor: {report.investor_id}", styles["small"]))
-    story.append(Paragraph(f"Period: {report.period_label}", styles["small"]))
-    story.append(Paragraph(f"Period start: {report.day_a.label}", styles["small"]))
-    story.append(Paragraph(f"Period end: {report.day_b.label}", styles["small"]))
-    story.append(Paragraph(f"Generated: {_ts_fmt(report.generated_at_ms)}", styles["small"]))
+    for label, value in iter_period_header_fields(report):
+        story.append(Paragraph(f"{label}: {value}", styles["small"]))
+    note = report.nav_snapshot_end_note
+    if note:
+        story.append(Paragraph(f"Note: {note}", styles["small"]))
+    if report.balance_table_uses_realized_only:
+        story.append(
+            Paragraph(
+                "Closing balance = opening + transfers + realized P&L from closed trades; "
+                "excludes open-position unrealized marks.",
+                styles["small"],
+            )
+        )
     story.append(Spacer(1, 8))
 
     story.append(Paragraph("1. Summary", styles["h2"]))
@@ -528,11 +599,11 @@ def write_settlement_fee_report_pdf(
 
     story.append(Paragraph("3. Detailed account balances", styles["h2"]))
     story.append(
-        _grid_table(
+        _balance_grid_table(
             ["", "BTC", "ETH", "USDC", "USDT"],
             [
-                _balance_row("Period start", report.day_a.native),
-                _balance_row("Period end", report.day_b.native),
+                _balance_row(report.opening_nav_row_label, report.day_a.native),
+                _balance_row(report.closing_nav_row_label, report.day_b.native),
                 _balance_row("Period deposits", report.deposit_native),
                 _balance_row("Period withdrawals", report.withdraw_native),
                 [
@@ -543,7 +614,6 @@ def write_settlement_fee_report_pdf(
                     _signed_native_pdf(report.earned_native["USDT"], "USDT"),
                 ],
             ],
-            col_widths=[36 * mm, 30 * mm, 30 * mm, 30 * mm, 30 * mm],
         )
     )
     story.append(Spacer(1, 8))
@@ -585,7 +655,7 @@ def write_settlement_fee_report_pdf(
                 "Book",
                 "Qty",
                 "PnL native",
-                "PnL USDC",
+                "PnL USD",
                 "Reason",
             ],
             trade_rows,

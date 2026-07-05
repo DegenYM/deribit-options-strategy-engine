@@ -24,7 +24,7 @@ from .investor_cash_flow import (
     native_book_amount_to_usdc,
 )
 from .investor_fee_config import InvestorFeeConfig, load_investor_fee_config
-from .utils import utc_now_ms
+from .utils import to_decimal, utc_now_ms
 
 # Reuse exchange prefetch per API login across fee CLI bursts (fee-settle-period, etc.).
 _FEE_EXCHANGE_PREFETCH_CACHE: Any = None
@@ -60,6 +60,7 @@ class InvestorNavCapture:
     index_eth_usd: Decimal
     equity_by_book: dict[str, Decimal]
     equity_native_by_book: dict[str, Decimal]
+    wallet_native_by_book: dict[str, Decimal]
     fee_config: InvestorFeeConfig
 
 
@@ -103,6 +104,57 @@ def agreed_spot_usdc(
     return native_book_amount_to_usdc(
         btc_native, "BTC", {"BTC": index_btc_usd, "ETH": index_eth_usd}
     ) + native_book_amount_to_usdc(eth_native, "ETH", {"BTC": index_btc_usd, "ETH": index_eth_usd})
+
+
+def wallet_native_by_book_from_accounts(accounts: dict[str, Any]) -> dict[str, Decimal]:
+    """Wallet balance per book: equity minus initial margin (excludes position occupation)."""
+    out: dict[str, Decimal] = {book: Decimal("0") for book in ("BTC", "ETH", "USDC", "USDT")}
+    for book, row in (accounts or {}).items():
+        book_key = str(book).upper()
+        if book_key not in out:
+            continue
+        if not isinstance(row, dict):
+            continue
+        equity = to_decimal(row.get("equity") or 0)
+        initial_margin = to_decimal(row.get("initial_margin") or 0)
+        out[book_key] += max(Decimal("0"), equity - initial_margin)
+    return out
+
+
+def snapshot_wallet_native_by_book(row: NavSnapshotRow) -> dict[str, Decimal]:
+    """Stored wallet balances (native); empty when legacy snapshot has no wallet data."""
+    stored = row.wallet_native_by_book
+    if stored:
+        return {book: to_decimal(stored.get(book, 0)) for book in ("BTC", "ETH", "USDC", "USDT")}
+    return {book: Decimal("0") for book in ("BTC", "ETH", "USDC", "USDT")}
+
+
+def wallet_usdc_by_book(
+    wallet_native: dict[str, Decimal],
+    *,
+    index_btc_usd: Decimal,
+    index_eth_usd: Decimal,
+) -> dict[str, Decimal]:
+    index_by_ccy = {
+        "BTC": index_btc_usd,
+        "ETH": index_eth_usd,
+        "USDC": Decimal("1"),
+        "USDT": Decimal("1"),
+    }
+    return {
+        book: native_book_amount_to_usdc(wallet_native.get(book, Decimal("0")), book, index_by_ccy)
+        for book in ("BTC", "ETH", "USDC", "USDT")
+    }
+
+
+def snapshot_has_wallet_balances(row: NavSnapshotRow | dict[str, Any] | None) -> bool:
+    if row is None:
+        return False
+    if isinstance(row, dict):
+        wallet = row.get("wallet_native_by_book") or {}
+        return any(to_decimal(v) != 0 for v in wallet.values())
+    wallet = snapshot_wallet_native_by_book(row)
+    return any(v != 0 for v in wallet.values())
 
 
 def snapshot_equity_native_by_book(row: NavSnapshotRow) -> dict[str, Decimal]:
@@ -300,12 +352,14 @@ def capture_investor_nav(
     index_eth = _dec(index_map.get("ETH") or index_map.get("eth") or "0")
     total_equity = _dec(portfolio.get("total_equity_usdc"))
     equity_by_book = {str(k).upper(): _dec(v) for k, v in (portfolio.get("equity_by_book") or {}).items()}
+    account_rows = status.get("accounts") or {}
     equity_native_by_book = {
-        str(book).upper(): _dec((row or {}).get("equity") or "0")
-        for book, row in (status.get("accounts") or {}).items()
+        str(book).upper(): _dec((row or {}).get("equity") or "0") for book, row in account_rows.items()
     }
+    wallet_native_by_book = wallet_native_by_book_from_accounts(account_rows)
     for book in ("BTC", "ETH", "USDC", "USDT"):
         equity_native_by_book.setdefault(book, Decimal("0"))
+        wallet_native_by_book.setdefault(book, Decimal("0"))
     # Portfolio equity_by_book only includes books each bot tracks; raw API USDC
     # balances can differ when a sub-account omits USDC from traded_collaterals.
     if "USDC" in equity_by_book:
@@ -331,6 +385,7 @@ def capture_investor_nav(
         index_eth_usd=index_eth,
         equity_by_book=equity_by_book,
         equity_native_by_book=equity_native_by_book,
+        wallet_native_by_book=wallet_native_by_book,
         fee_config=fee_config,
     )
 
@@ -370,6 +425,7 @@ def store_nav_capture(
         collateral_spot_btc=btc_spot,
         collateral_spot_eth=eth_spot,
         equity_by_book=capture.equity_by_book,
+        wallet_native_by_book=capture.wallet_native_by_book,
         notes=notes,
     )
     return row_id, bootstrap
@@ -505,6 +561,23 @@ def average_aum_mgmt(
         Decimal("0"),
     )
     return total / Decimal(len(rows))
+
+
+def _wallet_supplement_snap(
+    store: FeeSnapshotStore,
+    investor_id: str,
+    snap: NavSnapshotRow,
+    *,
+    target_ts_ms: int,
+    max_delta_ms: int,
+) -> NavSnapshotRow | None:
+    if snapshot_has_wallet_balances(snap):
+        return None
+    return store.snapshot_nearest_with_wallet_balances(
+        investor_id,
+        target_ts_ms=target_ts_ms,
+        max_delta_ms=max_delta_ms,
+    )
 
 
 def _resolve_period_end_snapshot(
@@ -740,10 +813,23 @@ def settle_period(
             last_settlement_period=period_key,
         )
 
+    end_wallet_supplement = _wallet_supplement_snap(
+        store,
+        manifest.investor_id,
+        end_snap,
+        target_ts_ms=end_ms,
+        max_delta_ms=max_delta_ms,
+    )
+
     result = {
         **{k: (str(v) if isinstance(v, Decimal) else v) for k, v in payload.items()},
         "start_snapshot": _snapshot_dict(start_snap, fee_config=fee_config, flow_baseline=flow_baseline),
-        "end_snapshot": _snapshot_dict(end_snap, fee_config=fee_config, flow_baseline=flow_baseline),
+        "end_snapshot": _snapshot_dict(
+            end_snap,
+            fee_config=fee_config,
+            flow_baseline=flow_baseline,
+            wallet_supplement=end_wallet_supplement,
+        ),
         "agreed_spot_btc_native": str(end_bd["agreed_spot_btc_native"]),
         "agreed_spot_eth_native": str(end_bd["agreed_spot_eth_native"]),
         "agreed_spot_source": end_bd["agreed_spot_source"],
@@ -885,6 +971,7 @@ def _snapshot_dict(
     *,
     fee_config: InvestorFeeConfig | None = None,
     flow_baseline: FlowBaselineRow | None = None,
+    wallet_supplement: NavSnapshotRow | None = None,
 ) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -902,7 +989,11 @@ def _snapshot_dict(
         "notes": row.notes,
     }
     if fee_config is not None:
+        wallet_source = row
+        if wallet_supplement is not None and not snapshot_has_wallet_balances(row):
+            wallet_source = wallet_supplement
         bd = financial_breakdown_from_snapshot(row, fee_config=fee_config, flow_baseline=flow_baseline)
+        wallet_native = snapshot_wallet_native_by_book(wallet_source)
         out.update(
             {
                 "collateral_spot_usdc": str(bd["collateral_spot_usdc"]),
@@ -910,6 +1001,15 @@ def _snapshot_dict(
                 "aum_mgmt": str(bd["aum_mgmt"]),
                 "equity_native_by_book": {k: str(v) for k, v in bd["equity_native_by_book"].items()},
                 "equity_usdc_by_book": {k: str(v) for k, v in bd["equity_usdc_by_book"].items()},
+                "wallet_native_by_book": {k: str(v) for k, v in wallet_native.items()},
+                "wallet_usdc_by_book": {
+                    k: str(v)
+                    for k, v in wallet_usdc_by_book(
+                        wallet_native,
+                        index_btc_usd=row.index_btc_usd,
+                        index_eth_usd=row.index_eth_usd,
+                    ).items()
+                },
                 "agreed_spot_btc_native": str(bd["agreed_spot_btc_native"]),
                 "agreed_spot_eth_native": str(bd["agreed_spot_eth_native"]),
                 "agreed_spot_source": bd["agreed_spot_source"],

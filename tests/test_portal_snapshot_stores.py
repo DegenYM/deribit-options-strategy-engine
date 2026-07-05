@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -62,6 +63,27 @@ def test_portal_snapshot_store_dedupes_fingerprint(tmp_path: Path) -> None:
     )
     assert first is not None
     assert second is None
+
+
+def test_portal_snapshot_store_serializes_datetime_in_payload(tmp_path: Path) -> None:
+    store = PortalSnapshotStore(tmp_path / "portal.db")
+    payload = {
+        "portfolio": {"total_equity_usdc": "1000"},
+        "realized_summary": {
+            "generated_at": datetime(2026, 6, 30, 12, 0, tzinfo=UTC),
+            "summary": {"realized_pnl_usdc": "10"},
+        },
+    }
+    row_id = store.append(
+        investor_id="alice",
+        snapshot_kind="disk",
+        payload=payload,
+        content_fingerprint="datetime-test",
+    )
+    assert row_id is not None
+    row = store.latest("alice", snapshot_kind="disk")
+    assert row is not None
+    assert row.payload["realized_summary"]["generated_at"] == "2026-06-30T12:00:00+00:00"
 
 
 def test_portal_service_load_prefers_live(tmp_path: Path) -> None:

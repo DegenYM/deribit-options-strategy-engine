@@ -226,6 +226,8 @@ EARLY_EXIT_REMAINING_APR=0.08
 EARLY_EXIT_MIN_PROFIT_CAPTURE=0.45
 EARLY_EXIT_MAX_SPREAD_RATIO=0.06
 TIME_EXIT_DTE=4
+# 到期前 time exit 的最低 profit capture（0 = 不論盈虧都平倉；0.01 = 至少鎖定 1% 權利金）。
+TIME_EXIT_MIN_PROFIT_CAPTURE=0.01
 SOFT_DEFENSE_LOSS_PCT=0.30
 HARD_STOP_LOSS_PCT=0.45
 # 防守確認窗：delta/虧損觸發需連續 N 個 cycle 成立才平倉（1=立即，舊行為）。

@@ -224,6 +224,60 @@ def test_call_auth_retries_on_429(tmp_path, monkeypatch):
     assert client._access_token == "token-a"
 
 
+def test_call_auth_retries_on_maintenance_405(tmp_path, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda s: sleeps.append(s))
+    nginx_405 = (
+        "<html><head><title>405 Not Allowed</title></head>"
+        "<body><center><h1>405 Not Allowed</h1></center><hr><center>nginx</center></body></html>"
+    )
+    session = FakeSession(
+        [
+            FakeResponse({}, status_code=405, text=nginx_405),
+            FakeResponse(_auth_result()),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    result = client._call_auth(
+        {
+            "grant_type": "client_credentials",
+            "client_id": client.config.client_id,
+            "client_secret": client.config.client_secret,
+        }
+    )
+    client._apply_auth_result(result)
+
+    assert len(sleeps) == 1
+    assert client._access_token == "token-a"
+
+
+def test_call_auth_maintenance_405_raises_transient_after_retries(tmp_path, monkeypatch):
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
+    nginx_405 = "<html><center>nginx</center></html>"
+    session = FakeSession([FakeResponse({}, status_code=405, text=nginx_405)] * 4)
+    client = _make_client(tmp_path, session)
+
+    with pytest.raises(TransientExchangeError, match="system maintenance"):
+        client._call_auth(
+            {
+                "grant_type": "client_credentials",
+                "client_id": client.config.client_id,
+                "client_secret": client.config.client_secret,
+            }
+        )
+
+
+def test_idempotent_request_maintenance_405_is_transient(tmp_path, monkeypatch):
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
+    nginx_405 = "<html><center>nginx</center></html>"
+    session = FakeSession([FakeResponse({}, status_code=405, text=nginx_405)] * 5)
+    client = _make_client(tmp_path, session)
+
+    with pytest.raises(TransientExchangeError, match="system maintenance"):
+        client.get_order_book("BTC-PERPETUAL")
+
+
 def test_auth_token_cache_shared_across_clients(tmp_path, monkeypatch):
     from deribit_engine.client import _AUTH_CACHE_LOCK, _AUTH_TOKEN_CACHE
 

@@ -15,6 +15,7 @@ from ..exit_eval import (
     exit_eval_context_from_config,
     income_exit_close_premium,
     take_profit_triggered,
+    time_exit_triggered,
 )
 from ..investor_cash_flow import cash_flow_scan_currencies, sum_external_flow_native_in_window
 from ..models import (
@@ -589,7 +590,7 @@ class ManagementMixin:
         robust_exit_actions = self._maybe_covered_call_robust_spot_exit(context, group, live=live)
         if robust_exit_actions is not None:
             return robust_exit_actions
-        if group.dte_days <= self.config.time_exit_dte:
+        if self._time_exit_triggered(context, group):
             actions.extend(self._close_group(context, group, reason="time_exit", live=live))
             return actions
         if soft_trigger and not hold_on_hard:
@@ -635,6 +636,14 @@ class ManagementMixin:
     def _take_profit_triggered(self, context: RuntimeContext, group: TradeGroup) -> bool:
         close_debit = self._income_exit_close_debit(context, group)
         return take_profit_triggered(
+            group,
+            close_debit_usdc=close_debit,
+            ctx=exit_eval_context_from_config(self.config),
+        )
+
+    def _time_exit_triggered(self, context: RuntimeContext, group: TradeGroup) -> bool:
+        close_debit = self._income_exit_close_debit(context, group)
+        return time_exit_triggered(
             group,
             close_debit_usdc=close_debit,
             ctx=exit_eval_context_from_config(self.config),

@@ -49,6 +49,7 @@ class BotConfig:
     early_exit_min_profit_capture: Decimal
     early_exit_max_spread_ratio: Decimal
     time_exit_dte: int
+    time_exit_min_profit_capture: Decimal
     soft_defense_delta: Decimal
     hard_defense_delta: Decimal
     soft_defense_loss_pct: Decimal
@@ -833,6 +834,7 @@ def load_config(
         .lower(),
         income_exit_order_ttl_minutes=max(1, int(_optional(values, "INCOME_EXIT_ORDER_TTL_MINUTES", "3"))),
         time_exit_dte=int(_optional(values, "TIME_EXIT_DTE", "5")),
+        time_exit_min_profit_capture=to_decimal(_optional(values, "TIME_EXIT_MIN_PROFIT_CAPTURE", "0")),
         soft_defense_delta=to_decimal(_optional(values, "SOFT_DEFENSE_DELTA", "0.25")),
         hard_defense_delta=to_decimal(_optional(values, "HARD_DEFENSE_DELTA", "0.35")),
         soft_defense_loss_pct=to_decimal(_optional(values, "SOFT_DEFENSE_LOSS_PCT", "0.35")),

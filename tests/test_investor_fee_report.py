@@ -158,6 +158,27 @@ def test_render_settlement_fee_report_md_english(tmp_path: Path) -> None:
     assert "Total fees due" in md
     assert "Performance & fee settlement" not in md
     assert "Closed option trades" in md
+    assert "Period end: `2026-03-31 23:59 UTC`" in md
+    assert "Closing NAV snapshot" not in md
+
+
+def test_settlement_report_separates_period_end_from_nav_snapshot(tmp_path: Path) -> None:
+    from deribit_engine.investor_fee_report_period import (
+        build_investor_period_report,
+        render_period_header_lines,
+    )
+
+    (tmp_path / "deribit_engine").mkdir()
+    (tmp_path / ".env.example").write_text("", encoding="utf-8")
+    ctx = _settlement_ctx(tmp_path)
+    ctx.end_snapshot["ts_ms"] = int(datetime(2026, 4, 2, 12, 52, tzinfo=UTC).timestamp() * 1000)
+    report = build_investor_period_report(ctx, repo_root=tmp_path)
+    md = render_settlement_fee_report_md(ctx, repo_root=tmp_path)
+    header = "\n".join(render_period_header_lines(report))
+    assert "Period end: `2026-03-31 23:59 UTC`" in header
+    assert "Closing NAV snapshot (MTM): `2026-04-02 12:52 UTC`" in header
+    assert "realized P&L" in header
+    assert "realized, through 2026-03-31 23:59 UTC" in md
 
 
 def _settlement_ctx(tmp_path: Path) -> SettlementFeeReportContext:
@@ -193,7 +214,7 @@ def _settlement_ctx(tmp_path: Path) -> SettlementFeeReportContext:
             "equity_usdc_by_book": {"BTC": "6000", "ETH": "2000", "USDC": "5000"},
         },
         end_snapshot={
-            "ts_ms": int(datetime(2026, 3, 31, tzinfo=UTC).timestamp() * 1000),
+            "ts_ms": int(datetime(2026, 3, 31, 23, 59, 59, tzinfo=UTC).timestamp() * 1000),
             "nav_perf": "12000",
             "total_equity_usdc": "14000",
             "aum_mgmt": "14000",
@@ -329,6 +350,12 @@ enabled = true
             index_eth_usd=Decimal("2000"),
             equity_by_book={"USDC": Decimal("1000")},
             equity_native_by_book={"BTC": Decimal("0"), "ETH": Decimal("0"), "USDC": Decimal("1000")},
+            wallet_native_by_book={
+                "BTC": Decimal("0"),
+                "ETH": Decimal("0"),
+                "USDC": Decimal("1000"),
+                "USDT": Decimal("0"),
+            },
             fee_config=InvestorFeeConfig(
                 collateral_spot_btc=Decimal("0"),
                 collateral_spot_eth=Decimal("0"),
@@ -367,3 +394,101 @@ enabled = true
     assert out_csv_only.pdf is None
     assert out_csv_only.markdown is None
     assert out_csv_only.flows_csv is not None
+
+
+def test_sum_realized_native_by_book_from_groups() -> None:
+    from deribit_engine.investor_fee_report_period import sum_realized_native_by_book_from_groups
+
+    rows = (
+        {
+            "status": "closed",
+            "collateral_currency": "BTC",
+            "currency": "BTC",
+            "realized_pnl_collateral_native": "0.00066",
+            "profit_sweep_status": "filled",
+            "profit_sweep_amount": "0.00066",
+            "profit_sweep_quote_proceeds": "40",
+            "profit_sweep_order_id": "ord-1",
+            "closed_timestamp_ms": 1_700_000_000_000,
+        },
+    )
+    native = sum_realized_native_by_book_from_groups(
+        rows,
+        spot_index={"BTC": Decimal("60000")},
+        fill_stats={"BTC": {"display_usdt": "40", "display_native_sold": "0.00066"}},
+    )
+    assert native["BTC"] == Decimal("0")
+    assert native["USDT"] == Decimal("40")
+
+
+def test_build_realized_closing_view() -> None:
+    from deribit_engine.investor_fee_report_period import _build_realized_closing_view
+
+    opening = {book: Decimal("0") for book in ("BTC", "ETH", "USDC", "USDT")}
+    net_flow = {**opening, "BTC": Decimal("0.1")}
+    realized = {**opening, "USDT": Decimal("187.61")}
+    index_end = {"BTC": Decimal("60000"), "ETH": Decimal("2000"), "USDC": Decimal("1"), "USDT": Decimal("1")}
+    view = _build_realized_closing_view(
+        opening_native=opening,
+        net_flow=net_flow,
+        period_realized_native=realized,
+        index_end=index_end,
+        period_end_ms=1_700_000_000_000,
+        mtm_snapshot_ts_ms=1_700_100_000_000,
+    )
+    assert view.native["BTC"] == Decimal("0.1")
+    assert view.native["USDT"] == Decimal("187.61")
+    assert view.uses_realized_balance is True
+    assert view.total_equity_usdc == Decimal("6000") + Decimal("187.61")
+
+
+def test_sum_realized_options_pnl_dashboard_uses_fill_stats() -> None:
+    from deribit_engine.investor_fee_report_period import (
+        sum_realized_options_pnl_dashboard,
+        sum_realized_options_pnl_usdc,
+    )
+
+    rows = (
+        {
+            "status": "closed",
+            "collateral_currency": "BTC",
+            "currency": "BTC",
+            "realized_pnl": "44.6",
+            "realized_pnl_collateral_native": "0.00066",
+            "profit_sweep_status": "filled",
+            "profit_sweep_amount": "0.00066",
+            "profit_sweep_quote_proceeds": "40",
+            "closed_timestamp_ms": 1_700_000_000_000,
+            "entry_timestamp_ms": 1_699_000_000_000,
+        },
+    )
+    trade_rows = (
+        {
+            "realized_pnl_usdc": Decimal("44.6"),
+        },
+    )
+    fill_stats = {
+        "BTC": {
+            "display_native_sold": "0.00066",
+            "display_usdt": "52.5",
+            "net_native_sold": "0.00066",
+            "net_usdt": "52.5",
+        }
+    }
+    spot = {"BTC": Decimal("60000")}
+    per_trade = sum_realized_options_pnl_usdc(trade_rows)
+    dashboard = sum_realized_options_pnl_dashboard(rows, spot_index=spot, fill_stats=fill_stats)
+    assert per_trade == Decimal("44.6")
+    assert dashboard == Decimal("52.5")
+
+
+def test_wallet_native_by_book_from_accounts_excludes_initial_margin() -> None:
+    from deribit_engine.investor_nav_snapshot import wallet_native_by_book_from_accounts
+
+    accounts = {
+        "BTC": {"equity": "0.20", "initial_margin": "0.05"},
+        "USDT": {"equity": "100", "initial_margin": "10"},
+    }
+    wallet = wallet_native_by_book_from_accounts(accounts)
+    assert wallet["BTC"] == Decimal("0.15")
+    assert wallet["USDT"] == Decimal("90")

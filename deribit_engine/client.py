@@ -309,6 +309,11 @@ class DeribitClient:
                     time.sleep(self._backoff_with_jitter(self.AUTH_RETRY_BACKOFF_SECONDS[attempt]))
                     continue
                 raise TransientExchangeError(f"public/auth HTTP {status}")
+            if self._is_maintenance_http_block(status, response):
+                if attempt < attempts - 1:
+                    time.sleep(self._backoff_with_jitter(self.AUTH_RETRY_BACKOFF_SECONDS[attempt]))
+                    continue
+                raise TransientExchangeError("public/auth: Deribit system maintenance (POST blocked at edge); HTTP 405")
             if status >= 400:
                 raise AuthenticationError(f"public/auth failed: HTTP {status} {response.text}")
             data = self._parse_jsonrpc(response, "public/auth")
@@ -401,6 +406,14 @@ class DeribitClient:
         return seconds * (0.5 + random.random() * 0.5)
 
     @staticmethod
+    def _is_maintenance_http_block(status: int, response: requests.Response) -> bool:
+        """True when Deribit blocks POST at nginx during system maintenance (HTTP 405 HTML)."""
+        if status != 405:
+            return False
+        body = (response.text or "").lower()
+        return "nginx" in body or "not allowed" in body
+
+    @staticmethod
     def _retry_after_seconds(response: requests.Response) -> float | None:
         header = response.headers.get("Retry-After") if hasattr(response, "headers") else None
         if header is None:
@@ -420,7 +433,7 @@ class DeribitClient:
         except (TypeError, ValueError):
             code_int = 0
         auth_codes = {13009, 13010, 13004, 13007, 13008}
-        transient_codes = {10028, 10040, 10041, 10042, 10043, 10044, 10066}
+        transient_codes = {10028, 10040, 10041, 10042, 10043, 10044, 10066, 11051}
         if code_int in auth_codes:
             return AuthenticationError(text)
         if code_int in transient_codes:
@@ -506,6 +519,13 @@ class DeribitClient:
                     time.sleep(self._backoff_with_jitter(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt]))
                     continue
                 raise TransientExchangeError(f"{method_name} retryable failure: HTTP {status}")
+            if self._is_maintenance_http_block(status, response):
+                if attempt < attempts - 1:
+                    time.sleep(self._backoff_with_jitter(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt]))
+                    continue
+                raise TransientExchangeError(
+                    f"{method_name}: Deribit system maintenance (POST blocked at edge); HTTP 405"
+                )
             if self._should_retry_private_auth(
                 private=private,
                 attempt=attempt,
@@ -580,6 +600,10 @@ class DeribitClient:
                 raise TransientExchangeError(f"{method_name} rate limited: HTTP 429 (no auto-retry for unsafe calls)")
             if status in self.RETRYABLE_STATUS_CODES:
                 raise TransientExchangeError(f"{method_name} server error HTTP {status}; reconcile required")
+            if self._is_maintenance_http_block(status, response):
+                raise TransientExchangeError(
+                    f"{method_name}: Deribit system maintenance (POST blocked at edge); HTTP 405"
+                )
             if status >= 400:
                 raise ExchangeError(f"{method_name} failed: HTTP {status} {response.text}")
             payload = self._parse_jsonrpc(response, method_name)

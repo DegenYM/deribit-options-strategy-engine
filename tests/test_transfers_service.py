@@ -9,6 +9,16 @@ from deribit_engine.frontend_server.transfers_service import aggregate_transfers
 from deribit_engine.frontend_server.types import DashboardAccount
 
 
+@pytest.fixture(autouse=True)
+def _fixed_transfer_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep synthetic transfer timestamps inside the requested 30d window."""
+    fixed_now = 1_700_100_000_000
+    monkeypatch.setattr(
+        "deribit_engine.frontend_server.transfers_service.utc_now_ms",
+        lambda: fixed_now,
+    )
+
+
 class _FakeClient:
     def __init__(self, rows_by_currency: dict[str, list[dict]]):
         self.rows_by_currency = rows_by_currency

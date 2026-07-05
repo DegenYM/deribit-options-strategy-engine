@@ -32,6 +32,9 @@ from .constants import (
     DEFAULT_PREMIUM_SWEEP_FILL_STATS_CACHE_TTL_SEC,
     DEFAULT_SNAPSHOT_INTERVAL_SEC,
     DEFAULT_TRADE_JOURNAL_SYNC_INTERVAL_SEC,
+    DEFAULT_TRANSFER_WARM_DAYS,
+    DEFAULT_TRANSFER_WARM_INTERVAL_SEC,
+    DEFAULT_TRANSFER_WARM_LIMIT,
     GROUPS_CACHE_TTL_SEC,
     REPORT_CACHE_TTL_SEC,
     SERIES_CACHE_TTL_SEC,
@@ -69,6 +72,7 @@ from .types import (
     DashboardAccount,
     EquitySnapshotScheduler,
     TradeJournalSyncScheduler,
+    TransferWarmScheduler,
     _TtlCache,
 )
 
@@ -285,12 +289,16 @@ def create_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
+        if ws_hub is not None:
+            await ws_hub.start()
         if enable_scheduler:
             for scheduler in background_schedulers:
                 scheduler.start()
         try:
             yield
         finally:
+            if ws_hub is not None:
+                await ws_hub.stop()
             for scheduler in background_schedulers:
                 scheduler.stop()
 
@@ -578,6 +586,8 @@ def create_app(
                 ),
                 summary,
             )
+        if ws_hub is not None and (status is not None or groups is not None):
+            ws_hub.notify_live_warm(status=status, groups=groups)
 
     def _warm_dashboard_bundle() -> None:
         """Background warm: refresh the Deribit prefetch and reseed live caches.
@@ -620,6 +630,11 @@ def create_app(
                 override=override,
             )
             bundle_cache.seed(cache_key, payload)
+            if ws_hub is not None:
+                ws_hub.notify_live_warm(
+                    status=payload.get("status"),
+                    groups=payload.get("groups"),
+                )
             if (
                 portal_service is not None
                 and investor_portal
@@ -697,11 +712,26 @@ def create_app(
                 limit_per_account=limit,
             )
 
+    from .dashboard_ws import DashboardWsHub
     from .routes.bundle import register_bundle_routes
     from .routes.context import RouteContext
     from .routes.groups import register_groups_routes
     from .routes.stress import register_stress_routes
     from .routes.transfers import register_transfers_routes
+    from .routes.ws import register_ws_routes
+
+    def _read_cached_groups() -> dict[str, Any] | None:
+        return groups_cache.try_get(("groups", _closed_groups_cache_key(accounts)))
+
+    ws_hub: DashboardWsHub | None = None
+    if os.environ.get("FRONTEND_WS_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}:
+        ws_hub = DashboardWsHub(
+            fetch_market=lambda: spot_cache.get_or_set("spot", _fetch_spot),
+            read_status=lambda: status_cache.try_get("status"),
+            read_groups=_read_cached_groups,
+            build_health=health,
+            has_private_creds=lambda: any(_has_private_creds(account.config) for account in accounts),
+        )
 
     route_ctx = RouteContext(
         accounts=accounts,
@@ -729,6 +759,7 @@ def create_app(
     register_groups_routes(app, route_ctx)
     register_stress_routes(app, route_ctx)
     register_transfers_routes(app, route_ctx)
+    register_ws_routes(app, ws_hub=ws_hub)
 
     # Keep the investor live caches warm so Snapshot→Live is near-instant. Only the
     # investor portal uses a long status TTL, so warming the ops dashboard (15s TTL)
@@ -763,6 +794,32 @@ def create_app(
             BundleWarmScheduler(
                 warm_fn=_warm_dashboard_bundle,
                 interval_sec=bundle_warm_interval,
+                has_private_creds=lambda: any(_has_private_creds(account.config) for account in accounts),
+            )
+        )
+
+    def _warm_transfers_cache() -> None:
+        if not any(_has_private_creds(account.config) for account in accounts):
+            return
+        days = int(os.environ.get("FRONTEND_TRANSFER_WARM_DAYS", DEFAULT_TRANSFER_WARM_DAYS))
+        limit = int(os.environ.get("FRONTEND_TRANSFER_WARM_LIMIT", DEFAULT_TRANSFER_WARM_LIMIT))
+        try:
+            spot_idx = _spot_index_decimals(spot_cache.get_or_set("spot", _fetch_spot))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("transfer warm spot fetch skipped: %s", exc)
+            spot_idx = {}
+        payload = _locked_aggregate_transfers(days=days, limit=limit, index_by_ccy=spot_idx)
+        cache_key = ("transfers", days, limit, _ledger_equity_cache_key(accounts))
+        transfers_cache.seed(cache_key, payload)
+
+    if enable_scheduler:
+        transfer_warm_interval = int(
+            os.environ.get("FRONTEND_TRANSFER_WARM_INTERVAL_SEC", DEFAULT_TRANSFER_WARM_INTERVAL_SEC)
+        )
+        background_schedulers.append(
+            TransferWarmScheduler(
+                warm_fn=_warm_transfers_cache,
+                interval_sec=transfer_warm_interval,
                 has_private_creds=lambda: any(_has_private_creds(account.config) for account in accounts),
             )
         )
