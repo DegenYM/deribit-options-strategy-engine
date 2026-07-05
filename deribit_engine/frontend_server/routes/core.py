@@ -40,8 +40,7 @@ def register_core_routes(app: Any, runtime: RuntimeSetup) -> None:
                 row = store.latest()
                 if row is not None:
                     max_age_ms = (
-                        int(os.environ.get("MARKET_SNAPSHOT_INTERVAL_SEC", DEFAULT_MARKET_SNAPSHOT_INTERVAL_SEC))
-                        * 2000
+                        int(os.environ.get("MARKET_SNAPSHOT_INTERVAL_SEC", DEFAULT_MARKET_SNAPSHOT_INTERVAL_SEC)) * 2000
                     )
                     if utc_now_ms() - row.ts_ms <= max_age_ms:
                         return row.to_spot_api_payload()
@@ -286,6 +285,8 @@ def register_core_routes(app: Any, runtime: RuntimeSetup) -> None:
                 detail=runtime.api_error_detail("apr series", exc),
             ) from exc
         return JSONResponse(payload)
+
+
 def _attach_realized_summary(
     payload: dict[str, Any],
     *,

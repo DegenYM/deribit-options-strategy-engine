@@ -1089,9 +1089,7 @@ class ExecutionMixin:
             original_error,
         )
         aligned = align_option_order_amount(quantity, instrument.contract_size, instrument.min_trade_amount)
-        capacity = self._option_reduce_only_capacity(
-            instrument_name, direction, option_positions=option_positions
-        )
+        capacity = self._option_reduce_only_capacity(instrument_name, direction, option_positions=option_positions)
         order_amount = align_option_order_amount(
             min(aligned, capacity), instrument.contract_size, instrument.min_trade_amount
         )
