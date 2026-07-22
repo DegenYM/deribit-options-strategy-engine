@@ -44,6 +44,8 @@ export const STATE = {
   lastRefreshStartedMs: 0,
   lastRefreshMs: 0,
   statusErrorOnce: false,
+  /** True when Deribit auth/API reports system maintenance (HTTP 405 at edge). */
+  deribitMaintenance: false,
   lastUnderlyingIndexUsd: {},
   lastSpotUsd: { BTC: null, ETH: null },
   lastPriceChangePct24h: { BTC: null, ETH: null },

@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateMaintenanceHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, exchangeOutageBannerHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, formatRiskTierSummary, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeRiskTier, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, riskTierChipHtml, riskTierForStrategy, riskTierLabel, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, summarizeSpotExitDisposition, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumStrategyRealizedPnlUsdcAtSpot, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
@@ -108,6 +108,44 @@ export function renderTopBar(health) {
         : `strategy: ${strategy ? strategyTitle(strategy) : "?"}`;
       strategyBadge.className =
         "text-xs px-2 py-0.5 rounded-full border border-sky-500/50 bg-sky-500/10 text-sky-200";
+    }
+  }
+
+  const riskTierBadge = document.getElementById("risk-tier-badge");
+  if (riskTierBadge) {
+    const tierSummary = formatRiskTierSummary(health, STATE.status);
+    const accountTiers = [
+      ...new Set(
+        (health.accounts || [])
+          .map((account) => normalizeRiskTier(account.risk_tier))
+          .filter(Boolean)
+      ),
+    ];
+    const singleTier =
+      accountTiers.length === 1
+        ? accountTiers[0]
+        : !health.multi_account
+          ? normalizeRiskTier(health.accounts?.[0]?.risk_tier) || normalizeRiskTier(health.risk_tier)
+          : "";
+    const display = tierSummary || (singleTier ? riskTierLabel(singleTier) : "");
+    if (INVESTOR) {
+      if (display) {
+        const tone =
+          singleTier === "high" ? "danger" : singleTier === "low" ? "success" : "warning";
+        setInvestorChip(riskTierBadge, i18n("Risk tier", "風險分級"), display, tone);
+      } else {
+        riskTierBadge.hidden = true;
+        riskTierBadge.className = "inv-chip inv-chip--neutral hidden";
+        riskTierBadge.textContent = "";
+      }
+    } else if (display) {
+      riskTierBadge.hidden = false;
+      riskTierBadge.textContent = `risk: ${display}`;
+      riskTierBadge.className =
+        "text-xs px-2 py-0.5 rounded-full border border-amber-500/50 bg-amber-500/10 text-amber-200";
+    } else {
+      riskTierBadge.hidden = true;
+      riskTierBadge.textContent = "";
     }
   }
 
@@ -403,10 +441,12 @@ export function renderAccountCards(health, status) {
       const openCount = num(row.trade_group_count);
       const credsOk = account.has_private_creds;
       const strategy = row.option_strategy || account.option_strategy || "";
+      const riskTier = normalizeRiskTier(account.risk_tier || row.risk_tier || "");
       const env = row.env || account.env || "";
       const stateFile = account.state_file || row.state_file || "";
       const chips = [
         strategy ? strategyChipHtml(strategy) : "",
+        riskTier ? riskTierChipHtml(riskTier, { compact: true }) : "",
         credsOk === undefined
           ? ""
           : `<span class="chip ${credsOk ? "chip-ok" : "chip-bad"}">creds ${credsOk ? "ok" : "missing"}</span>`,
@@ -451,6 +491,11 @@ export function renderAggregate(status, report) {
   if (!root) return;
 
   const investorRealizedReady = !INVESTOR || isInvestorOverviewDisplayReady();
+  if (INVESTOR && STATE.deribitMaintenance && !investorRealizedReady) {
+    root.innerHTML = aggregateMaintenanceHtml();
+    renderDataFreshnessBadge();
+    return;
+  }
   if (
     INVESTOR &&
     !investorRealizedReady &&
@@ -465,7 +510,10 @@ export function renderAggregate(status, report) {
   const summary = investorRealizedReady ? report?.summary : null;
 
   if (!portfolio && !summary) {
-    if (INVESTOR && (STATE.refreshInFlight || !STATE.investorReady)) {
+    if (INVESTOR && STATE.deribitMaintenance) {
+      root.innerHTML = aggregateMaintenanceHtml();
+      renderDataFreshnessBadge();
+    } else if (INVESTOR && (STATE.refreshInFlight || !STATE.investorReady)) {
       root.innerHTML = aggregateSkeletonHtml();
       renderDataFreshnessBadge();
     } else {
@@ -535,6 +583,9 @@ export function renderAggregate(status, report) {
   const windowProfitDisposition = summary
     ? aggregateProfitDisposition(report, STATE.groups, status, { windowDays: windowLabelDays })
     : null;
+  const spotExitSummary = summary
+    ? summarizeSpotExitDisposition(STATE.groups, { status })
+    : null;
   const { equityNativeByBook, equityUsdByBook } = overviewEquityBreakdown(portfolio, status);
   const sinceLine =
     lifetimeStartMs !== null
@@ -556,6 +607,7 @@ export function renderAggregate(status, report) {
     lifetimeNativeByBook,
     profitCompositionByBook: profitComposition,
     lifetimeProfitDisposition,
+    spotExitSummary,
     closedCount,
     windowLabelDays,
     windowPnl,
@@ -567,8 +619,9 @@ export function renderAggregate(status, report) {
     equityUsdByBook,
   };
   const contentHtml = overviewDesktopContentHtml(overviewCtx);
+  const outageBanner = exchangeOutageBannerHtml();
   const overviewWrap = (inner) =>
-    `<div class="overview-panel-inner">${inner}<div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
+    `<div class="overview-panel-inner">${outageBanner}${inner}<div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
 
   if (INVESTOR) {
     root.innerHTML = overviewWrap(`
@@ -718,6 +771,10 @@ export function strategySummaryCardHtml(summary) {
   const avgHolding =
     summary.holdingCount > 0 ? summary.holdingSum / summary.holdingCount : null;
   const books = Array.from(summary.books).sort().join(" / ") || "—";
+  const riskTier = riskTierForStrategy(summary.id, STATE.health, STATE.status);
+  const chips = [strategyChipHtml(summary.id), riskTierChipHtml(riskTier, { compact: true })]
+    .filter(Boolean)
+    .join("");
 
   return `
     <div class="rounded-2xl border ${info.accentClass} bg-slate-900/60 p-4 shadow">
@@ -726,7 +783,7 @@ export function strategySummaryCardHtml(summary) {
           <h3 class="text-sm font-semibold tracking-wide text-slate-100">${escapeHtml(info.title)}</h3>
           <p class="text-xs text-slate-500 mt-1">${escapeHtml(info.description)}</p>
         </div>
-        ${strategyChipHtml(summary.id)}
+        <div class="flex flex-wrap justify-end gap-1 flex-shrink-0">${chips}</div>
       </div>
       <div class="stat-grid mt-4">
         <div class="stat-tile">
@@ -1033,6 +1090,7 @@ export function openPositionCardHtml(g, status, groups) {
 export function strategyOpenGroupHtml(id, rows, status, groups) {
   const normalizedId = normalizeStrategyId(id) || id;
   const info = strategyInfo(normalizedId);
+  const riskTier = riskTierForStrategy(normalizedId, STATE.health, status);
   const cardsHtml = rows.map((g) => openPositionCardHtml(g, status, groups)).join("");
   return `
     <div class="rounded-2xl border ${info.accentClass} bg-slate-900/60 shadow overflow-hidden">
@@ -1040,6 +1098,7 @@ export function strategyOpenGroupHtml(id, rows, status, groups) {
         <div class="flex flex-wrap items-center gap-2 min-w-0">
           <h3 class="text-sm font-semibold text-slate-200">${escapeHtml(info.title)}</h3>
           ${strategyChipHtml(normalizedId)}
+          ${riskTierChipHtml(riskTier, { compact: true })}
         </div>
         <span class="text-xs text-slate-500">${rows.length} ${i18n("open", "筆持倉")}</span>
       </div>

@@ -7,7 +7,7 @@
     <!-- <meta name="dashboard-api-base" content="https://your-dashboard.example.com" /> -->
     <title>Investor summary · Deribit options</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=9d27c11d10" as="script" />
+    <link rel="preload" href="/app-investor.js?v=935abedaea" as="script" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -16,7 +16,7 @@
     />
     <link rel="stylesheet" href="/tailwind.css?v=c6fde4d604" />
     <link rel="stylesheet" href="/tokens.css?v=ds003" />
-    <link rel="stylesheet" href="/styles.css?v=05f4315b36" />
+    <link rel="stylesheet" href="/styles.css?v=c00146d4ef" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -55,6 +55,7 @@
             <span id="env-badge" class="inv-chip inv-chip--neutral">Loading…</span>
             <span id="regime-badge" class="inv-chip inv-chip--neutral">Risk · —</span>
             <span id="strategy-badge" class="inv-chip inv-chip--info">Strategy · —</span>
+            <span id="risk-tier-badge" class="inv-chip inv-chip--warning hidden" hidden>Risk tier · —</span>
             <span id="profit-sweep-badge" class="inv-chip inv-chip--success hidden" hidden>Sweep · —</span>
           </div>
           <div class="investor-header-spot header-market-strip" aria-label="Spot and IV Rank">
@@ -307,6 +308,6 @@
       class="hidden"
     ></div>
 
-    <script defer src="/app-investor.js?v=9d27c11d10"></script>
+    <script defer src="/app-investor.js?v=935abedaea"></script>
   </body>
 </html>

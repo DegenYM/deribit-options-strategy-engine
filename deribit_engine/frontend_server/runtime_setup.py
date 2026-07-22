@@ -105,6 +105,14 @@ class RuntimeSetup:
 
 
 def _api_error_detail(label: str, exc: Exception, *, investor_portal: bool) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if (
+        "system maintenance" in lowered
+        or "post blocked at edge" in lowered
+        or ("http 405" in lowered and "auth" in lowered)
+    ):
+        return "deribit_maintenance: Deribit system maintenance"
     if investor_portal:
         return f"{label} unavailable"
     return f"{label} failed: {exc}"
@@ -339,15 +347,22 @@ def build_runtime_setup(
         return live_status.get("premium_sweep_fill_stats_by_book") or {}
 
     def _enrich_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        from .aggregation import SPOT_EXIT_FILL_STATS_CACHE_KEY
+
         fill_stats = _fill_stats_for_snapshot()
         cached_status = status_cache.try_get("status") or {}
         hedge_summary = cached_status.get("hedge_pnl_summary")
-        if not fill_stats and not hedge_summary:
+        spot_exit_stats = cached_status.get("spot_exit_fill_stats_by_book") or fill_stats_cache.get_stale(
+            SPOT_EXIT_FILL_STATS_CACHE_KEY
+        )
+        if not fill_stats and not hedge_summary and not spot_exit_stats:
             return payload
         out = dict(payload)
         live_status = dict(out.get("live_status") or {})
         if fill_stats:
             live_status["premium_sweep_fill_stats_by_book"] = fill_stats
+        if spot_exit_stats:
+            live_status["spot_exit_fill_stats_by_book"] = spot_exit_stats
         if hedge_summary:
             live_status["hedge_pnl_summary"] = hedge_summary
         out["live_status"] = live_status

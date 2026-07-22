@@ -9,6 +9,13 @@ from .context import RouteContext
 LOGGER = logging.getLogger(__name__)
 
 
+def _groups_error_detail(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "system maintenance" in text or "post blocked at edge" in text or ("http 405" in text and "auth" in text):
+        return "deribit_maintenance: Deribit system maintenance"
+    return f"groups failed: {exc}"
+
+
 def register_groups_routes(app: Any, ctx: RouteContext) -> None:
     from fastapi import HTTPException, Query
     from fastapi.responses import JSONResponse
@@ -42,7 +49,7 @@ def register_groups_routes(app: Any, ctx: RouteContext) -> None:
                 LOGGER.warning("dashboard /api/groups using stale cache: %s", exc)
                 payload = copy.deepcopy(stale)
             else:
-                raise HTTPException(status_code=500, detail=f"groups failed: {exc}") from exc
+                raise HTTPException(status_code=502, detail=_groups_error_detail(exc)) from exc
         try:
             spot_idx = pkg._spot_index_decimals(ctx.spot_cache.get_or_set("spot", ctx.fetch_spot))
             pkg._apply_spot_native_backfill(payload, spot_idx)

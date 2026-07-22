@@ -462,6 +462,12 @@ export function fmtFreshnessMinutes(ms) {
 }
 
 export function dataFreshnessBadgeHtml() {
+  if (STATE.deribitMaintenance) {
+    return `<span id="data-freshness-badge" class="freshness-badge freshness-badge--stale">${i18n(
+      "Deribit maintenance",
+      "Deribit 維護中"
+    )}</span>`;
+  }
   const resolved = resolvedPortfolio();
   if (resolved.source === "cache") {
     if (STATE.refreshInFlight) {
@@ -834,7 +840,51 @@ export function fmtBookEquityAllocationChips(nativeByBook, usdByBook) {
   return `<div class="overview-alloc-chips">${chips.join("")}</div>`;
 }
 
+export function isDeribitMaintenanceError(err) {
+  const raw = String(err?.message || err || "").toLowerCase();
+  if (!raw) return false;
+  if (raw.includes("deribit_maintenance")) return true;
+  if (raw.includes("system maintenance")) return true;
+  if (raw.includes("post blocked at edge")) return true;
+  return /\b405\b/.test(raw) && (raw.includes("auth") || raw.includes("deribit"));
+}
+
+export function deribitMaintenanceTitle() {
+  return i18n("Deribit under maintenance", "Deribit 維護中");
+}
+
+export function deribitMaintenanceBody() {
+  return i18n(
+    "Live portfolio data is paused while the exchange is unavailable. Please refresh later.",
+    "交易所暫時無法連線，投資組合即時資料暫停更新。請稍後再重整頁面。"
+  );
+}
+
+/** Record maintenance from a failed API error; returns true when detected. */
+export function noteDeribitMaintenance(err) {
+  if (!isDeribitMaintenanceError(err)) return false;
+  STATE.deribitMaintenance = true;
+  return true;
+}
+
+export function clearDeribitMaintenance() {
+  STATE.deribitMaintenance = false;
+}
+
+export function exchangeOutageBannerHtml() {
+  if (!STATE.deribitMaintenance) return "";
+  return `<div class="exchange-outage-banner" role="status">
+    <p class="exchange-outage-title">${escapeHtml(deribitMaintenanceTitle())}</p>
+    <p class="exchange-outage-body">${escapeHtml(deribitMaintenanceBody())}</p>
+  </div>`;
+}
+
+export function aggregateMaintenanceHtml() {
+  return `<div class="overview-panel-inner">${exchangeOutageBannerHtml()}<div id="overview-freshness-slot" class="overview-freshness-corner"></div></div>`;
+}
+
 export function aggregateSkeletonHtml() {
+  if (STATE.deribitMaintenance) return aggregateMaintenanceHtml();
   const hero = `<div class="overview-hero skeleton-block" style="min-height:6.5rem;border-radius:16px"></div>`;
   const stats = `<div class="overview-stat-row">${`<div class="overview-stat skeleton-block" style="min-height:4.5rem;border-radius:12px"></div>`.repeat(3)}</div>`;
   const headline = `<div class="overview-headline">${hero}${profitSkeletonHtml()}${stats}</div>`;
@@ -860,6 +910,7 @@ export function overviewDesktopContentHtml(ctx) {
   return `<div class="overview-stack">
     ${overviewMetricsGridHtml(ctx)}
     ${overviewProfitSectionHtml(ctx)}
+    ${overviewSpotExitSectionHtml(ctx)}
   </div>`;
 }
 
@@ -1052,9 +1103,11 @@ export function investorOpenCreditMiniHtml(byStrategy) {
   return strategyOrder(new Set(dashboardStrategyIds()))
     .map((id) => {
       const short = escapeHtml(strategyInfo(id).short);
+      const tier = riskTierForStrategy(id, STATE.health, STATE.status);
+      const tierLabel = tier ? ` · ${escapeHtml(riskTierLabel(tier, { compact: true }))}` : "";
       const n = num(byStrategy[id]);
       const text = n === null ? "—" : fmtUsd(n);
-      return `<div class="inv-mini-row"><span class="inv-mini-label">${short}</span><span class="inv-mini-value font-mono tabular-nums">${text}</span></div>`;
+      return `<div class="inv-mini-row"><span class="inv-mini-label">${short}${tierLabel}</span><span class="inv-mini-value font-mono tabular-nums">${text}</span></div>`;
     })
     .join("");
 }
@@ -1077,6 +1130,7 @@ export function investorOverviewHtml(ctx) {
       : "—";
   const winSub = summary ? sinceLine : i18n("Loading…", "載入中…");
   const swapSection = overviewProfitSectionHtml(ctx);
+  const spotExitSection = overviewSpotExitSectionHtml(ctx);
   return `<div class="inv-dashboard">
     <section class="inv-panel inv-panel--hero" aria-label="${i18n("Portfolio summary", "投資組合摘要")}">
       <div class="inv-split">
@@ -1108,6 +1162,7 @@ export function investorOverviewHtml(ctx) {
     </div>
 
     ${swapSection}
+    ${spotExitSection}
   </div>`;
 }
 
@@ -2148,15 +2203,22 @@ export function isMeaningfulNativeForBook(native, book) {
 export function profitSweepHasExchangeFill(g) {
   const status = String(g?.profit_sweep_status || "").toLowerCase();
   if (status !== "filled") return false;
+  const reason = String(g?.profit_sweep_reason || "").toLowerCase();
+  if (reason.includes("proceeds_reconciled")) {
+    const exchangeNative = num(g?.profit_sweep_exchange_native);
+    if ((exchangeNative !== null && exchangeNative > 0) || reason.includes("exchange_fully_swept")) {
+      return true;
+    }
+    const orderId = String(g?.profit_sweep_order_id || "").trim();
+    if (reason.includes("premium_amount_synced") && orderId) return true;
+    return false;
+  }
   const orderId = String(g?.profit_sweep_order_id || "").trim();
   if (orderId) return true;
-  const reason = String(g?.profit_sweep_reason || "").toLowerCase();
   if (reason.includes("exchange_fully_swept")) return true;
   if (reason.includes("unlabeled_premium_reconciled")) return true;
   if (reason.includes("manual_swap")) return true;
   if (reason.includes("dust_pool_sweep")) return true;
-  // proceeds_reconciled alone = journal pool attribution, not a per-group fill.
-  if (reason.includes("proceeds_reconciled")) return false;
   return true;
 }
 
@@ -2183,6 +2245,16 @@ export function premiumSweepFillStatsByBook(status) {
   return status?.premium_sweep_fill_stats_by_book ?? null;
 }
 
+/** Exchange VWAP stats from status (ITM / settlement spot-exit fills). */
+export function spotExitFillStatsByBook(status) {
+  return status?.spot_exit_fill_stats_by_book ?? null;
+}
+
+/** Exchange VWAP stats from status (cover restore buys after ITM exit). */
+export function spotRestoreFillStatsByBook(status) {
+  return status?.spot_restore_fill_stats_by_book ?? null;
+}
+
 /** Merge live status; retain exchange fill stats when a fast refresh omits them. */
 export function mergeStatusPayload(prev, next) {
   if (!next || typeof next !== "object") return prev ?? next ?? null;
@@ -2191,6 +2263,16 @@ export function mergeStatusPayload(prev, next) {
   const prevFill = premiumSweepFillStatsByBook(prev);
   if (!nextFill && prevFill) {
     merged.premium_sweep_fill_stats_by_book = prevFill;
+  }
+  const nextSpotExit = spotExitFillStatsByBook(next);
+  const prevSpotExit = spotExitFillStatsByBook(prev);
+  if (!nextSpotExit && prevSpotExit) {
+    merged.spot_exit_fill_stats_by_book = prevSpotExit;
+  }
+  const nextSpotRestore = spotRestoreFillStatsByBook(next);
+  const prevSpotRestore = spotRestoreFillStatsByBook(prev);
+  if (!nextSpotRestore && prevSpotRestore) {
+    merged.spot_restore_fill_stats_by_book = prevSpotRestore;
   }
   const nextHedge = next.hedge_pnl_summary;
   const prevHedge = prev?.hedge_pnl_summary;
@@ -2533,7 +2615,8 @@ function fmtProfitSwapLedgerRow(label, valuesHtml, { emptyText = "—" } = {}) {
   </div>`;
 }
 
-/** Profit-sweep panel: USDT headline + earned / sold / remaining ledger. */
+/** Profit-sweep panel: USDT headline + earned / sold / remaining ledger.
+ *  Premium swap only — never inflate with ITM spot-exit / full wallet USDT. */
 export function fmtProfitSwapPanel(disposition, summary = null) {
   if (!disposition) return "";
   const totals = summary ?? summarizeProfitDisposition(disposition, { status: STATE.status });
@@ -2544,13 +2627,7 @@ export function fmtProfitSwapPanel(disposition, summary = null) {
 
   const walletUsdt = bookEquityNative(STATE.status, "USDT");
   const journalUsdt = totals.usdtSwapped > 0 ? totals.usdtSwapped : null;
-  const displayUsdt =
-    walletUsdt !== null &&
-    journalUsdt !== null &&
-    !totals.hasPending &&
-    walletUsdt > journalUsdt + 0.5
-      ? walletUsdt
-      : journalUsdt;
+  const displayUsdt = journalUsdt;
   const usdtHeroClass =
     displayUsdt !== null && displayUsdt > 0
       ? "pnl-pos"
@@ -2573,14 +2650,6 @@ export function fmtProfitSwapPanel(disposition, summary = null) {
           "USDT wallet now (withdrawals do not reduce lifetime total above)",
           "USDT 錢包現餘（提領不影響上方累計）"
         )}: <span class="font-mono tabular-nums">${fmtUsd(walletUsdt)}</span></p>`
-      : walletUsdt !== null &&
-        journalUsdt !== null &&
-        !totals.hasPending &&
-        walletUsdt > journalUsdt + 0.5
-      ? `<p class="profit-swap-wallet-footnote text-slate-500">${i18n(
-          "Includes pre-label premium swaps in wallet not yet split per trade group",
-          "含尚未逐筆分攤的早期現貨兌換 USDT"
-        )}: <span class="font-mono tabular-nums">${fmtUsd(walletUsdt)}</span></p>`
       : "";
 
   const detailRows = [
@@ -2601,6 +2670,203 @@ export function fmtProfitSwapPanel(disposition, summary = null) {
     ${walletFootnote}
     ${detailsHtml}
   </div>`;
+}
+
+/** Journal USDT from a filled ITM / settlement spot exit. */
+export function spotExitRealizedQuoteUsdt(g) {
+  const lifetime = num(g?.spot_exit_quote_proceeds_lifetime);
+  if (lifetime !== null && lifetime > 0) return lifetime;
+  const quote = num(g?.spot_exit_quote_proceeds);
+  const status = String(g?.spot_exit_status || "").toLowerCase();
+  if (quote !== null && quote > 0 && status === "filled") return quote;
+  return null;
+}
+
+/** Journal USDT spent restoring cover after ITM spot exit. */
+export function spotRestoreRealizedQuoteUsdt(g) {
+  const lifetime = num(g?.spot_restore_quote_spent_lifetime);
+  if (lifetime !== null && lifetime > 0) return lifetime;
+  const spent = num(g?.spot_restore_quote_spent);
+  const status = String(g?.spot_restore_status || "").toLowerCase();
+  if (spent !== null && spent > 0 && status === "filled") return spent;
+  return null;
+}
+
+/** Normalize groups payload (`{open,closed}`) or a flat row list for spot-exit rollup. */
+function spotExitGroupRows(groups) {
+  if (Array.isArray(groups)) return groups;
+  if (!groups || typeof groups !== "object") return [];
+  const closed = Array.isArray(groups.closed) ? groups.closed : [];
+  const open = Array.isArray(groups.open) ? groups.open : [];
+  return closed.length || open.length ? [...closed, ...open] : [];
+}
+
+/** Roll up filled ITM spot exits + restores (+ exchange fill stats when present). */
+export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
+  const fillStats = spotExitFillStatsByBook(status ?? STATE.status);
+  const restoreStats = spotRestoreFillStatsByBook(status ?? STATE.status);
+  const soldNative = { BTC: 0, ETH: 0 };
+  const soldQuote = { BTC: 0, ETH: 0 };
+  const soldAvg = {};
+  const boughtNative = { BTC: 0, ETH: 0 };
+  const boughtQuote = { BTC: 0, ETH: 0 };
+  const boughtAvg = {};
+  let any = false;
+  for (const g of spotExitGroupRows(groups)) {
+    const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
+    if (book !== "BTC" && book !== "ETH") continue;
+    if (String(g?.spot_exit_status || "").toLowerCase() === "filled") {
+      const native = num(g?.spot_exit_amount) ?? 0;
+      const quote = spotExitRealizedQuoteUsdt(g) ?? 0;
+      if (native > 0) {
+        soldNative[book] += native;
+        any = true;
+      }
+      if (quote > 0) {
+        soldQuote[book] += quote;
+        any = true;
+      }
+    }
+    if (String(g?.spot_restore_status || "").toLowerCase() === "filled") {
+      const native = num(g?.spot_restore_amount) ?? 0;
+      const quote = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+      if (native > 0) {
+        boughtNative[book] += native;
+        any = true;
+      }
+      if (quote > 0) {
+        boughtQuote[book] += quote;
+        any = true;
+      }
+    }
+  }
+  for (const book of PROFIT_SWEEP_BOOKS) {
+    const exchange = fillStats?.[book];
+    const displayNative = num(exchange?.native_sold);
+    const displayUsdt = num(exchange?.usdt);
+    if (displayNative !== null && displayNative > 0 && displayUsdt !== null && displayUsdt > 0) {
+      soldNative[book] = displayNative;
+      soldQuote[book] = displayUsdt;
+      any = true;
+    }
+    const restore = restoreStats?.[book];
+    const restoreNative = num(restore?.native_bought);
+    const restoreUsdt = num(restore?.usdt_spent);
+    if (restoreNative !== null && restoreNative > 0 && restoreUsdt !== null && restoreUsdt > 0) {
+      boughtNative[book] = restoreNative;
+      boughtQuote[book] = restoreUsdt;
+      any = true;
+    }
+    if (soldNative[book] > 0 && soldQuote[book] > 0) {
+      soldAvg[book] = profitSwapDisplayAvg(book, soldQuote[book], soldNative[book]);
+    }
+    if (boughtNative[book] > 0 && boughtQuote[book] > 0) {
+      boughtAvg[book] = profitSwapDisplayAvg(book, boughtQuote[book], boughtNative[book]);
+    }
+  }
+  if (!any) return null;
+  const usdtSold = PROFIT_SWEEP_BOOKS.reduce((sum, book) => sum + (soldQuote[book] || 0), 0);
+  const usdtBought = PROFIT_SWEEP_BOOKS.reduce((sum, book) => sum + (boughtQuote[book] || 0), 0);
+  return {
+    soldNative,
+    soldQuote,
+    soldAvg,
+    boughtNative,
+    boughtQuote,
+    boughtAvg,
+    usdtSold,
+    usdtBought,
+    usdtNet: usdtSold - usdtBought,
+    usdtTotal: usdtSold,
+  };
+}
+
+function fmtSpotExitSoldSlot(summary, book) {
+  const sold = num(summary.soldNative?.[book]);
+  if (sold === null || sold <= 0) return fmtProfitSwapEmptySlot();
+  const quote = num(summary.soldQuote?.[book]);
+  const subParts = [];
+  if (quote !== null && quote > 0) {
+    subParts.push(`<span class="font-mono tabular-nums pnl-pos">${fmtProfitUsdt(quote)} USDT</span>`);
+    const avgOverride = num(summary.soldAvg?.[book]);
+    const avg =
+      avgOverride !== null && avgOverride > 0
+        ? avgOverride
+        : profitSwapDisplayAvg(book, quote, sold);
+    subParts.push(
+      `<span class="profit-sweep-avg-price font-mono tabular-nums">${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}</span>`
+    );
+  }
+  return `<div class="profit-swap-book-slot">
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums pnl-neg">-${fmtProfitNative(book, sold)}</span></div>
+    <div class="profit-swap-book-slot-sub">${subParts.join('<span class="profit-swap-book-slot-sep" aria-hidden="true">·</span>')}</div>
+  </div>`;
+}
+
+function fmtSpotExitBoughtSlot(summary, book) {
+  const bought = num(summary.boughtNative?.[book]);
+  if (bought === null || bought <= 0) return fmtProfitSwapEmptySlot();
+  const quote = num(summary.boughtQuote?.[book]);
+  const subParts = [];
+  if (quote !== null && quote > 0) {
+    subParts.push(`<span class="font-mono tabular-nums pnl-neg">${fmtProfitUsdt(quote)} USDT</span>`);
+    const avgOverride = num(summary.boughtAvg?.[book]);
+    const avg =
+      avgOverride !== null && avgOverride > 0
+        ? avgOverride
+        : profitSwapDisplayAvg(book, quote, bought);
+    subParts.push(
+      `<span class="profit-sweep-avg-price font-mono tabular-nums">${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}</span>`
+    );
+  }
+  return `<div class="profit-swap-book-slot">
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums pnl-pos">+${fmtProfitNative(book, bought)}</span></div>
+    <div class="profit-swap-book-slot-sub">${subParts.join('<span class="profit-swap-book-slot-sep" aria-hidden="true">·</span>')}</div>
+  </div>`;
+}
+
+/** ITM / settlement spot-exit panel — collateral liquidation, not premium Profit swap. */
+export function fmtSpotExitPanel(summary) {
+  if (!summary) return "";
+  const hasSold = PROFIT_SWEEP_BOOKS.some((book) => (num(summary?.soldNative?.[book]) ?? 0) > 0);
+  const hasBought = PROFIT_SWEEP_BOOKS.some((book) => (num(summary?.boughtNative?.[book]) ?? 0) > 0);
+  if (!hasSold && !hasBought) return "";
+  const activeBooks = PROFIT_SWEEP_BOOKS.filter(
+    (book) => (num(summary.soldNative?.[book]) ?? 0) > 0 || (num(summary.boughtNative?.[book]) ?? 0) > 0
+  );
+  if (!activeBooks.length) return "";
+  const net = num(summary.usdtNet) ?? (num(summary.usdtSold) ?? 0) - (num(summary.usdtBought) ?? 0);
+  const usdtHeroText = Math.abs(net) > 0.005 ? fmtProfitUsdt(net) : "—";
+  const usdtHeroClass = Math.abs(net) > 0.005 ? pnlClass(net) : "";
+  const detailRows = [
+    fmtProfitSwapColumnHtml(summary, i18n("Sold", "已賣出"), activeBooks, fmtSpotExitSoldSlot),
+  ];
+  if (hasBought) {
+    detailRows.push(
+      fmtProfitSwapColumnHtml(summary, i18n("Bought back", "已買回"), activeBooks, fmtSpotExitBoughtSlot)
+    );
+  }
+  return `<div class="profit-disposition-panel profit-swap-panel spot-exit-panel">
+    <div class="profit-swap-kpi">
+      <span class="profit-swap-kpi-label">${i18n("Net USDT (exit − restore)", "淨 USDT（賣出 − 買回）")}</span>
+      <span class="profit-swap-kpi-value font-mono tabular-nums ${usdtHeroClass}">${usdtHeroText}</span>
+    </div>
+    <div class="profit-swap-detail">${detailRows.join("")}</div>
+  </div>`;
+}
+
+export function overviewSpotExitSectionHtml(ctx) {
+  const { spotExitSummary } = ctx;
+  if (!spotExitSummary) return "";
+  const body = fmtSpotExitPanel(spotExitSummary);
+  if (!body) return "";
+  return `<section class="overview-composition-card overview-composition-card--swap overview-composition-card--spot-exit" aria-label="${i18n("ITM spot exit", "ITM 現貨退場")}">
+    <header class="overview-composition-head">
+      <h3 class="overview-composition-title">${i18n("ITM spot exit", "ITM 現貨退場")}</h3>
+      <span class="overview-composition-sub">${i18n("Cover → USDT", "Cover → USDT")}</span>
+    </header>
+    ${body}
+  </section>`;
 }
 
 /** Realized P&L meta: simple book chips, or full swap panel when profit sweep applies. */
@@ -2955,6 +3221,87 @@ export function strategyChipHtml(id, { compact = false } = {}) {
   return `<span class="chip ${cls}${compactClass}">${escapeHtml(label)}</span>`;
 }
 
+export function normalizeRiskTier(raw) {
+  const tier = String(raw || "")
+    .trim()
+    .toLowerCase();
+  if (tier === "low" || tier === "medium" || tier === "high") return tier;
+  return "";
+}
+
+export function riskTierLabel(tier, { compact = false } = {}) {
+  const key = normalizeRiskTier(tier);
+  if (!key) return "—";
+  if (INVESTOR && INVESTOR_ZH) {
+    if (compact) return key === "low" ? "低" : key === "high" ? "高" : "中";
+    return key === "low" ? "低風險" : key === "high" ? "高風險" : "中風險";
+  }
+  if (compact) return key === "low" ? "Low" : key === "high" ? "High" : "Med";
+  return key === "low" ? "Low" : key === "high" ? "High" : "Medium";
+}
+
+export function riskTierChipClass(tier) {
+  const key = normalizeRiskTier(tier);
+  if (key === "low") return "chip-risk-low";
+  if (key === "high") return "chip-risk-high";
+  if (key === "medium") return "chip-risk-medium";
+  return "chip-muted";
+}
+
+export function riskTierChipHtml(tier, { compact = false } = {}) {
+  const key = normalizeRiskTier(tier);
+  if (!key) return "";
+  const compactClass = compact ? " chip--compact" : "";
+  return `<span class="chip ${riskTierChipClass(key)}${compactClass}">${escapeHtml(
+    riskTierLabel(key, { compact })
+  )}</span>`;
+}
+
+export function dashboardAccountMetaRows(health, status) {
+  const fromHealth = Array.isArray(health?.accounts) ? health.accounts : [];
+  if (fromHealth.length) return fromHealth;
+  const fromStatus = Array.isArray(status?.dashboard_accounts) ? status.dashboard_accounts : [];
+  return fromStatus;
+}
+
+/** Risk tier for a strategy id from health/status account metadata; "" if unknown. */
+export function riskTierForStrategy(strategyIdRaw, health, status) {
+  const id = normalizeStrategyId(strategyIdRaw);
+  const accounts = dashboardAccountMetaRows(health, status);
+  const tiers = [
+    ...new Set(
+      accounts
+        .filter((account) => normalizeStrategyId(account.option_strategy) === id)
+        .map((account) => normalizeRiskTier(account.risk_tier))
+        .filter(Boolean)
+    ),
+  ];
+  if (tiers.length === 1) return tiers[0];
+  if (tiers.length > 1) return "";
+  if (!health?.multi_account && accounts.length === 1) {
+    return normalizeRiskTier(accounts[0].risk_tier);
+  }
+  return "";
+}
+
+/** Compact summary of configured tiers across dashboard accounts. */
+export function formatRiskTierSummary(health, status) {
+  const tiers = [
+    ...new Set(
+      dashboardAccountMetaRows(health, status)
+        .map((account) => normalizeRiskTier(account.risk_tier))
+        .filter(Boolean)
+    ),
+  ];
+  if (!tiers.length) return "";
+  if (tiers.length === 1) return riskTierLabel(tiers[0]);
+  const order = { low: 0, medium: 1, high: 2 };
+  return tiers
+    .sort((a, b) => (order[a] ?? 9) - (order[b] ?? 9))
+    .map((tier) => riskTierLabel(tier, { compact: true }))
+    .join(" / ");
+}
+
 export function tradeGroupKey(g) {
   return [
     String(g?.account_name || ""),
@@ -2994,6 +3341,20 @@ const TRADE_GROUP_ENRICH_KEYS = [
   "profit_sweep_order_id",
   "profit_sweep_quote_proceeds",
   "profit_sweep_reason",
+  "spot_exit_status",
+  "spot_exit_amount",
+  "spot_exit_instrument_name",
+  "spot_exit_order_id",
+  "spot_exit_reason",
+  "spot_exit_quote_proceeds",
+  "spot_exit_quote_proceeds_lifetime",
+  "spot_restore_status",
+  "spot_restore_amount",
+  "spot_restore_instrument_name",
+  "spot_restore_order_id",
+  "spot_restore_reason",
+  "spot_restore_quote_spent",
+  "spot_restore_quote_spent_lifetime",
 ];
 
 export function hasTradeGroupValue(v) {
@@ -3916,6 +4277,71 @@ export function profitSweepMetaLine(g) {
   return null;
 }
 
+function spotExitAvgSuffix(g, book, soldNative) {
+  const quoteRaw = g?.spot_exit_quote_proceeds_lifetime ?? g?.spot_exit_quote_proceeds;
+  const quote = num(quoteRaw);
+  const sold = num(soldNative);
+  if (quote === null || quote <= 0 || sold === null || sold <= 0) return "";
+  const avg = profitSwapDisplayAvg(book, quoteRaw ?? quote, soldNative ?? sold);
+  if (avg === null) return "";
+  return ` · ${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}`;
+}
+
+/** Closed-trade meta: ITM / settlement cover sell (not premium Profit swap). */
+export function spotExitMetaLine(g) {
+  const status = String(g?.spot_exit_status || "").toLowerCase();
+  if (!status) return null;
+  const inst = String(g?.spot_exit_instrument_name || "");
+  const base = inst.split("_")[0] || String(g?.currency || "").toUpperCase() || "—";
+  const amt = g?.spot_exit_amount;
+  const amtDisplay =
+    amt !== undefined && amt !== null && amt !== "" ? fmtProfitNative(base, amt) : "—";
+  if (status === "filled") {
+    const quoteRaw = g?.spot_exit_quote_proceeds_lifetime ?? g?.spot_exit_quote_proceeds;
+    const quoteNum = num(quoteRaw);
+    const quoteDisplay =
+      quoteRaw !== undefined &&
+      quoteRaw !== null &&
+      quoteRaw !== "" &&
+      quoteNum !== null &&
+      quoteNum > 0
+        ? fmtProfitUsdt(quoteRaw).replace(/^\$/, "")
+        : null;
+    const avgSuffix = spotExitAvgSuffix(g, base, amt);
+    return [
+      i18n("ITM sold", "ITM 已賣"),
+      quoteDisplay
+        ? `${amtDisplay} ${base} → ${quoteDisplay} USDT${avgSuffix}`
+        : amtDisplay !== "—"
+          ? `${amtDisplay} ${base} → USDT${avgSuffix}`
+          : i18n("filled", "已成交"),
+    ];
+  }
+  if (status === "pending" || status === "submitted") {
+    return [
+      i18n("ITM exit", "ITM 退場"),
+      amtDisplay !== "—"
+        ? `${amtDisplay} ${base} → USDT (${i18n("pending", "待成交")})`
+        : i18n("pending", "待成交"),
+    ];
+  }
+  if (status === "failed") {
+    return [
+      i18n("ITM exit", "ITM 退場"),
+      amtDisplay !== "—"
+        ? `${amtDisplay} ${base} (${i18n("failed", "失敗")})`
+        : i18n("failed", "失敗"),
+    ];
+  }
+  if (status === "skipped") {
+    return [
+      i18n("ITM exit", "ITM 退場"),
+      i18n("below min size, skipped", "低於最小成交單位，未賣出"),
+    ];
+  }
+  return null;
+}
+
 export function activityClosedRows(status, report, groups) {
   return mergedClosedRows(report, groups, 500, status).filter((g) =>
     isDashboardStrategy(strategyId(g))
@@ -4045,6 +4471,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
         ? [i18n("Held", "持有"), `${fmtNum(holding, 1)}${INVESTOR_ZH ? " 天" : "d"}`]
         : null,
       profitSweepMetaLine(g),
+      spotExitMetaLine(g),
     ].filter(Boolean);
     const pnlValue =
       pnl !== null
@@ -4188,6 +4615,9 @@ export function formatFetchError(err, fallback = "Request failed") {
       "無法連線至 Dashboard 伺服器，請確認服務是否正在執行。"
     );
   }
+  if (isDeribitMaintenanceError(err)) {
+    return `${deribitMaintenanceTitle()} — ${deribitMaintenanceBody()}`;
+  }
   const raw = String(err?.message || err || fallback);
   if (/\b524\b/.test(raw)) {
     return i18n(
@@ -4232,7 +4662,12 @@ export async function fetchJson(url, options = {}) {
       const body = await res.json();
       if (body?.detail) detail = `${res.status} ${body.detail}`;
     } catch (_) {}
-    if (FETCH_JSON_RETRYABLE_STATUS.has(res.status) && httpAttempt < FETCH_JSON_MAX_RETRIES) {
+    // Maintenance 502s will not recover on retry — fail fast for investor UX.
+    if (
+      FETCH_JSON_RETRYABLE_STATUS.has(res.status) &&
+      httpAttempt < FETCH_JSON_MAX_RETRIES &&
+      !isDeribitMaintenanceError(detail)
+    ) {
       httpAttempt += 1;
       await delay(FETCH_JSON_RETRY_BASE_MS * httpAttempt);
       continue;

@@ -187,6 +187,8 @@ class PortalSnapshotService:
         payload["live_status"] = {
             "underlying_index_usd": status.get("underlying_index_usd") or {},
             "premium_sweep_fill_stats_by_book": status.get("premium_sweep_fill_stats_by_book") or {},
+            "spot_exit_fill_stats_by_book": status.get("spot_exit_fill_stats_by_book") or {},
+            "spot_restore_fill_stats_by_book": status.get("spot_restore_fill_stats_by_book") or {},
             "hedge_pnl_summary": status.get("hedge_pnl_summary") or {},
         }
         fp = _fingerprint(
@@ -194,6 +196,8 @@ class PortalSnapshotService:
                 **payload["_fingerprint_basis"],
                 "live": status.get("underlying_index_usd"),
                 "fill_stats": status.get("premium_sweep_fill_stats_by_book"),
+                "spot_exit_fill_stats": status.get("spot_exit_fill_stats_by_book"),
+                "spot_restore_fill_stats": status.get("spot_restore_fill_stats_by_book"),
                 "hedge_pnl": status.get("hedge_pnl_summary"),
             }
         )

@@ -592,6 +592,29 @@ html {
   padding: var(--spacing-2xl);
 }
 
+.exchange-outage-banner {
+  margin: 0 0 1rem;
+  padding: 1rem 1.1rem;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-semantic-warning) 45%, transparent);
+  background: color-mix(in srgb, var(--color-semantic-warning) 16%, transparent);
+}
+
+.exchange-outage-title {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--color-semantic-warning-text) 95%, transparent);
+}
+
+.exchange-outage-body {
+  margin: 0.35rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--color-text-secondary) 92%, transparent);
+}
+
 .overview-panel-inner {
   position: relative;
   padding-bottom: 1.75rem;
@@ -1099,6 +1122,22 @@ html {
   border-color: color-mix(in srgb, var(--color-semantic-warning) 45%, transparent);
   background: color-mix(in srgb, var(--color-semantic-warning) 10%, transparent);
   color: var(--color-semantic-warning-text);
+}
+
+.chip-risk-low {
+  border-color: color-mix(in srgb, var(--color-semantic-success) 50%, transparent);
+  background: color-mix(in srgb, var(--color-semantic-success) 12%, transparent);
+  color: var(--color-semantic-success-text);
+}
+.chip-risk-medium {
+  border-color: color-mix(in srgb, var(--color-semantic-warning) 50%, transparent);
+  background: color-mix(in srgb, var(--color-semantic-warning) 12%, transparent);
+  color: var(--color-semantic-warning-text);
+}
+.chip-risk-high {
+  border-color: color-mix(in srgb, var(--color-semantic-danger) 50%, transparent);
+  background: color-mix(in srgb, var(--color-semantic-danger) 12%, transparent);
+  color: var(--color-semantic-danger-text);
 }
 
 table tbody tr:hover {

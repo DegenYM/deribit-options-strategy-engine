@@ -17,7 +17,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { applyDashboardBundlePayload, dashboardBundleUrl, delay, fetchJson, formatFetchError, isInvestorOverviewDisplayReady, mergeStatusPayload, num, premiumSweepFillStatsByBook, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, transfersUrl, updateUnderlyingIndexCache, applyDiskGroupsPayload } from "./domain.js";
+import { applyDashboardBundlePayload, clearDeribitMaintenance, dashboardBundleUrl, delay, fetchJson, formatFetchError, isInvestorOverviewDisplayReady, mergeStatusPayload, noteDeribitMaintenance, num, premiumSweepFillStatsByBook, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, transfersUrl, updateUnderlyingIndexCache, applyDiskGroupsPayload } from "./domain.js";
 import { saveInvestorCache } from "./investor-cache.js";
 import { loadChartJs } from "./chart-vendor.js";
 import { formatDateTimeHmsLocal } from "./date-time.js";
@@ -43,6 +43,17 @@ function showRefreshFetchToast(
   err,
   { retry, hasCachedData = false, silentIfLimited = false, silent = false } = {},
 ) {
+  if (noteDeribitMaintenance(err)) {
+    if (INVESTOR && !STATE.investorReady) {
+      setInvestorPageReady(true);
+    }
+    invokeRenderDashboard();
+    if (!STATE.statusErrorOnce) {
+      showToast(formatFetchError(err), retry ? { retry } : undefined);
+      STATE.statusErrorOnce = true;
+    }
+    return;
+  }
   if (silent) {
     console.warn(`[dashboard] ${label} fetch failed`, err);
     return;
@@ -527,11 +538,25 @@ export async function fetchStatusWithTimeout() {
     const d = await Promise.race([fetchJson("/api/status"), timeoutPromise]);
     STATE.status = mergeStatusPayload(STATE.status, d);
     STATE.statusErrorOnce = false;
+    clearDeribitMaintenance();
     STATE.dataFreshness.source = "live";
     STATE.dataFreshness.live = true;
     STATE.dataFreshness.statusMs = 0;
     return d;
   } catch (err) {
+    if (noteDeribitMaintenance(err)) {
+      if (INVESTOR && !STATE.investorReady) {
+        setInvestorPageReady(true);
+      }
+      if (!STATE.statusErrorOnce) {
+        showToast(formatFetchError(err), {
+          retry: () => refreshAll({ force: true, renderDashboard: persistentRenderDashboard }),
+        });
+        STATE.statusErrorOnce = true;
+      }
+      invokeRenderDashboard();
+      return null;
+    }
     if (timedOut && STATE.portfolioSnapshot?.portfolio) {
       if (!STATE.statusErrorOnce) {
         showToast(
@@ -545,11 +570,17 @@ export async function fetchStatusWithTimeout() {
       fetchJson("/api/status")
         .then((d) => {
           STATE.status = mergeStatusPayload(STATE.status, d);
+          clearDeribitMaintenance();
           STATE.dataFreshness.source = "live";
           STATE.dataFreshness.live = true;
           invokeRenderDashboard();
         })
-        .catch(() => {});
+        .catch((lateErr) => {
+          if (noteDeribitMaintenance(lateErr)) {
+            if (INVESTOR && !STATE.investorReady) setInvestorPageReady(true);
+            invokeRenderDashboard();
+          }
+        });
       return null;
     }
     STATE.status = null;
@@ -955,6 +986,10 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
           scheduleRender();
         })
         .catch((err) => {
+          if (noteDeribitMaintenance(err)) {
+            if (INVESTOR && !STATE.investorReady) setInvestorPageReady(true);
+            scheduleRender();
+          }
           showRefreshFetchToast(i18n("groups", "持倉"), err, {
             hasCachedData: Boolean(STATE.groups?.open?.length || STATE.groups?.closed?.length),
             silentIfLimited,
@@ -971,9 +1006,21 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
         .then((d) => {
           STATE.status = mergeStatusPayload(STATE.status, d);
           STATE.statusErrorOnce = false;
+          clearDeribitMaintenance();
           scheduleRender();
         })
         .catch((err) => {
+          if (noteDeribitMaintenance(err)) {
+            if (INVESTOR && !STATE.investorReady) setInvestorPageReady(true);
+            scheduleRender();
+            if (!STATE.statusErrorOnce) {
+              showToast(formatFetchError(err), {
+                retry: () => refreshAll({ force: true, renderDashboard: persistentRenderDashboard }),
+              });
+              STATE.statusErrorOnce = true;
+            }
+            return;
+          }
           STATE.status = null;
           if (!STATE.statusErrorOnce) {
             showToast(`${i18n("status", "即時狀態")}: ${formatFetchError(err)}`, {

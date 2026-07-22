@@ -13,6 +13,13 @@ _BUNDLE_SECTIONS = frozenset({"status", "groups", "realized_summary"})
 _DEFAULT_BUNDLE_SECTIONS = frozenset({"status", "groups", "realized_summary"})
 
 
+def _exchange_http_detail(label: str, exc: Exception) -> str:
+    text = str(exc).lower()
+    if "system maintenance" in text or "post blocked at edge" in text or ("http 405" in text and "auth" in text):
+        return "deribit_maintenance: Deribit system maintenance"
+    return f"{label} failed: {exc}"
+
+
 def _parse_bundle_sections(raw: str | None) -> frozenset[str]:
     if raw is None or not raw.strip():
         return _DEFAULT_BUNDLE_SECTIONS
@@ -88,7 +95,7 @@ def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
                 headers: dict[str, str] = {"X-Cache-Stale": "true"}
                 return JSONResponse(pkg._decimalize(ctx.finalize_dashboard_bundle(payload)), headers=headers)
             LOGGER.warning("dashboard /api/dashboard_bundle failed: %s", exc, exc_info=True)
-            raise HTTPException(status_code=502, detail=f"dashboard bundle failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=_exchange_http_detail("dashboard bundle", exc)) from exc
         headers: dict[str, str] = {}
         age_ms = ctx.bundle_cache.cache_age_ms(cache_key)
         if age_ms is not None:
@@ -112,7 +119,7 @@ def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
                     headers["X-Cache-Age-Ms"] = str(age_ms)
                 return JSONResponse(pkg._decimalize(payload), headers=headers)
             LOGGER.warning("dashboard /api/status aggregate failed: %s", exc, exc_info=True)
-            raise HTTPException(status_code=502, detail=f"status failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=_exchange_http_detail("status", exc)) from exc
         headers: dict[str, str] = {}
         age_ms = ctx.status_cache.cache_age_ms("status")
         if age_ms is not None:
@@ -127,5 +134,5 @@ def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
             payload = ctx.report_cache.get_or_set(("report", days), lambda: ctx.locked_aggregate_report(days))
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("dashboard /api/report aggregate failed: %s", exc, exc_info=True)
-            raise HTTPException(status_code=502, detail=f"report failed: {exc}") from exc
+            raise HTTPException(status_code=502, detail=_exchange_http_detail("report", exc)) from exc
         return JSONResponse(pkg._decimalize(payload))

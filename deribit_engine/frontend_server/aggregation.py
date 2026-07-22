@@ -364,6 +364,8 @@ def _aggregate_status(
     active_accounts = [account for account in accounts if account.name in payload_by_name]
     equity_statuses = _dedupe_statuses_for_equity_aggregate(active_accounts, statuses)
     fill_stats = _aggregate_premium_sweep_fill_stats(statuses)
+    spot_exit_stats = _aggregate_spot_exit_fill_stats(statuses)
+    spot_restore_stats = _aggregate_spot_restore_fill_stats(statuses)
     aggregated: dict[str, Any] = {
         "env": "multi" if len(accounts) > 1 else accounts[0].config.env,
         "portfolio": _aggregate_portfolios(active_accounts, statuses, equity_statuses=equity_statuses),
@@ -378,6 +380,7 @@ def _aggregate_status(
                 "name": account.name,
                 "env": account.config.env,
                 "option_strategy": account.config.option_strategy,
+                "risk_tier": account.config.risk_tier,
                 "state_file": str(account.state_path),
             }
             for account in accounts
@@ -387,6 +390,7 @@ def _aggregate_status(
                 "name": account.name,
                 "env": payload.get("env"),
                 "option_strategy": account.config.option_strategy,
+                "risk_tier": account.config.risk_tier,
                 "portfolio": payload.get("portfolio"),
                 "accounts": payload.get("accounts") or {},
                 "trade_group_count": payload.get("trade_group_count"),
@@ -397,6 +401,10 @@ def _aggregate_status(
     }
     if fill_stats:
         aggregated["premium_sweep_fill_stats_by_book"] = fill_stats
+    if spot_exit_stats:
+        aggregated["spot_exit_fill_stats_by_book"] = spot_exit_stats
+    if spot_restore_stats:
+        aggregated["spot_restore_fill_stats_by_book"] = spot_restore_stats
     hedge_summary = _aggregate_hedge_pnl(active_accounts)
     if hedge_summary:
         aggregated["hedge_pnl_summary"] = hedge_summary
@@ -482,6 +490,72 @@ def _aggregate_premium_sweep_fill_stats(
 
 
 FILL_STATS_CACHE_KEY = "premium_sweep_fill_stats"
+SPOT_EXIT_FILL_STATS_CACHE_KEY = "spot_exit_fill_stats"
+SPOT_RESTORE_FILL_STATS_CACHE_KEY = "spot_restore_fill_stats"
+
+_SPOT_EXIT_FILL_STAT_SUM_KEYS = (
+    "native_sold",
+    "usdt",
+)
+
+_SPOT_RESTORE_FILL_STAT_SUM_KEYS = (
+    "native_bought",
+    "usdt_spent",
+)
+
+
+def _aggregate_spot_exit_fill_stats(
+    statuses: list[dict[str, Any]],
+) -> dict[str, dict[str, str]] | None:
+    from ..utils import format_decimal
+
+    merged: dict[str, dict[str, Decimal]] = {}
+    for payload in statuses:
+        for book, row in (payload.get("spot_exit_fill_stats_by_book") or {}).items():
+            book_key = str(book).upper()
+            if book_key not in merged:
+                merged[book_key] = {key: Decimal("0") for key in _SPOT_EXIT_FILL_STAT_SUM_KEYS}
+            for key in _SPOT_EXIT_FILL_STAT_SUM_KEYS:
+                merged[book_key][key] += _dec(row.get(key))
+    if not merged:
+        return None
+    out: dict[str, dict[str, str]] = {}
+    for book, totals in merged.items():
+        native = totals["native_sold"]
+        usdt = totals["usdt"]
+        out[book] = {
+            "native_sold": format_decimal(native, 8),
+            "usdt": format_decimal(usdt, 4),
+            "avg_price_usd": format_decimal(usdt / native, 2) if native > 0 else "0",
+        }
+    return out
+
+
+def _aggregate_spot_restore_fill_stats(
+    statuses: list[dict[str, Any]],
+) -> dict[str, dict[str, str]] | None:
+    from ..utils import format_decimal
+
+    merged: dict[str, dict[str, Decimal]] = {}
+    for payload in statuses:
+        for book, row in (payload.get("spot_restore_fill_stats_by_book") or {}).items():
+            book_key = str(book).upper()
+            if book_key not in merged:
+                merged[book_key] = {key: Decimal("0") for key in _SPOT_RESTORE_FILL_STAT_SUM_KEYS}
+            for key in _SPOT_RESTORE_FILL_STAT_SUM_KEYS:
+                merged[book_key][key] += _dec(row.get(key))
+    if not merged:
+        return None
+    out: dict[str, dict[str, str]] = {}
+    for book, totals in merged.items():
+        native = totals["native_bought"]
+        usdt = totals["usdt_spent"]
+        out[book] = {
+            "native_bought": format_decimal(native, 8),
+            "usdt_spent": format_decimal(usdt, 4),
+            "avg_price_usd": format_decimal(usdt / native, 2) if native > 0 else "0",
+        }
+    return out
 
 
 def attach_cached_premium_sweep_fill_stats(
@@ -489,15 +563,33 @@ def attach_cached_premium_sweep_fill_stats(
     cache: _TtlCache,
 ) -> dict[str, Any]:
     """Keep last successful exchange VWAP stats when a live status fetch omits them."""
+    out = status
     fill_stats = status.get("premium_sweep_fill_stats_by_book")
     if fill_stats:
         cache.seed(FILL_STATS_CACHE_KEY, fill_stats)
-        return status
-    cached = cache.get_stale(FILL_STATS_CACHE_KEY)
-    if not cached:
-        return status
-    out = dict(status)
-    out["premium_sweep_fill_stats_by_book"] = cached
+    else:
+        cached = cache.get_stale(FILL_STATS_CACHE_KEY)
+        if cached:
+            out = dict(out)
+            out["premium_sweep_fill_stats_by_book"] = cached
+    spot_exit_stats = status.get("spot_exit_fill_stats_by_book")
+    if spot_exit_stats:
+        cache.seed(SPOT_EXIT_FILL_STATS_CACHE_KEY, spot_exit_stats)
+    else:
+        cached_spot = cache.get_stale(SPOT_EXIT_FILL_STATS_CACHE_KEY)
+        if cached_spot:
+            if out is status:
+                out = dict(out)
+            out["spot_exit_fill_stats_by_book"] = cached_spot
+    spot_restore_stats = status.get("spot_restore_fill_stats_by_book")
+    if spot_restore_stats:
+        cache.seed(SPOT_RESTORE_FILL_STATS_CACHE_KEY, spot_restore_stats)
+    else:
+        cached_restore = cache.get_stale(SPOT_RESTORE_FILL_STATS_CACHE_KEY)
+        if cached_restore:
+            if out is status:
+                out = dict(out)
+            out["spot_restore_fill_stats_by_book"] = cached_restore
     return out
 
 
