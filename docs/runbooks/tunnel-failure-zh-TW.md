@@ -19,15 +19,16 @@
 | 步驟 | 動作 |
 |------|------|
 | 1 | 重啟 frontend：`./bot investor frontend restart --investor <id>` |
-| 2 | 重啟 tunnel：`./bot investor tunnel restart`（或前景除錯：`cloudflared tunnel --config ~/.cloudflared/config.yml run`） |
-| 3 | 查 log：`~/Library/Logs/cloudflared-<tunnel_name>.log`（`<tunnel_name>` 見 `registry.toml`） |
-| 4 | 確認 Access policy 未誤刪 `dashboard_email` 對應規則 |
-| 5 | Bot live 可獨立運行；dashboard 掛掉不必然停 trading |
+| 2 | 若外網 **HTTP 404**：多半是遠端 Tunnel ingress 缺 hostname → `./bot investor provision-tunnel --investor <id>` |
+| 3 | 重啟 tunnel：`./bot investor tunnel restart`（或前景除錯：`cloudflared tunnel --config ~/.cloudflared/config.yml run`） |
+| 4 | 查 log：`~/Library/Logs/cloudflared-<tunnel_name>.err.log`；搜尋 `Updated to new configuration` 是否含該 hostname |
+| 5 | 確認 Access policy 未誤刪 `dashboard_email` 對應規則 |
+| 6 | Bot live 可獨立運行；dashboard 掛掉不必然停 trading |
 
 ## 預防
 
-- Phase 3 計畫：Uptime 監控 frontend port + tunnel
-- registry 維護 `dashboard_email` 與 hostname 對照
+- 新投資人上線一律跑 [`investor-provision-checklist-zh-TW.md`](../investor-provision-checklist-zh-TW.md)
+- registry 維護 `dashboard_email` 與 hostname 對照；勿只改本機 `config.yml`
 
 ## 升級
 

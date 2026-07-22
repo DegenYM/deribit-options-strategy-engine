@@ -6,9 +6,11 @@
 [platform]
 repo_root = "/Users/youming/Desktop/deribit-options-strategy-engine"
 python_bin = "/Users/youming/miniforge3/envs/crypto/bin/python"
-domain = "portfolio.example.com"
-tunnel_name = "deribit-tunnel"
-next_frontend_port = 8769
+domain = "debopt.com"
+# New investors get hostname = template with {id} replaced (override per-row if needed).
+hostname_template = "{id}-portfolio.debopt.com"
+tunnel_name = "debopt-jack"
+next_frontend_port = 8772
 
 # Existing investors (optional — add rows as you onboard)
 [[investors]]
@@ -16,7 +18,7 @@ id = "youming"
 display_name = "YouMing"
 dashboard_email = ""
 access_method = "email"
-hostname = "youming.portfolio.example.com"
+hostname = "youming-portfolio.debopt.com"
 frontend_port = 8765
 live_enabled = true
 frontend_enabled = true
@@ -26,7 +28,7 @@ id = "jack"
 display_name = "Jack"
 dashboard_email = ""
 access_method = "email"
-hostname = "jack.portfolio.example.com"
+hostname = "jack-portfolio.debopt.com"
 frontend_port = 8766
 live_enabled = true
 frontend_enabled = true
@@ -36,7 +38,7 @@ id = "an"
 display_name = "An"
 dashboard_email = ""
 access_method = "email"
-hostname = "an.portfolio.example.com"
+hostname = "an-portfolio.debopt.com"
 frontend_port = 8768
 live_enabled = true
 frontend_enabled = true

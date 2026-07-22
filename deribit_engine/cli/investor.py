@@ -161,6 +161,46 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         )
         p.add_argument("--json", action="store_true", help="Emit JSON")
 
+    inv_provision = investor_sub.add_parser(
+        "provision-tunnel",
+        help=(
+            "Sync Cloudflare Tunnel ingress from registry.toml "
+            "(local ~/.cloudflared/config.yml + remote CF config + DNS)"
+        ),
+    )
+    inv_provision.add_argument(
+        "--investor",
+        metavar="ID",
+        default=None,
+        help="Only ensure this investor hostname (still rewrites full local ingress from registry)",
+    )
+    inv_provision.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show planned changes without writing local/remote/DNS",
+    )
+    inv_provision.add_argument(
+        "--skip-local",
+        action="store_true",
+        help="Do not rewrite ~/.cloudflared/config.yml",
+    )
+    inv_provision.add_argument(
+        "--skip-remote",
+        action="store_true",
+        help="Do not PUT Cloudflare remote tunnel configuration",
+    )
+    inv_provision.add_argument(
+        "--skip-dns",
+        action="store_true",
+        help="Do not run cloudflared tunnel route dns",
+    )
+    inv_provision.add_argument(
+        "--include-disabled",
+        action="store_true",
+        help="Include frontend_enabled=false rows when building full ingress",
+    )
+    inv_provision.add_argument("--json", action="store_true", help="Emit JSON")
+
 
 def dispatch(args: argparse.Namespace) -> int | None:
     if args.command != "investor":
@@ -209,10 +249,12 @@ def dispatch(args: argparse.Namespace) -> int | None:
             "launchd_paths": [str(path) for path in result.launchd_paths],
             "systemd_paths": [str(path) for path in result.systemd_paths],
             "next_steps": [
-                "Set fee payout addresses: cp config/platform/fee-payout-addresses.toml.example fee-payout-addresses.toml",
-                "Fill secrets: ./bot investor import-handoff config/handoff/<id>.toml",
+                "Fill secrets: ./bot investor import-handoff /secure/path/<id>-handoff.toml",
                 f"Validate + initial HWM: ./bot investor validate {result.investor_id}",
-                "Install launchd (macOS) or systemd (Linux): see docs/operator-onboarding-zh-TW.md",
+                f"Start dashboard: ./bot investor frontend start --investor {result.investor_id}",
+                f"Publish hostname: ./bot investor provision-tunnel --investor {result.investor_id}",
+                "Create Cloudflare Access app for the hostname (see docs/investor-provision-checklist-zh-TW.md)",
+                f"Start live (optional): ./bot investor live start --investor {result.investor_id}",
             ],
         }
         render(payload, args.json)
@@ -368,5 +410,37 @@ def dispatch(args: argparse.Namespace) -> int | None:
             mark = "ok" if result.ok else "FAIL"
             print(f"[{mark}] {result.tunnel_name} {result.state} — {result.message}{health}")
         return 0 if result.ok else 1
+
+    if args.investor_command == "provision-tunnel":
+        from ..tunnel_provision import provision_tunnel
+
+        outcome = provision_tunnel(
+            repo_root=repo_root,
+            investor_id=args.investor,
+            dry_run=args.dry_run,
+            sync_local=not args.skip_local,
+            sync_remote=not args.skip_remote,
+            sync_dns=not args.skip_dns,
+            include_disabled=args.include_disabled,
+        )
+        payload = {"action": "investor-provision-tunnel", **outcome.to_dict()}
+        render(payload, args.json)
+        if not args.json:
+            for message in outcome.messages:
+                print(f"- {message}")
+            if outcome.access_checklist:
+                print("Access checklist:")
+                for row in outcome.access_checklist:
+                    email = row.get("dashboard_email") or "(missing email)"
+                    print(f"  • {row['investor_id']}: {row['hostname']} ← {email}")
+            if outcome.dry_run:
+                print("[dry-run] no changes written")
+            mark = "ok" if outcome.ok else "FAIL"
+            print(
+                f"[{mark}] tunnel={outcome.tunnel_name} "
+                f"local_changed={outcome.local_changed} remote_changed={outcome.remote_changed} "
+                f"version={outcome.remote_version}"
+            )
+        return 0 if outcome.ok else 1
 
     raise SystemExit(2)

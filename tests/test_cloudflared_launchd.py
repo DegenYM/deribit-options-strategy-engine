@@ -19,6 +19,7 @@ def _registry(tmp_path: Path, *, tunnel_name: str = "debopt-jack") -> PlatformRe
             repo_root=tmp_path,
             python_bin="python3",
             domain="portfolio.test",
+            hostname_template=None,
             tunnel_name=tunnel_name,
             next_frontend_port=8800,
         ),

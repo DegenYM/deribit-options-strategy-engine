@@ -123,7 +123,27 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.deribit.frontend.${I
 
 **Linux** 請見 [`live-profiles-systemd-zh-TW.md`](live-profiles-systemd-zh-TW.md)（`./bot investor render-systemd <id>` 產生 unit 後 `systemctl enable --now`）。
 
-Cloudflare Tunnel / Access 仍依 [`cloudflare-tunnel-investor.md`](cloudflare-tunnel-investor.md)（Phase 2 再自動化 `provision`）。
+## 5. 對外網址（Tunnel + DNS + Access）— 必做
+
+**快速版 checklist**（建議收藏）：[`investor-provision-checklist-zh-TW.md`](investor-provision-checklist-zh-TW.md)
+
+本站 Tunnel 為 **Cloudflare 遠端管理**：只改 `~/.cloudflared/config.yml` **不會**讓新 hostname 生效，缺遠端 ingress 會變成 **HTTP 404**。
+
+```bash
+# 本機 frontend 先健康
+./bot investor frontend start --investor alice
+./bot investor frontend status --investor alice
+
+# 同步：本機 config.yml + Cloudflare 遠端 ingress + DNS CNAME
+./bot investor provision-tunnel --investor alice
+# 預覽：./bot investor provision-tunnel --investor alice --dry-run
+
+./bot investor tunnel status
+```
+
+然後依 [`cloudflare-access-checklist-zh-TW.md`](cloudflare-access-checklist-zh-TW.md) 為該 hostname 建 **Access Application**（Allow = `dashboard_email`）。
+
+架構說明：[`cloudflare-tunnel-investor.md`](cloudflare-tunnel-investor.md)。
 
 ## 一鍵管理所有投資人 frontend（launchd）
 
@@ -171,6 +191,7 @@ Cloudflare Tunnel / Access 仍依 [`cloudflare-tunnel-investor.md`](cloudflare-t
 |------|------|
 | `./bot investor list` | 列出 registry + 本機 `config/investors/` |
 | `./bot investor frontend start` | 一次啟動所有 `frontend_enabled` 的 dashboard |
+| `./bot investor provision-tunnel` | 依 registry 同步本機 + **遠端** Tunnel ingress + DNS |
 | `./bot investor tunnel start` | 啟動 cloudflared tunnel run（launchd 常駐） |
 | `./bot investor live start` | 一次啟動所有 `live_enabled` 的 live 監督 |
 | `./bot investor render-launchd alice` | 重產 launchd plist（改埠時加 `--port`） |

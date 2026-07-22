@@ -109,6 +109,16 @@ cloudflared tunnel create deribit-tunnel
 
 ## 三、設定 config.yml（單一投資人範例）
 
+> **重要（debopt 現況）**：此 Tunnel 為 **remotely managed**。Cloudflare 會把遠端 Public Hostname 推到 connector，**覆蓋**本機 `ingress`。  
+> 新增投資人請用：
+>
+> ```bash
+> ./bot investor provision-tunnel --investor <id>
+> ```
+>
+> 它會同時寫入本機 `~/.cloudflared/config.yml`、PUT 遠端 tunnel configuration、並執行 DNS route。  
+> 只手改下方 YAML、不跑 provision → 新網址常出現 **HTTP 404**。
+
 若只有一位投資人對外，在本機建立（或編輯）`~/.cloudflared/config.yml`。以下將 `portfolio.example.com` 全部轉到**單一**本機 dashboard；請替換為你的 **Tunnel UUID** 與 **實際子網域**。多位投資人時請改用上一節的多條 `hostname` / 多埠設定，不要共用同一埠。
 
 ```yaml

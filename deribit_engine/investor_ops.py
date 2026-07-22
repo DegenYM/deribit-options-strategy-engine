@@ -194,7 +194,11 @@ def investor_init(
     frontend_port: int | None = None
     if register:
         frontend_port = allocate_frontend_port(registry)
-        hostname = default_hostname(investor_id, registry.platform.domain)
+        hostname = default_hostname(
+            investor_id,
+            registry.platform.domain,
+            hostname_template=registry.platform.hostname_template,
+        )
         entry = InvestorRegistryEntry(
             investor_id=investor_id,
             display_name=label,

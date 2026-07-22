@@ -26,6 +26,7 @@ class PlatformSettings:
     repo_root: Path | None
     python_bin: str | None
     domain: str | None
+    hostname_template: str | None
     tunnel_name: str | None
     next_frontend_port: int
 
@@ -108,6 +109,9 @@ def load_platform_registry(
         repo_root=repo_override,
         python_bin=str(platform_raw["python_bin"]).strip() if platform_raw.get("python_bin") else None,
         domain=str(platform_raw["domain"]).strip() if platform_raw.get("domain") else None,
+        hostname_template=(
+            str(platform_raw["hostname_template"]).strip() if platform_raw.get("hostname_template") else None
+        ),
         tunnel_name=str(platform_raw["tunnel_name"]).strip() if platform_raw.get("tunnel_name") else None,
         next_frontend_port=next_port,
     )
@@ -152,7 +156,24 @@ def resolve_effective_repo_root(registry: PlatformRegistry, *, cwd_repo: Path | 
     raise ConfigurationError("Cannot resolve repo root; set [platform].repo_root in registry.toml")
 
 
-def default_hostname(investor_id: str, domain: str | None) -> str | None:
+def default_hostname(
+    investor_id: str,
+    domain: str | None,
+    *,
+    hostname_template: str | None = None,
+) -> str | None:
+    """Build public hostname for a new investor.
+
+    Prefer ``hostname_template`` when set (e.g. ``{id}-portfolio.debopt.com``).
+    Otherwise fall back to ``{id}.{domain}``.
+    """
+    template = (hostname_template or "").strip()
+    if template:
+        if "{id}" not in template:
+            raise ConfigurationError(
+                f"[platform].hostname_template must include '{{id}}' placeholder; got {template!r}"
+            )
+        return template.replace("{id}", investor_id)
     if not domain:
         return None
     return f"{investor_id}.{domain}"
@@ -221,6 +242,8 @@ def _render_registry(registry: PlatformRegistry) -> str:
         lines.append(f'python_bin = "{platform.python_bin}"')
     if platform.domain:
         lines.append(f'domain = "{platform.domain}"')
+    if platform.hostname_template:
+        lines.append(f'hostname_template = "{platform.hostname_template}"')
     if platform.tunnel_name:
         lines.append(f'tunnel_name = "{platform.tunnel_name}"')
     lines.append(f"next_frontend_port = {platform.next_frontend_port}")

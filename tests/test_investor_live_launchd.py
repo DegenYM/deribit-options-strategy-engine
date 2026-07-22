@@ -26,6 +26,7 @@ def _registry(tmp_path: Path, *, investors: list[InvestorRegistryEntry]) -> Plat
             repo_root=tmp_path,
             python_bin="python3",
             domain="portfolio.test",
+            hostname_template=None,
             tunnel_name=None,
             next_frontend_port=8800,
         ),

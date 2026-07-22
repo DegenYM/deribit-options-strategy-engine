@@ -4,6 +4,7 @@
 
 相關文件：
 
+- **新投資人快速上線**（含 provision-tunnel）：[`investor-provision-checklist-zh-TW.md`](investor-provision-checklist-zh-TW.md)
 - Tunnel 與多投資人架構：[`cloudflare-tunnel-investor.md`](cloudflare-tunnel-investor.md)
 - `registry.toml` 的 `dashboard_email`：[`operator-onboarding-zh-TW.md`](operator-onboarding-zh-TW.md)
 - Incident（Tunnel 失效）：[`runbooks/tunnel-failure-zh-TW.md`](runbooks/tunnel-failure-zh-TW.md)
