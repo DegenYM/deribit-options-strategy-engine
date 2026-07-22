@@ -91,6 +91,58 @@ def test_premium_sweep_fill_stats_vwap() -> None:
     assert _group_id_from_label("covered_call-profit-sweep-buyback-btc") is None
 
 
+def test_premium_sweep_fill_stats_excludes_attributed_spot_exit_unlabeled() -> None:
+    client = MagicMock()
+    btc_trades = {
+        "trades": [
+            {
+                "trade_id": "s1",
+                "label": "cc-profit-sweep-btc-0001",
+                "direction": "sell",
+                "instrument_name": "BTC_USDT",
+                "amount": "0.01",
+                "price": "62000",
+                "timestamp": 1_746_000_000_000,
+            },
+            {
+                "trade_id": "itm1",
+                "label": "",
+                "order_id": "spot-exit-order",
+                "direction": "sell",
+                "instrument_name": "BTC_USDT",
+                "amount": "0.1",
+                "price": "90000",
+                "timestamp": 1_746_000_050_000,
+            },
+        ],
+        "has_more": False,
+    }
+
+    def _fetch(currency: str, **kwargs):
+        if kwargs.get("historical") is False:
+            return {"trades": [], "has_more": False}
+        if currency == "BTC":
+            return btc_trades
+        return {"trades": [], "has_more": False}
+
+    client.get_user_trades_by_currency.side_effect = _fetch
+    from deribit_engine.profit_sweep_repair import premium_sweep_fill_stats_for_currency
+
+    groups = [
+        _group(
+            spot_exit_status="filled",
+            spot_exit_amount="0.1",
+            spot_exit_order_id="spot-exit-order",
+            closed_timestamp_ms=1_746_000_000_000,
+        )
+    ]
+    stats = premium_sweep_fill_stats_for_currency(client, "cc", "BTC", groups=groups)
+    assert Decimal(stats["net_native_sold"]) == Decimal("0.01")
+    assert Decimal(stats["unlabeled_native_sold"]) == Decimal("0")
+    assert Decimal(stats["display_native_sold"]) == Decimal("0.01")
+    assert Decimal(stats["display_usdt"]) == Decimal(stats["net_usdt"])
+
+
 def test_build_repair_plan_uses_first_day_only() -> None:
     client = MagicMock()
     btc_trades = {

@@ -601,6 +601,8 @@ def premium_sweep_fill_stats_for_currency(
     client: DeribitClient,
     order_label_prefix: str,
     currency: str,
+    *,
+    groups: list[TradeGroup] | None = None,
 ) -> dict[str, str]:
     """Exchange VWAP stats for premium-sweep spot sells (gross fills and net after buyback)."""
     by_gid, dust_trades, align_trades = _classify_profit_sweep_sell_trades(
@@ -622,7 +624,7 @@ def premium_sweep_fill_stats_for_currency(
 
     from .trade_journal_backfill import _collect_unlabeled_premium_sell_trades
 
-    unlabeled_trades = _collect_unlabeled_premium_sell_trades(client, currency)
+    unlabeled_trades = _collect_unlabeled_premium_sell_trades(client, currency, groups=groups)
     unlabeled_native = sum((to_decimal(t.get("amount")) for t in unlabeled_trades), Decimal("0"))
     unlabeled_usdt = spot_sell_quote_proceeds_from_trades(unlabeled_trades, quote_currency="USDT")
     display_native = net_native + unlabeled_native
@@ -653,10 +655,17 @@ def premium_sweep_fill_stats_for_currency(
 def premium_sweep_fill_stats_by_book(
     client: DeribitClient,
     order_label_prefix: str,
+    *,
+    groups: list[TradeGroup] | None = None,
 ) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for currency in ("BTC", "ETH"):
-        stats = premium_sweep_fill_stats_for_currency(client, order_label_prefix, currency)
+        stats = premium_sweep_fill_stats_for_currency(
+            client,
+            order_label_prefix,
+            currency,
+            groups=groups,
+        )
         if to_decimal(stats["gross_native_sold"]) > 0 or to_decimal(stats["net_usdt"]) > 0:
             out[currency] = stats
     return out

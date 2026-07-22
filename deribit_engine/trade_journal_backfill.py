@@ -614,15 +614,24 @@ def _iter_spot_sell_trades(client: DeribitClient, currency: str) -> Iterator[dic
         cursor_ts = last_ts + 1
 
 
-def _collect_unlabeled_premium_sell_trades(client: DeribitClient, currency: str) -> list[dict[str, Any]]:
+def _collect_unlabeled_premium_sell_trades(
+    client: DeribitClient,
+    currency: str,
+    *,
+    groups: list[TradeGroup] | None = None,
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for trade in _iter_spot_sell_trades(client, currency):
         label = str(trade.get("label") or "")
-        if label and ("profit-sweep" in label or "spot-exit" in label):
+        if label and ("profit-sweep" in label or "spot-exit" in label or "spot-restore" in label):
             continue
         if "USDT" not in str(trade.get("instrument_name") or ""):
             continue
         out.append(trade)
+    if groups:
+        from .spot_exit_ops import filter_unlabeled_trades_excluding_spot_exits
+
+        out = filter_unlabeled_trades_excluding_spot_exits(out, currency=currency, groups=groups)
     return out
 
 
@@ -760,7 +769,11 @@ def repair_unlabeled_profit_sweeps_in_groups(
     for group in closed:
         currency = group.currency.upper()
         if currency not in unlabeled_by_currency:
-            unlabeled_by_currency[currency] = _collect_unlabeled_premium_sell_trades(client, currency)
+            unlabeled_by_currency[currency] = _collect_unlabeled_premium_sell_trades(
+                client,
+                currency,
+                groups=groups,
+            )
         if repair_unlabeled_profit_sweep_from_exchange(
             group,
             client=client,

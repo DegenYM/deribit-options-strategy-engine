@@ -179,8 +179,9 @@ def test_reconcile_profit_sweep_from_exchange_pending_to_filled():
     assert group.profit_sweep_quote_proceeds == Decimal("21.9045")
 
 
-def test_reconcile_profit_sweep_skips_locked_proceeds_reconciled():
-    group = TradeGroup(
+def test_reconcile_profit_sweep_skips_when_proceeds_reconciled_has_exchange_fill():
+    """Ledger-only proceeds_reconciled is not locked; real exchange fills stay locked."""
+    unlocked = TradeGroup(
         group_id="0048",
         currency="BTC",
         collateral_currency="BTC",
@@ -203,6 +204,30 @@ def test_reconcile_profit_sweep_skips_locked_proceeds_reconciled():
         profit_sweep_quote_proceeds=Decimal("90"),
         profit_sweep_reason="proceeds_reconciled",
     )
+    locked = TradeGroup(
+        group_id="0049",
+        currency="BTC",
+        collateral_currency="BTC",
+        quantity=Decimal("0.1"),
+        entry_timestamp_ms=1,
+        expiration_timestamp_ms=2,
+        short_instrument_name="BTC-26JUN26-80000-C",
+        short_strike=Decimal("80000"),
+        entry_credit=Decimal("86"),
+        original_entry_credit=Decimal("86"),
+        max_loss=Decimal("0"),
+        regime_at_entry="normal",
+        strategy="covered_call",
+        option_type="call",
+        status="closed",
+        closed_timestamp_ms=3,
+        profit_sweep_status="filled",
+        profit_sweep_order_id="exchange-fill-0049",
+        profit_sweep_amount=Decimal("0.001"),
+        profit_sweep_quote_proceeds=Decimal("90"),
+        profit_sweep_exchange_native=Decimal("0.001"),
+        profit_sweep_reason="proceeds_reconciled",
+    )
 
     class SweepClient:
         def get_user_trades_by_currency(self, currency, **kwargs):
@@ -218,13 +243,20 @@ def test_reconcile_profit_sweep_skips_locked_proceeds_reconciled():
                 ]
             }
 
-    assert not reconcile_profit_sweep_from_exchange(
-        group,
+    assert reconcile_profit_sweep_from_exchange(
+        unlocked,
         client=SweepClient(),
         order_label_prefix="covered_call",
     )
-    assert group.profit_sweep_amount == Decimal("0.001")
-    assert group.profit_sweep_quote_proceeds == Decimal("90")
+    assert unlocked.profit_sweep_amount == Decimal("0.0003")
+
+    assert not reconcile_profit_sweep_from_exchange(
+        locked,
+        client=SweepClient(),
+        order_label_prefix="covered_call",
+    )
+    assert locked.profit_sweep_amount == Decimal("0.001")
+    assert locked.profit_sweep_quote_proceeds == Decimal("90")
 
 
 def test_repair_unlabeled_profit_sweep_from_exchange():

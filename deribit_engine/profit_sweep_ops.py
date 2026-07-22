@@ -30,9 +30,15 @@ def profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
     status = str(group.profit_sweep_status or "").lower()
     if status != "filled":
         return False
+    reason = str(group.profit_sweep_reason or "").lower()
+    if "proceeds_reconciled" in reason:
+        if group.profit_sweep_exchange_native > 0 or "exchange_fully_swept" in reason:
+            return True
+        if "premium_amount_synced" in reason and str(group.profit_sweep_order_id or "").strip():
+            return True
+        return False
     if str(group.profit_sweep_order_id or "").strip():
         return True
-    reason = str(group.profit_sweep_reason or "").lower()
     if "exchange_fully_swept" in reason:
         return True
     if "unlabeled_premium_reconciled" in reason:
@@ -41,8 +47,6 @@ def profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
         return True
     if "dust_pool_sweep" in reason:
         return True
-    if "proceeds_reconciled" in reason:
-        return False
     return True
 
 
