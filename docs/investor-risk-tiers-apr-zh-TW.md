@@ -51,9 +51,11 @@
 
 | 分級 | 適合對象 | Strike 選擇（約略） | 保證金紀律 | 進場 APR 門檻 |
 |------|----------|---------------------|------------|---------------|
-| **Low** | 重視保留上漲空間、現貨曝險最小化 | 深 OTM call（BTC delta 約 0.06–0.14） | IM 硬上限 55%；最多 2 組／幣 | 最低 **4%**，偏好 5–12% |
-| **Medium** | 平衡權利金與被 call 走機率 | BTC delta 約 0.08–0.20（偏好 0.10–0.16） | IM 硬上限 70% | 最低 **6%**，偏好 8–16% |
-| **High** | 願接受較高被履約／封頂機率 | 較近 strike（BTC delta 約 0.10–0.25，偏好 0.12–0.20） | IM 硬上限 75% | 最低 **8%**，偏好 10–20% |
+| **Low** | 重視保留現貨／上漲空間 | BTC delta 約 0.05–0.10（偏好 0.05–0.08）；OTM 地板約 12%（ETH 14%） | IM 硬上限 48%；最多 3 組／幣 | 最低 **3.5%**，偏好 **4–6%** |
+| **Medium** | 平衡權利金與被 call 走機率 | BTC delta 約 0.06–0.13（偏好 0.07–0.11）；OTM 地板約 8%（ETH 10%） | IM 硬上限 62% | 最低 **4%**，偏好 **5–8%** |
+| **High** | 願接受較高被履約／封頂機率 | BTC delta 約 0.10–0.17（偏好 0.11–0.15）；OTM 地板約 5%（ETH 6%） | IM 硬上限 65% | 最低 **7%**，偏好 **8–12%** |
+
+**選約原則**：排序為 **delta → 更深 OTM → TARGET APR（軟）**；硬門檻只有 delta 帶與 `*_CALL_OTM_MIN`（無 OTM max）。TARGET APR 不再壓過保留現貨的選約。
 
 **風險重點**：現貨下跌風險仍在；ITM 結算後 tier 預設會 **settlement spot exit**（賣 BTC_USDT / ETH_USDT，數量已扣結算損失）。High tier strike 較近，較容易在強勢行情中被 call 走。
 
@@ -71,15 +73,15 @@
 
 ---
 
-### 4.3 Naked short（裸賣｜USDC 線性，預設 put+call 雙向）
+### 4.3 Naked short（裸賣｜USDC 線性；骨架預設 `put`，可設 `both` 雙邊掃描）
 
 | 分級 | 適合對象 | Strike 選擇 | 保證金紀律 | 進場 APR 門檻 |
 |------|----------|-------------|------------|---------------|
-| **Low** | 最保守的 premium selling | 深 OTM（delta 約 0.06–0.10） | 單腿 IM cap 10%；最多 2 組／幣 | 最低 **4%**，偏好 5–12% |
-| **Medium** | 標準裸賣 | delta 約 0.08–0.14 | 單腿 IM cap 12–14% | 最低 **7%**，偏好 8–16% |
-| **High** | 進攻型收權利金 | delta 約 0.10–0.18 | 單腿 IM cap 16–18%；IM 硬上限 80% | 最低 **10%**，偏好 12–22% |
+| **Low** | 最保守的 premium selling | BTC delta 約 0.06–0.11；OTM 約 10–24%（較深）；DTE 10–35 | 單腿 IM cap 10%；最多 2 組／幣 | 最低 **4%**，偏好 5–12% |
+| **Medium** | 標準裸賣 | BTC delta 約 0.08–0.15；OTM 約 7–22%；DTE 10–35 | 單腿 IM cap 12–14% | 最低 **7%**，偏好 8–16% |
+| **High** | 進攻型收權利金 | BTC delta 約 0.10–0.18；OTM 約 5–20%（較近）；DTE 10–35 | 單腿 IM cap 16–18%；IM 硬上限 80% | 最低 **10%**，偏好 12–22% |
 
-**風險重點**：尾部風險最高；極端行情可能觸發 soft roll、hard stop。Low tier 限制同時最多 2 組倉位（`MAX_GROUPS_PER_CURRENCY=2`）。
+**風險重點**：尾部風險最高；極端行情可能觸發 soft roll、hard stop。Low tier 限制同時最多 2 組倉位（`MAX_GROUPS_PER_CURRENCY=2`）；loss 防禦為 soft ＜ hard 階梯（low：35% → 50%）。
 
 ---
 
@@ -91,7 +93,7 @@
 | **TARGET_NET_APR_MIN ~ MAX** | 掃描排序時 **偏好** 的單筆 APR 區間 | 代表「理想成交」的權利金水準，不是投資組合保證報酬 |
 | **投資組合實際 APR** | 已平倉損益年化 ÷ 參考資金或抵押 | 通常 **低於** 單筆 TARGET 上限，因提早 TP、空倉期、部分成交失敗 |
 
-引擎另有 **IV Rank 進場閘門**：投資人 layout 載入 `config/shared/.env.defaults` 時預設 **`ENABLE_IV_ENTRY_GATE=true`**（波動過低時可能暫停新開倉）。若只用 repo 根目錄 `.env.example` 單檔 workflow，程式 fallback 預設為關閉。
+引擎另有 **IV Rank 進場閘門**：投資人 layout 載入 `config/shared/.env.defaults` 時預設 **`ENABLE_IV_ENTRY_GATE=true`**（naked／bull put：BTC 約 15%、ETH 約 12%）。**Covered call** 在策略骨架覆寫為較寬鬆（`MIN_IV_RANK=0.05`，關閉 `MIN_IV_MINUS_RV`），低波仍可靠 delta／APR 控品質。若只用 repo 根目錄 `.env.example` 單檔 workflow，程式 fallback 預設為關閉。
 
 ---
 
@@ -111,7 +113,7 @@
 
 | 策略 | Low tier | Medium tier | High tier |
 |------|----------|-------------|-----------|
-| **Covered call** | **3% – 8%** | **4% – 10%** | **5% – 12%** |
+| **Covered call** | **2.5% – 5%** | **3.5% – 7%** | **5% – 9%** |
 | **Bull put spread** | **4% – 8%** | **5% – 10%** | **5% – 12%** |
 | **Naked short** | **4% – 9%** | **5% – 11%** | **6% – 14%** |
 
@@ -166,9 +168,9 @@ risk_tier = "medium"
 
 | 策略 | Tier | MIN_NET_APR | TARGET 區間 |
 |------|------|-------------|-------------|
-| Covered call | low | 4% | 5% – 12% |
-| Covered call | medium | 6% | 8% – 16% |
-| Covered call | high | 8% | 10% – 20% |
+| Covered call | low | 3.5% | 4% – 6% |
+| Covered call | medium | 4% | 5% – 8% |
+| Covered call | high | 7% | 8% – 12% |
 | Bull put spread | low | 4% | 5% – 10% |
 | Bull put spread | medium | 6% | 7% – 13% |
 | Bull put spread | high | 9% | 10% – 16% |

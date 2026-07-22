@@ -312,7 +312,7 @@ bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json       
 |------|--------|------|
 | `naked_short` | [`.env.naked_short`](../config/shared/strategies/.env.naked_short) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=both` |
 | `bull_put_spread` | [`.env.bull_put_spread`](../config/shared/strategies/.env.bull_put_spread) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put` |
-| `covered_call` | [`.env.covered_call`](../config/shared/strategies/.env.covered_call) | `inverse_native`；`TRADED_COLLATERALS=BTC,ETH`；`SHORT_OPTION_SIDE=call` |
+| `covered_call` | [`.env.covered_call`](../config/shared/strategies/.env.covered_call) | `inverse_native`；`TRADED_COLLATERALS=BTC,ETH`；`SHORT_OPTION_SIDE=call`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`） |
 
 各 tier 的 delta、APR、IM 白話對照見 [風險分級與 APR 說明](investor-risk-tiers-apr-zh-TW.md)；**以 tier 檔為準**，勿沿用下方 legacy 單檔範例中的舊數字。
 

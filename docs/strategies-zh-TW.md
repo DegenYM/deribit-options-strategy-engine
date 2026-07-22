@@ -17,7 +17,7 @@
 - short leg 會先過 delta、OTM、OI、book notional、spread ratio、APR 與 book IM/MM 門檻
 - `bull_put_spread` 的 long put 以 `BULL_PUT_LONG_DELTA_MIN/MAX` 選擇，同到期且 strike 低於 short put
 - `covered_call` 只使用 BTC/ETH 本位 book 的既有可用庫存作 cover，不會自動買現貨或用 perp 補 cover；tier profile 預設 **`COVERED_CALL_SPOT_EXIT_ENABLED=true`**（ITM 結算後賣 Deribit spot）
-- 投資人 layout 下 **IV Rank 進場閘門**預設開啟（`config/shared/.env.defaults` 的 `ENABLE_IV_ENTRY_GATE=true`）
+- 投資人 layout 下 **IV Rank 進場閘門**預設開啟（`config/shared/.env.defaults`）；`covered_call` 策略骨架另覆寫為較寬鬆（BTC/ETH `MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`），品質交由 delta／APR
 - 只做流動性足夠的 short leg：`OI`、`book notional`、`spread ratio` 都要過門檻
 - `MIN_LIQUID_EXPIRIES_REQUIRED` 可控制 DTE 視窗內至少需要幾個可交易 expiry 才允許開倉
 - regime 分為 `normal / elevated / crisis`
@@ -41,7 +41,7 @@
 
 ### `covered_call`
 
-只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險，所以 call delta 可選較大（依 tier 調整）。風險是上漲收益被履約價封頂，以及 ITM 結算後仍可能留下 spot exposure。
+只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險。選約以**保留現貨**為原則：**delta 為硬門檻與排序主軸**（優先於 TARGET APR），`CALL_OTM_MIN` 僅作安全地板（依 tier：low 較高、high 較低），**不設 OTM max**；同 delta 下偏好更深 OTM。風險是上漲收益被履約價封頂，以及 ITM 結算後仍可能留下 spot exposure。
 
 **ITM 退場（預設 tier 設定）**：
 

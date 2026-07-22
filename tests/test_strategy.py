@@ -715,6 +715,117 @@ def test_short_call_rejected_when_otm_out_of_range(tmp_path):
     assert reason == "otm_out_of_range"
 
 
+def test_covered_call_allows_deep_otm_when_delta_in_range(tmp_path):
+    """Covered call: OTM max is not a hard gate; delta + OTM min decide eligibility."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        enable_short_call=True,
+        btc_call_delta_min=Decimal("0.05"),
+        btc_call_delta_max=Decimal("0.15"),
+        btc_call_otm_min=Decimal("0.10"),
+        btc_call_otm_max=Decimal("0.18"),
+    )
+    selector = StrategySelector(config)
+    # strike 98000 / index 70000 → OTM ≈ 40%, above configured max but delta OK
+    inst_payload, book_payload = _make_btc_call_payload(14, 98000, delta="0.08")
+    instrument = OptionInstrument.from_api(inst_payload)
+    book = OrderBookSnapshot.from_api(book_payload)
+
+    assert selector._naked_short_call_rejection_reason("BTC", instrument, book) is None
+    assert selector._passes_strike_otm_prefilter(
+        instrument,
+        currency="BTC",
+        index_price=Decimal("70000"),
+        option_type="call",
+    )
+
+
+def test_covered_call_sort_prefers_delta_then_farther_otm(tmp_path):
+    from deribit_engine.models import SpreadLeg
+
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        btc_preferred_call_delta_min=Decimal("0.07"),
+        btc_preferred_call_delta_max=Decimal("0.11"),
+    )
+    selector = StrategySelector(config)
+
+    def cand(
+        *,
+        delta: Decimal,
+        strike: Decimal,
+        preferred_delta: bool,
+        in_band: bool = True,
+    ) -> NakedPutCandidate:
+        short = SpreadLeg(
+            instrument_name=f"BTC-14APR30-{int(strike)}-C",
+            strike=strike,
+            quantity=Decimal("0.1"),
+            min_trade_amount=Decimal("0.1"),
+            contract_size=Decimal("0.1"),
+            entry_price=Decimal("0.003"),
+            target_price=Decimal("0.003"),
+            best_bid_price=Decimal("0.003"),
+            best_ask_price=Decimal("0.0032"),
+            delta=delta,
+            tick_size=Decimal("0.0001"),
+            tick_size_steps=(),
+            expiration_timestamp_ms=1_800_000_000_000,
+            index_price=Decimal("70000"),
+            quote_currency="BTC",
+            settlement_currency="BTC",
+            instrument_type="reversed",
+        )
+        return NakedPutCandidate(
+            currency="BTC",
+            collateral_currency="BTC",
+            quantity=Decimal("0.1"),
+            dte_days=Decimal("14"),
+            short_leg=short,
+            screening_bid=Decimal("0.003"),
+            screening_mark=Decimal("0.0031"),
+            target_limit_price=Decimal("0.003"),
+            net_premium_native=Decimal("0.0003"),
+            fee_native=Decimal("0.00001"),
+            net_apr=Decimal("0.06"),
+            margin_efficiency=Decimal("0.06"),
+            estimated_im_total=Decimal("0"),
+            estimated_mm_total=Decimal("0"),
+            regime=RiskRegime.NORMAL,
+            preferred_delta=preferred_delta,
+            preferred_otm=True,
+            in_target_apr_band=in_band,
+            option_type="call",
+            strategy="covered_call",
+            covered_underlying_quantity=Decimal("0.1"),
+        )
+
+    # Preferred-delta + deeper OTM should beat preferred-delta + closer OTM.
+    closer = cand(delta=Decimal("0.09"), strike=Decimal("80500"), preferred_delta=True)
+    farther = cand(delta=Decimal("0.09"), strike=Decimal("91000"), preferred_delta=True)
+    # Preferred delta (out of TARGET APR) still beats non-preferred delta in-band.
+    retain = cand(
+        delta=Decimal("0.09"),
+        strike=Decimal("91000"),
+        preferred_delta=True,
+        in_band=False,
+    )
+    rich_wrong_delta = cand(
+        delta=Decimal("0.18"),
+        strike=Decimal("77000"),
+        preferred_delta=False,
+        in_band=True,
+    )
+
+    ranked = sorted([closer, farther, retain, rich_wrong_delta], key=selector.naked_put_sort_key)
+    assert ranked[0] is farther
+    assert ranked[1] is retain  # same delta/OTM as farther; in_band only breaks tie after OTM
+    assert ranked[2] is closer
+    assert ranked[3] is rich_wrong_delta
+
+
 def test_strike_otm_prefilter_skips_deep_itm_call_without_orderbook(tmp_path):
     config = make_config(
         tmp_path,

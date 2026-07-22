@@ -448,6 +448,9 @@ class StrategySelector:
         else:
             omin, omax = self.config.put_otm_bounds(currency)
         slack = Decimal("0.005")
+        # Covered call: retain spot → delta is the hard gate; OTM max is not.
+        if option_type == "call" and self.config.option_strategy == "covered_call":
+            return otm >= (omin - slack)
         return (omin - slack) <= otm <= (omax + slack)
 
     @staticmethod
@@ -526,6 +529,8 @@ class StrategySelector:
             if option_type == "call":
                 otm = self._call_otm_ratio(instrument, book)
                 omin, omax = self.config.call_otm_bounds(currency)
+                if self.config.option_strategy == "covered_call":
+                    return f"otm={format_decimal(otm, 4)} min={format_decimal(omin, 4)}"
             else:
                 otm = self._put_otm_ratio(instrument, book)
                 omin, omax = self.config.put_otm_bounds(currency)
@@ -638,6 +643,13 @@ class StrategySelector:
             return "delta_out_of_range"
         otm = self._call_otm_ratio(instrument, book)
         omin, omax = self.config.call_otm_bounds(currency)
+        # Covered call prioritizes delta for assignment risk; OTM% is a floor
+        # only (must be sufficiently OTM). Do not hard-cap OTM max so low-IV
+        # deep-OTM strikes that still match delta remain eligible.
+        if self.config.option_strategy == "covered_call":
+            if otm < omin:
+                return "otm_out_of_range"
+            return None
         if not (omin <= otm <= omax):
             return "otm_out_of_range"
         return None
@@ -799,6 +811,17 @@ class StrategySelector:
         target_otm = (pomin + pomax) / Decimal("2")
         otm = candidate._otm_ratio()
         spread = self.short_spread_ratio_or_zero(candidate)
+        # Covered call: delta primary, reward farther OTM; APR is a light bonus only.
+        if candidate.strategy == "covered_call" or self.config.option_strategy == "covered_call":
+            score = (
+                -self.config.score_weight_delta_distance * abs(abs(candidate.short_leg.delta) - target_delta)
+                + self.config.score_weight_otm_distance * otm
+                - self.config.score_weight_spread * spread
+                + self.config.score_weight_net_apr * candidate.net_apr * Decimal("0.25")
+            )
+            if candidate.in_target_apr_band:
+                score += Decimal("0.005")
+            return score
         score = (
             self.config.score_weight_net_apr * candidate.net_apr
             + self.config.score_weight_margin_efficiency * candidate.margin_efficiency
@@ -824,6 +847,17 @@ class StrategySelector:
         preferred_delta = pdmin <= abs(candidate.short_leg.delta) <= pdmax
         otm = candidate._otm_ratio()
         preferred_otm = pomin <= otm <= pomax
+        # Covered call: retain spot → delta, then farther OTM, then APR (soft).
+        if candidate.strategy == "covered_call" or self.config.option_strategy == "covered_call":
+            return (
+                0 if preferred_delta else 1,
+                abs(abs(candidate.short_leg.delta) - target_delta),
+                -otm,
+                0 if in_band else 1,
+                self.short_spread_ratio_or_zero(candidate),
+                -candidate.net_apr,
+                -candidate.screening_bid * candidate.quantity,
+            )
         return (
             0 if in_band else 1,
             self._trend_side_sort_tier(candidate),
@@ -1954,7 +1988,7 @@ class StrategySelector:
             target_price=self.sell_mid_price(instrument, book),
         )
         pdmin, pdmax = self.config.preferred_call_delta_bounds(currency)
-        pomin, pomax = self.config.preferred_call_otm_bounds(currency)
+        omin, _omax = self.config.call_otm_bounds(currency)
         otm = self._call_otm_ratio(instrument, book)
         return (
             NakedPutCandidate(
@@ -1974,7 +2008,8 @@ class StrategySelector:
                 estimated_mm_total=Decimal("0"),
                 regime=regime,
                 preferred_delta=pdmin <= abs(book.delta) <= pdmax,
-                preferred_otm=pomin <= otm <= pomax,
+                # Hard OTM floor already enforced; flag is informational only.
+                preferred_otm=otm >= omin,
                 in_target_apr_band=self.config.target_net_apr_min <= net_apr <= self.config.target_net_apr_max,
                 option_type="call",
                 strategy="covered_call",
