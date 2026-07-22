@@ -484,6 +484,8 @@ def test_covered_call_robust_exit_live_sells_spot_after_call_close(tmp_path):
     saved = engine.state_store.load().groups[0]
     assert saved.spot_exit_status == "filled"
     assert saved.spot_exit_order_id
+    assert saved.spot_exit_quote_proceeds > 0
+    assert saved.spot_exit_quote_proceeds_lifetime >= saved.spot_exit_quote_proceeds
 
 
 def test_covered_call_robust_exit_does_not_sell_spot_when_close_incomplete(tmp_path):

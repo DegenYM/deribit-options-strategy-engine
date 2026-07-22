@@ -28,6 +28,7 @@ def build_bot(args) -> DeribitOptionTrialBot:
         "close-position",
         "cancel",
         "profit-sweep",
+        "spot-restore",
         "trade-spot",
         "internal-transfer",
     }

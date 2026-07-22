@@ -415,6 +415,11 @@ class ExecutionMixin:
         group.spot_exit_order_id = str(order.get("order_id") or "")
         if order_state == "filled" or filled >= amount:
             group.spot_exit_status = "filled"
+            from ..spot_exit_ops import apply_spot_exit_quote_proceeds
+
+            proceeds = apply_spot_exit_quote_proceeds(group, self._order_trades(response))
+            if proceeds > 0:
+                payload["spot_exit_quote_proceeds"] = format_decimal(proceeds, 4)
         elif order_state in {"cancelled", "rejected"}:
             group.spot_exit_status = "failed"
         else:

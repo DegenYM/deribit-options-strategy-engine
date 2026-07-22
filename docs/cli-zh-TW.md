@@ -1,5 +1,14 @@
 # CLI 指令
 
+## 列出所有指令
+
+```bash
+./bot help              # 分類列出全部頂層指令
+./bot help investor     # 列出 investor 子指令
+./bot                 # 同 ./bot help（無參數時印目錄）
+./bot <command> -h      # 單一指令的完整參數說明
+```
+
 ## 怎麼指定用哪個子帳
 
 | 方式 | 範例 |
@@ -58,6 +67,7 @@ export INVESTOR=youming
 # macOS launchd 常駐（依 registry.toml）
 ./bot investor frontend start    # dashboard
 ./bot investor tunnel start      # cloudflared tunnel run
+./bot investor provision-tunnel  # sync local+remote ingress + DNS from registry
 ./bot investor live start        # 實單監督
 
 # 同時啟動 accounts.toml 內 live_enabled 子帳的 `run --live`（log：logs/live/<investor_id>/<slug>.log）
@@ -198,3 +208,37 @@ ACCT=covered_call
 | Ledger 缺 `equity_native_by_book` | `python scripts/backfill_ledger_equity_native.py --investor <id>` |
 
 詳見 [`scripts/README.md`](../scripts/README.md)。
+
+## Covered call ITM spot restore（手動買回 cover）
+
+ITM / settlement spot exit 賣掉 cover 後，若要用 USDT 買回現貨並正確記帳，請用 `spot-restore`（**不要**用裸 `trade-spot`，也**不要**用 `profit-sweep-buyback` label）。
+
+```bash
+export INVESTOR=youming
+ACCT=covered_call
+
+# 預覽尚可買回的 group（dry-run）
+./bot --investor $INVESTOR --account $ACCT spot-restore --json
+
+# 買回單一 group 的全部 unrestored 數量
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --live --json
+
+# 只買回部分數量
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --amount 0.05 --live --json
+
+# 只從 Deribit `*-spot-restore` label 同步 spot_restore_*，不下單
+./bot --investor $INVESTOR --account $ACCT spot-restore --reconcile-only --json
+```
+
+| 參數 | 說明 |
+|------|------|
+| `--group-id` | 只處理指定已平倉 group |
+| `--amount` | 買回 native 數量；預設為 `spot_exit_amount − spot_restore_amount` |
+| `--reconcile-only` | 只同步 state 上的 restore 欄位，不送 spot 單 |
+| `--live` | 實際下單並寫入 state（預設 dry-run） |
+
+記帳：
+
+- 訂單 label：`{short_label}-spot-restore`
+- Journal：`spot_restore_amount` / `spot_restore_quote_spent`（與 Profit swap 分離）
+- Dashboard **ITM spot exit** 區塊顯示 Sold / Bought back / 淨 USDT

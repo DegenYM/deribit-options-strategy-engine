@@ -124,6 +124,10 @@ class CoveredCallMixin:
     ) -> list[dict[str, Any]]:
         if not self.config.covered_call_spot_exit_enabled:
             return []
+        if live and self.config.has_private_credentials:
+            from ..spot_exit_ops import reconcile_spot_exits_in_groups
+
+            reconcile_spot_exits_in_groups(context.state.groups, self.client)
         actions: list[dict[str, Any]] = []
         for group in context.state.groups:
             if group.status == "closed" and self._is_covered_call_group(group) and group.spot_exit_status == "pending":

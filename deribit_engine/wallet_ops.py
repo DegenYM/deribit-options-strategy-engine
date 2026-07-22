@@ -60,6 +60,37 @@ def spot_sell_quote_proceeds_from_trades(
     return max(total, Decimal("0"))
 
 
+def spot_buy_quote_spent_from_trades(
+    trades: list[dict[str, Any]],
+    *,
+    quote_currency: str = "USDT",
+) -> Decimal:
+    """Net quote spent on spot buy fills (gross notional plus fees in quote terms)."""
+    quote = quote_currency.upper()
+    total = Decimal("0")
+    for trade in trades:
+        direction = str(trade.get("direction") or "").lower()
+        if direction != "buy":
+            continue
+        amount = to_decimal(trade.get("amount"))
+        price = to_decimal(trade.get("price"))
+        if amount <= 0 or price <= 0:
+            continue
+        spent = amount * price
+        fee = to_decimal(trade.get("fee"))
+        if fee > 0:
+            fee_ccy = str(trade.get("fee_currency") or quote).upper()
+            if fee_ccy in _STABLE_QUOTE_CURRENCIES:
+                spent += fee
+            elif fee_ccy in SPOT_BASE_CURRENCIES:
+                spent += fee * price
+            else:
+                idx = to_decimal(trade.get("index_price"))
+                spent += fee * idx if idx > 0 else fee * price
+        total += spent
+    return max(total, Decimal("0"))
+
+
 @dataclass(frozen=True)
 class FeeSubaccountConfig:
     subaccount_id: int | None

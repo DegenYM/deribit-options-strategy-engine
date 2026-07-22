@@ -677,6 +677,15 @@ class TradeGroup:
     spot_exit_instrument_name: str = ""
     spot_exit_order_id: str = ""
     spot_exit_reason: str = ""
+    spot_exit_quote_proceeds: Decimal = Decimal("0")
+    spot_exit_quote_proceeds_lifetime: Decimal = Decimal("0")
+    spot_restore_status: str = ""
+    spot_restore_amount: Decimal = Decimal("0")
+    spot_restore_instrument_name: str = ""
+    spot_restore_order_id: str = ""
+    spot_restore_reason: str = ""
+    spot_restore_quote_spent: Decimal = Decimal("0")
+    spot_restore_quote_spent_lifetime: Decimal = Decimal("0")
     profit_sweep_status: str = ""
     profit_sweep_amount: Decimal = Decimal("0")
     profit_sweep_instrument_name: str = ""
@@ -1455,6 +1464,24 @@ class TradeGroup:
             payload["spot_exit_order_id"] = self.spot_exit_order_id
         if self.spot_exit_reason:
             payload["spot_exit_reason"] = self.spot_exit_reason
+        if self.spot_exit_quote_proceeds > 0:
+            payload["spot_exit_quote_proceeds"] = self.spot_exit_quote_proceeds
+        if self.spot_exit_quote_proceeds_lifetime > 0:
+            payload["spot_exit_quote_proceeds_lifetime"] = self.spot_exit_quote_proceeds_lifetime
+        if self.spot_restore_status:
+            payload["spot_restore_status"] = self.spot_restore_status
+        if self.spot_restore_amount > 0:
+            payload["spot_restore_amount"] = self.spot_restore_amount
+        if self.spot_restore_instrument_name:
+            payload["spot_restore_instrument_name"] = self.spot_restore_instrument_name
+        if self.spot_restore_order_id:
+            payload["spot_restore_order_id"] = self.spot_restore_order_id
+        if self.spot_restore_reason:
+            payload["spot_restore_reason"] = self.spot_restore_reason
+        if self.spot_restore_quote_spent > 0:
+            payload["spot_restore_quote_spent"] = self.spot_restore_quote_spent
+        if self.spot_restore_quote_spent_lifetime > 0:
+            payload["spot_restore_quote_spent_lifetime"] = self.spot_restore_quote_spent_lifetime
         if self.profit_sweep_status:
             payload["profit_sweep_status"] = self.profit_sweep_status
         if self.profit_sweep_amount > 0:
@@ -1592,6 +1619,15 @@ class TradeGroup:
             spot_exit_instrument_name=str(payload.get("spot_exit_instrument_name") or ""),
             spot_exit_order_id=str(payload.get("spot_exit_order_id") or ""),
             spot_exit_reason=str(payload.get("spot_exit_reason") or ""),
+            spot_exit_quote_proceeds=to_decimal(payload.get("spot_exit_quote_proceeds")),
+            spot_exit_quote_proceeds_lifetime=to_decimal(payload.get("spot_exit_quote_proceeds_lifetime")),
+            spot_restore_status=str(payload.get("spot_restore_status") or ""),
+            spot_restore_amount=to_decimal(payload.get("spot_restore_amount")),
+            spot_restore_instrument_name=str(payload.get("spot_restore_instrument_name") or ""),
+            spot_restore_order_id=str(payload.get("spot_restore_order_id") or ""),
+            spot_restore_reason=str(payload.get("spot_restore_reason") or ""),
+            spot_restore_quote_spent=to_decimal(payload.get("spot_restore_quote_spent")),
+            spot_restore_quote_spent_lifetime=to_decimal(payload.get("spot_restore_quote_spent_lifetime")),
             profit_sweep_status=str(payload.get("profit_sweep_status") or ""),
             profit_sweep_amount=to_decimal(payload.get("profit_sweep_amount")),
             profit_sweep_instrument_name=str(payload.get("profit_sweep_instrument_name") or ""),

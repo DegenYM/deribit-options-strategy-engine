@@ -204,6 +204,11 @@ class EngineBase:
                 order_label_prefix=self.config.order_label_prefix,
             ):
                 changed = True
+            if self.config.has_private_credentials:
+                from ..spot_exit_ops import reconcile_spot_exit_from_exchange
+
+                if reconcile_spot_exit_from_exchange(group, client=self.client):
+                    changed = True
         return changed
 
     def _book_equity_native(
@@ -862,11 +867,28 @@ class EngineBase:
                 fill_stats = premium_sweep_fill_stats_by_book(
                     self.client,
                     self.config.order_label_prefix,
+                    groups=context.state.groups,
                 )
                 if fill_stats:
                     payload["premium_sweep_fill_stats_by_book"] = fill_stats
             except Exception:  # noqa: BLE001
                 LOGGER.debug("premium_sweep_fill_stats_by_book failed", exc_info=True)
+            try:
+                from ..spot_exit_ops import spot_exit_fill_stats_by_book
+
+                spot_exit_stats = spot_exit_fill_stats_by_book(self.client)
+                if spot_exit_stats:
+                    payload["spot_exit_fill_stats_by_book"] = spot_exit_stats
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("spot_exit_fill_stats_by_book failed", exc_info=True)
+            try:
+                from ..spot_restore_ops import spot_restore_fill_stats_by_book
+
+                spot_restore_stats = spot_restore_fill_stats_by_book(self.client)
+                if spot_restore_stats:
+                    payload["spot_restore_fill_stats_by_book"] = spot_restore_stats
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("spot_restore_fill_stats_by_book failed", exc_info=True)
         try:
             from ..hedge_pnl import attach_hedge_performance_windows, summarize_hedge_pnl_for_scope
 
@@ -2042,6 +2064,25 @@ class EngineBase:
             "spot_exit_instrument_name": group.spot_exit_instrument_name or None,
             "spot_exit_order_id": group.spot_exit_order_id or None,
             "spot_exit_reason": group.spot_exit_reason or None,
+            "spot_exit_quote_proceeds": format_decimal(group.spot_exit_quote_proceeds, 4)
+            if group.spot_exit_quote_proceeds > 0
+            else None,
+            "spot_exit_quote_proceeds_lifetime": format_decimal(group.spot_exit_quote_proceeds_lifetime, 4)
+            if group.spot_exit_quote_proceeds_lifetime > 0
+            else None,
+            "spot_restore_status": group.spot_restore_status or None,
+            "spot_restore_amount": format_decimal(group.spot_restore_amount, 8)
+            if group.spot_restore_amount > 0
+            else None,
+            "spot_restore_instrument_name": group.spot_restore_instrument_name or None,
+            "spot_restore_order_id": group.spot_restore_order_id or None,
+            "spot_restore_reason": group.spot_restore_reason or None,
+            "spot_restore_quote_spent": format_decimal(group.spot_restore_quote_spent, 4)
+            if group.spot_restore_quote_spent > 0
+            else None,
+            "spot_restore_quote_spent_lifetime": format_decimal(group.spot_restore_quote_spent_lifetime, 4)
+            if group.spot_restore_quote_spent_lifetime > 0
+            else None,
             "profit_sweep_status": group.profit_sweep_status or None,
             "profit_sweep_amount": format_decimal(group.profit_sweep_amount, 8)
             if group.profit_sweep_amount > 0
@@ -2126,6 +2167,25 @@ class EngineBase:
             "spot_exit_instrument_name": group.spot_exit_instrument_name or None,
             "spot_exit_order_id": group.spot_exit_order_id or None,
             "spot_exit_reason": group.spot_exit_reason or None,
+            "spot_exit_quote_proceeds": format_decimal(group.spot_exit_quote_proceeds, 4)
+            if group.spot_exit_quote_proceeds > 0
+            else None,
+            "spot_exit_quote_proceeds_lifetime": format_decimal(group.spot_exit_quote_proceeds_lifetime, 4)
+            if group.spot_exit_quote_proceeds_lifetime > 0
+            else None,
+            "spot_restore_status": group.spot_restore_status or None,
+            "spot_restore_amount": format_decimal(group.spot_restore_amount, 8)
+            if group.spot_restore_amount > 0
+            else None,
+            "spot_restore_instrument_name": group.spot_restore_instrument_name or None,
+            "spot_restore_order_id": group.spot_restore_order_id or None,
+            "spot_restore_reason": group.spot_restore_reason or None,
+            "spot_restore_quote_spent": format_decimal(group.spot_restore_quote_spent, 4)
+            if group.spot_restore_quote_spent > 0
+            else None,
+            "spot_restore_quote_spent_lifetime": format_decimal(group.spot_restore_quote_spent_lifetime, 4)
+            if group.spot_restore_quote_spent_lifetime > 0
+            else None,
             "realized_close_debit": format_decimal(group.realized_close_debit, 8)
             if group.realized_close_debit is not None
             else None,

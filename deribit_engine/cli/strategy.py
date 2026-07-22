@@ -31,6 +31,7 @@ BOT_COMMANDS = frozenset(
         "close-position",
         "cancel",
         "profit-sweep",
+        "spot-restore",
         "stress-current",
     }
 )
@@ -132,6 +133,33 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Submit spot sell orders; default is dry-run preview",
     )
     profit_sweep_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    spot_restore_parser = subparsers.add_parser(
+        "spot-restore",
+        help="Buy back cover sold by ITM/settlement spot exit (USDT→BTC/ETH); journals spot_restore_*",
+    )
+    add_env_file_after_subcommand(spot_restore_parser)
+    spot_restore_parser.add_argument(
+        "--group-id",
+        default=None,
+        help="Restore one closed trade group only",
+    )
+    spot_restore_parser.add_argument(
+        "--amount",
+        default=None,
+        help="Native amount to buy back (default: full unrestored spot_exit remainder); requires --group-id if multiple candidates",
+    )
+    spot_restore_parser.add_argument(
+        "--reconcile-only",
+        action="store_true",
+        help="Only sync spot_restore_* from Deribit order labels; do not place orders",
+    )
+    spot_restore_parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Submit spot buy orders; default is dry-run preview",
+    )
+    spot_restore_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
     run_parser = subparsers.add_parser("run", help="Run repeated manage+enter cycles")
     add_env_file_after_subcommand(run_parser)
@@ -564,6 +592,24 @@ def _dispatch_bot_commands(args: argparse.Namespace) -> int:
                 bot,
                 live=args.live,
                 group_id=getattr(args, "group_id", None),
+                reconcile_only=bool(getattr(args, "reconcile_only", False)),
+            )
+            render(summary.to_dict(), args.json)
+            return 0
+        if args.command == "spot-restore":
+            from ..spot_restore_ops import run_spot_restores
+
+            if bot.config.option_strategy != "covered_call":
+                raise SystemExit(f"spot-restore requires covered_call strategy (got {bot.config.option_strategy!r})")
+            amount_raw = getattr(args, "amount", None)
+            amount = to_decimal(amount_raw) if amount_raw is not None else None
+            if amount is not None and amount <= 0:
+                raise SystemExit("spot-restore --amount must be positive")
+            summary = run_spot_restores(
+                bot,
+                live=args.live,
+                group_id=getattr(args, "group_id", None),
+                amount=amount,
                 reconcile_only=bool(getattr(args, "reconcile_only", False)),
             )
             render(summary.to_dict(), args.json)
