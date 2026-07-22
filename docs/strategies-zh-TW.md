@@ -48,7 +48,7 @@
 - **Settlement spot exit**（`COVERED_CALL_SPOT_EXIT_ENABLED=true`）：short call 到期 ITM 結算後，引擎標記 pending，下一輪 `manage` market 賣 **BTC_USDT / ETH_USDT**。賣出數量 = `cover − settlement_loss`（優先 Deribit transaction log，否則 intrinsic 估算），避免結算扣幣後 oversell。
 - **Robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=false` 為 tier 預設）：接近到期且 ITM 時**先買回** short call，再賣 spot；啟用時不扣 settlement loss（call 已買回）。可設 `COVERED_CALL_ITM_CONFIRM_CYCLES` 避免 wick 假觸發。
 
-預設啟用 **槽位分配**（`COVERED_CALL_SLOT_SIZING=true`）：每筆進場數量 ≈ `剩餘可用 cover ÷ 剩餘 MAX_GROUPS_PER_CURRENCY 槽位`，隨現貨規模放大，無固定 QTY 上限。例如 0.5 BTC、`MAX_GROUPS_PER_CURRENCY=3` 時第一筆約 0.1～0.17 BTC，後續 cycle 逐步補滿不同合約。
+預設啟用 **槽位分配**（`COVERED_CALL_SLOT_SIZING=true`）：依合約最小單位（BTC 通常 0.1）把可填 cover 整數均分到剩餘 `MAX_GROUPS_PER_CURRENCY` 槽位（`ceil(units / slots)`），避免 `cover ÷ 槽位數` 再 floor 後留下無法再開的碎量。例如 0.5 BTC、3 槽、min 0.1 → 依序約 **0.2 / 0.2 / 0.1**（仍受盤口 `best_bid_amount` 上限）。
 
 ## Payoff 示意
 

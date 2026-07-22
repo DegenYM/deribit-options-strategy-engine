@@ -1995,9 +1995,11 @@ class StrategySelector:
         Returns ``None`` when slot sizing is disabled or ``max_groups_per_currency``
         is unset (<= 0), meaning callers should size to full available cover.
 
-        When ``min_trade_amount`` is set, slots are only split across positions
-        that can each satisfy the contract minimum — e.g. 0.1 BTC cover with
-        min 0.1 uses one slot (0.1), not three (0.033 floored to 0).
+        When ``min_trade_amount`` is set, allocate in whole contract units with
+        ``ceil(fillable_units / remaining_slots)`` so sequential fills consume all
+        fillable cover — e.g. 0.5 BTC cover / min 0.1 / 3 slots → 0.2, then 0.2,
+        then 0.1 (not three × floor(0.5/3)=0.1 leaving 0.2 stranded). With only
+        0.1 cover and min 0.1, still one slot of 0.1 (not three × 0.033 → 0).
         """
         if not self.config.covered_call_slot_sizing:
             return None
@@ -2009,8 +2011,11 @@ class StrategySelector:
             max_fillable = floor_to_step(available_cover_quantity, min_trade_amount)
             if max_fillable < min_trade_amount:
                 return Decimal("0")
-            fillable_slots = int(max_fillable // min_trade_amount)
-            remaining_slots = min(remaining_slots, max(1, fillable_slots))
+            fillable_units = int(max_fillable // min_trade_amount)
+            remaining_slots = min(remaining_slots, max(1, fillable_units))
+            # ceil division keeps remainder units on earlier entries.
+            units_this_entry = (fillable_units + remaining_slots - 1) // remaining_slots
+            return min_trade_amount * Decimal(units_this_entry)
         return available_cover_quantity / Decimal(remaining_slots)
 
     @staticmethod

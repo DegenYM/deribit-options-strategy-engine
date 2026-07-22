@@ -414,6 +414,7 @@ def test_build_covered_call_candidates_requires_existing_cover(tmp_path):
 
 
 def test_covered_call_slot_sizing_splits_available_cover(tmp_path):
+    """0.5 BTC / min 0.1 / 3 slots → whole-unit ceil split: 0.2, then 0.2, then 0.1."""
     config = make_config(
         tmp_path,
         option_strategy="covered_call",
@@ -425,6 +426,7 @@ def test_covered_call_slot_sizing_splits_available_cover(tmp_path):
     )
     selector = StrategySelector(config)
     inst_payload, book_payload = _make_btc_call_payload(14, 77000)
+    book_payload = {**book_payload, "best_bid_amount": "1", "best_ask_amount": "1"}
     instrument = OptionInstrument.from_api(inst_payload)
 
     def loader(name):
@@ -442,7 +444,7 @@ def test_covered_call_slot_sizing_splits_available_cover(tmp_path):
         open_group_count=0,
     )
     assert candidates
-    assert candidates[0].quantity == Decimal("0.1")
+    assert candidates[0].quantity == Decimal("0.2")
 
     candidates_one_open = selector.build_covered_call_candidates(
         [instrument],
@@ -450,12 +452,51 @@ def test_covered_call_slot_sizing_splits_available_cover(tmp_path):
         regime=RiskRegime.NORMAL,
         collateral_currency="BTC",
         currency="BTC",
-        available_cover_quantity=Decimal("0.4"),
+        available_cover_quantity=Decimal("0.3"),
         summary_equity=Decimal("1"),
         open_group_count=1,
     )
     assert candidates_one_open
     assert candidates_one_open[0].quantity == Decimal("0.2")
+
+    candidates_two_open = selector.build_covered_call_candidates(
+        [instrument],
+        loader,
+        regime=RiskRegime.NORMAL,
+        collateral_currency="BTC",
+        currency="BTC",
+        available_cover_quantity=Decimal("0.1"),
+        summary_equity=Decimal("1"),
+        open_group_count=2,
+    )
+    assert candidates_two_open
+    assert candidates_two_open[0].quantity == Decimal("0.1")
+
+
+def test_covered_call_slot_entry_cap_allocates_whole_min_trade_units(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        max_groups_per_currency=3,
+        covered_call_slot_sizing=True,
+    )
+    selector = StrategySelector(config)
+    min_trade = Decimal("0.1")
+    assert selector.covered_call_slot_entry_cap(
+        available_cover_quantity=Decimal("0.5"),
+        open_group_count=0,
+        min_trade_amount=min_trade,
+    ) == Decimal("0.2")
+    assert selector.covered_call_slot_entry_cap(
+        available_cover_quantity=Decimal("0.3"),
+        open_group_count=1,
+        min_trade_amount=min_trade,
+    ) == Decimal("0.2")
+    assert selector.covered_call_slot_entry_cap(
+        available_cover_quantity=Decimal("0.1"),
+        open_group_count=2,
+        min_trade_amount=min_trade,
+    ) == Decimal("0.1")
 
 
 def test_covered_call_slot_sizing_does_not_split_below_min_contract(tmp_path):
