@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 from deribit_engine.market_snapshot_store import MarketSnapshotStore
-from deribit_engine.portal_snapshot_service import PortalSnapshotService, build_portal_payload
+from deribit_engine.portal_snapshot_service import (
+    PORTAL_PAYLOAD_STRING_MAX_CHARS,
+    PortalSnapshotService,
+    build_portal_payload,
+)
 from deribit_engine.portal_snapshot_store import PortalSnapshotStore
 from deribit_engine.utils import utc_now_ms
+
+
+def _portal_row_count(db_path: Path) -> int:
+    with sqlite3.connect(db_path) as conn:
+        return int(conn.execute("SELECT COUNT(*) FROM portal_snapshots").fetchone()[0])
 
 
 def test_market_snapshot_store_roundtrip(tmp_path: Path) -> None:
@@ -134,3 +144,86 @@ def test_portal_service_load_prefers_live(tmp_path: Path) -> None:
     assert api["cache_kind"] == "live"
     assert api["source"] == "portal_cache"
     assert api["portfolio"]["total_equity_usdc"] == "1000"
+
+
+def test_portal_snapshot_store_keeps_only_latest_per_kind(tmp_path: Path) -> None:
+    db_path = tmp_path / "portal.db"
+    store = PortalSnapshotStore(db_path)
+    first = store.append(
+        investor_id="alice",
+        snapshot_kind="disk",
+        payload={"n": 1},
+        content_fingerprint="disk-1",
+        ts_ms=1_000,
+    )
+    second = store.append(
+        investor_id="alice",
+        snapshot_kind="disk",
+        payload={"n": 2},
+        content_fingerprint="disk-2",
+        ts_ms=2_000,
+    )
+    live = store.append(
+        investor_id="alice",
+        snapshot_kind="live",
+        payload={"n": 3},
+        content_fingerprint="live-1",
+        ts_ms=3_000,
+    )
+    assert first is not None
+    assert second is not None
+    assert live is not None
+    assert _portal_row_count(db_path) == 2
+    disk_row = store.latest("alice", snapshot_kind="disk")
+    live_row = store.latest("alice", snapshot_kind="live")
+    assert disk_row is not None
+    assert live_row is not None
+    assert disk_row.payload == {"n": 2}
+    assert live_row.payload == {"n": 3}
+
+
+def test_build_portal_payload_truncates_long_strings() -> None:
+    huge = "x" * (PORTAL_PAYLOAD_STRING_MAX_CHARS + 512)
+    payload = build_portal_payload(
+        ledger_snapshot={
+            "source": "ledger",
+            "snapshot_ts_ms": 1_000,
+            "freshness_ms": 100,
+            "portfolio": {"note": huge},
+            "accounts": [],
+            "scheduler": {},
+        },
+        groups={"open": [{"spot_exit_reason": huge}], "closed": []},
+        realized_summary={"summary": {"realized_pnl_usdc": "10"}},
+        dashboard_strategies=["covered_call"],
+    )
+    assert len(payload["groups"]["open"][0]["spot_exit_reason"]) == PORTAL_PAYLOAD_STRING_MAX_CHARS
+    assert len(payload["portfolio"]["note"]) == PORTAL_PAYLOAD_STRING_MAX_CHARS
+
+
+def test_capture_live_truncates_live_status_strings(tmp_path: Path) -> None:
+    service = PortalSnapshotService(repo_root=tmp_path, investor_id="alice")
+    huge = "y" * (PORTAL_PAYLOAD_STRING_MAX_CHARS + 128)
+    captured = service.capture_live(
+        ledger_snapshot={
+            "source": "ledger",
+            "snapshot_ts_ms": 2_000,
+            "freshness_ms": 0,
+            "portfolio": {"total_equity_usdc": "1000"},
+            "accounts": [],
+            "scheduler": {},
+        },
+        status={
+            "portfolio": {"total_equity_usdc": "1000"},
+            "underlying_index_usd": {"note": huge},
+        },
+        groups={"open": [{"spot_exit_reason": huge}], "closed": []},
+        realized_summary={"summary": {"realized_pnl_usdc": "10"}},
+        dashboard_strategies=["covered_call"],
+        min_interval_sec=0,
+    )
+    assert captured is True
+    row = service.portal_store.latest("alice", snapshot_kind="live")
+    assert row is not None
+    assert len(row.payload["groups"]["open"][0]["spot_exit_reason"]) == PORTAL_PAYLOAD_STRING_MAX_CHARS
+    assert len(row.payload["live_status"]["underlying_index_usd"]["note"]) == PORTAL_PAYLOAD_STRING_MAX_CHARS

@@ -36,10 +36,10 @@ pip install -r requirements.txt
 |------|------|------------------|
 | Equity ledger（帳戶快照 JSONL） | `data/frontend_ledger/<id>/[<slug>/]equity_*.jsonl` | `FRONTEND_SNAPSHOT_INTERVAL_SEC`（300s） |
 | Market 快照（BTC/ETH spot、IVR） | `data/frontend_ledger/_shared/market.db` | `MARKET_SNAPSHOT_INTERVAL_SEC`（300s）、`MARKET_SNAPSHOT_RETENTION_DAYS`（7） |
-| Portal disk 快照 | `data/frontend_ledger/<id>/portal_snapshots.db` | `PORTAL_SNAPSHOT_DISK_INTERVAL_SEC`（300s）、`PORTAL_SNAPSHOT_DISK_RETENTION_DAYS`（90） |
-| Portal live 快照 | 同上（`snapshot_kind=live`） | `PORTAL_SNAPSHOT_LIVE_INTERVAL_SEC`（600s）、`PORTAL_SNAPSHOT_LIVE_RETENTION_DAYS`（30） |
+| Portal disk 快照 | `data/frontend_ledger/<id>/portal_snapshots.db` | 每 `snapshot_kind` 只留最新 1 列；`PORTAL_SNAPSHOT_DISK_INTERVAL_SEC`（300s）、`PORTAL_SNAPSHOT_DISK_RETENTION_DAYS`（1，後備） |
+| Portal live 快照 | 同上（`snapshot_kind=live`） | 同上；`PORTAL_SNAPSHOT_LIVE_INTERVAL_SEC`（600s）、`PORTAL_SNAPSHOT_LIVE_RETENTION_DAYS`（1，後備） |
 
-投資人 portal（`investor.html`）優先讀 `portal_snapshots.db` 的預組 bundle（`source=portal_cache`），並以 `FRONTEND_INVESTOR_STATUS_CACHE_TTL_SEC`（預設 180s）作為 live 快照有效期限；背景 warm 週期由 `FRONTEND_BUNDLE_WARM_INTERVAL_SEC`（預設 90s）控制，避免每次刷新都打 Deribit。
+投資人 portal（`investor.html`）優先讀 `portal_snapshots.db` 的預組 bundle（`source=portal_cache`），並以 `FRONTEND_INVESTOR_STATUS_CACHE_TTL_SEC`（預設 180s）作為 live 快照有效期限；背景 warm 週期由 `FRONTEND_BUNDLE_WARM_INTERVAL_SEC`（預設 90s）控制，避免每次刷新都打 Deribit。組裝 portal payload 時會遞迴截斷超過 2KB 的字串（例如膨脹的 `spot_exit_reason`），不改交易 state。
 
 Ledger 每列可含 `equity_native_by_book`（原幣 equity）；舊列若只有 USDC 等價 `equity_by_book`，可用 `scripts/backfill_ledger_equity_native.py` 回填（詳見 [`scripts/README.md`](../scripts/README.md)）。
 

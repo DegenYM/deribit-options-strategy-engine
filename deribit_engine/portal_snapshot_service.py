@@ -10,17 +10,26 @@ from pathlib import Path
 from typing import Any
 
 from .env_layout import investor_portal_db_path, shared_market_db_path
-from .frontend_server.constants import (
-    DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC,
-    DEFAULT_MARKET_SNAPSHOT_RETENTION_DAYS,
-    DEFAULT_PORTAL_SNAPSHOT_DISK_RETENTION_DAYS,
-    DEFAULT_PORTAL_SNAPSHOT_LIVE_RETENTION_DAYS,
-)
 from .market_snapshot_store import MarketSnapshotStore
 from .portal_snapshot_store import PortalSnapshotStore
 from .utils import utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
+
+# Cap inflated text fields (e.g. spot_exit_reason) in portal payloads only.
+PORTAL_PAYLOAD_STRING_MAX_CHARS = 2048
+
+
+def _truncate_long_strings(value: Any, *, max_chars: int = PORTAL_PAYLOAD_STRING_MAX_CHARS) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= max_chars else value[:max_chars]
+    if isinstance(value, dict):
+        return {key: _truncate_long_strings(item, max_chars=max_chars) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_truncate_long_strings(item, max_chars=max_chars) for item in value]
+    if isinstance(value, tuple):
+        return [_truncate_long_strings(item, max_chars=max_chars) for item in value]
+    return value
 
 
 def _fingerprint(payload: dict[str, Any]) -> str:
@@ -55,17 +64,19 @@ def build_portal_payload(
         "groups_open": len(groups.get("open") or []),
         "summary": _summary_numbers(summary),
     }
-    return {
-        "snapshot_ts_ms": ledger_snapshot.get("snapshot_ts_ms"),
-        "freshness_ms": ledger_snapshot.get("freshness_ms"),
-        "portfolio": portfolio,
-        "accounts": ledger_snapshot.get("accounts") or [],
-        "scheduler": ledger_snapshot.get("scheduler") or {},
-        "groups": groups,
-        "realized_summary": realized_summary,
-        "dashboard_strategies": list(dashboard_strategies),
-        "_fingerprint_basis": fp_basis,
-    }
+    return _truncate_long_strings(
+        {
+            "snapshot_ts_ms": ledger_snapshot.get("snapshot_ts_ms"),
+            "freshness_ms": ledger_snapshot.get("freshness_ms"),
+            "portfolio": portfolio,
+            "accounts": ledger_snapshot.get("accounts") or [],
+            "scheduler": ledger_snapshot.get("scheduler") or {},
+            "groups": groups,
+            "realized_summary": realized_summary,
+            "dashboard_strategies": list(dashboard_strategies),
+            "_fingerprint_basis": fp_basis,
+        }
+    )
 
 
 def portal_row_to_api_response(
@@ -191,6 +202,7 @@ class PortalSnapshotService:
             "spot_restore_fill_stats_by_book": status.get("spot_restore_fill_stats_by_book") or {},
             "hedge_pnl_summary": status.get("hedge_pnl_summary") or {},
         }
+        payload = _truncate_long_strings(payload)
         fp = _fingerprint(
             {
                 **payload["_fingerprint_basis"],
@@ -221,6 +233,8 @@ class PortalSnapshotService:
     ) -> dict[str, Any] | None:
         max_age = live_max_age_ms
         if max_age is None:
+            from .frontend_server.constants import DEFAULT_INVESTOR_STATUS_CACHE_TTL_SEC
+
             max_age = (
                 int(
                     os.environ.get(
@@ -253,6 +267,12 @@ class PortalSnapshotService:
         return None
 
     def run_retention(self) -> dict[str, int]:
+        from .frontend_server.constants import (
+            DEFAULT_MARKET_SNAPSHOT_RETENTION_DAYS,
+            DEFAULT_PORTAL_SNAPSHOT_DISK_RETENTION_DAYS,
+            DEFAULT_PORTAL_SNAPSHOT_LIVE_RETENTION_DAYS,
+        )
+
         now_ms = utc_now_ms()
         market_days = int(os.environ.get("MARKET_SNAPSHOT_RETENTION_DAYS", DEFAULT_MARKET_SNAPSHOT_RETENTION_DAYS))
         disk_days = int(

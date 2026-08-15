@@ -110,8 +110,16 @@ class PortalSnapshotStore:
                         content_fingerprint,
                     ),
                 )
+                row_id = int(cur.lastrowid)
+                conn.execute(
+                    """
+                    DELETE FROM portal_snapshots
+                    WHERE investor_id = ? AND snapshot_kind = ? AND id != ?
+                    """,
+                    (investor_id, snapshot_kind, row_id),
+                )
                 conn.commit()
-                return int(cur.lastrowid)
+                return row_id
 
     def latest(self, investor_id: str, *, snapshot_kind: str | None = None) -> PortalSnapshotRow | None:
         with self._connect() as conn:
