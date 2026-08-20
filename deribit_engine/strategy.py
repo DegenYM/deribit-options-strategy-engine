@@ -431,6 +431,19 @@ class StrategySelector:
             return (instrument.strike / index_price) - Decimal("1")
         return Decimal("1") - (instrument.strike / index_price)
 
+    def _otm_floor_only(self, option_type: str) -> bool:
+        """True when OTM% is a min floor only (no hard OTM max).
+
+        Covered call and naked short put both use delta as the hard strike gate;
+        deep-OTM names that still match delta stay eligible (APR filters thin premium).
+        """
+        strategy = self.config.option_strategy
+        if option_type == "call" and strategy == "covered_call":
+            return True
+        if option_type == "put" and strategy == "naked_short":
+            return True
+        return False
+
     def _passes_strike_otm_prefilter(
         self,
         instrument: OptionInstrument,
@@ -448,8 +461,7 @@ class StrategySelector:
         else:
             omin, omax = self.config.put_otm_bounds(currency)
         slack = Decimal("0.005")
-        # Covered call: retain spot → delta is the hard gate; OTM max is not.
-        if option_type == "call" and self.config.option_strategy == "covered_call":
+        if self._otm_floor_only(option_type):
             return otm >= (omin - slack)
         return (omin - slack) <= otm <= (omax + slack)
 
@@ -529,11 +541,11 @@ class StrategySelector:
             if option_type == "call":
                 otm = self._call_otm_ratio(instrument, book)
                 omin, omax = self.config.call_otm_bounds(currency)
-                if self.config.option_strategy == "covered_call":
-                    return f"otm={format_decimal(otm, 4)} min={format_decimal(omin, 4)}"
             else:
                 otm = self._put_otm_ratio(instrument, book)
                 omin, omax = self.config.put_otm_bounds(currency)
+            if self._otm_floor_only(option_type):
+                return f"otm={format_decimal(otm, 4)} min={format_decimal(omin, 4)}"
             return f"otm={format_decimal(otm, 4)} range={format_decimal(omin, 4)}-{format_decimal(omax, 4)}"
         return ""
 
@@ -619,6 +631,12 @@ class StrategySelector:
             return "delta_out_of_range"
         otm = self._put_otm_ratio(instrument, book)
         omin, omax = self.config.put_otm_bounds(currency)
+        # Naked short put: delta is the hard gate; OTM% is a floor only so
+        # deep-OTM strikes that still match delta remain eligible.
+        if self._otm_floor_only("put"):
+            if otm < omin:
+                return "otm_out_of_range"
+            return None
         if not (omin <= otm <= omax):
             return "otm_out_of_range"
         return None
@@ -646,7 +664,7 @@ class StrategySelector:
         # Covered call prioritizes delta for assignment risk; OTM% is a floor
         # only (must be sufficiently OTM). Do not hard-cap OTM max so low-IV
         # deep-OTM strikes that still match delta remain eligible.
-        if self.config.option_strategy == "covered_call":
+        if self._otm_floor_only("call"):
             if otm < omin:
                 return "otm_out_of_range"
             return None
@@ -847,16 +865,24 @@ class StrategySelector:
         preferred_delta = pdmin <= abs(candidate.short_leg.delta) <= pdmax
         otm = candidate._otm_ratio()
         preferred_otm = pomin <= otm <= pomax
-        # Covered call: retain spot → delta, then farther OTM, then APR (soft).
-        if candidate.strategy == "covered_call" or self.config.option_strategy == "covered_call":
+        # Covered call / naked short: trend-aligned side, then delta hard gate
+        # → farther OTM → APR (soft). Trend is a no-op when every candidate is
+        # the same side (covered call, or naked put-only).
+        strategy = candidate.strategy or self.config.option_strategy
+        if strategy in {"covered_call", "naked_short"} or self.config.option_strategy in {
+            "covered_call",
+            "naked_short",
+        }:
             return (
+                self._trend_side_sort_tier(candidate),
                 0 if preferred_delta else 1,
                 abs(abs(candidate.short_leg.delta) - target_delta),
                 -otm,
                 0 if in_band else 1,
+                -candidate.margin_efficiency,
                 self.short_spread_ratio_or_zero(candidate),
-                -candidate.net_apr,
                 -candidate.screening_bid * candidate.quantity,
+                -candidate.net_apr,
             )
         return (
             0 if in_band else 1,
@@ -1230,12 +1256,18 @@ class StrategySelector:
             pdmin, pdmax = self.config.preferred_call_delta_bounds(currency)
             pomin, pomax = self.config.preferred_call_otm_bounds(currency)
             otm = self._call_otm_ratio(instrument, book)
+            omin, _omax = self.config.call_otm_bounds(currency)
         else:
             pdmin, pdmax = self.config.preferred_put_delta_bounds(currency)
             pomin, pomax = self.config.preferred_put_otm_bounds(currency)
             otm = self._put_otm_ratio(instrument, book)
+            omin, _omax = self.config.put_otm_bounds(currency)
         preferred_delta = pdmin <= abs(book.delta) <= pdmax
-        preferred_otm = pomin <= otm <= pomax
+        # Floor-only strategies: preferred_otm is informational (cleared the OTM min).
+        if self._otm_floor_only(option_type):
+            preferred_otm = otm >= omin
+        else:
+            preferred_otm = pomin <= otm <= pomax
         in_band = self.config.target_net_apr_min <= net_apr <= self.config.target_net_apr_max
         return (
             NakedPutCandidate(

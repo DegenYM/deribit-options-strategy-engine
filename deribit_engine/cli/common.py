@@ -53,6 +53,11 @@ def parse_instrument_names(raw_values: list[str] | None) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def parse_group_ids(raw_values: list[str] | None) -> list[str]:
+    """Normalize repeated / comma-separated ``--group-id`` values (same rules as instruments)."""
+    return parse_instrument_names(raw_values)
+
+
 def render(data, json_output: bool) -> None:
     if json_output:
         print(json.dumps(data, default=json_default, ensure_ascii=False, indent=2, sort_keys=True))

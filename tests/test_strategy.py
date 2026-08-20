@@ -337,6 +337,41 @@ def _make_btc_call_payload(days: int, strike: int, *, delta: str = "0.11") -> tu
     return instrument, book
 
 
+def _make_btc_put_payload(days: int, strike: int, *, delta: str = "-0.10") -> tuple[dict, dict]:
+    """Build synthetic instrument + orderbook payloads for a BTC inverse short put test."""
+    from conftest import future_expiry
+
+    expiry = future_expiry(days)
+    instrument = {
+        "instrument_name": f"BTC-{days:02d}APR30-{strike}-P",
+        "base_currency": "BTC",
+        "quote_currency": "BTC",
+        "settlement_currency": "BTC",
+        "instrument_type": "reversed",
+        "tick_size": "0.0001",
+        "tick_size_steps": [{"above_price": "0.005", "tick_size": "0.0005"}],
+        "min_trade_amount": "0.1",
+        "contract_size": "0.1",
+        "option_type": "put",
+        "expiration_timestamp": expiry,
+        "strike": str(strike),
+        "instrument_state": "open",
+    }
+    book = {
+        "instrument_name": f"BTC-{days:02d}APR30-{strike}-P",
+        "best_bid_price": "0.0032",
+        "best_bid_amount": "0.3",
+        "best_ask_price": "0.0034",
+        "best_ask_amount": "0.3",
+        "mark_price": "0.0033",
+        "index_price": "70000",
+        "mark_iv": "0.55",
+        "open_interest": "60",
+        "greeks": {"delta": delta},
+    }
+    return instrument, book
+
+
 def test_build_naked_short_call_candidates_inverse_btc(tmp_path):
     config = make_config(
         tmp_path,
@@ -741,6 +776,50 @@ def test_covered_call_allows_deep_otm_when_delta_in_range(tmp_path):
     )
 
 
+def test_naked_short_put_allows_deep_otm_when_delta_in_range(tmp_path):
+    """Naked short put: OTM max is not a hard gate; delta + OTM min decide eligibility."""
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        enable_short_put=True,
+        btc_put_delta_min=Decimal("0.05"),
+        btc_put_delta_max=Decimal("0.15"),
+        btc_put_otm_min=Decimal("0.10"),
+        btc_put_otm_max=Decimal("0.18"),
+    )
+    selector = StrategySelector(config)
+    # strike 42000 / index 70000 → OTM ≈ 40%, above configured max but delta OK
+    inst_payload, book_payload = _make_btc_put_payload(14, 42000, delta="-0.08")
+    instrument = OptionInstrument.from_api(inst_payload)
+    book = OrderBookSnapshot.from_api(book_payload)
+
+    assert selector._naked_short_put_rejection_reason("BTC", instrument, book) is None
+    assert selector._passes_strike_otm_prefilter(
+        instrument,
+        currency="BTC",
+        index_price=Decimal("70000"),
+        option_type="put",
+    )
+
+
+def test_naked_short_put_still_rejects_too_close_otm(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        enable_short_put=True,
+        btc_put_delta_min=Decimal("0.05"),
+        btc_put_delta_max=Decimal("0.20"),
+        btc_put_otm_min=Decimal("0.12"),
+        btc_put_otm_max=Decimal("0.50"),
+    )
+    selector = StrategySelector(config)
+    # strike 65000 / index 70000 → OTM ≈ 7.1% < 12% floor
+    inst_payload, book_payload = _make_btc_put_payload(14, 65000, delta="-0.12")
+    instrument = OptionInstrument.from_api(inst_payload)
+    book = OrderBookSnapshot.from_api(book_payload)
+    assert selector._naked_short_put_rejection_reason("BTC", instrument, book) == "otm_out_of_range"
+
+
 def test_covered_call_sort_prefers_delta_then_farther_otm(tmp_path):
     from deribit_engine.models import SpreadLeg
 
@@ -822,6 +901,88 @@ def test_covered_call_sort_prefers_delta_then_farther_otm(tmp_path):
     ranked = sorted([closer, farther, retain, rich_wrong_delta], key=selector.naked_put_sort_key)
     assert ranked[0] is farther
     assert ranked[1] is retain  # same delta/OTM as farther; in_band only breaks tie after OTM
+    assert ranked[2] is closer
+    assert ranked[3] is rich_wrong_delta
+
+
+def test_naked_short_sort_prefers_delta_then_farther_otm(tmp_path):
+    from deribit_engine.models import SpreadLeg
+
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        btc_preferred_put_delta_min=Decimal("0.07"),
+        btc_preferred_put_delta_max=Decimal("0.11"),
+    )
+    selector = StrategySelector(config)
+
+    def cand(
+        *,
+        delta: Decimal,
+        strike: Decimal,
+        preferred_delta: bool,
+        in_band: bool = True,
+    ) -> NakedPutCandidate:
+        short = SpreadLeg(
+            instrument_name=f"BTC-14APR30-{int(strike)}-P",
+            strike=strike,
+            quantity=Decimal("1"),
+            min_trade_amount=Decimal("1"),
+            contract_size=Decimal("1"),
+            entry_price=Decimal("120"),
+            target_price=Decimal("120"),
+            best_bid_price=Decimal("120"),
+            best_ask_price=Decimal("125"),
+            delta=delta,
+            tick_size=Decimal("0.1"),
+            tick_size_steps=(),
+            expiration_timestamp_ms=1_800_000_000_000,
+            index_price=Decimal("70000"),
+            quote_currency="USDC",
+            settlement_currency="USDC",
+            instrument_type="linear",
+        )
+        return NakedPutCandidate(
+            currency="BTC",
+            collateral_currency="USDC",
+            quantity=Decimal("1"),
+            dte_days=Decimal("14"),
+            short_leg=short,
+            screening_bid=Decimal("120"),
+            screening_mark=Decimal("122"),
+            target_limit_price=Decimal("120"),
+            net_premium_native=Decimal("118"),
+            fee_native=Decimal("2"),
+            net_apr=Decimal("0.10"),
+            margin_efficiency=Decimal("0.08"),
+            estimated_im_total=Decimal("1500"),
+            estimated_mm_total=Decimal("900"),
+            regime=RiskRegime.NORMAL,
+            preferred_delta=preferred_delta,
+            preferred_otm=True,
+            in_target_apr_band=in_band,
+            option_type="put",
+            strategy="naked_short",
+        )
+
+    closer = cand(delta=Decimal("-0.09"), strike=Decimal("59500"), preferred_delta=True)
+    farther = cand(delta=Decimal("-0.09"), strike=Decimal("49000"), preferred_delta=True)
+    retain = cand(
+        delta=Decimal("-0.09"),
+        strike=Decimal("49000"),
+        preferred_delta=True,
+        in_band=False,
+    )
+    rich_wrong_delta = cand(
+        delta=Decimal("-0.18"),
+        strike=Decimal("63000"),
+        preferred_delta=False,
+        in_band=True,
+    )
+
+    ranked = sorted([closer, farther, retain, rich_wrong_delta], key=selector.naked_put_sort_key)
+    assert ranked[0] is farther
+    assert ranked[1] is retain
     assert ranked[2] is closer
     assert ranked[3] is rich_wrong_delta
 

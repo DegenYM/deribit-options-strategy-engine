@@ -679,6 +679,9 @@ class TradeGroup:
     spot_exit_reason: str = ""
     spot_exit_quote_proceeds: Decimal = Decimal("0")
     spot_exit_quote_proceeds_lifetime: Decimal = Decimal("0")
+    #: Native settlement debit used when sizing ITM spot exit / full-cover restore.
+    spot_exit_settlement_loss: Decimal = Decimal("0")
+    spot_exit_settlement_loss_source: str = ""
     spot_restore_status: str = ""
     spot_restore_amount: Decimal = Decimal("0")
     spot_restore_instrument_name: str = ""
@@ -1468,6 +1471,10 @@ class TradeGroup:
             payload["spot_exit_quote_proceeds"] = self.spot_exit_quote_proceeds
         if self.spot_exit_quote_proceeds_lifetime > 0:
             payload["spot_exit_quote_proceeds_lifetime"] = self.spot_exit_quote_proceeds_lifetime
+        if self.spot_exit_settlement_loss > 0:
+            payload["spot_exit_settlement_loss"] = self.spot_exit_settlement_loss
+        if self.spot_exit_settlement_loss_source:
+            payload["spot_exit_settlement_loss_source"] = self.spot_exit_settlement_loss_source
         if self.spot_restore_status:
             payload["spot_restore_status"] = self.spot_restore_status
         if self.spot_restore_amount > 0:
@@ -1621,6 +1628,8 @@ class TradeGroup:
             spot_exit_reason=str(payload.get("spot_exit_reason") or ""),
             spot_exit_quote_proceeds=to_decimal(payload.get("spot_exit_quote_proceeds")),
             spot_exit_quote_proceeds_lifetime=to_decimal(payload.get("spot_exit_quote_proceeds_lifetime")),
+            spot_exit_settlement_loss=to_decimal(payload.get("spot_exit_settlement_loss")),
+            spot_exit_settlement_loss_source=str(payload.get("spot_exit_settlement_loss_source") or ""),
             spot_restore_status=str(payload.get("spot_restore_status") or ""),
             spot_restore_amount=to_decimal(payload.get("spot_restore_amount")),
             spot_restore_instrument_name=str(payload.get("spot_restore_instrument_name") or ""),
@@ -1801,6 +1810,9 @@ class StrategyState:
     day_equity_anchor_ms_by_book: dict[str, int] = field(default_factory=dict)
     next_group_id: int = 1
     normal_recovery_counts: dict[str, int] = field(default_factory=dict)
+    # Consecutive manage cycles with an unfilled maker-mode hedge gap, keyed by
+    # underlying (BTC / ETH). Reset when the gap closes within the deadband.
+    hedge_maker_wait_cycles: dict[str, int] = field(default_factory=dict)
     groups: list[TradeGroup] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1821,6 +1833,7 @@ class StrategyState:
             "day_equity_anchor_ms_by_book": dict(self.day_equity_anchor_ms_by_book),
             "next_group_id": self.next_group_id,
             "normal_recovery_counts": self.normal_recovery_counts,
+            "hedge_maker_wait_cycles": dict(self.hedge_maker_wait_cycles),
             "groups": [group.to_dict() for group in self.groups],
         }
 
@@ -1869,6 +1882,9 @@ class StrategyState:
             next_group_id=int(payload.get("next_group_id") or 1),
             normal_recovery_counts={
                 str(k).upper(): int(v) for k, v in (payload.get("normal_recovery_counts") or {}).items()
+            },
+            hedge_maker_wait_cycles={
+                str(k).upper(): int(v) for k, v in (payload.get("hedge_maker_wait_cycles") or {}).items()
             },
             groups=[TradeGroup.from_dict(item) for item in payload.get("groups") or []],
         )

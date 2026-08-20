@@ -94,10 +94,24 @@ def profit_sweep_lifetime_usdt(group: TradeGroup) -> Decimal:
 
 def profit_sweep_realized_usdt(group: TradeGroup) -> Decimal:
     """USDT actually received from premium swap fills (exchange quote, not reconcile high-water)."""
+    if not _profit_sweep_has_exchange_fill(group):
+        return Decimal("0")
+    exchange_quote = group.profit_sweep_exchange_quote_proceeds
+    if exchange_quote > 0:
+        return exchange_quote
     quote = group.profit_sweep_quote_proceeds
-    if quote > 0 and str(group.profit_sweep_status or "").lower() == "filled":
+    if quote > 0:
         return quote
     return profit_sweep_lifetime_usdt(group)
+
+
+def _profit_sweep_filled_native_sold(group: TradeGroup, native: Decimal) -> Decimal:
+    """Native sold for disposition: prefer exchange qty over dust-padded journal amount."""
+    if group.profit_sweep_exchange_native > 0:
+        return min(group.profit_sweep_exchange_native, native)
+    if group.profit_sweep_amount > 0:
+        return min(group.profit_sweep_amount, native)
+    return native
 
 
 def _profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
@@ -110,6 +124,13 @@ def _profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
             return True
         if "premium_amount_synced" in reason and str(group.profit_sweep_order_id or "").strip():
             return True
+        # Manual / unlabeled may lack per-group order_id; dust needs exchange qty.
+        if "unlabeled_premium_reconciled" in reason:
+            return True
+        if "manual_swap" in reason:
+            return True
+        if "dust_pool_sweep" in reason:
+            return group.profit_sweep_exchange_native > 0
         return False
     if str(group.profit_sweep_order_id or "").strip():
         return True
@@ -120,7 +141,7 @@ def _profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
     if "manual_swap" in reason:
         return True
     if "dust_pool_sweep" in reason:
-        return True
+        return group.profit_sweep_exchange_native > 0
     return True
 
 
@@ -143,10 +164,38 @@ def _profit_disposition_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
             "swept_native": Decimal("0"),
             "swept_usdt": Decimal("0"),
         }
+    # ITM + legacy premium-folded spot exit: attribute premium slice to Profit swap
+    # (Sold). Cover round-trip stays in exit−restore (with folded USDT subtracted).
+    # ITM without fold: premium remains native — use the normal held/sweep path below.
+    from .spot_restore_ops import (
+        group_has_itm_spot_exit_fills,
+        itm_folded_premium_native,
+        itm_folded_premium_usdt,
+        itm_spot_exit_premium_folded,
+    )
+
+    itm_spot_exit = book in ("BTC", "ETH") and group_has_itm_spot_exit_fills(group)
     native = group.realized_pnl_collateral_native
     if native is None:
         group.backfill_realized_pnl_collateral_native()
         native = group.realized_pnl_collateral_native
+    if itm_spot_exit and itm_spot_exit_premium_folded(group):
+        premium = itm_folded_premium_native(group)
+        prem_usdt = itm_folded_premium_usdt(group)
+        if premium > 0 and prem_usdt > 0:
+            return {
+                "book": book,
+                "held": Decimal("0"),
+                "pending": Decimal("0"),
+                "swept_native": premium,
+                "swept_usdt": prem_usdt,
+                "from_itm_fold": True,
+            }
+        return None
+    # ITM cover−settle path: only positive premium belongs in Profit swap.
+    # Settlement losses stay on the ITM exit−restore net after restore.
+    if itm_spot_exit and (native is None or native <= 0):
+        return None
     if native is None or native == 0:
         return None
     if book not in ("BTC", "ETH"):
@@ -171,7 +220,7 @@ def _profit_disposition_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
                 "swept_native": Decimal("0"),
                 "swept_usdt": Decimal("0"),
             }
-        swept_native = min(sweep_amt, native)
+        swept_native = _profit_sweep_filled_native_sold(group, native)
         remainder = max(Decimal("0"), native - swept_native)
         return {
             "book": book,
@@ -181,13 +230,36 @@ def _profit_disposition_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
             "swept_usdt": swept_usdt,
         }
     if sweep in {"pending", "submitted"}:
-        if group.profit_sweep_amount > 0 and group.profit_sweep_amount < native:
-            remainder = max(Decimal("0"), native - group.profit_sweep_amount)
+        reason = str(group.profit_sweep_reason or "").lower()
+        # Cover top-up retain: count as held BTC, not queued pending.
+        if "retained_for_cover" in reason:
+            prior_exchange = (
+                group.profit_sweep_exchange_native if group.profit_sweep_exchange_native > 0 else Decimal("0")
+            )
+            swept_native = min(prior_exchange, native) if prior_exchange > 0 else Decimal("0")
+            held = max(Decimal("0"), native - swept_native)
+            return {
+                "book": book,
+                "held": held,
+                "pending": Decimal("0"),
+                "swept_native": swept_native,
+                "swept_usdt": swept_usdt,
+                "cover_retained": held,
+            }
+        prior_exchange = group.profit_sweep_exchange_native if group.profit_sweep_exchange_native > 0 else Decimal("0")
+        prior_journal = (
+            group.profit_sweep_amount
+            if group.profit_sweep_amount > 0 and group.profit_sweep_amount < native
+            else Decimal("0")
+        )
+        prior_native = prior_exchange if prior_exchange > 0 else prior_journal
+        if prior_native > 0 and prior_native < native:
+            remainder = max(Decimal("0"), native - prior_native)
             return {
                 "book": book,
                 "held": Decimal("0"),
                 "pending": remainder,
-                "swept_native": group.profit_sweep_amount,
+                "swept_native": prior_native,
                 "swept_usdt": swept_usdt,
             }
         return {
@@ -208,9 +280,13 @@ def _profit_disposition_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
 
 def _aggregate_profit_disposition(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     held_native: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0"), "USDC": Decimal("0")}
+    loss_native: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
+    cover_retained_native: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
     pending_sweep_native: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
     swept_native_ref: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
     swept_quote_proceeds: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
+    folded_swept_native: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
+    folded_swept_quote: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
     excluded_swept_native: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
     excluded_swept_quote: dict[str, Decimal] = {"BTC": Decimal("0"), "ETH": Decimal("0")}
     any_row = False
@@ -223,24 +299,40 @@ def _aggregate_profit_disposition(rows: list[dict[str, Any]]) -> dict[str, Any] 
         if book == "USDC":
             held_native["USDC"] += disp["held"]
             continue
-        held_native[book] += disp["held"]
+        if disp["held"] < 0:
+            loss_native[book] += disp["held"]
+        else:
+            held_native[book] += disp["held"]
+        cover_retained = to_decimal(disp.get("cover_retained"))
+        if cover_retained > 0:
+            cover_retained_native[book] += cover_retained
         pending_sweep_native[book] += disp["pending"]
-        swept_native_ref[book] += disp["swept_native"]
         swept_usdt = disp["swept_usdt"]
-        if swept_usdt > 0:
-            if _is_premium_proceeds_pool_excluded(row):
-                excluded_swept_quote[book] += swept_usdt
-                if disp["swept_native"] > 0:
-                    excluded_swept_native[book] += disp["swept_native"]
-            else:
+        if swept_usdt > 0 and _is_premium_proceeds_pool_excluded(row):
+            # Manual / unlabeled: native+quote only in excluded buckets (avoid Sold double-count).
+            excluded_swept_quote[book] += swept_usdt
+            if disp["swept_native"] > 0:
+                excluded_swept_native[book] += disp["swept_native"]
+        else:
+            swept_native_ref[book] += disp["swept_native"]
+            if swept_usdt > 0:
                 swept_quote_proceeds[book] += swept_usdt
+            if disp.get("from_itm_fold"):
+                if disp["swept_native"] > 0:
+                    folded_swept_native[book] += disp["swept_native"]
+                if swept_usdt > 0:
+                    folded_swept_quote[book] += swept_usdt
     if not any_row:
         return None
     return {
         "held_native": held_native,
+        "loss_native": loss_native,
+        "cover_retained_native": cover_retained_native,
         "pending_sweep_native": pending_sweep_native,
         "swept_native_ref": swept_native_ref,
         "swept_quote_proceeds": swept_quote_proceeds,
+        "folded_swept_native": folded_swept_native,
+        "folded_swept_quote": folded_swept_quote,
         "excluded_swept_native": excluded_swept_native,
         "excluded_swept_quote": excluded_swept_quote,
     }
@@ -261,13 +353,18 @@ def _summarize_profit_disposition(
         pending = disposition["pending_sweep_native"].get(book, Decimal("0"))
         journal_sold = disposition["swept_native_ref"].get(book, Decimal("0"))
         journal_quote = disposition["swept_quote_proceeds"].get(book, Decimal("0"))
-        earned = held + pending + journal_sold
+        excluded_native = disposition["excluded_swept_native"].get(book, Decimal("0"))
+        excluded_quote = disposition["excluded_swept_quote"].get(book, Decimal("0"))
+        folded_native = disposition.get("folded_swept_native", {}).get(book, Decimal("0"))
+        folded_quote = disposition.get("folded_swept_quote", {}).get(book, Decimal("0"))
+        earned = held + pending + journal_sold + excluded_native
         exchange = (fill_stats or {}).get(book) or {}
         display_usdt = to_decimal(exchange.get("display_usdt"))
         display_native = to_decimal(exchange.get("display_native_sold"))
         if display_native > 0 and display_usdt > 0:
-            sold_native = display_native
-            sold_quote = display_usdt
+            # Exchange premium_sweep fills omit legacy ITM-folded premium (sold via spot exit).
+            sold_native = display_native + folded_native
+            sold_quote = display_usdt + folded_quote
         else:
             net_usdt = to_decimal(exchange.get("net_usdt"))
             net_native = to_decimal(exchange.get("net_native_sold"))
@@ -281,12 +378,15 @@ def _summarize_profit_disposition(
             sold_quote = journal_quote
             if net_usdt > 0:
                 sold_quote = net_usdt
-            sold_native += disposition["excluded_swept_native"].get(book, Decimal("0"))
-            sold_quote += disposition["excluded_swept_quote"].get(book, Decimal("0"))
+            sold_native += excluded_native
+            sold_quote += excluded_quote
         spot_sold[book] = sold_native
         spot_sold_quote[book] = sold_quote
         remainder = max(Decimal("0"), earned - sold_native - pending)
         spot_held[book] = remainder
+        cover_retained = disposition.get("cover_retained_native", {}).get(book, Decimal("0"))
+        if cover_retained > 0:
+            spot_held[book] = max(spot_held[book], cover_retained)
     return {
         "spot_held": spot_held,
         "spot_pending": spot_pending,
@@ -301,26 +401,32 @@ def total_realized_usdc_from_swap_disposition(
     spot_index: dict[str, Decimal],
     fill_stats: dict[str, dict[str, str]] | None = None,
 ) -> Decimal | None:
-    """Total profit = swapped USDT + unswept native × live spot (+ USDC realized)."""
+    """Total profit = premium swap USDT + unswept native × spot + ITM exit−restore net (+ USDC)."""
+    from .spot_restore_ops import sum_itm_spot_exit_net_usdt_for_total_profit
+
     disposition = _aggregate_profit_disposition(closed_rows)
-    if not disposition:
-        return None
-    summary = _summarize_profit_disposition(disposition, spot_index=spot_index, fill_stats=fill_stats)
+    itm_net = sum_itm_spot_exit_net_usdt_for_total_profit(closed_rows)
     total = Decimal("0")
     any_book = False
-    for book in ("BTC", "ETH"):
-        swapped = summary["spot_sold_quote"].get(book, Decimal("0"))
-        held = summary["spot_held"].get(book, Decimal("0"))
-        pending = summary["spot_pending"].get(book, Decimal("0"))
-        unswept = held + pending
-        spot = spot_index.get(book)
-        unswept_usd = unswept * spot if spot is not None and spot > 0 and unswept > 0 else Decimal("0")
-        if swapped > Decimal("0.005") or unswept_usd > Decimal("0.005"):
-            total += swapped + unswept_usd
+    if disposition:
+        summary = _summarize_profit_disposition(disposition, spot_index=spot_index, fill_stats=fill_stats)
+        for book in ("BTC", "ETH"):
+            swapped = summary["spot_sold_quote"].get(book, Decimal("0"))
+            held = summary["spot_held"].get(book, Decimal("0"))
+            pending = summary["spot_pending"].get(book, Decimal("0"))
+            loss = disposition["loss_native"].get(book, Decimal("0"))
+            unswept = held + pending + loss
+            spot = spot_index.get(book)
+            unswept_usd = unswept * spot if spot is not None and spot > 0 and abs(unswept) > 0 else Decimal("0")
+            if swapped > Decimal("0.005") or abs(unswept_usd) >= Decimal("0.005"):
+                total += swapped + unswept_usd
+                any_book = True
+        usdc = disposition["held_native"].get("USDC", Decimal("0"))
+        if abs(usdc) >= Decimal("0.005"):
+            total += usdc
             any_book = True
-    usdc = disposition["held_native"].get("USDC", Decimal("0"))
-    if abs(usdc) >= Decimal("0.005"):
-        total += usdc
+    if abs(itm_net) >= Decimal("0.005"):
+        total += itm_net
         any_book = True
     return total if any_book else None
 
@@ -330,14 +436,13 @@ def _profit_sweep_display_usdc(
     native: Decimal,
     spot: Decimal,
 ) -> Decimal:
-    """Coin profit swapped to USDT uses lifetime quote proceeds, not live wallet."""
+    """Coin profit swapped to USDT uses exchange/fill quote, not live wallet."""
     if native <= 0:
         return native * spot
     sweep = str(group.profit_sweep_status or "").lower()
     swept_usdt = profit_sweep_realized_usdt(group)
-    sweep_amt = group.profit_sweep_amount if group.profit_sweep_amount > 0 else native
     if sweep == "filled" and swept_usdt > 0:
-        swept_native = min(sweep_amt, native)
+        swept_native = _profit_sweep_filled_native_sold(group, native)
         held_native = max(Decimal("0"), native - swept_native)
         if held_native > 0:
             return swept_usdt + held_native * spot

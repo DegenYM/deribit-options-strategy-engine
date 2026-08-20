@@ -309,6 +309,52 @@ def test_build_premium_alignment_plan_sell_deficit() -> None:
     assert plan.sell_native["ETH"] == Decimal("0.03")
 
 
+def test_principal_restore_buy_does_not_create_premium_deficit() -> None:
+    client = MagicMock()
+    btc_trades = {
+        "trades": [
+            {
+                "trade_id": "s1",
+                "label": "cc-profit-sweep-btc-0001",
+                "direction": "sell",
+                "amount": "0.01",
+            },
+            {
+                "trade_id": "r1",
+                "label": "cc-principal-restore-btc",
+                "direction": "buy",
+                "amount": "0.0003",
+            },
+        ]
+    }
+
+    def _fetch(currency: str, **kwargs):
+        if kwargs.get("historical") is False:
+            return {"trades": [], "has_more": False}
+        if currency == "BTC":
+            return btc_trades
+        return {"trades": [], "has_more": False}
+
+    client.get_user_trades_by_currency.side_effect = _fetch
+    group = _group(
+        realized_pnl_collateral_native="0.01",
+        profit_sweep_amount="0.01",
+        profit_sweep_quote_proceeds="600",
+    )
+    plan = build_premium_alignment_plan(client, [group])
+    assert plan.net_sold_native["BTC"] == Decimal("0.01")
+    assert plan.sell_native.get("BTC", Decimal(0)) == Decimal(0)
+    assert plan.buyback_native.get("BTC", Decimal(0)) == Decimal(0)
+
+
+def test_align_native_up_rounds_to_spot_step() -> None:
+    from deribit_engine.profit_sweep_repair import _align_native_up
+
+    assert _align_native_up(Decimal("0.00022"), Decimal("0.0001"), Decimal("0.0001")) == Decimal("0.0003")
+    assert _align_native_up(Decimal("0.0001"), Decimal("0.0001"), Decimal("0.0001")) == Decimal("0.0001")
+    assert _align_native_up(Decimal("0"), Decimal("0.0001"), Decimal("0.0001")) == Decimal("0")
+
+
 def test_reconcile_premium_proceeds_allocates_by_premium_share() -> None:
     client = MagicMock()
     btc_trades = {

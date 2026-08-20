@@ -6,7 +6,9 @@ from deribit_engine.spot_exit_ops import (
     apply_spot_exit_quote_proceeds,
     filter_unlabeled_trades_excluding_spot_exits,
     reconcile_spot_exit_from_exchange,
+    reschedule_incomplete_spot_exits,
     spot_exit_fill_stats_for_currency,
+    spot_exit_filled_native,
     spot_exit_realized_usdt,
 )
 
@@ -142,7 +144,7 @@ def test_reconcile_spot_exit_from_exchange_by_order_id() -> None:
 
 
 def test_reconcile_spot_exit_repairs_failed_partial_fill() -> None:
-    """Cancelled order with partial fill must still journal as filled from exchange trades."""
+    """Cancelled order with partial fill stays pending so manage can sell the remainder."""
     group = _group(
         spot_exit_status="failed",
         spot_exit_amount="0.9845",
@@ -162,7 +164,75 @@ def test_reconcile_spot_exit_repairs_failed_partial_fill() -> None:
         }
     ]
     assert reconcile_spot_exit_from_exchange(group, client=client) is True
-    assert group.spot_exit_status == "filled"
+    assert group.spot_exit_status == "pending"
     assert group.spot_exit_amount == Decimal("0.0564")
     assert group.spot_exit_quote_proceeds == Decimal("0.0564") * Decimal("1886.198")
     assert group.spot_exit_quote_proceeds_lifetime == group.spot_exit_quote_proceeds
+    assert spot_exit_filled_native(group) == Decimal("0.0564")
+    assert spot_exit_realized_usdt(group) == group.spot_exit_quote_proceeds
+
+
+def test_reschedule_incomplete_spot_exits_requeues_filled_partial() -> None:
+    group = _group(
+        spot_exit_status="filled",
+        spot_exit_amount="0.9355",
+        spot_exit_quote_proceeds="1700",
+        spot_exit_quote_proceeds_lifetime="1700",
+    )
+    assert reschedule_incomplete_spot_exits([group], remaining_native_for_group=lambda _g: Decimal("0.049")) == 1
+    assert group.spot_exit_status == "pending"
+
+
+def test_reschedule_incomplete_spot_exits_keeps_complete_filled() -> None:
+    group = _group(spot_exit_status="filled", spot_exit_amount="0.9845")
+    assert reschedule_incomplete_spot_exits([group], remaining_native_for_group=lambda _g: Decimal("0")) == 0
+    assert group.spot_exit_status == "filled"
+
+
+def test_reschedule_incomplete_spot_exits_skips_after_restore() -> None:
+    """AN 0035: after restore-to-cover, do not re-sell structural remainder (e.g. 0.0582)."""
+    group = _group(
+        spot_exit_status="filled",
+        spot_exit_amount="0.9355",
+        spot_exit_quote_proceeds="1700",
+        spot_exit_quote_proceeds_lifetime="1700",
+        spot_restore_status="filled",
+        spot_restore_amount="0.9441",
+    )
+    assert reschedule_incomplete_spot_exits([group], remaining_native_for_group=lambda _g: Decimal("0.0582")) == 0
+    assert group.spot_exit_status == "filled"
+
+
+def test_reschedule_incomplete_spot_exits_skips_while_restore_pending() -> None:
+    group = _group(
+        spot_exit_status="filled",
+        spot_exit_amount="0.9355",
+        spot_restore_status="pending",
+        spot_restore_amount="0.9441",
+    )
+    assert reschedule_incomplete_spot_exits([group], remaining_native_for_group=lambda _g: Decimal("0.0582")) == 0
+    assert group.spot_exit_status == "filled"
+
+
+def test_spot_exit_filled_native_ignores_pending_plan_amount() -> None:
+    group = _group(
+        spot_exit_status="pending",
+        spot_exit_amount="0.9845",
+        spot_exit_order_id="",
+        spot_exit_quote_proceeds="0",
+        spot_exit_quote_proceeds_lifetime="0",
+    )
+    assert spot_exit_filled_native(group) == Decimal("0")
+
+
+def test_spot_exit_filled_native_ignores_unfilled_pending_order() -> None:
+    """not_enough_funds plan + order id is not a cover sale (Youming #0082)."""
+    group = _group(
+        spot_exit_status="pending",
+        spot_exit_amount="0.9845",
+        spot_exit_order_id="ETH_USDT-failed",
+        spot_exit_quote_proceeds="0",
+        spot_exit_quote_proceeds_lifetime="0",
+        spot_exit_reason="not_enough_funds",
+    )
+    assert spot_exit_filled_native(group) == Decimal("0")

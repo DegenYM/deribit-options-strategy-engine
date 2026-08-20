@@ -37,9 +37,25 @@ def spot_exit_realized_usdt(group: TradeGroup) -> Decimal:
     if lifetime > 0:
         return lifetime
     quote = group.spot_exit_quote_proceeds
-    if quote > 0 and str(group.spot_exit_status or "").lower() == "filled":
+    status = str(group.spot_exit_status or "").lower()
+    if quote > 0 and status in {"filled", "pending", "submitted", "failed"}:
         return quote
     return Decimal("0")
+
+
+def spot_exit_filled_native(group: TradeGroup) -> Decimal:
+    """Cumulative native already sold via ITM/settlement spot-exit fills."""
+    status = str(group.spot_exit_status or "").lower()
+    if status not in {"filled", "pending", "submitted", "failed"}:
+        return Decimal("0")
+    if status == "filled":
+        return group.spot_exit_amount if group.spot_exit_amount > 0 else Decimal("0")
+    # Pending / failed / submitted: only trust amount when a real partial fill has proceeds.
+    # A planned size + order id with not_enough_funds must not count as sold cover.
+    has_proceeds = group.spot_exit_quote_proceeds > 0 or group.spot_exit_quote_proceeds_lifetime > 0
+    if not has_proceeds:
+        return Decimal("0")
+    return group.spot_exit_amount if group.spot_exit_amount > 0 else Decimal("0")
 
 
 def apply_spot_exit_quote_proceeds(
@@ -224,7 +240,7 @@ def reconcile_spot_exit_from_exchange(
     *,
     client: DeribitClient,
 ) -> bool:
-    """Backfill spot_exit_quote_proceeds from labeled spot-exit sells / order id."""
+    """Sync cumulative spot-exit fills; keep pending when more may remain to sell."""
     if not group.is_covered_call_group():
         return False
     status = str(group.spot_exit_status or "").lower()
@@ -233,7 +249,8 @@ def reconcile_spot_exit_from_exchange(
         return False
     if group.spot_exit_quote_proceeds > 0 and status == "filled":
         record_spot_exit_lifetime_proceeds(group, group.spot_exit_quote_proceeds)
-        return False
+        # Still refresh amount/proceeds from exchange when we can — journal amount may be
+        # a stale structural target after an incomplete SWAP + later restore.
 
     short_label = str(group.short_label or "").strip()
     label = spot_exit_order_label(short_label) if short_label else ""
@@ -253,13 +270,25 @@ def reconcile_spot_exit_from_exchange(
             )
             trades = []
 
-    if not trades and label:
+    if label:
+        # Always merge by label so multi-order retries accumulate.
+        by_id: dict[Any, dict[str, Any]] = {}
+        for trade in trades:
+            trade_id = trade.get("trade_id")
+            key = trade_id if trade_id is not None else id(trade)
+            by_id[key] = trade
         for trade in spot_exit_sell_trades_for_currency(client, group.currency.upper()):
             if str(trade.get("label") or "") != label:
                 continue
-            trades.append(trade)
+            trade_id = trade.get("trade_id")
+            key = trade_id if trade_id is not None else id(trade)
+            by_id[key] = trade
+        trades = list(by_id.values())
 
     if not trades:
+        if status == "failed":
+            group.spot_exit_status = "pending"
+            return True
         return False
 
     trades.sort(key=lambda row: int(row.get("timestamp") or 0))
@@ -269,7 +298,11 @@ def reconcile_spot_exit_from_exchange(
     last_order_id = str(last.get("order_id") or "").strip()
     instrument_name = str(last.get("instrument_name") or f"{group.currency.upper()}_USDT")
 
-    group.spot_exit_status = "filled"
+    # Partial IOC cancels leave labeled fills; keep pending so manage can sell the remainder.
+    if status in {"failed", "submitted", "pending"}:
+        group.spot_exit_status = "pending"
+    else:
+        group.spot_exit_status = "filled"
     group.spot_exit_instrument_name = instrument_name
     if last_order_id:
         group.spot_exit_order_id = last_order_id
@@ -294,19 +327,59 @@ def reconcile_spot_exits_in_groups(
     return repaired
 
 
+def spot_restore_blocks_exit_remainder(group: TradeGroup) -> bool:
+    """After restore-to-cover is queued/done, do not chase structural spot-exit remainder.
+
+    Incomplete first exits often sell only cover−settle; restore then reconstitutes cover.
+    Re-selling cover+premium−settle − filled (e.g. leftover premium fold) after that would
+    incorrectly sell into the restored cover. Leftover premium belongs to profit-sweep.
+    """
+    status = str(getattr(group, "spot_restore_status", "") or "").lower()
+    return status in {"pending", "filled"}
+
+
+def reschedule_incomplete_spot_exits(
+    groups: list[TradeGroup],
+    *,
+    remaining_native_for_group,
+) -> int:
+    """Re-queue filled/failed exits that still have structural remainder to sell."""
+    rescheduled = 0
+    for group in groups:
+        if group.status != "closed" or not group.is_covered_call_group():
+            continue
+        if spot_restore_blocks_exit_remainder(group):
+            continue
+        status = str(group.spot_exit_status or "").lower()
+        if status not in {"filled", "failed"}:
+            continue
+        try:
+            remaining = to_decimal(remaining_native_for_group(group))
+        except Exception:  # noqa: BLE001
+            continue
+        if remaining <= 0:
+            continue
+        group.spot_exit_status = "pending"
+        if not group.spot_exit_reason:
+            group.spot_exit_reason = "covered_call_settlement_exit"
+        rescheduled += 1
+    return rescheduled
+
+
 def journal_spot_exit_totals_by_book(groups: list[TradeGroup]) -> dict[str, dict[str, Decimal]]:
-    """Sum filled ITM spot-exit native/USDT from journal groups."""
+    """Sum ITM spot-exit native/USDT from journal groups (includes in-progress partials)."""
     out: dict[str, dict[str, Decimal]] = {
         "BTC": {"native": Decimal("0"), "usdt": Decimal("0")},
         "ETH": {"native": Decimal("0"), "usdt": Decimal("0")},
     }
     for group in groups:
-        if str(group.spot_exit_status or "").lower() != "filled":
+        status = str(group.spot_exit_status or "").lower()
+        if status not in {"filled", "pending", "submitted", "failed"}:
             continue
         book = group.currency.upper()
         if book not in out:
             continue
-        native = group.spot_exit_amount
+        native = spot_exit_filled_native(group)
         usdt = spot_exit_realized_usdt(group)
         if native > 0:
             out[book]["native"] += native

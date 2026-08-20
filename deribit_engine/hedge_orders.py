@@ -1,18 +1,19 @@
-"""Perp hedge order pricing and placement (market vs limit IOC)."""
+"""Perp hedge order pricing and placement (market, limit IOC, limit maker)."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 from typing import Any
 
+from .exceptions import ExchangeError
 from .models import OptionInstrument, OrderBookSnapshot
-from .utils import ceil_to_step, floor_to_step, format_decimal, to_decimal
+from .utils import ceil_to_step, floor_to_step, format_decimal, is_post_only_reject, to_decimal
 
-_HEDGE_ORDER_TYPES = frozenset({"market", "limit_ioc"})
+_HEDGE_ORDER_TYPES = frozenset({"market", "limit_ioc", "limit_maker"})
 
 
 def normalize_hedge_order_type(raw: str) -> str:
-    value = str(raw or "limit_ioc").strip().lower()
+    value = str(raw or "limit_maker").strip().lower()
     if value not in _HEDGE_ORDER_TYPES:
         raise ValueError(f"unsupported hedge order type: {value}")
     return value
@@ -54,6 +55,41 @@ def resolve_hedge_perp_ioc_limit_price(
     return price, None
 
 
+def resolve_hedge_perp_maker_limit_price(
+    *,
+    direction: str,
+    book: OrderBookSnapshot,
+    instrument: OptionInstrument,
+) -> tuple[Decimal | None, str | None]:
+    """Return (limit_price, skip_reason) for a resting maker hedge (buy@bid / sell@ask)."""
+    is_buy = direction.lower() == "buy"
+    if is_buy:
+        ref = book.best_bid_price
+        if ref <= 0:
+            mark = book.mark_price if book.mark_price > 0 else book.index_price
+            if mark <= 0:
+                return None, "hedge_book_unavailable"
+            # One tick below mark so post_only has room if the bid is empty.
+            step = instrument.tick_size_for_price(mark)
+            ref = mark - step if mark > step else mark
+        price = floor_to_step(ref, instrument.tick_size_for_price(ref))
+        if price <= 0:
+            return None, "hedge_limit_price_unavailable"
+        return price, None
+
+    ref = book.best_ask_price
+    if ref <= 0:
+        mark = book.mark_price if book.mark_price > 0 else book.index_price
+        if mark <= 0:
+            return None, "hedge_book_unavailable"
+        step = instrument.tick_size_for_price(mark)
+        ref = mark + step
+    price = ceil_to_step(ref, instrument.tick_size_for_price(ref))
+    if price <= 0:
+        return None, "hedge_limit_price_unavailable"
+    return price, None
+
+
 def place_hedge_perp_order(
     client: Any,
     *,
@@ -67,7 +103,7 @@ def place_hedge_perp_order(
     label: str,
     reduce_only: bool,
 ) -> dict[str, Any]:
-    """Place a perp hedge order using market or limit IOC."""
+    """Place a perp hedge order using market, limit IOC, or resting maker limit."""
     order_type = normalize_hedge_order_type(hedge_order_type)
     if order_type == "market":
         return client.place_order(
@@ -78,6 +114,32 @@ def place_hedge_perp_order(
             order_type="market",
             reduce_only=reduce_only,
         )
+
+    if order_type == "limit_maker":
+        limit_price, skip_reason = resolve_hedge_perp_maker_limit_price(
+            direction=direction,
+            book=book,
+            instrument=instrument,
+        )
+        if limit_price is None or limit_price <= 0:
+            return {"skipped": True, "reason": skip_reason or "hedge_limit_price_unavailable"}
+        try:
+            return client.place_order(
+                direction=direction,
+                instrument_name=instrument_name,
+                amount=amount,
+                label=label,
+                order_type="limit",
+                price=limit_price,
+                time_in_force="good_til_cancelled",
+                post_only=True,
+                reject_post_only=True,
+                reduce_only=reduce_only,
+            )
+        except ExchangeError as exc:
+            if is_post_only_reject(exc):
+                return {"skipped": True, "reason": "hedge_post_only_reject"}
+            raise
 
     limit_price, skip_reason = resolve_hedge_perp_ioc_limit_price(
         direction=direction,
@@ -113,12 +175,19 @@ def hedge_order_action_meta(
     meta: dict[str, str] = {"hedge_order_type": order_type}
     if order_type == "market":
         return meta
-    limit_price, skip_reason = resolve_hedge_perp_ioc_limit_price(
-        direction=direction,
-        book=book,
-        instrument=instrument,
-        max_slippage_pct=hedge_limit_slippage_pct,
-    )
+    if order_type == "limit_maker":
+        limit_price, skip_reason = resolve_hedge_perp_maker_limit_price(
+            direction=direction,
+            book=book,
+            instrument=instrument,
+        )
+    else:
+        limit_price, skip_reason = resolve_hedge_perp_ioc_limit_price(
+            direction=direction,
+            book=book,
+            instrument=instrument,
+            max_slippage_pct=hedge_limit_slippage_pct,
+        )
     if limit_price is not None and limit_price > 0:
         meta["hedge_limit_price"] = format_decimal(limit_price, 8)
     if skip_reason:

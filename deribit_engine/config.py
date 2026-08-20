@@ -268,10 +268,13 @@ class BotConfig:
     # per-position hedge. Defaults higher than ``recovery_normal_cycles`` so
     # unwind hysteresis cuts whipsaw round-trips around ATM.
     hedge_unwind_recovery_cycles: int = 6
-    # Perp hedge execution: ``market`` taker, or ``limit_ioc`` (limit +
-    # immediate_or_cancel at best bid/ask with optional slippage cap).
-    hedge_order_type: str = "limit_ioc"
+    # Perp hedge execution: ``market`` taker, ``limit_ioc`` (aggressive
+    # bid/ask IOC), or ``limit_maker`` (resting post-only buy@bid / sell@ask).
+    hedge_order_type: str = "limit_maker"
     hedge_limit_slippage_pct: Decimal = Decimal("0.005")
+    # Consecutive manage cycles with an unfilled maker hedge gap before
+    # falling back to ``limit_ioc`` for that currency.
+    hedge_maker_max_cycles: int = 12
 
     def hedge_reconcile_deadband_base(self, currency: str) -> Decimal:
         book = str(currency or "").upper()
@@ -312,8 +315,14 @@ class BotConfig:
     covered_call_itm_buffer_pct: Decimal = Decimal("0")
     covered_call_spot_order_type: str = "market"
     covered_call_spot_max_slippage_pct: Decimal = Decimal("0")
+    # Manual ``spot-restore`` CLI defaults (independent of automated spot exit).
+    spot_restore_order_type: str = "limit"
+    spot_restore_wait_seconds: int = 120
     covered_call_profit_sweep_enabled: bool = False
     covered_call_profit_sweep_dust_pool_enabled: bool = True
+    # Agreed cover inventory. Profit sweep must not sell below this when flat.
+    collateral_spot_btc: Decimal = Decimal("0")
+    collateral_spot_eth: Decimal = Decimal("0")
     # When true, each covered_call entry sizes to available_cover / remaining
     # MAX_GROUPS_PER_CURRENCY slots (scales with spot; no fixed QTY cap).
     covered_call_slot_sizing: bool = True
@@ -763,22 +772,31 @@ def load_config(
     covered_call_spot_max_slippage_pct = to_decimal(_optional(values, "COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT", "0"))
     if covered_call_spot_max_slippage_pct < 0 or covered_call_spot_max_slippage_pct >= 1:
         raise ConfigurationError("COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT must be in [0, 1)")
+    spot_restore_order_type = _optional(values, "SPOT_RESTORE_ORDER_TYPE", "limit").lower()
+    if spot_restore_order_type not in {"limit", "market"}:
+        raise ConfigurationError("SPOT_RESTORE_ORDER_TYPE must be one of: limit, market")
+    spot_restore_wait_seconds = max(1, int(_optional(values, "SPOT_RESTORE_WAIT_SECONDS", "120")))
     covered_call_spot_exit_enabled = _to_bool(_optional(values, "COVERED_CALL_SPOT_EXIT_ENABLED", "false"))
     covered_call_profit_sweep_enabled = _to_bool(_optional(values, "COVERED_CALL_PROFIT_SWEEP_ENABLED", "false"))
     covered_call_profit_sweep_dust_pool_enabled = _to_bool(
         _optional(values, "COVERED_CALL_PROFIT_SWEEP_DUST_POOL_ENABLED", "true"),
         default=True,
     )
+    collateral_spot_btc = to_decimal(_optional(values, "COLLATERAL_SPOT_BTC", "0"))
+    collateral_spot_eth = to_decimal(_optional(values, "COLLATERAL_SPOT_ETH", "0"))
+    if collateral_spot_btc < 0 or collateral_spot_eth < 0:
+        raise ConfigurationError("COLLATERAL_SPOT_BTC / COLLATERAL_SPOT_ETH must be >= 0")
     covered_call_slot_sizing = _to_bool(_optional(values, "COVERED_CALL_SLOT_SIZING", "true"), default=True)
     if (covered_call_profit_sweep_enabled or covered_call_spot_exit_enabled) and "USDT" not in traded_collaterals:
         traded_collaterals = tuple(list(traded_collaterals) + ["USDT"])
 
-    hedge_order_type = str(_optional(values, "HEDGE_ORDER_TYPE", "limit_ioc")).strip().lower()
-    if hedge_order_type not in {"market", "limit_ioc"}:
-        raise ConfigurationError("HEDGE_ORDER_TYPE must be one of: market, limit_ioc")
+    hedge_order_type = str(_optional(values, "HEDGE_ORDER_TYPE", "limit_maker")).strip().lower()
+    if hedge_order_type not in {"market", "limit_ioc", "limit_maker"}:
+        raise ConfigurationError("HEDGE_ORDER_TYPE must be one of: market, limit_ioc, limit_maker")
     hedge_limit_slippage_pct = to_decimal(_optional(values, "HEDGE_LIMIT_SLIPPAGE_PCT", "0.005"))
     if hedge_limit_slippage_pct < 0 or hedge_limit_slippage_pct >= 1:
         raise ConfigurationError("HEDGE_LIMIT_SLIPPAGE_PCT must be in [0, 1)")
+    hedge_maker_max_cycles = max(int(_optional(values, "HEDGE_MAKER_MAX_CYCLES", "12")), 1)
 
     put_dte_min = int(_optional(values, "PUT_DTE_MIN", _optional(values, "ENTRY_DTE_MIN", "10")))
     put_dte_max = int(_optional(values, "PUT_DTE_MAX", _optional(values, "ENTRY_DTE_MAX", "21")))
@@ -1014,6 +1032,7 @@ def load_config(
         ),
         hedge_order_type=hedge_order_type,
         hedge_limit_slippage_pct=hedge_limit_slippage_pct,
+        hedge_maker_max_cycles=hedge_maker_max_cycles,
         scan_assets=scan_assets,
         scan_underlyings=scan_underlyings,
         traded_collaterals=traded_collaterals,
@@ -1025,8 +1044,12 @@ def load_config(
         covered_call_itm_buffer_pct=to_decimal(_optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")),
         covered_call_spot_order_type=covered_call_spot_order_type,
         covered_call_spot_max_slippage_pct=covered_call_spot_max_slippage_pct,
+        spot_restore_order_type=spot_restore_order_type,
+        spot_restore_wait_seconds=spot_restore_wait_seconds,
         covered_call_profit_sweep_enabled=covered_call_profit_sweep_enabled,
         covered_call_profit_sweep_dust_pool_enabled=covered_call_profit_sweep_dust_pool_enabled,
+        collateral_spot_btc=collateral_spot_btc,
+        collateral_spot_eth=collateral_spot_eth,
         covered_call_slot_sizing=covered_call_slot_sizing,
         account_role=account_role,
         risk_tier=risk_tier,

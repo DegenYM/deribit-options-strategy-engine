@@ -366,6 +366,7 @@ def _aggregate_status(
     fill_stats = _aggregate_premium_sweep_fill_stats(statuses)
     spot_exit_stats = _aggregate_spot_exit_fill_stats(statuses)
     spot_restore_stats = _aggregate_spot_restore_fill_stats(statuses)
+    trade_groups = _dedupe_trade_group_rows(trade_groups)
     aggregated: dict[str, Any] = {
         "env": "multi" if len(accounts) > 1 else accounts[0].config.env,
         "portfolio": _aggregate_portfolios(active_accounts, statuses, equity_statuses=equity_statuses),

@@ -15,7 +15,7 @@ from ..env_layout import find_repo_root
 from ..param_scan import run_param_scan
 from ..report_md import render_backtest_report_md
 from ..utils import parse_csv, to_decimal
-from .common import add_env_file_after_subcommand, build_bot, parse_instrument_names, render
+from .common import add_env_file_after_subcommand, build_bot, parse_group_ids, parse_instrument_names, render
 
 BOT_COMMANDS = frozenset(
     {
@@ -144,10 +144,18 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         default=None,
         help="Restore one closed trade group only",
     )
-    spot_restore_parser.add_argument(
+    spot_restore_size = spot_restore_parser.add_mutually_exclusive_group()
+    spot_restore_size.add_argument(
         "--amount",
         default=None,
-        help="Native amount to buy back (default: full unrestored spot_exit remainder); requires --group-id if multiple candidates",
+        help="Native amount to buy back (default: swap+settle+fee to restore original cover); requires --group-id if multiple candidates",
+    )
+    spot_restore_size.add_argument(
+        "--usdt",
+        "--quote",
+        dest="usdt",
+        default=None,
+        help="USDT to spend buying spot back (capped to remaining full-cover restore); alias --quote; requires --group-id if multiple candidates",
     )
     spot_restore_parser.add_argument(
         "--reconcile-only",
@@ -158,6 +166,19 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         "--live",
         action="store_true",
         help="Submit spot buy orders; default is dry-run preview",
+    )
+    spot_restore_parser.add_argument(
+        "--order-type",
+        choices=("limit", "market"),
+        default=None,
+        help="Spot buy style (default: SPOT_RESTORE_ORDER_TYPE / limit). "
+        "limit = post-only buy@bid GTC for --wait-seconds; market = immediate USDT spend",
+    )
+    spot_restore_parser.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=None,
+        help="How long to leave a limit restore resting before cancel (default: SPOT_RESTORE_WAIT_SECONDS / 120)",
     )
     spot_restore_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
@@ -175,7 +196,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     close_parser = subparsers.add_parser(
         "close-position",
-        help="Close specific option or perp positions (use sub-account --env-file)",
+        help="Close specific option/perp positions or open trade groups (use sub-account --env-file)",
     )
     add_env_file_after_subcommand(close_parser)
     close_parser.add_argument(
@@ -186,9 +207,16 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         help="Contract to close; repeat or comma-separate (e.g. BTC_USDC-27MAR26-90000-P)",
     )
     close_parser.add_argument(
+        "--group-id",
+        action="append",
+        default=None,
+        metavar="ID",
+        help="Close an open trade group by id (strategy close path; repeat or comma-separate)",
+    )
+    close_parser.add_argument(
         "--list",
         action="store_true",
-        help="List non-zero positions only (dry-run; ignores --instrument)",
+        help="List non-zero positions only (dry-run; ignores --instrument/--group-id)",
     )
     close_parser.add_argument("--live", action="store_true", help="Actually place closing orders")
     close_parser.add_argument(
@@ -196,13 +224,13 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         choices=["market", "limit"],
         default="market",
         help="market: perp via close_position, option via reduce-only market; "
-        "limit: option IOC limit with retry (default market)",
+        "limit: option IOC limit with retry (default market; ignored for --group-id)",
     )
     close_parser.add_argument(
         "--amount",
         default=None,
         metavar="QTY",
-        help="Partial close size in contracts; default closes full position",
+        help="Partial close size in contracts; default closes full position (not with --group-id)",
     )
     close_parser.add_argument("--json", action="store_true", help="Emit JSON")
 
@@ -597,22 +625,35 @@ def _dispatch_bot_commands(args: argparse.Namespace) -> int:
             render(summary.to_dict(), args.json)
             return 0
         if args.command == "spot-restore":
-            from ..spot_restore_ops import run_spot_restores
+            from ..spot_restore_ops import format_spot_restore_human_report, run_spot_restores
 
             if bot.config.option_strategy != "covered_call":
                 raise SystemExit(f"spot-restore requires covered_call strategy (got {bot.config.option_strategy!r})")
             amount_raw = getattr(args, "amount", None)
+            usdt_raw = getattr(args, "usdt", None)
             amount = to_decimal(amount_raw) if amount_raw is not None else None
+            quote_usdt = to_decimal(usdt_raw) if usdt_raw is not None else None
             if amount is not None and amount <= 0:
                 raise SystemExit("spot-restore --amount must be positive")
+            if quote_usdt is not None and quote_usdt <= 0:
+                raise SystemExit("spot-restore --usdt must be positive")
+            wait_seconds = getattr(args, "wait_seconds", None)
+            if wait_seconds is not None and int(wait_seconds) <= 0:
+                raise SystemExit("spot-restore --wait-seconds must be positive")
             summary = run_spot_restores(
                 bot,
                 live=args.live,
                 group_id=getattr(args, "group_id", None),
                 amount=amount,
+                quote_usdt=quote_usdt,
                 reconcile_only=bool(getattr(args, "reconcile_only", False)),
+                order_type=getattr(args, "order_type", None),
+                wait_seconds=int(wait_seconds) if wait_seconds is not None else None,
             )
-            render(summary.to_dict(), args.json)
+            if args.json:
+                render(summary.to_dict(), True)
+            else:
+                print("\n".join(format_spot_restore_human_report(summary)))
             return 0
         if args.command == "run":
             render(
@@ -629,14 +670,18 @@ def _dispatch_bot_commands(args: argparse.Namespace) -> int:
             return 0
         if args.command == "close-position":
             instruments = parse_instrument_names(args.instrument)
-            if not args.list and not instruments:
-                raise SystemExit("close-position: pass --instrument NAME or use --list")
+            group_ids = parse_group_ids(getattr(args, "group_id", None))
+            if not args.list and not instruments and not group_ids:
+                raise SystemExit("close-position: pass --instrument NAME, --group-id ID, or use --list")
             amount = to_decimal(args.amount) if args.amount is not None else None
             if amount is not None and amount <= 0:
                 raise SystemExit("close-position: --amount must be positive")
+            if amount is not None and group_ids:
+                raise SystemExit("close-position: --amount is not supported with --group-id")
             render(
                 bot.close_positions(
                     instruments=instruments,
+                    group_ids=group_ids,
                     list_only=args.list,
                     live=args.live,
                     order_type=args.order_type,

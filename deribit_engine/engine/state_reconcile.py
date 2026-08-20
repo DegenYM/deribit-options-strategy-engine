@@ -11,6 +11,7 @@ from ..bull_put_settlement import (
     long_instrument_for_spread_reconcile,
     spread_expiry_close_debit_usdc,
 )
+from ..exit_reasons import INCOME_EXIT_REASONS
 from ..margin import (
     linear_usdc_short_call_initial_per_contract_usdc,
     linear_usdc_short_put_initial_per_contract_usdc,
@@ -644,25 +645,6 @@ class StateReconcileMixin:
             if estimated_close_debit is not None:
                 realized_pnl = group.entry_credit_net_usdc() - estimated_close_debit
                 realized_return_on_max_loss = safe_div(realized_pnl, group.max_loss)
-            if (
-                self.config.covered_call_spot_exit_enabled
-                and not self.config.covered_call_robust_exit_enabled
-                and self._is_covered_call_group(group)
-                and group.spot_exit_status not in {"submitted", "filled", "pending"}
-                and self._covered_call_itm_from_cache(group, orderbook_cache)
-            ):
-                group.spot_exit_status = "pending"
-                spot_plan = self._plan_covered_call_spot_exit_fields(
-                    group,
-                    orderbook_cache=orderbook_cache,
-                    markets_by_currency=markets_by_currency,
-                    summaries={},
-                    live=live,
-                    reason="covered_call_settlement_exit",
-                )
-                group.spot_exit_amount = spot_plan["amount"]
-                group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
-                group.spot_exit_reason = "covered_call_settlement_exit"
             journal_rows: list[dict[str, Any]] = []
             try:
                 journal_rows = self._trade_journal().list_executions(
@@ -682,6 +664,22 @@ class StateReconcileMixin:
                 )
                 if inferred_reason:
                     group.enrich_fill_prices_from_journal(journal_rows)
+            # Settlement spot exit only after true expiry ITM delivery.
+            # Pre-expiry buybacks (TP / early / time / external) keep the cover —
+            # income exits may profit-sweep premium, but must not sell spot cover.
+            income_exit = inferred_reason in INCOME_EXIT_REASONS if inferred_reason else False
+            if (
+                expired
+                and not income_exit
+                and self.config.covered_call_spot_exit_enabled
+                and not self.config.covered_call_robust_exit_enabled
+                and self._is_covered_call_group(group)
+                and group.spot_exit_status not in {"submitted", "filled", "pending"}
+                and self._covered_call_itm_from_cache(group, orderbook_cache)
+            ):
+                group.spot_exit_status = "pending"
+                group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
+                group.spot_exit_reason = "covered_call_settlement_exit"
             group.backfill_realized_pnl_collateral_native(journal_executions=journal_rows or None)
             group.backfill_realized_pnl_usdc()
             close_reason = "reconciled_expiry" if expired else (inferred_reason or "reconciled_external")
@@ -697,8 +695,12 @@ class StateReconcileMixin:
             )
             self._journal_reconcile_close(group, closed_timestamp_ms=closed_timestamp_ms)
             closed_any = True
-            if live and inferred_reason:
-                self._maybe_schedule_profit_sweep(group, reason=inferred_reason, live=live)
+            if live:
+                self._maybe_schedule_profit_sweep(
+                    group,
+                    reason=inferred_reason or close_reason,
+                    live=live,
+                )
             if realized_pnl is not None:
                 LOGGER.info("reconcile group=%s estimated_pnl=%s", group.group_id, realized_pnl)
             else:

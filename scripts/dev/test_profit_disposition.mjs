@@ -12,6 +12,10 @@ import {
   fmtProfitAvgUsd,
   fmtProfitNative,
   fmtProfitUsdt,
+  groupHasItmSpotExitFills,
+  itmFoldedPremiumUsdt,
+  itmSpotExitNetUsdtForTotalProfit,
+  itmSpotExitPremiumFolded,
   profitDispositionForGroup,
   profitSweepHasExchangeFill,
   profitSweepExchangeNativeSold,
@@ -20,6 +24,7 @@ import {
   realizedPnlDisplayUsdc,
   resolvePremiumSweepBookDisplay,
   summarizeProfitDisposition,
+  summarizeSpotExitDisposition,
   truncateDecimal,
 } from "../../frontend/src/modules/domain.js";
 
@@ -54,6 +59,24 @@ const filledPartial = profitDispositionForGroup(
 assert.ok(Math.abs(filledPartial.held - 0.000086) < 1e-10);
 assert.equal(filledPartial.sweptNative, 0.000914);
 assert.equal(filledPartial.pending, 0);
+
+// Dust-padded journal amount must not inflate Sold / shrink Remaining.
+const filledDustPadded = profitDispositionForGroup(
+  group({
+    profit_sweep_status: "filled",
+    profit_sweep_amount: "0.0003",
+    profit_sweep_exchange_native: "0.0002",
+    profit_sweep_exchange_quote_proceeds: "12.5",
+    profit_sweep_quote_proceeds: "18.9",
+    profit_sweep_reason: "take_profit; dust_pool_sweep; proceeds_reconciled",
+    realized_pnl_collateral_native: "0.0003",
+  }),
+  status,
+);
+assert.equal(filledDustPadded.sweptNative, 0.0002);
+assert.ok(Math.abs(filledDustPadded.held - 0.0001) < 1e-12);
+assert.equal(filledDustPadded.sweptUsdt, 12.5);
+assert.equal(filledDustPadded.pending, 0);
 
 const resweepPending = profitDispositionForGroup(
   group({
@@ -96,6 +119,33 @@ const groups = {
   open: [],
 };
 
+const dustPaddedSummary = summarizeProfitDisposition(
+  aggregateProfitDisposition(
+    report,
+    {
+      closed: [
+        group({
+          group_id: "dust-pad",
+          profit_sweep_status: "filled",
+          profit_sweep_amount: "0.0003",
+          profit_sweep_exchange_native: "0.0002",
+          profit_sweep_exchange_quote_proceeds: "12.5",
+          profit_sweep_quote_proceeds: "18.9",
+          profit_sweep_reason: "take_profit; dust_pool_sweep; proceeds_reconciled",
+          realized_pnl_collateral_native: "0.0003",
+        }),
+      ],
+      open: [],
+    },
+    status,
+  ),
+  { status },
+);
+assert.ok(Math.abs(dustPaddedSummary.spotSold.BTC - 0.0002) < 1e-12);
+assert.ok(Math.abs(dustPaddedSummary.spotSoldQuote.BTC - 12.5) < 1e-9);
+assert.ok(Math.abs(dustPaddedSummary.spotHeld.BTC - 0.0001) < 1e-12);
+assert.ok(Math.abs(dustPaddedSummary.spotEarned.BTC - 0.0003) < 1e-12);
+
 const disposition = aggregateProfitDisposition(report, groups, status);
 const summary = summarizeProfitDisposition(disposition);
 assert.ok(summary.spotEarned.BTC > 0);
@@ -103,7 +153,8 @@ assert.ok(summary.usdtSwapped > 0);
 
 const composition = profitCompositionByBook(report, groups, status);
 assert.ok(composition.earnedUsdByBook.BTC > composition.swappedUsdtByBook.BTC);
-assert.ok(Math.abs(composition.earnedUsdByBook.BTC - 113.4) < 0.1);
+// Earned USD = swapped USDT proceeds + unswept native × live spot (not all-native×spot).
+assert.ok(Math.abs(composition.earnedUsdByBook.BTC - (107.5 + 0.000086 * 63000)) < 0.1);
 assert.ok(Math.abs(composition.earnedNativeByBook.BTC - 0.0018) < 1e-4);
 assert.ok(Math.abs(composition.swappedNativeByBook.BTC - 0.001714) < 1e-4);
 assert.ok(Math.abs(composition.swappedUsdtByBook.BTC - 107.5) < 0.01);
@@ -134,7 +185,8 @@ const fullySold = profitCompositionByBook(
   status,
 );
 assert.equal(fullySold.nativeByBook.BTC, 0);
-assert.ok(Math.abs(fullySold.earnedUsdByBook.BTC - 63) < 0.1);
+// Fully swapped: earned USD matches sold USDT proceeds (not native×spot).
+assert.ok(Math.abs(fullySold.earnedUsdByBook.BTC - 57.5) < 0.1);
 assert.ok(Math.abs(fullySold.swappedUsdtByBook.BTC - 57.5) < 0.01);
 assert.ok(Math.abs(fullySold.usdByBook.BTC - 57.5) < 0.01);
 
@@ -273,9 +325,10 @@ const maLike = summarizeProfitDisposition(
   },
   { status: maLikeStatus },
 );
-assert.ok(Math.abs(maLike.spotEarned.BTC - 0.00285) < 1e-10);
+// Exchange display sold used for Sold; journal dust padding above display stays in Remaining.
 assert.ok(Math.abs(maLike.spotSold.BTC - 0.0029) < 1e-10);
-assert.ok(Math.abs(maLike.spotHeld.BTC) < 1e-10);
+assert.ok(Math.abs(maLike.spotEarned.BTC - (0.00285 + 0.0002)) < 1e-10);
+assert.ok(Math.abs(maLike.spotHeld.BTC - 0.00015) < 1e-10);
 assert.ok(Math.abs(maLike.spotSoldQuote.BTC - 176.5656) < 0.0001);
 assert.ok(Math.abs(maLike.usdtSwapped - 176.5656) < 0.0001);
 assert.ok(Math.abs(maLike.spotSoldAvg.BTC - 60884.689) < 0.001);
@@ -350,12 +403,13 @@ const jackOversell = summarizeProfitDisposition(
   },
   { status: jackOversellStatus },
 );
-assert.ok(Math.abs(jackOversell.spotEarned.BTC - 0.0063078) < 1e-10);
+// Exchange sold can exceed journal earned; Earned is lifted to ≥ Sold.
+assert.ok(Math.abs(jackOversell.spotEarned.BTC - 0.0065) < 1e-10);
 assert.ok(Math.abs(jackOversell.spotSold.BTC - 0.0065) < 1e-10);
 // Exchange execution VWAP (net USDT ÷ net native sold), not journal attribution drift.
 assert.ok(Math.abs(jackOversell.spotSoldQuote.BTC - 411.449) < 0.01);
 assert.ok(Math.abs(jackOversell.spotSoldAvg.BTC - 63299.84) < 0.01);
-assert.ok(Math.abs(jackOversell.spotEarned.ETH - 0.08089459) < 1e-10);
+assert.ok(Math.abs(jackOversell.spotEarned.ETH - 0.0834) < 1e-10);
 assert.ok(Math.abs(jackOversell.spotSold.ETH - 0.0834) < 1e-10);
 assert.ok(Math.abs(jackOversell.spotSoldQuote.ETH - 139.982) < 0.01);
 assert.ok(Math.abs(jackOversell.spotSoldAvg.ETH - 1678.44) < 0.01);
@@ -402,8 +456,8 @@ assert.ok(Math.abs(jackComposition.swappedNativeByBook.BTC - 0.0065) < 1e-10);
 assert.ok(Math.abs(jackComposition.swappedNativeByBook.ETH - 0.0834) < 1e-10);
 assert.ok(Math.abs(jackComposition.swappedUsdtByBook.BTC - 411.449) < 0.01);
 assert.ok(Math.abs(jackComposition.swappedUsdtByBook.ETH - 139.982) < 0.01);
-// usdByBook stays journal per-group; composition display uses swappedUsdt (see entryUsd below).
-assert.ok(Math.abs(jackComposition.usdByBook.ETH - 108.07) < 0.5);
+// Fully swapped books: usdByBook follows exchange Sold USDT (not journal lifetime drift).
+assert.ok(Math.abs(jackComposition.usdByBook.ETH - 139.982) < 0.5);
 
 const jackSummary = summarizeProfitDisposition(
   {
@@ -493,6 +547,8 @@ const maIncomeGroups = {
       group_id: "0016",
       profit_sweep_status: "filled",
       profit_sweep_amount: "0.00002",
+      profit_sweep_exchange_native: "0.00002",
+      profit_sweep_exchange_quote_proceeds: "0.90955257",
       profit_sweep_quote_proceeds: "0.90955257",
       profit_sweep_quote_proceeds_lifetime: "1.23016371",
       profit_sweep_reason: "take_profit; dust_pool_sweep; proceeds_reconciled",
@@ -555,8 +611,31 @@ const reconciledOnly = group({
   profit_sweep_reason: "take_profit; proceeds_reconciled",
 });
 assert.equal(profitSweepHasExchangeFill(reconciledOnly), false);
-assert.equal(profitSweepMetaLine(reconciledOnly), null);
+// No per-group exchange fill → LOG shows pending, not fake journal USDT/avg.
+const reconciledOnlyMeta = profitSweepMetaLine(reconciledOnly);
+assert.ok(reconciledOnlyMeta);
+assert.equal(reconciledOnlyMeta[0], "Profit swapped");
+assert.ok(reconciledOnlyMeta[1].includes("0.000406 BTC"), reconciledOnlyMeta[1]);
+assert.ok(reconciledOnlyMeta[1].includes("pending"), reconciledOnlyMeta[1]);
+assert.ok(!reconciledOnlyMeta[1].includes("14.085 USDT"), reconciledOnlyMeta[1]);
 assert.ok(Math.abs(realizedPnlDisplayUsdc(reconciledOnly, status) - 0.000406 * 63000) < 0.1);
+
+// MA dust-pool ledger row without exchange_native must not print absurd avg.
+const ma0016 = group({
+  group_id: "0016",
+  profit_sweep_status: "filled",
+  profit_sweep_amount: "0.00002",
+  profit_sweep_instrument_name: "BTC_USDT",
+  profit_sweep_quote_proceeds: "3.58959158",
+  realized_pnl_collateral_native: "0.00002",
+  profit_sweep_reason: "take_profit; dust_pool_sweep; proceeds_reconciled",
+});
+assert.equal(profitSweepHasExchangeFill(ma0016), false);
+const ma0016Meta = profitSweepMetaLine(ma0016);
+assert.ok(ma0016Meta);
+assert.ok(ma0016Meta[1].includes("pending"), ma0016Meta[1]);
+assert.ok(!ma0016Meta[1].includes("avg"), ma0016Meta[1]);
+assert.ok(!ma0016Meta[1].includes("3.589"), ma0016Meta[1]);
 
 const exchangeFilled = group({
   profit_sweep_status: "filled",
@@ -632,5 +711,167 @@ const jack0036 = group({
 const jack0036Meta = profitSweepMetaLine(jack0036);
 assert.ok(jack0036Meta);
 assert.ok(jack0036Meta[1].includes("0.0017 ETH"), jack0036Meta[1]);
+
+// Legacy ITM fold: premium → Profit swap Sold; ITM Sold shows cover only.
+const itmFolded = group({
+  group_id: "0070",
+  currency: "ETH",
+  collateral_currency: "ETH",
+  quantity: "2",
+  covered_underlying_quantity: "2",
+  short_entry_average_price: "0.01",
+  entry_fee_collateral: "0.00054",
+  realized_pnl_collateral_native: "0.00812",
+  spot_exit_status: "filled",
+  spot_exit_amount: "2.0156",
+  spot_exit_quote_proceeds_lifetime: "3839.52123",
+  spot_exit_settlement_loss: "0.00381376",
+  spot_restore_status: "filled",
+  spot_restore_amount: "1.9999",
+  spot_restore_quote_spent_lifetime: "3809.60951",
+});
+assert.equal(itmSpotExitPremiumFolded(itmFolded), true);
+const foldedUsdt = itmFoldedPremiumUsdt(itmFolded);
+assert.ok(foldedUsdt > 0);
+const itmDisp = profitDispositionForGroup(itmFolded, status);
+assert.ok(itmDisp);
+assert.ok(Math.abs(itmDisp.sweptUsdt - foldedUsdt) < 1e-6);
+const itmNet = itmSpotExitNetUsdtForTotalProfit(itmFolded);
+assert.ok(itmNet !== null);
+assert.ok(
+  Math.abs(itmNet - (3839.52123 - 3809.60951 - foldedUsdt)) < 1e-4,
+  `itmNet=${itmNet} folded=${foldedUsdt}`,
+);
+const spotExitSum = summarizeSpotExitDisposition({ closed: [itmFolded], open: [] }, { status });
+assert.ok(spotExitSum);
+assert.ok(spotExitSum.soldNative.ETH < 2.0156 - 0.01);
+assert.ok(spotExitSum.soldQuote.ETH < 3839.52123 - foldedUsdt + 1e-6);
+
+// Exchange fill-stats include folded premium — Sold / Net must still peel it.
+const foldNative = 2.0156 - spotExitSum.soldNative.ETH;
+assert.ok(foldNative > 0.01);
+const withFillStats = summarizeSpotExitDisposition(
+  { closed: [itmFolded], open: [] },
+  {
+    status: {
+      ...status,
+      spot_exit_fill_stats_by_book: {
+        ETH: { native_sold: "2.0156", usdt: "3839.52123" },
+      },
+      spot_restore_fill_stats_by_book: {
+        ETH: { native_bought: "1.9999", usdt_spent: "3809.60951" },
+      },
+    },
+  },
+);
+assert.ok(withFillStats);
+assert.ok(
+  Math.abs(withFillStats.soldNative.ETH - spotExitSum.soldNative.ETH) < 1e-9,
+  `fill-stats soldNative=${withFillStats.soldNative.ETH} journal=${spotExitSum.soldNative.ETH}`,
+);
+assert.ok(
+  Math.abs(withFillStats.soldQuote.ETH - spotExitSum.soldQuote.ETH) < 1e-6,
+  `fill-stats soldQuote=${withFillStats.soldQuote.ETH}`,
+);
+assert.ok(
+  Math.abs(withFillStats.usdtNet - (spotExitSum.soldQuote.ETH - 3809.60951)) < 1e-4,
+  `usdtNet=${withFillStats.usdtNet}`,
+);
+
+// Profit-swap Sold must re-add ITM-folded premium when exchange fill-stats omit it.
+assert.ok(itmDisp.fromItmFold);
+const foldDisp = emptyProfitDisposition();
+foldDisp.sweptNativeRef.ETH = itmDisp.sweptNative + 0.005; // fold + real premium_sweep
+foldDisp.sweptQuoteProceedsByBook.ETH = itmDisp.sweptUsdt + 8;
+foldDisp.sweptUsdt = itmDisp.sweptUsdt + 8;
+foldDisp.foldedSweptNativeRefByBook.ETH = itmDisp.sweptNative;
+foldDisp.foldedSweptQuoteProceedsByBook.ETH = itmDisp.sweptUsdt;
+foldDisp.heldNative.ETH = 0.01; // unswept leftover
+const foldSwap = summarizeProfitDisposition(foldDisp, {
+  status: {
+    ...status,
+    premium_sweep_fill_stats_by_book: {
+      ETH: {
+        display_native_sold: 0.005,
+        display_usdt: 8,
+        native_sold: 0.005,
+        usdt: 8,
+        net_native_sold: 0.005,
+        net_usdt: 8,
+      },
+    },
+  },
+});
+assert.ok(foldSwap);
+assert.ok(
+  Math.abs(foldSwap.spotSold.ETH - (0.005 + itmDisp.sweptNative)) < 1e-9,
+  `profit-swap sold=${foldSwap.spotSold.ETH}`,
+);
+assert.ok(
+  Math.abs(foldSwap.spotSoldQuote.ETH - (8 + foldedUsdt)) < 1e-4,
+  `profit-swap soldQuote=${foldSwap.spotSoldQuote.ETH}`,
+);
+assert.ok(
+  Math.abs(foldSwap.spotEarned.ETH - (0.01 + 0.005 + itmDisp.sweptNative)) < 1e-9,
+);
+assert.ok(
+  Math.abs(foldSwap.spotHeld.ETH - 0.01) < 1e-9,
+  `remaining should exclude fold; held=${foldSwap.spotHeld.ETH}`,
+);
+
+// Pat-style: exchange Sold (incl. dust) leaves unswept < journal pending → clamp Remaining.
+const patPendingStatus = {
+  ...status,
+  premium_sweep_fill_stats_by_book: {
+    BTC: {
+      net_native_sold: "0.00091239",
+      net_usdt: "57.5",
+      display_native_sold: "0.00091239",
+      display_usdt: "57.5",
+    },
+  },
+};
+const patPendingSummary = summarizeProfitDisposition(
+  {
+    ...emptyProfitDisposition(),
+    heldNative: { BTC: 0, ETH: 0, USDC: 0 },
+    pendingSweepNative: { BTC: 0.00015437, ETH: 0 },
+    sweptNativeRef: { BTC: 0.00084602, ETH: 0 },
+    sweptQuoteProceedsByBook: { BTC: 53.2, ETH: 0 },
+    sweptUsdt: 53.2,
+  },
+  { status: patPendingStatus },
+);
+const patEarned = 0.00084602 + 0.00015437;
+const patSold = 0.00091239;
+const patUnswept = patEarned - patSold;
+assert.ok(Math.abs(patPendingSummary.spotSold.BTC - patSold) < 1e-12);
+assert.ok(Math.abs(patPendingSummary.spotEarned.BTC - patEarned) < 1e-12);
+assert.ok(Math.abs(patPendingSummary.spotPending.BTC - patUnswept) < 1e-12);
+assert.ok(Math.abs(patPendingSummary.spotPending.BTC - 0.000088) < 1e-12);
+assert.equal(patPendingSummary.spotHeld.BTC || 0, 0);
+// Must not lift Earned to sold+pending (would inflate Remaining).
+assert.ok(patPendingSummary.spotEarned.BTC + 1e-12 < patSold + 0.00015437);
+
+// Failed ITM plan (not_enough_funds, no proceeds) is not a fill — do not fold or hide premium.
+const failedItmPlan = group({
+  group_id: "0082",
+  currency: "ETH",
+  collateral_currency: "ETH",
+  quantity: "1",
+  covered_underlying_quantity: "1",
+  realized_pnl_collateral_native: "0.01",
+  spot_exit_status: "pending",
+  spot_exit_amount: "0.9845",
+  spot_exit_order_id: "ETH_USDT-failed",
+  spot_exit_quote_proceeds: "0",
+  spot_exit_reason: "not_enough_funds",
+});
+assert.equal(groupHasItmSpotExitFills(failedItmPlan), false);
+assert.equal(itmSpotExitPremiumFolded(failedItmPlan), false);
+const failedDisp = profitDispositionForGroup(failedItmPlan, status);
+assert.ok(failedDisp);
+assert.equal(failedDisp.fromItmFold, undefined);
+assert.ok(Math.abs(failedDisp.held - 0.01) < 1e-12);
 
 console.log("test_profit_disposition: ok");

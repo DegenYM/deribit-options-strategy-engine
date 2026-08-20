@@ -3,7 +3,11 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
-from ..covered_call_settlement import resolve_covered_call_settlement_loss
+from ..covered_call_settlement import (
+    covered_call_spot_exit_premium_native,
+    covered_call_spot_exit_target_native,
+    resolve_covered_call_settlement_loss,
+)
 from ..exit_reasons import INCOME_EXIT_REASONS
 from ..models import (
     AccountSummary,
@@ -125,12 +129,27 @@ class CoveredCallMixin:
         if not self.config.covered_call_spot_exit_enabled:
             return []
         if live and self.config.has_private_credentials:
-            from ..spot_exit_ops import reconcile_spot_exits_in_groups
+            from ..spot_exit_ops import reconcile_spot_exits_in_groups, reschedule_incomplete_spot_exits
 
             reconcile_spot_exits_in_groups(context.state.groups, self.client)
+            reschedule_incomplete_spot_exits(
+                context.state.groups,
+                remaining_native_for_group=lambda group: self._plan_covered_call_spot_exit_fields(
+                    group,
+                    orderbook_cache=context.orderbook_cache,
+                    markets_by_currency=context.markets_by_currency,
+                    summaries={},
+                    live=False,
+                    reason=group.spot_exit_reason or "covered_call_settlement_exit",
+                )["amount"],
+            )
         actions: list[dict[str, Any]] = []
         for group in context.state.groups:
-            if group.status == "closed" and self._is_covered_call_group(group) and group.spot_exit_status == "pending":
+            if (
+                group.status == "closed"
+                and self._is_covered_call_group(group)
+                and group.spot_exit_status in {"pending", "failed"}
+            ):
                 actions.append(
                     self._execute_covered_call_spot_exit(
                         context,
@@ -149,10 +168,26 @@ class CoveredCallMixin:
             return
         if self.config.option_strategy != "covered_call":
             return
-        if reason not in INCOME_EXIT_REASONS:
+        allowed_reasons = INCOME_EXIT_REASONS | {
+            "covered_call_settlement_exit",
+            "covered_call_robust_spot_exit",
+            "reconciled_external",
+            "reconciled_expiry",
+        }
+        if reason not in allowed_reasons:
             return
         if not self._is_covered_call_group(group):
             return
+        # Legacy journals that folded premium into ITM spot exit must not sweep again.
+        # New path: ITM sells cover−settle only; after exit is filled, sweep remaining premium.
+        spot_status = str(group.spot_exit_status or "").lower()
+        if spot_status in {"pending", "submitted", "filled"}:
+            from ..spot_restore_ops import itm_spot_exit_premium_folded
+
+            if itm_spot_exit_premium_folded(group):
+                return
+            if spot_status != "filled":
+                return
         native = self._coin_profit_native_for_sweep(group)
         if native is None:
             return
@@ -161,9 +196,12 @@ class CoveredCallMixin:
             unswept = self._unswept_profit_native_for_sweep(group)
             if unswept is None or unswept <= 0:
                 return
+            native = self._coin_profit_native_for_sweep(group) or Decimal("0")
+            already = max(native - unswept, Decimal("0"))
             group.profit_sweep_status = "pending"
             group.profit_sweep_reason = reason
-            group.profit_sweep_amount = unswept
+            if already > 0:
+                group.profit_sweep_amount = already
             return
         if status in {"pending", "submitted"}:
             return
@@ -185,6 +223,7 @@ class CoveredCallMixin:
                 heal_reconciled_proceeds_drift,
                 reschedule_failed_profit_sweeps,
                 reschedule_ledger_only_profit_sweeps,
+                schedule_remaining_closed_profit_sweeps,
             )
             from ..trade_journal_backfill import (
                 repair_manual_swap_proceeds_in_groups,
@@ -201,6 +240,27 @@ class CoveredCallMixin:
             self._reconcile_profit_sweeps_from_exchange(context, trade_cache=trade_cache)
             reschedule_ledger_only_profit_sweeps(self, context.state.groups)
             reschedule_failed_profit_sweeps(self, context.state.groups)
+            schedule_remaining_closed_profit_sweeps(self, context.state.groups, trade_cache=trade_cache)
+            # ITM cover−settle exits: queue remaining premium for Profit swap.
+            from ..spot_exit_ops import spot_exit_realized_usdt
+            from ..spot_restore_ops import group_has_itm_spot_exit_fills, itm_spot_exit_premium_folded
+
+            for group in context.state.groups:
+                if group.status != "closed" or not self._is_covered_call_group(group):
+                    continue
+                if not group_has_itm_spot_exit_fills(group):
+                    continue
+                if str(group.spot_exit_status or "").lower() != "filled":
+                    continue
+                if itm_spot_exit_premium_folded(group):
+                    continue
+                if spot_exit_realized_usdt(group) <= 0:
+                    continue
+                self._maybe_schedule_profit_sweep(
+                    group,
+                    reason=str(group.spot_exit_reason or "covered_call_settlement_exit"),
+                    live=True,
+                )
         actions: list[dict[str, Any]] = []
         for group in context.state.groups:
             if (
@@ -291,17 +351,16 @@ class CoveredCallMixin:
 
     def _unswept_profit_native_for_sweep(self, group: TradeGroup) -> Decimal | None:
         """Coin profit not yet sold to USDT (supports partial prior sweeps)."""
+        from ..profit_sweep_ops import remaining_spot_profit_native
+
         native_cap = self._coin_profit_native_for_sweep(group)
         if native_cap is None or native_cap <= 0:
             return None
         status = str(group.profit_sweep_status or "").lower()
-        swept = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal("0")
         if status == "filled":
-            from ..profit_sweep_ops import profit_sweep_has_exchange_fill
-
-            if not profit_sweep_has_exchange_fill(group):
-                return native_cap
-            return max(native_cap - min(swept, native_cap), Decimal("0"))
+            rem = remaining_spot_profit_native(group)
+            return rem if rem > 0 else None
+        swept = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal("0")
         if status in {"pending", "submitted"} and swept > 0 and swept < native_cap:
             return max(native_cap - swept, Decimal("0"))
         return native_cap
@@ -336,6 +395,32 @@ class CoveredCallMixin:
                 total += unswept
         return total
 
+    def _covered_call_realized_loss_reserve(
+        self,
+        state: StrategyState,
+        currency: str,
+    ) -> Decimal:
+        """Closed coin losses to retain as BTC so cover equity is not chronically short."""
+        ccy = currency.upper()
+        total = Decimal("0")
+        for group in state.groups:
+            if group.status != "closed" or not self._is_covered_call_group(group):
+                continue
+            if group.currency.upper() != ccy or not group.is_coin_collateral():
+                continue
+            native = group.realized_pnl_collateral_native
+            if native is not None and native < 0:
+                total += abs(native)
+        return total
+
+    def _covered_call_principal_reserve(self, currency: str) -> Decimal:
+        ccy = currency.upper()
+        if ccy == "BTC":
+            return self.config.collateral_spot_btc
+        if ccy == "ETH":
+            return self.config.collateral_spot_eth
+        return Decimal("0")
+
     def _profit_sweep_sellable_native_cap(
         self,
         context: RuntimeContext,
@@ -343,13 +428,22 @@ class CoveredCallMixin:
         *,
         live: bool,
     ) -> Decimal:
-        """Native free to sell without touching open covered-call collateral."""
+        """Native free to sell without touching open cover or agreed inventory."""
         summaries = self._account_summaries_by_currency() if live else context.summaries
-        return self._available_covered_call_quantity_from_summaries(
+        free = self._available_covered_call_quantity_from_summaries(
             context.state,
             summaries,
             currency,
         )
+        if free <= 0:
+            return Decimal("0")
+        reserved = self._reserved_covered_call_quantity(context.state, currency)
+        principal = self._covered_call_principal_reserve(currency)
+        extra_floor = max(Decimal("0"), principal - reserved)
+        loss_reserve = self._covered_call_realized_loss_reserve(context.state, currency)
+        if extra_floor > 0:
+            return max(free - extra_floor, Decimal("0"))
+        return max(free - loss_reserve, Decimal("0"))
 
     def _profit_sweep_amount(
         self,
@@ -421,16 +515,17 @@ class CoveredCallMixin:
         instrument_name = self._covered_call_profit_sweep_instrument(group.currency)
         amount = self._profit_sweep_amount(context, group, live=live)
         if amount <= 0:
-            if live:
-                group.profit_sweep_status = "skipped"
-                if not group.profit_sweep_reason:
-                    group.profit_sweep_reason = "amount_below_min_or_unavailable"
+            # Keep pending so the cycle retries when free collateral / dust pool opens up.
+            # Do not mark skipped: wallet-locked cover is temporary, not a terminal skip.
+            if live and str(group.profit_sweep_status or "").lower() != "pending":
+                group.profit_sweep_status = "pending"
             return {
                 "action": "covered_call_profit_sweep_skipped",
                 "group_id": group.group_id,
                 "reason": "amount_below_min_or_unavailable",
                 "instrument_name": instrument_name,
                 "amount": format_decimal(amount, 8),
+                "profit_sweep_status": group.profit_sweep_status or None,
                 "live": live,
             }
 
@@ -689,13 +784,20 @@ class CoveredCallMixin:
         live: bool,
         reason: str = "",
     ) -> dict[str, Any]:
+        from ..spot_exit_ops import spot_exit_filled_native, spot_restore_blocks_exit_remainder
+
         cover = group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
         if cover <= 0:
             return {
                 "amount": Decimal("0"),
                 "cover": Decimal("0"),
+                "premium": Decimal("0"),
+                "premium_available": Decimal("0"),
+                "include_premium": False,
                 "settlement_loss": Decimal("0"),
                 "settlement_loss_source": "none",
+                "already_filled": Decimal("0"),
+                "remaining_structural": Decimal("0"),
             }
 
         index_price = self._spot_exit_index_price_usd(group, orderbook_cache)
@@ -708,7 +810,26 @@ class CoveredCallMixin:
             reason=reason,
             prefer_log=self.config.has_private_credentials,
         )
-        target = max(cover - settlement_loss, Decimal("0"))
+        premium = covered_call_spot_exit_premium_native(group)
+        # ITM spot exit always sells cover−settle only. Premium stays as spot profit
+        # and is shown / swept via Profit swap (never folded into the cover sale).
+        include_premium = False
+        already_filled = spot_exit_filled_native(group)
+
+        structural = covered_call_spot_exit_target_native(
+            cover=cover,
+            premium_native=premium,
+            settlement_loss=settlement_loss,
+            settlement_loss_source=settlement_loss_source,
+            include_premium=include_premium,
+        )
+        remaining_structural = max(structural - already_filled, Decimal("0"))
+        # Restore-to-cover already reconstituted inventory; do not sell the
+        # structural remainder (premium fold) a second time into restored cover.
+        if spot_restore_blocks_exit_remainder(group):
+            remaining_structural = Decimal("0")
+        target = remaining_structural
+        folded_premium = premium if include_premium else Decimal("0")
 
         summary = summaries.get(group.currency)
         if live:
@@ -719,8 +840,13 @@ class CoveredCallMixin:
                 return {
                     "amount": Decimal("0"),
                     "cover": cover,
+                    "premium": folded_premium,
+                    "premium_available": premium,
+                    "include_premium": include_premium,
                     "settlement_loss": settlement_loss,
                     "settlement_loss_source": settlement_loss_source,
+                    "already_filled": already_filled,
+                    "remaining_structural": remaining_structural,
                 }
             target = min(target, available)
 
@@ -731,8 +857,13 @@ class CoveredCallMixin:
         return {
             "amount": amount,
             "cover": cover,
+            "premium": folded_premium,
+            "premium_available": premium,
+            "include_premium": include_premium,
             "settlement_loss": settlement_loss,
             "settlement_loss_source": settlement_loss_source,
+            "already_filled": already_filled,
+            "remaining_structural": remaining_structural,
         }
 
     def _covered_call_spot_exit_amount(

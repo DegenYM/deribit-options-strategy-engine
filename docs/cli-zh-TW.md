@@ -126,22 +126,23 @@ Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。Tunnel 手動
 | 參數 | 說明 |
 |------|------|
 | `--env-file PATH` | 子帳憑證與 `STATE_FILE`（可寫在子命令前或後） |
-| `--list` | 只列出非零倉位（dry-run，不需 `--instrument`） |
+| `--list` | 只列出非零倉位（dry-run，不需 `--instrument`／`--group-id`） |
 | `--instrument NAME` | 要平的合約全名；可重複傳入或逗號分隔多個 |
+| `--group-id ID` | 依本地 open trade group 平倉（走 `_close_group`／`manual_close`）；可重複或逗號分隔 |
 | `--live` | 實際送單；省略則僅預覽 |
-| `--order-type market\|limit` | 預設 `market`；選擇權 `limit` 走 IOC limit + retry（同 `manage` 平倉） |
-| `--amount QTY` | 部分平倉張數；省略則平掉該合約全部倉位 |
+| `--order-type market\|limit` | 預設 `market`；選擇權 `limit` 走 IOC limit + retry（同 `manage` 平倉；**`--group-id` 忽略此參數**） |
+| `--amount QTY` | 部分平倉張數；省略則平掉該合約全部倉位（**不可與 `--group-id` 併用**） |
 | `--json` | JSON 輸出 |
 
 平倉方式（依合約類型）：
 
-- **選擇權**：`market` → reduce-only 市價單；`limit` → reduce-only IOC limit（含 retry）
-- **永續／期貨**：`private/close_position`（市價）
+- **`--instrument`**：選擇權 `market` → reduce-only 市價單；`limit` → reduce-only IOC limit（含 retry）；永續／期貨 → `private/close_position`（市價）。此路徑**不**自動更新本地 group。
+- **`--group-id`**：依 state 內 open group 用策略平倉路徑（short／long 腿、寫入 `close_reason=manual_close`）；dry-run 回傳 `actions[].action = close_group_preview`。
 
 ```bash
 export INVESTOR=youming
 
-# 1) 先看子帳有哪些倉位
+# 1) 先看子帳有哪些倉位 / group
 ./bot --investor $INVESTOR --account naked status --json
 ./bot --investor $INVESTOR --account naked close-position --list --json
 
@@ -149,25 +150,33 @@ export INVESTOR=youming
 ./bot --investor $INVESTOR --account naked close-position \
   --instrument BTC_USDC-27MAR26-90000-P --json
 
-# 3) 市價全平該合約
+# 3) 依 group id 預覽提前關倉（不送單）
+./bot --investor $INVESTOR --account naked close-position \
+  --group-id 0001 --json
+
+# 4) 市價全平該合約
 ./bot --investor $INVESTOR --account naked close-position \
   --instrument BTC_USDC-27MAR26-90000-P --live --json
 
-# 4) 選擇權用 limit 平倉
+# 5) 依 group id 實單平倉
+./bot --investor $INVESTOR --account naked close-position \
+  --group-id 0001 --live --json
+
+# 6) 選擇權用 limit 平倉（僅 --instrument）
 ./bot --investor $INVESTOR --account bull_put close-position \
   --instrument BTC_USDC-27MAR26-88000-P --order-type limit --live --json
 ```
 
 ### 與 `panic-close` 對照
 
-| | `close-position` | `panic-close` |
-|--|------------------|---------------|
-| 範圍 | 僅 `--instrument` 指定合約 | 全部 open group + PERP |
-| 掛單 | 不取消 | 取消所有 open orders |
-| Cooldown | 不設定 | 寫入全 book cooldown |
-| 本地 state | 不自動更新 group | 標記 group 為 closed |
+| | `close-position --instrument` | `close-position --group-id` | `panic-close` |
+|--|------------------------------|-----------------------------|---------------|
+| 範圍 | 指定合約 | 指定 open group | 全部 open group + PERP |
+| 掛單 | 不取消 | 不取消其他掛單 | 取消所有 open orders |
+| Cooldown | 不設定 | 不設定 | 寫入全 book cooldown |
+| 本地 state | 不自動更新 group | 標記該 group 為 closed | 標記全部 closed |
 
-手動平掉 bot 有追蹤的 spread 後，本地 `STATE_FILE` 可能與交易所不一致；之後可再跑 `manage` 讓 reconcile 收斂。
+用 `--instrument` 手動平掉 bot 有追蹤的 spread 後，本地 `STATE_FILE` 可能與交易所不一致；之後可再跑 `manage` 讓 reconcile 收斂。`--group-id` 路徑會直接更新該 group。
 
 ## Covered call profit sweep
 
@@ -211,20 +220,32 @@ ACCT=covered_call
 
 ## Covered call ITM spot restore（手動買回 cover）
 
-ITM / settlement spot exit 賣掉 cover 後，若要用 USDT 買回現貨並正確記帳，請用 `spot-restore`（**不要**用裸 `trade-spot`，也**不要**用 `profit-sweep-buyback` label）。
+ITM / settlement spot exit 賣掉 cover（`cover − settle`；權利金另走 Profit swap）後，若要用 USDT 買回現貨並正確記帳，請用 `spot-restore`（**不要**用裸 `trade-spot`，也**不要**用 `profit-sweep-buyback` label）。
 
 ```bash
 export INVESTOR=youming
 ACCT=covered_call
 
-# 預覽尚可買回的 group（dry-run）
-./bot --investor $INVESTOR --account $ACCT spot-restore --json
+# 預覽（預設人讀格式：預計買回 / 當前價格 / 預計花費 USDT）
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017
 
-# 買回單一 group 的全部 unrestored 數量
-./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --live --json
+# 同上，輸出完整 JSON（含 preview.buy_amount / current_price_usdt / estimated_usdt）
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --json
 
-# 只買回部分數量
+# 買回單一 group 至完整 cover（預設 = swap + settle + fee − 已買回）
+# 預設 limit@bid GTC post_only，掛單等待 SPOT_RESTORE_WAIT_SECONDS（預設 120s）後取消未成交
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --live
+
+# 只買回部分 native 數量
 ./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --amount 0.05 --live --json
+
+# 指定花費 USDT 數量買回（與 --amount 互斥；超出尚未補滿的 cover 會自動封頂）
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --usdt 4500 --live --json
+# 等價：--quote 4500
+
+# 改掛單等待時間 / 改用市價
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --wait-seconds 180 --live
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --order-type market --live
 
 # 只從 Deribit `*-spot-restore` label 同步 spot_restore_*，不下單
 ./bot --investor $INVESTOR --account $ACCT spot-restore --reconcile-only --json
@@ -233,12 +254,29 @@ ACCT=covered_call
 | 參數 | 說明 |
 |------|------|
 | `--group-id` | 只處理指定已平倉 group |
-| `--amount` | 買回 native 數量；預設為 `spot_exit_amount − spot_restore_amount` |
+| `--amount` | 買回 native 數量；**預設**為補滿原始 cover：`swap（spot exit）+ settle + fee − 已 restore` |
+| `--usdt` / `--quote` | 花費 USDT 買回（與 `--amount` 互斥）；超過尚未補滿的 cover 時會封頂 |
+| `--order-type` | `limit`（預設）或 `market`；亦可設 `SPOT_RESTORE_ORDER_TYPE` |
+| `--wait-seconds` | limit 掛單等待秒數後取消未成交（預設 `SPOT_RESTORE_WAIT_SECONDS=120`） |
 | `--reconcile-only` | 只同步 state 上的 restore 欄位，不送 spot 單 |
 | `--live` | 實際下單並寫入 state（預設 dry-run） |
+
+預設數量拆解（preview JSON 的 `buy_amount_composition` / `preview`）：
+
+- **swap_sold** = **實際已成交**的 ITM spot exit（含 partial / pending）
+- **settlement_loss** = 結算損失（缺則回讀 transaction log / intrinsic；**務必有值**）
+- **premium_native** = 淨進場權利金（fill − entry fee）。若 ITM 沒把 premium 賣進 spot exit，現貨會多這筆 → restore **要減掉**，否則會買成 cover+premium
+- **buy_amount** = `min(cover, swap + settle − premium) − already_restored`
+- **estimated_usdt** = `buy_amount × current_price`（limit 用 best bid；market 用 best ask）
+- **order_budget_usdt** = limit 時同 estimated；market 時 `buy × ask × 1.005`（緩衝）
+- **limit 預設**：post-only buy@bid GTC，等待 `--wait-seconds`／`SPOT_RESTORE_WAIT_SECONDS` 後取消未成交；可 `--order-type market` 改市價
+- **低於交易所最小下單量**（例如 ETH_USDT min `0.001`）：**省略**（`dust_below_min`），**不進位**；`--live` 會標記 restore 完成，避免為塵埃多買超過 cover
+
+ITM + `COVERED_CALL_PROFIT_SWEEP_ENABLED` 卻只賣出 cover−settle 時：restore 回到 **cover**，錢包留下的 premium 是 spot profit（之後可再 `profit-sweep` 兌 USDT）。
 
 記帳：
 
 - 訂單 label：`{short_label}-spot-restore`
 - Journal：`spot_restore_amount` / `spot_restore_quote_spent`（與 Profit swap 分離）
 - Dashboard **ITM spot exit** 區塊顯示 Sold / Bought back / 淨 USDT
+- Restore 完成後，`exit USDT − restore USDT` 會計入 **Total profit**（績效費基數）；未買回 cover 前不把整筆 spot 賣出當獲利

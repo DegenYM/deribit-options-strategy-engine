@@ -1449,9 +1449,9 @@ function sharedLegCounts(status, groups) {
   for (const src of [status?.trade_groups || [], groups?.open || []]) {
     for (const row of src) {
       if (!isOpenTradeGroup(row)) continue;
-      const key = tradeGroupKey(row);
-      if (seen.has(key)) continue;
-      seen.add(key);
+      const keys = tradeGroupMatchKeys(row);
+      if (keys.some((key) => seen.has(key))) continue;
+      for (const key of keys) seen.add(key);
       const account = String(row?.account_name || "");
       for (const legRole of ["short", "long"]) {
         const instrument = openRowLegInstrumentName(row, legRole);
@@ -2041,6 +2041,16 @@ export function profitSweepExchangeNativeSold(g, book) {
   return journal;
 }
 
+/** Native qty credited as sold for Earned/Sold/Remaining (exchange qty beats journal padding). */
+export function profitSweepFilledNativeSold(g, nativeFallback = null) {
+  const exchange = num(g?.profit_sweep_exchange_native);
+  if (exchange !== null && exchange > 0) return exchange;
+  const journal = num(g?.profit_sweep_amount);
+  if (journal !== null && journal > 0) return journal;
+  const fallback = num(nativeFallback);
+  return fallback !== null && fallback > 0 ? fallback : 0;
+}
+
 /** Truncate toward zero — profit-swap display never rounds up vs exchange/journal math. */
 export function truncateDecimal(value, places) {
   const n = num(value);
@@ -2211,6 +2221,13 @@ export function profitSweepHasExchangeFill(g) {
     }
     const orderId = String(g?.profit_sweep_order_id || "").trim();
     if (reason.includes("premium_amount_synced") && orderId) return true;
+    // Manual / unlabeled may lack per-group order_id; dust needs exchange qty.
+    if (reason.includes("unlabeled_premium_reconciled")) return true;
+    if (reason.includes("manual_swap")) return true;
+    if (reason.includes("dust_pool_sweep")) {
+      const dustNative = num(g?.profit_sweep_exchange_native);
+      return dustNative !== null && dustNative > 0;
+    }
     return false;
   }
   const orderId = String(g?.profit_sweep_order_id || "").trim();
@@ -2218,7 +2235,10 @@ export function profitSweepHasExchangeFill(g) {
   if (reason.includes("exchange_fully_swept")) return true;
   if (reason.includes("unlabeled_premium_reconciled")) return true;
   if (reason.includes("manual_swap")) return true;
-  if (reason.includes("dust_pool_sweep")) return true;
+  if (reason.includes("dust_pool_sweep")) {
+    const dustNative = num(g?.profit_sweep_exchange_native);
+    return dustNative !== null && dustNative > 0;
+  }
   return true;
 }
 
@@ -2235,6 +2255,8 @@ export function profitSweepLifetimeQuoteUsdt(g) {
 /** USDT actually received from premium swap fills (exchange quote, not reconcile high-water). */
 export function profitSweepRealizedQuoteUsdt(g) {
   if (!profitSweepHasExchangeFill(g)) return null;
+  const exQuote = num(g?.profit_sweep_exchange_quote_proceeds);
+  if (exQuote !== null && exQuote > 0) return exQuote;
   const quote = num(g?.profit_sweep_quote_proceeds);
   if (quote !== null && quote > 0) return quote;
   return profitSweepLifetimeQuoteUsdt(g);
@@ -2298,7 +2320,7 @@ function dispositionBookHasAttribution(disposition, book) {
   const journalQuote = num(disposition.sweptQuoteProceedsByBook?.[book]) ?? 0;
   const excludedQuote = num(disposition.excludedSweptQuoteProceedsByBook?.[book]) ?? 0;
   const excludedNative = num(disposition.excludedSweptNativeRefByBook?.[book]) ?? 0;
-  const earned = held + pending + journalSold;
+  const earned = held + pending + journalSold + excludedNative;
   return (
     Math.abs(earned) > 0 ||
     journalQuote > 0.005 ||
@@ -2357,23 +2379,26 @@ export function summarizeProfitDisposition(disposition, { status = null } = {}) 
     const pending = num(disposition.pendingSweepNative?.[book]) ?? 0;
     const journalSold = num(disposition.sweptNativeRef?.[book]) ?? 0;
     const journalQuote = num(disposition.sweptQuoteProceedsByBook?.[book]) ?? 0;
+    const excludedQuote = num(disposition.excludedSweptQuoteProceedsByBook?.[book]) ?? 0;
+    const excludedNative = num(disposition.excludedSweptNativeRefByBook?.[book]) ?? 0;
     spotHeld[book] = held;
     spotPending[book] = pending;
 
     const hasAttribution = dispositionBookHasAttribution(disposition, book);
     const exchange = hasAttribution ? fillStats?.[book] : null;
-    const earned = held + pending + journalSold;
+    // Earned = unswept premium (held≥0) + pending + sold. Losses are in lossNative, not here.
+    // Include excluded (manual/unlabeled) native once; it is not in journalSold.
+    const earned = Math.max(0, held) + pending + journalSold + excludedNative;
     const display = resolvePremiumSweepBookDisplay({
       journalSold,
       journalQuote,
       exchange,
       earned,
     });
-
-    const excludedQuote = num(disposition.excludedSweptQuoteProceedsByBook?.[book]) ?? 0;
-    const excludedNative = num(disposition.excludedSweptNativeRefByBook?.[book]) ?? 0;
     const displayUsdt = num(exchange?.display_usdt);
     const displayNative = num(exchange?.display_native_sold);
+    const foldedNative = num(disposition.foldedSweptNativeRefByBook?.[book]) ?? 0;
+    const foldedQuote = num(disposition.foldedSweptQuoteProceedsByBook?.[book]) ?? 0;
     if (
       hasAttribution &&
       displayNative !== null &&
@@ -2381,9 +2406,11 @@ export function summarizeProfitDisposition(disposition, { status = null } = {}) 
       displayUsdt !== null &&
       displayUsdt > 0
     ) {
-      spotSold[book] = displayNative;
-      spotSoldQuote[book] = displayUsdt;
+      // Exchange premium_sweep fills omit legacy ITM-folded premium (sold via spot exit).
+      spotSold[book] = displayNative + foldedNative;
+      spotSoldQuote[book] = displayUsdt + foldedQuote;
     } else {
+      // Journal path already includes folded premium inside sweptNativeRef.
       spotSold[book] = display.soldNative + excludedNative;
       spotSoldQuote[book] = display.soldQuote + excludedQuote;
     }
@@ -2391,23 +2418,46 @@ export function summarizeProfitDisposition(disposition, { status = null } = {}) 
       spotSoldAvg[book] = profitSwapDisplayAvg(book, spotSoldQuote[book], spotSold[book]);
     }
 
-    if (Math.abs(earned) > 0) {
-      spotEarned[book] = earned;
+    // Journal earned before any Sold lift. Remaining must use this so exchange Sold
+    // (incl. dust FIFO to other groups) cannot keep full journal pending.
+    const journalEarned = earned;
+    const soldNow = num(spotSold[book]) ?? 0;
+    const places = profitInternalNativePrecision(book);
+    const unswept = subtractDecimals(journalEarned, soldNow, places);
+    // Clamp pending to unswept; held is the leftover identity slice.
+    let pendingClamped = Math.min(Math.max(0, pending), unswept);
+    let heldClamped = subtractDecimals(unswept, pendingClamped, places);
+    if (!isMeaningfulNativeForBook(pendingClamped, book)) pendingClamped = 0;
+    if (!isMeaningfulNativeForBook(heldClamped, book)) heldClamped = 0;
+    spotPending[book] = pendingClamped;
+    spotHeld[book] = heldClamped;
+
+    // Exchange fill-stats can exceed journal earned; lift Earned so Sold ≯ Earned.
+    // Do not use sold+pending — that double-counts and inflates Remaining.
+    let earnedDisplay = journalEarned;
+    if (soldNow > earnedDisplay + 1e-12) {
+      earnedDisplay = soldNow;
+    }
+    if (Math.abs(earnedDisplay) > 0) {
+      spotEarned[book] = earnedDisplay;
       hasCoinProfit = true;
     }
-    if (pending > 0) hasPending = true;
-    if (spotSold[book] > 0 || spotSoldQuote[book] > 0) hasSwap = true;
+    if (pendingClamped > 0) hasPending = true;
+    if (soldNow > 0 || (num(spotSoldQuote[book]) ?? 0) > 0) hasSwap = true;
   }
   for (const book of PROFIT_SWEEP_BOOKS) {
-    const earned = num(spotEarned[book]) ?? 0;
     const sold = num(spotSold[book]) ?? 0;
     const pending = num(spotPending[book]) ?? 0;
-    const places = profitInternalNativePrecision(book);
-    const impliedRemainder = subtractDecimals(subtractDecimals(earned, sold, places), pending, places);
-    if (impliedRemainder > 0 && isMeaningfulNativeForBook(impliedRemainder, book)) {
-      spotHeld[book] = impliedRemainder;
-    } else if (!isMeaningfulNativeForBook(spotHeld[book], book)) {
-      spotHeld[book] = 0;
+    // Fill-stats identity can zero dusty journal hold; keep cover retain visible as "+".
+    const coverRetained = num(disposition.coverRetainedNative?.[book]) ?? 0;
+    if (coverRetained > 0 && isMeaningfulNativeForBook(coverRetained, book)) {
+      const heldNow = Math.max(num(spotHeld[book]) ?? 0, coverRetained);
+      spotHeld[book] = heldNow;
+      const minEarned = sold + pending + heldNow;
+      if ((num(spotEarned[book]) ?? 0) + 1e-12 < minEarned) {
+        spotEarned[book] = minEarned;
+        hasCoinProfit = true;
+      }
     }
   }
   const exchangeQuoteTotal = PROFIT_SWEEP_BOOKS.reduce(
@@ -2446,7 +2496,10 @@ export function realizedUsdByBookFromProfitDisposition(disposition, status) {
     const swapped = num(summary.spotSoldQuote?.[book]) ?? 0;
     const held = num(summary.spotHeld?.[book]) ?? 0;
     const pending = num(summary.spotPending?.[book]) ?? 0;
-    const unswept = held + pending;
+    // Coin losses live in lossNative (excluded from swap "Remaining").
+    const lossNative =
+      num(disposition.lossNative?.[book]) ?? Math.min(0, num(disposition.heldNative?.[book]) ?? 0);
+    const unswept = held + pending + lossNative;
     const spot = spotUsdForBook(status, book);
     const unsweptUsd =
       spot !== null && spot > 0 && isMeaningfulNativeForBook(unswept, book) ? unswept * spot : 0;
@@ -2463,7 +2516,7 @@ export function realizedUsdByBookFromProfitDisposition(disposition, status) {
   return any ? out : null;
 }
 
-/** Total profit: Σ (swapped USDT + unswept native × live spot) + USDC realized. */
+/** Premium-swap Total profit slice: Σ (swapped USDT + unswept native × live spot) + USDC. */
 export function realizedUsdFromProfitDisposition(disposition, status) {
   const byBook = realizedUsdByBookFromProfitDisposition(disposition, status);
   if (!byBook) return null;
@@ -2672,13 +2725,19 @@ export function fmtProfitSwapPanel(disposition, summary = null) {
   </div>`;
 }
 
-/** Journal USDT from a filled ITM / settlement spot exit. */
+/** Journal USDT from an ITM / settlement spot exit (includes in-progress partials). */
 export function spotExitRealizedQuoteUsdt(g) {
   const lifetime = num(g?.spot_exit_quote_proceeds_lifetime);
   if (lifetime !== null && lifetime > 0) return lifetime;
   const quote = num(g?.spot_exit_quote_proceeds);
   const status = String(g?.spot_exit_status || "").toLowerCase();
-  if (quote !== null && quote > 0 && status === "filled") return quote;
+  if (
+    quote !== null &&
+    quote > 0 &&
+    (status === "filled" || status === "pending" || status === "submitted" || status === "failed")
+  ) {
+    return quote;
+  }
   return null;
 }
 
@@ -2690,6 +2749,175 @@ export function spotRestoreRealizedQuoteUsdt(g) {
   const status = String(g?.spot_restore_status || "").toLowerCase();
   if (spent !== null && spent > 0 && status === "filled") return spent;
   return null;
+}
+
+/** True when ITM / settlement spot exit has real fill proceeds or filled native. */
+export function groupHasItmSpotExitFills(g) {
+  const quote = spotExitRealizedQuoteUsdt(g) ?? 0;
+  if (quote > 0) return true;
+  const native = num(g?.spot_exit_amount) ?? 0;
+  const status = String(g?.spot_exit_status || "").toLowerCase();
+  // Pending + order id without proceeds is a failed/unfilled plan, not a fill.
+  if (native > 0 && status === "filled") return true;
+  return false;
+}
+
+function _itmSpotExitSwapNative(g) {
+  const status = String(g?.spot_exit_status || "").toLowerCase();
+  if (status === "filled") return Math.max(num(g?.spot_exit_amount) ?? 0, 0);
+  if (
+    (status === "pending" || status === "submitted") &&
+    (num(g?.spot_exit_quote_proceeds) ?? 0) > 0
+  ) {
+    return Math.max(num(g?.spot_exit_amount) ?? 0, 0);
+  }
+  return 0;
+}
+
+function _itmSpotRestoreFilledNative(g) {
+  const restoreStatus = String(g?.spot_restore_status || "").toLowerCase();
+  if (restoreStatus === "filled" || restoreStatus === "pending" || restoreStatus === "submitted") {
+    return Math.max(num(g?.spot_restore_amount) ?? 0, 0);
+  }
+  return 0;
+}
+
+function _itmSpotRestorePlan(g) {
+  const cover = num(g?.covered_underlying_quantity) ?? num(g?.quantity) ?? 0;
+  const swap = _itmSpotExitSwapNative(g);
+  const settle = Math.max(num(g?.spot_exit_settlement_loss) ?? 0, 0);
+  const premium = Math.max(coinCollateralNetEntryCreditNative(g) ?? 0, 0);
+  let rawTarget = swap + settle - premium;
+  if (rawTarget < 0) rawTarget = 0;
+  const target = cover > 0 ? Math.min(rawTarget, cover) : rawTarget;
+  const restored = _itmSpotRestoreFilledNative(g);
+  const structuralWithPremium = Math.max(cover + premium - settle, 0);
+  const structuralCoverOnly = Math.max(cover - settle, 0);
+  let premiumInSwap = false;
+  if (cover > 0 && premium > 0 && swap > 0) {
+    premiumInSwap =
+      Math.abs(swap - structuralWithPremium) <= Math.abs(swap - structuralCoverOnly);
+  }
+  return {
+    cover,
+    swap,
+    settle,
+    premium,
+    target,
+    restored,
+    unrestored: Math.max(target - restored, 0),
+    premiumInSwap,
+  };
+}
+
+/** Legacy ITM journals that sold cover+premium in one spot exit. */
+export function itmSpotExitPremiumFolded(g) {
+  if (!groupHasItmSpotExitFills(g)) return false;
+  return Boolean(_itmSpotRestorePlan(g).premiumInSwap);
+}
+
+/** Entry premium native attributable to a legacy folded ITM spot exit. */
+export function itmFoldedPremiumNative(g) {
+  if (!itmSpotExitPremiumFolded(g)) return 0;
+  return Math.max(_itmSpotRestorePlan(g).premium || 0, 0);
+}
+
+/** USDT share of spot-exit proceeds attributable to folded premium. */
+export function itmFoldedPremiumUsdt(g) {
+  const premium = itmFoldedPremiumNative(g);
+  if (premium <= 0) return 0;
+  const swap = _itmSpotRestorePlan(g).swap;
+  if (!(swap > 0)) return 0;
+  const exitU = spotExitRealizedQuoteUsdt(g) ?? 0;
+  if (!(exitU > 0)) return 0;
+  return exitU * Math.min(premium / swap, 1);
+}
+
+/**
+ * Restore-to-cover target still unpaid (same identity as backend
+ * ``plan_spot_restore_to_cover`` / ``unrestored_spot_exit_native``).
+ */
+export function unrestoredSpotExitNative(g) {
+  const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
+  if (book !== "BTC" && book !== "ETH") return 0;
+  const swap = _itmSpotExitSwapNative(g);
+  const settle = Math.max(num(g?.spot_exit_settlement_loss) ?? 0, 0);
+  if (swap <= 0 && settle <= 0) return 0;
+  return _itmSpotRestorePlan(g).unrestored;
+}
+
+/** Conservative spot min lot when instrument lookup is unavailable (ETH 0.001 / BTC 0.0001). */
+export function spotRestoreLotThreshold(currency) {
+  return String(currency || "").toUpperCase() === "ETH" ? 0.001 : 0.0001;
+}
+
+/** Both ITM legs filled with real USDT flows (restore may predate an overstated exit amount). */
+export function itmSpotRoundTripComplete(g) {
+  const plan = _itmSpotRestorePlan(g);
+  if (plan.unrestored <= 1e-8) {
+    const restoreU = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+    if (plan.target > 0 && plan.restored <= 0 && restoreU <= 0) return false;
+    return true;
+  }
+  const exitStatus = String(g?.spot_exit_status || "").toLowerCase();
+  const restoreStatus = String(g?.spot_restore_status || "").toLowerCase();
+  const reason = String(g?.spot_restore_reason || "");
+  const dustOmitted = reason.includes("dust_below_min_omitted");
+  const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
+  const dustRemainder = plan.unrestored < spotRestoreLotThreshold(book);
+  // Sub-min remainder: omit (never round up). Treat as complete when restore already filled.
+  if (restoreStatus === "filled" && (dustOmitted || dustRemainder)) {
+    const exitU = spotExitRealizedQuoteUsdt(g) ?? 0;
+    if (exitStatus === "filled" && exitU > 0) return true;
+  }
+  if (exitStatus !== "filled" || restoreStatus !== "filled") return false;
+  const exitU = spotExitRealizedQuoteUsdt(g) ?? 0;
+  const restoreU = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+  return exitU > 0 && restoreU > 0;
+}
+
+/**
+ * ITM cover round-trip for Total profit: exit USDT − restore USDT,
+ * only after restore-to-cover is complete (do not count raw cover sale as profit).
+ * Legacy folded premium USDT is attributed to Profit swap instead.
+ */
+export function itmSpotExitNetUsdtForTotalProfit(g) {
+  if (!groupHasItmSpotExitFills(g)) return null;
+  const exitU = spotExitRealizedQuoteUsdt(g);
+  if (exitU === null || exitU <= 0) return null;
+  if (!itmSpotRoundTripComplete(g)) return null;
+  const restoreU = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+  let net = exitU - restoreU;
+  const folded = itmFoldedPremiumUsdt(g);
+  if (folded > 0) net -= folded;
+  return net;
+}
+
+/**
+ * Closed-trade card ITM PnL: exit − restore once restore has quote spend
+ * (or round-trip is complete for fee recognition).
+ */
+export function itmSpotExitDisplayNetUsdt(g) {
+  if (!groupHasItmSpotExitFills(g)) return null;
+  const feeNet = itmSpotExitNetUsdtForTotalProfit(g);
+  if (feeNet !== null) return feeNet;
+  const exitU = spotExitRealizedQuoteUsdt(g);
+  const restoreU = spotRestoreRealizedQuoteUsdt(g);
+  if (exitU === null || exitU <= 0) return null;
+  if (restoreU === null || restoreU <= 0) return null;
+  return exitU - restoreU;
+}
+
+export function sumItmSpotExitNetUsdtForTotalProfit(rows) {
+  let total = 0;
+  let any = false;
+  for (const g of rows || []) {
+    const net = itmSpotExitNetUsdtForTotalProfit(g);
+    if (net === null) continue;
+    total += net;
+    any = true;
+  }
+  return any ? total : 0;
 }
 
 /** Normalize groups payload (`{open,closed}`) or a flat row list for spot-exit rollup. */
@@ -2711,14 +2939,38 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
   const boughtNative = { BTC: 0, ETH: 0 };
   const boughtQuote = { BTC: 0, ETH: 0 };
   const boughtAvg = {};
+  /** Folded premium peeled from ITM Sold (attributed to Profit swap instead). */
+  const foldedNativeByBook = { BTC: 0, ETH: 0 };
+  const foldedUsdtByBook = { BTC: 0, ETH: 0 };
   let any = false;
   for (const g of spotExitGroupRows(groups)) {
     const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
     if (book !== "BTC" && book !== "ETH") continue;
-    if (String(g?.spot_exit_status || "").toLowerCase() === "filled") {
-      const native = num(g?.spot_exit_amount) ?? 0;
-      const quote = spotExitRealizedQuoteUsdt(g) ?? 0;
-      if (native > 0) {
+    const exitStatus = String(g?.spot_exit_status || "").toLowerCase();
+    if (
+      exitStatus === "filled" ||
+      exitStatus === "pending" ||
+      exitStatus === "submitted" ||
+      exitStatus === "failed"
+    ) {
+      let native = num(g?.spot_exit_amount) ?? 0;
+      let quote = spotExitRealizedQuoteUsdt(g) ?? 0;
+      // Pending without fills may still carry a legacy planned amount — only count real proceeds/fills.
+      const hasFill = quote > 0 || (native > 0 && (exitStatus === "filled" || g?.spot_exit_order_id));
+      // ITM Sold = cover liquidation only; folded premium is shown under Profit swap.
+      if (hasFill && itmSpotExitPremiumFolded(g)) {
+        const premNative = itmFoldedPremiumNative(g);
+        const premUsdt = itmFoldedPremiumUsdt(g);
+        if (premNative > 0) {
+          foldedNativeByBook[book] += premNative;
+          native = Math.max(0, native - premNative);
+        }
+        if (premUsdt > 0) {
+          foldedUsdtByBook[book] += premUsdt;
+          quote = Math.max(0, quote - premUsdt);
+        }
+      }
+      if (hasFill && native > 0) {
         soldNative[book] += native;
         any = true;
       }
@@ -2745,8 +2997,9 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
     const displayNative = num(exchange?.native_sold);
     const displayUsdt = num(exchange?.usdt);
     if (displayNative !== null && displayNative > 0 && displayUsdt !== null && displayUsdt > 0) {
-      soldNative[book] = displayNative;
-      soldQuote[book] = displayUsdt;
+      // Exchange fill-stats include folded premium; peel it so Sold stays cover-only.
+      soldNative[book] = Math.max(0, displayNative - (foldedNativeByBook[book] || 0));
+      soldQuote[book] = Math.max(0, displayUsdt - (foldedUsdtByBook[book] || 0));
       any = true;
     }
     const restore = restoreStats?.[book];
@@ -2863,7 +3116,7 @@ export function overviewSpotExitSectionHtml(ctx) {
   return `<section class="overview-composition-card overview-composition-card--swap overview-composition-card--spot-exit" aria-label="${i18n("ITM spot exit", "ITM 現貨退場")}">
     <header class="overview-composition-head">
       <h3 class="overview-composition-title">${i18n("ITM spot exit", "ITM 現貨退場")}</h3>
-      <span class="overview-composition-sub">${i18n("Cover → USDT", "Cover → USDT")}</span>
+      <span class="overview-composition-sub">${i18n("Cover only → USDT", "僅 Cover → USDT")}</span>
     </header>
     ${body}
   </section>`;
@@ -2887,11 +3140,30 @@ export function fmtRealizedProfitBreakdown(disposition, nativeByBookFallback) {
 export function profitDispositionForGroup(g, status) {
   const book = tradeGroupAprBook(g);
   const native = realizedPnlInAprBookNative(g, status);
-  if (native === null || native === 0) return null;
   if (book === "USDC") {
+    if (native === null || native === 0) return null;
     return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book: "USDC" };
   }
   if (book !== "BTC" && book !== "ETH") return null;
+  // Legacy ITM that folded premium into spot exit → attribute that slice to Profit swap.
+  // New ITM (cover−settle only): only positive premium enters Profit swap; losses stay on ITM net.
+  if (groupHasItmSpotExitFills(g) && itmSpotExitPremiumFolded(g)) {
+    const premium = itmFoldedPremiumNative(g);
+    const premUsdt = itmFoldedPremiumUsdt(g);
+    if (premium > 0 && premUsdt > 0) {
+      return {
+        held: 0,
+        pending: 0,
+        sweptNative: premium,
+        sweptUsdt: premUsdt,
+        book,
+        fromItmFold: true,
+      };
+    }
+    return null;
+  }
+  if (groupHasItmSpotExitFills(g) && (native === null || native <= 0)) return null;
+  if (native === null || native === 0) return null;
   if (native <= 0) {
     return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book };
   }
@@ -2904,19 +3176,41 @@ export function profitDispositionForGroup(g, status) {
     if (!profitSweepHasExchangeFill(g)) {
       return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book };
     }
-    const sweptNative = Math.min(sweepAmt, native);
+    // Prefer exchange qty — journal amount often includes dust-pool ledger padding.
+    const sweptNative = Math.min(profitSweepFilledNativeSold(g, native), native);
     let remainder = Math.max(0, native - sweptNative);
     if (!isMeaningfulNativeForBook(remainder, book)) remainder = 0;
     return { held: remainder, pending: 0, sweptNative, sweptUsdt, book };
   }
   if (sweep === "pending" || sweep === "submitted") {
-    // amount < native: prior partial sweep done; only remainder is queued.
-    if (sweepAmtRaw !== null && sweepAmtRaw > 0 && sweepAmtRaw < native) {
-      const remainder = Math.max(0, native - sweepAmtRaw);
+    // Cover top-up retain: keep as held BTC, not "待兌" (will not be swapped).
+    const reason = String(g?.profit_sweep_reason || "").toLowerCase();
+    if (reason.includes("retained_for_cover")) {
+      const priorEx = num(g?.profit_sweep_exchange_native);
+      const sweptNative =
+        priorEx !== null && priorEx > 0 ? Math.min(priorEx, native) : 0;
+      let held = Math.max(0, native - sweptNative);
+      if (!isMeaningfulNativeForBook(held, book)) held = 0;
+      // Flag so fill-stats identity wipe cannot hide cover retain as "—".
+      return { held, pending: 0, sweptNative, sweptUsdt, book, coverRetained: held };
+    }
+    // Prior partial fill: prefer exchange qty when present, else journal amount.
+    const priorSold = profitSweepFilledNativeSold(g, native);
+    const priorRaw = num(g?.profit_sweep_exchange_native);
+    const hasPriorExchange = priorRaw !== null && priorRaw > 0;
+    const priorJournal =
+      sweepAmtRaw !== null && sweepAmtRaw > 0 && sweepAmtRaw < native ? sweepAmtRaw : null;
+    const priorNative = hasPriorExchange
+      ? priorSold
+      : priorJournal !== null
+        ? priorJournal
+        : null;
+    if (priorNative !== null && priorNative > 0 && priorNative < native) {
+      const remainder = Math.max(0, native - priorNative);
       return {
         held: 0,
         pending: remainder,
-        sweptNative: sweepAmtRaw,
+        sweptNative: priorNative,
         sweptUsdt,
         book,
       };
@@ -2935,9 +3229,20 @@ export function profitDispositionForGroup(g, status) {
 export function emptyProfitDisposition() {
   return {
     heldNative: { BTC: 0, ETH: 0, USDC: 0 },
+    /** Closed coin losses (native ≤ 0); kept out of Earned/Remaining, applied in Total profit. */
+    lossNative: { BTC: 0, ETH: 0 },
+    /** Premium kept to top up cover (not queued for swap). */
+    coverRetainedNative: { BTC: 0, ETH: 0 },
     pendingSweepNative: { BTC: 0, ETH: 0 },
     sweptNativeRef: { BTC: 0, ETH: 0 },
     sweptQuoteProceedsByBook: { BTC: 0, ETH: 0 },
+    /**
+     * Legacy ITM fold: premium sold via spot exit (not premium_sweep fills).
+     * Still counted in sweptNativeRef for Earned; must be re-added when Sold
+     * is taken from exchange fill-stats (which omit this slice).
+     */
+    foldedSweptNativeRefByBook: { BTC: 0, ETH: 0 },
+    foldedSweptQuoteProceedsByBook: { BTC: 0, ETH: 0 },
     excludedSweptNativeRefByBook: { BTC: 0, ETH: 0 },
     excludedSweptQuoteProceedsByBook: { BTC: 0, ETH: 0 },
     sweptUsdt: 0,
@@ -3310,6 +3615,20 @@ export function tradeGroupKey(g) {
   ].join("\u0000");
 }
 
+/**
+ * Identity keys for collapsing the same open row from ``status.trade_groups``
+ * and ``/api/groups`` when one side is missing ``account_name``.
+ * Without this, 2 live 0.1 BTC covers can render as 3 cards (duplicate + other).
+ */
+export function tradeGroupMatchKeys(g) {
+  const account = String(g?.account_name || "");
+  const id = String(g?.group_id || "");
+  const inst = String(g?.short_instrument_name || "");
+  const keys = [`${account}\0${id}\0${inst}`];
+  if (id || inst) keys.push(`*\0${id}\0${inst}`);
+  return keys;
+}
+
 const TRADE_GROUP_ENRICH_KEYS = [
   "realized_pnl_collateral_native",
   "short_entry_average_price",
@@ -3374,13 +3693,27 @@ export function mergeTradeGroupRow(a, b) {
 }
 
 export function dedupeTradeGroups(rows) {
-  const byKey = new Map();
+  const out = [];
+  const keyToIndex = new Map();
   for (const g of rows || []) {
-    const key = tradeGroupKey(g);
-    const prev = byKey.get(key);
-    byKey.set(key, prev ? mergeTradeGroupRow(prev, g) : g);
+    if (!g) continue;
+    const keys = tradeGroupMatchKeys(g);
+    let idx = -1;
+    for (const key of keys) {
+      if (keyToIndex.has(key)) {
+        idx = keyToIndex.get(key);
+        break;
+      }
+    }
+    if (idx >= 0) {
+      out[idx] = mergeTradeGroupRow(out[idx], g);
+    } else {
+      idx = out.length;
+      out.push(g);
+    }
+    for (const key of keys) keyToIndex.set(key, idx);
   }
-  return [...byKey.values()];
+  return out;
 }
 
 export function isOpenTradeGroup(g) {
@@ -3441,24 +3774,17 @@ export function isDisplayableClosedTradeGroup(g, status, groups) {
 }
 
 export function currentOpenRows(status, groups) {
-  const out = [];
-  const seen = new Set();
+  const merged = [];
   for (const g of status?.trade_groups || []) {
     if (!isOpenTradeGroup(g)) continue;
-    const key = tradeGroupKey(g);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(g);
+    merged.push(g);
   }
   for (const g of groups?.open || []) {
     if (!isOpenTradeGroup(g)) continue;
     if (exchangeShortLegIsFlat(status, g)) continue;
-    const key = tradeGroupKey(g);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(g);
+    merged.push(g);
   }
-  return out.map((g) => enrichOpenGroupRow(status, g, groups));
+  return dedupeTradeGroups(merged).map((g) => enrichOpenGroupRow(status, g, groups));
 }
 
 export function mergedClosedRows(report, groups, limit = 20, status = null) {
@@ -3853,11 +4179,44 @@ export function isInverseCoinBookGroup(g) {
   return book === "BTC" || book === "ETH";
 }
 
+/**
+ * Native coin amount that feeds Profit swap 「兌換前 / Earned」.
+ * Legacy folded ITM premium is included; cover round-trip stays on ITM net.
+ */
+export function realizedPnlNativeForProfitSwap(g, status) {
+  const book = tradeGroupAprBook(g);
+  if (book === "USDC") return realizedPnlInAprBookNative(g, status);
+  if (book !== "BTC" && book !== "ETH") return null;
+  if (groupHasItmSpotExitFills(g)) {
+    const disp = profitDispositionForGroup(g, status);
+    if (!disp) return null;
+    const total =
+      (num(disp.held) ?? 0) + (num(disp.pending) ?? 0) + (num(disp.sweptNative) ?? 0);
+    return total === 0 ? null : total;
+  }
+  return realizedPnlInAprBookNative(g, status);
+}
+
 /** Coin collateral PnL in USDT terms: swapped portion uses actual USDT received;
- *  unswept/pending portion uses live index × native. USDC book uses stored USDC PnL. */
+ *  unswept/pending portion uses live index × native. USDC book uses stored USDC PnL.
+ *  ITM spot-exit groups use exit−restore net (+ any separate premium-sweep USDT). */
 export function realizedPnlDisplayUsdc(g, status) {
   const book = tradeGroupAprBook(g);
   if (book === "USDC") return num(g?.realized_pnl);
+  if (groupHasItmSpotExitFills(g)) {
+    const disp = profitDispositionForGroup(g, status);
+    const sweptUsdt = num(disp?.sweptUsdt) ?? 0;
+    const itm = itmSpotExitDisplayNetUsdt(g);
+    if (itm !== null) return itm + sweptUsdt;
+    if (sweptUsdt > 0) return sweptUsdt;
+    // Exit done, restore not started: keep option PnL (never blank the card).
+    const stored = num(g?.realized_pnl);
+    if (stored !== null) return stored;
+    const spot = collateralBookSpotUsd(g, status);
+    const native = realizedPnlInAprBookNative(g, status);
+    if (native !== null && spot !== null && spot > 0) return native * spot;
+    return null;
+  }
   const spot = collateralBookSpotUsd(g, status);
   const disp = profitDispositionForGroup(g, status);
   if (disp) {
@@ -3887,6 +4246,21 @@ export function realizedPnlInAprBookNative(g, status) {
   const stored = num(g?.realized_pnl_collateral_native);
   if (stored !== null) return stored;
   return realizedPnlCoinNative(g, status);
+}
+
+/** ITM exit−restore net USDT rolled up by collateral book (for composition / Total profit). */
+export function sumItmSpotExitNetUsdtByBook(rows) {
+  const out = { BTC: 0, ETH: 0 };
+  let any = false;
+  for (const g of rows || []) {
+    const net = itmSpotExitNetUsdtForTotalProfit(g);
+    if (net === null) continue;
+    const book = tradeGroupAprBook(g);
+    if (book !== "BTC" && book !== "ETH") continue;
+    out[book] += net;
+    any = true;
+  }
+  return any ? out : null;
 }
 
 /** APR 分母：每張合約名目（與 trade_apr.opened_contract_amount_per_contract 一致）。 */
@@ -3959,6 +4333,18 @@ export function fmtRealizedPnlDisplay(g, status) {
   if (!isInverseCoinBookGroup(g)) {
     const pnlUsd = num(g?.realized_pnl);
     return pnlUsd === null ? "—" : fmtUsdPrecise(pnlUsd);
+  }
+  // ITM spot exit: show exit−restore USDT (not the stale option settlement USDC line).
+  if (groupHasItmSpotExitFills(g)) {
+    const net = realizedPnlDisplayUsdc(g, status);
+    if (net === null) return "—";
+    const usdStr = fmtUsdPrecise(net);
+    if (!itmSpotRoundTripComplete(g)) {
+      const note = i18n("restore incomplete", "尚未補滿 cover");
+      return `${usdStr} · ${note}`;
+    }
+    const tag = i18n("exit − restore", "賣出 − 買回");
+    return `${usdStr}（${tag}）`;
   }
   const native =
     g?.realized_pnl_collateral_native !== undefined &&
@@ -4176,19 +4562,11 @@ export function groupEntryCreditNative(g, status) {
 }
 
 export function allTradeGroupsForActivity(status, groups) {
-  const rows = [];
-  const seen = new Set();
-  const add = (g) => {
-    if (!g) return;
-    const key = tradeGroupKey(g);
-    if (seen.has(key)) return;
-    seen.add(key);
-    rows.push(g);
-  };
-  for (const g of status?.trade_groups || []) add(g);
-  for (const g of groups?.open || []) add(g);
-  for (const g of groups?.closed || []) add(g);
-  return rows;
+  return dedupeTradeGroups([
+    ...(status?.trade_groups || []),
+    ...(groups?.open || []),
+    ...(groups?.closed || []),
+  ]);
 }
 
 export function activityOpenRows(status, groups) {
@@ -4199,8 +4577,15 @@ export function activityOpenRows(status, groups) {
 }
 
 function profitSweepAvgSuffix(g, book, soldNative) {
+  const exQuote = num(g?.profit_sweep_exchange_quote_proceeds);
+  const exNative = num(g?.profit_sweep_exchange_native);
+  // Prefer exchange quote; allow journal quote only when per-group exchange qty exists.
   const quoteRaw =
-    g?.profit_sweep_exchange_quote_proceeds ?? g?.profit_sweep_quote_proceeds;
+    exQuote !== null && exQuote > 0
+      ? g.profit_sweep_exchange_quote_proceeds
+      : exNative !== null && exNative > 0
+        ? g?.profit_sweep_quote_proceeds
+        : null;
   const quote = num(quoteRaw);
   const sold = num(soldNative);
   if (quote === null || quote <= 0 || sold === null || sold <= 0) return "";
@@ -4220,40 +4605,46 @@ export function profitSweepMetaLine(g) {
   if (!status) return null;
   const inst = String(g?.profit_sweep_instrument_name || "");
   const base = inst.split("_")[0] || String(g?.currency || "").toUpperCase() || "—";
-  if (status === "filled") {
-    if (!profitSweepHasExchangeFill(g)) return null;
-    const soldRaw =
-      g?.profit_sweep_exchange_native ??
-      (profitSweepHasExchangeFill(g) ? g?.profit_sweep_amount : null);
-    const soldNative = num(soldRaw);
-    const amtDisplay =
-      soldRaw === null || soldRaw === undefined || soldRaw === "" || soldNative === null
-        ? "—"
-        : fmtProfitNative(base, soldRaw);
-    const quoteRaw =
-      g?.profit_sweep_exchange_quote_proceeds ?? g?.profit_sweep_quote_proceeds;
-    const quoteNum = num(quoteRaw);
-    const quoteDisplay =
-      quoteRaw !== undefined &&
-      quoteRaw !== null &&
-      quoteRaw !== "" &&
-      quoteNum !== null &&
-      quoteNum > 0
-        ? fmtProfitUsdt(quoteRaw).replace(/^\$/, "")
-        : null;
-    const avgSuffix = profitSweepAvgSuffix(g, base, soldRaw ?? soldNative);
-    return [
-      i18n("Profit swapped", "獲利已兌"),
-      quoteDisplay
-        ? `${amtDisplay} ${base} → ${quoteDisplay} USDT${avgSuffix}`
-        : `${amtDisplay} ${base} → USDT${avgSuffix}`,
-    ];
-  }
   const amt = g?.profit_sweep_amount;
   const amtDisplay =
     amt !== undefined && amt !== null && amt !== ""
       ? fmtProfitNative(base, amt)
       : "—";
+  if (status === "filled") {
+    const exNative = num(g?.profit_sweep_exchange_native);
+    const exQuote = num(g?.profit_sweep_exchange_quote_proceeds);
+    const hasExQty = exNative !== null && exNative > 0;
+    const hasExQuote = exQuote !== null && exQuote > 0;
+    // Dust/ledger pool splits often write journal quote without per-group exchange
+    // fill fields — never show that as USDT/avg (produces absurd ~$179k prints).
+    if (!hasExQty && !hasExQuote) {
+      return [
+        i18n("Profit swapped", "獲利已兌"),
+        amtDisplay !== "—"
+          ? `${amtDisplay} ${base} → USDT (${i18n("pending", "待兌")})`
+          : i18n("pending", "待兌"),
+      ];
+    }
+    const soldRaw = hasExQty ? g.profit_sweep_exchange_native : g?.profit_sweep_amount;
+    const soldNative = num(soldRaw);
+    const quoteRaw = hasExQuote
+      ? g.profit_sweep_exchange_quote_proceeds
+      : g?.profit_sweep_quote_proceeds;
+    const quoteNum = num(quoteRaw);
+    const hasSold = soldNative !== null && soldNative > 0;
+    const hasQuote = quoteNum !== null && quoteNum > 0;
+    if (!hasSold && !hasQuote) return null;
+    const soldDisplay = hasSold ? fmtProfitNative(base, soldRaw) : "—";
+    const quoteDisplay = hasQuote ? fmtProfitUsdt(quoteRaw).replace(/^\$/, "") : null;
+    const avgSuffix =
+      hasSold && hasQuote ? profitSweepAvgSuffix(g, base, soldRaw ?? soldNative) : "";
+    return [
+      i18n("Profit swapped", "獲利已兌"),
+      quoteDisplay
+        ? `${soldDisplay} ${base} → ${quoteDisplay} USDT${avgSuffix}`
+        : `${soldDisplay} ${base} → USDT${avgSuffix}`,
+    ];
+  }
   if (status === "pending" || status === "submitted") {
     return [
       i18n("Profit swapped", "獲利已兌"),
@@ -4293,12 +4684,21 @@ export function spotExitMetaLine(g) {
   if (!status) return null;
   const inst = String(g?.spot_exit_instrument_name || "");
   const base = inst.split("_")[0] || String(g?.currency || "").toUpperCase() || "—";
-  const amt = g?.spot_exit_amount;
+  let amt = num(g?.spot_exit_amount);
+  let quoteRaw = g?.spot_exit_quote_proceeds_lifetime ?? g?.spot_exit_quote_proceeds;
+  let quoteNum = num(quoteRaw);
+  if (itmSpotExitPremiumFolded(g)) {
+    const premN = itmFoldedPremiumNative(g);
+    const premU = itmFoldedPremiumUsdt(g);
+    if (amt !== null && premN > 0) amt = Math.max(0, amt - premN);
+    if (quoteNum !== null && premU > 0) {
+      quoteNum = Math.max(0, quoteNum - premU);
+      quoteRaw = quoteNum;
+    }
+  }
   const amtDisplay =
-    amt !== undefined && amt !== null && amt !== "" ? fmtProfitNative(base, amt) : "—";
+    amt !== null && amt !== undefined ? fmtProfitNative(base, amt) : "—";
   if (status === "filled") {
-    const quoteRaw = g?.spot_exit_quote_proceeds_lifetime ?? g?.spot_exit_quote_proceeds;
-    const quoteNum = num(quoteRaw);
     const quoteDisplay =
       quoteRaw !== undefined &&
       quoteRaw !== null &&
@@ -4317,20 +4717,28 @@ export function spotExitMetaLine(g) {
           : i18n("filled", "已成交"),
     ];
   }
-  if (status === "pending" || status === "submitted") {
+  if (status === "pending" || status === "submitted" || status === "failed") {
+    const quoteRaw = g?.spot_exit_quote_proceeds_lifetime ?? g?.spot_exit_quote_proceeds;
+    const quoteNum = num(quoteRaw);
+    const hasPartial =
+      quoteNum !== null &&
+      quoteNum > 0 &&
+      amt !== undefined &&
+      amt !== null &&
+      amt !== "";
+    if (hasPartial) {
+      const quoteDisplay = fmtProfitUsdt(quoteRaw).replace(/^\$/, "");
+      const avgSuffix = spotExitAvgSuffix(g, base, amt);
+      return [
+        i18n("ITM selling", "ITM 續賣中"),
+        `${amtDisplay} ${base} → ${quoteDisplay} USDT${avgSuffix} (${i18n("pending", "待續賣")})`,
+      ];
+    }
     return [
       i18n("ITM exit", "ITM 退場"),
       amtDisplay !== "—"
         ? `${amtDisplay} ${base} → USDT (${i18n("pending", "待成交")})`
         : i18n("pending", "待成交"),
-    ];
-  }
-  if (status === "failed") {
-    return [
-      i18n("ITM exit", "ITM 退場"),
-      amtDisplay !== "—"
-        ? `${amtDisplay} ${base} (${i18n("failed", "失敗")})`
-        : i18n("failed", "失敗"),
     ];
   }
   if (status === "skipped") {

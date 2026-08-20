@@ -1645,6 +1645,7 @@ class EngineBase:
         amount: Decimal,
         label: str,
         reduce_only: bool,
+        order_type_override: str | None = None,
     ) -> dict[str, Any]:
         from ..hedge_orders import hedge_order_action_meta, place_hedge_perp_order
 
@@ -1652,9 +1653,10 @@ class EngineBase:
         if instrument is None:
             return {"skipped": True, "reason": "hedge_future_metadata_missing"}
         book = self._get_orderbook(instrument_name, context.orderbook_cache)
+        effective_type = order_type_override or self.config.hedge_order_type
         response = place_hedge_perp_order(
             self.client,
-            hedge_order_type=self.config.hedge_order_type,
+            hedge_order_type=effective_type,
             hedge_limit_slippage_pct=self.config.hedge_limit_slippage_pct,
             book=book,
             instrument=instrument,
@@ -1667,7 +1669,7 @@ class EngineBase:
         if isinstance(response, dict) and response.get("skipped"):
             return response
         meta = hedge_order_action_meta(
-            hedge_order_type=self.config.hedge_order_type,
+            hedge_order_type=effective_type,
             book=book,
             instrument=instrument,
             direction=direction,
@@ -1676,6 +1678,90 @@ class EngineBase:
         if isinstance(response, dict):
             response = {**response, **meta}
         return response
+
+    def _open_hedge_orders(
+        self,
+        context: RuntimeContext,
+        *,
+        currency: str,
+        instrument_name: str,
+    ) -> list[Any]:
+        prefix = f"{self.config.order_label_prefix}-hedge-{currency.lower()}-"
+        open_orders = getattr(context, "open_orders", None) or []
+        return [
+            order
+            for order in open_orders
+            if order.instrument_name == instrument_name
+            and str(order.label or "").startswith(prefix)
+            and str(order.order_state or "").lower() in {"open", "untriggered"}
+        ]
+
+    def _pending_hedge_base_from_orders(
+        self,
+        orders: list[Any],
+        *,
+        uses_base: bool,
+        index_price: Decimal,
+    ) -> Decimal:
+        total = Decimal("0")
+        for order in orders:
+            remaining = order.amount - order.filled_amount
+            if remaining <= 0:
+                continue
+            if uses_base:
+                base = remaining
+            else:
+                if index_price <= 0:
+                    continue
+                base = remaining / index_price
+            total += base if order.direction == "buy" else -base
+        return total
+
+    def _cancel_open_hedge_orders(
+        self,
+        context: RuntimeContext,
+        *,
+        currency: str,
+        instrument_name: str,
+        live: bool,
+    ) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        for order in self._open_hedge_orders(context, currency=currency, instrument_name=instrument_name):
+            action: dict[str, Any] = {
+                "action": "cancel_hedge_order",
+                "order_id": order.order_id,
+                "instrument_name": instrument_name,
+                "label": order.label,
+                "live": live,
+            }
+            if live:
+                action["response"] = self.client.cancel_order(order.order_id)
+            actions.append(action)
+        # Drop cancelled ids from the in-memory snapshot so later steps in this
+        # cycle do not double-count pending size.
+        cancelled_ids = {a["order_id"] for a in actions}
+        if cancelled_ids and hasattr(context, "open_orders"):
+            context.open_orders = [o for o in context.open_orders if o.order_id not in cancelled_ids]
+        return actions
+
+    def _bump_hedge_maker_wait(self, context: RuntimeContext, currency: str) -> int:
+        key = currency.upper()
+        wait = int(context.state.hedge_maker_wait_cycles.get(key, 0)) + 1
+        context.state.hedge_maker_wait_cycles[key] = wait
+        return wait
+
+    def _reset_hedge_maker_wait(self, context: RuntimeContext, currency: str) -> None:
+        context.state.hedge_maker_wait_cycles.pop(currency.upper(), None)
+
+    def _resolve_hedge_order_type_for_currency(self, context: RuntimeContext, *, currency: str) -> str:
+        """Return configured type, bumping maker wait and falling back to IOC when due."""
+        configured = self.config.hedge_order_type
+        if configured != "limit_maker":
+            return configured
+        wait = self._bump_hedge_maker_wait(context, currency)
+        if wait >= max(self.config.hedge_maker_max_cycles, 1):
+            return "limit_ioc"
+        return "limit_maker"
 
     def _day_start_ms_from_key(self, day_key: str) -> int:
         """Convert a ``YYYY-MM-DD`` key back to its UTC-midnight epoch ms.
@@ -2070,6 +2156,10 @@ class EngineBase:
             "spot_exit_quote_proceeds_lifetime": format_decimal(group.spot_exit_quote_proceeds_lifetime, 4)
             if group.spot_exit_quote_proceeds_lifetime > 0
             else None,
+            "spot_exit_settlement_loss": format_decimal(group.spot_exit_settlement_loss, 8)
+            if group.spot_exit_settlement_loss > 0
+            else None,
+            "spot_exit_settlement_loss_source": group.spot_exit_settlement_loss_source or None,
             "spot_restore_status": group.spot_restore_status or None,
             "spot_restore_amount": format_decimal(group.spot_restore_amount, 8)
             if group.spot_restore_amount > 0
@@ -2173,6 +2263,10 @@ class EngineBase:
             "spot_exit_quote_proceeds_lifetime": format_decimal(group.spot_exit_quote_proceeds_lifetime, 4)
             if group.spot_exit_quote_proceeds_lifetime > 0
             else None,
+            "spot_exit_settlement_loss": format_decimal(group.spot_exit_settlement_loss, 8)
+            if group.spot_exit_settlement_loss > 0
+            else None,
+            "spot_exit_settlement_loss_source": group.spot_exit_settlement_loss_source or None,
             "spot_restore_status": group.spot_restore_status or None,
             "spot_restore_amount": format_decimal(group.spot_restore_amount, 8)
             if group.spot_restore_amount > 0

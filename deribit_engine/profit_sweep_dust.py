@@ -14,6 +14,7 @@ from .profit_sweep_ops import (
     native_profit_for_group,
     record_profit_sweep_lifetime_proceeds,
     remaining_spot_profit_native,
+    to_sweep_native,
 )
 from .utils import align_option_order_amount, format_decimal, to_decimal
 
@@ -111,12 +112,21 @@ def dust_allocated_native_in_state(
     client,
     order_label_prefix: str,
     *,
+    currency: str | None = None,
     trade_cache: ProfitSweepTradeCache | None = None,
 ) -> Decimal:
-    """Native profit-sweep amount already attributed to dust-pool fills in state."""
+    """Native already attributed to dust-pool fills in state (exchange-grounded).
+
+    Prefer ``profit_sweep_exchange_native − per-group labeled fills`` so
+    ``premium_amount_synced`` journal padding does not over-count allocated dust
+    and block reconcile from reducing pending queues.
+    """
     total = Decimal("0")
+    target = str(currency or "").upper()
     for group in groups:
         if group.status != "closed" or not group.is_covered_call_group():
+            continue
+        if target and group.currency.upper() != target:
             continue
         if "dust_pool_sweep" not in str(group.profit_sweep_reason or ""):
             continue
@@ -126,8 +136,46 @@ def dust_allocated_native_in_state(
             order_label_prefix,
             trade_cache=trade_cache,
         )
-        total += max(Decimal("0"), group.profit_sweep_amount - per_group)
+        # Journal amount may include premium_amount_synced padding above true dust.
+        if group.profit_sweep_exchange_native > 0:
+            attributed = group.profit_sweep_exchange_native
+        else:
+            attributed = Decimal("0")
+        total += max(Decimal("0"), attributed - per_group)
     return total
+
+
+def collect_unswept_rows_for_dust_reconcile(
+    bot: DeribitOptionTrialBot,
+    groups: list[TradeGroup],
+    *,
+    trade_cache: ProfitSweepTradeCache | None = None,
+) -> list[DustRemainderRow]:
+    """Pending queues + sub-min remainders eligible to absorb unallocated dust fills."""
+    cache = trade_cache or ProfitSweepTradeCache(bot.client)
+    by_id: dict[str, DustRemainderRow] = {}
+    for group in groups:
+        if group.status != "closed" or not group.is_covered_call_group() or not group.is_coin_collateral():
+            continue
+        status = str(group.profit_sweep_status or "").lower()
+        if status not in {"pending", "submitted"}:
+            continue
+        unswept = to_sweep_native(group)
+        if unswept <= 0:
+            continue
+        by_id[group.group_id] = DustRemainderRow(
+            group_id=group.group_id,
+            currency=group.currency.upper(),
+            remainder_native=unswept,
+            closed_timestamp_ms=int(group.closed_timestamp_ms or 0),
+        )
+    for row in collect_dust_remainder_rows(bot, groups, trade_cache=cache):
+        prior = by_id.get(row.group_id)
+        if prior is None or row.remainder_native > prior.remainder_native:
+            by_id[row.group_id] = row
+    rows = list(by_id.values())
+    rows.sort(key=lambda item: (item.currency, item.closed_timestamp_ms, int(item.group_id)))
+    return rows
 
 
 def reconcile_dust_sweep_from_exchange(
@@ -150,17 +198,44 @@ def reconcile_dust_sweep_from_exchange(
         from .wallet_ops import spot_sell_quote_proceeds_from_trades
 
         dust_proceeds = spot_sell_quote_proceeds_from_trades(dust_trades, quote_currency="USDT")
-        allocated = dust_allocated_native_in_state(groups, bot.client, prefix, trade_cache=cache)
+        allocated = dust_allocated_native_in_state(
+            groups,
+            bot.client,
+            prefix,
+            currency=currency,
+            trade_cache=cache,
+        )
         unallocated = dust_sold - allocated
         if unallocated <= 0:
             continue
+        by_id = {group.group_id: group for group in groups}
         pool_rows = [
             row
-            for row in collect_dust_remainder_rows(bot, groups, trade_cache=cache)
+            for row in collect_unswept_rows_for_dust_reconcile(bot, groups, trade_cache=cache)
             if row.currency == currency.upper()
         ]
         if not pool_rows:
             continue
+
+        # Prefer pending/submitted queues so dust sells reduce zombie Remaining first.
+        def _dust_reconcile_sort_key(row: DustRemainderRow) -> tuple[int, int, int]:
+            group = by_id.get(row.group_id)
+            status = str(group.profit_sweep_status or "").lower() if group is not None else ""
+            pending_first = 0 if status in {"pending", "submitted"} else 1
+            return (pending_first, int(row.closed_timestamp_ms or 0), int(row.group_id))
+
+        pool_rows.sort(key=_dust_reconcile_sort_key)
+        # When most premium is already sold on exchange, keep the small deficit unswept
+        # for cover top-up (do not attribute the last crumbs as dust fills).
+        from .profit_sweep_repair import build_premium_alignment_plan
+
+        plan = build_premium_alignment_plan(bot.client, groups)
+        deficit = plan.sell_native.get(currency.upper(), Decimal("0"))
+        pool_total = sum((row.remainder_native for row in pool_rows), Decimal("0"))
+        if Decimal("0") < deficit < pool_total:
+            unallocated = min(unallocated, pool_total - deficit)
+            if unallocated <= 0:
+                continue
         proceeds_share = dust_proceeds * (unallocated / dust_sold) if dust_sold > 0 else Decimal("0")
         allocated_groups = apply_dust_sweep_allocation(
             groups,
@@ -192,9 +267,6 @@ def collect_dust_remainder_rows(
         if group.status != "closed" or not group.is_covered_call_group() or not group.is_coin_collateral():
             continue
         guard_profit_sweep_against_oversell(group, bot.client, prefix, trade_cache=cache)
-        remainder = remaining_spot_profit_native(group)
-        if remainder <= 0:
-            continue
         native = native_profit_for_group(group)
         if native is None or native <= 0:
             continue
@@ -205,6 +277,12 @@ def collect_dust_remainder_rows(
             trade_cache=cache,
         )
         if exchange_swept >= native:
+            continue
+        # Prefer live exchange shortfall over journal amount (journal may claim full fill).
+        journal_rem = remaining_spot_profit_native(group)
+        exchange_rem = max(Decimal("0"), native - exchange_swept) if exchange_swept > 0 else Decimal("0")
+        remainder = max(journal_rem, exchange_rem)
+        if remainder <= 0:
             continue
         instrument = bot._covered_call_profit_sweep_instrument(group.currency)
         contract_size, min_trade_amount = bot._spot_min_trade_amount(instrument, group.currency)
@@ -274,19 +352,37 @@ def apply_dust_sweep_allocation(
         native = native_profit_for_group(group)
         if native is None or native <= 0:
             continue
-        rem = remaining_spot_profit_native(group)
+        status = str(group.profit_sweep_status or "").lower()
+        rem = to_sweep_native(group) if status in {"pending", "submitted"} else remaining_spot_profit_native(group)
         chunk = min(rem, left, row.remainder_native)
         if chunk <= 0:
             continue
         share = chunk / sold_native
         quote = proceeds_usdt * share
-        prior = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal(0)
-        group.profit_sweep_amount = min(native, prior + chunk)
+        prior_ex = group.profit_sweep_exchange_native if group.profit_sweep_exchange_native > 0 else Decimal(0)
+        prior_exq = (
+            group.profit_sweep_exchange_quote_proceeds if group.profit_sweep_exchange_quote_proceeds > 0 else Decimal(0)
+        )
+        group.profit_sweep_exchange_native = min(native, prior_ex + chunk)
+        group.profit_sweep_exchange_quote_proceeds = prior_exq + quote
+        # Journal amount tracks exchange sold for pending→partial, else grows toward premium.
+        if status in {"pending", "submitted"}:
+            group.profit_sweep_amount = group.profit_sweep_exchange_native
+            if group.profit_sweep_exchange_native + Decimal("1e-12") < native:
+                group.profit_sweep_status = "pending"
+            else:
+                group.profit_sweep_status = "filled"
+        else:
+            prior = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal(0)
+            group.profit_sweep_amount = min(native, prior + chunk)
+            if remaining_spot_profit_native(group) <= 0:
+                group.profit_sweep_status = "filled"
         group.profit_sweep_quote_proceeds += quote
+        # When fills were already exchange-tracked, drop legacy dust journal inflate.
+        if prior_exq > 0 and group.profit_sweep_quote_proceeds > group.profit_sweep_exchange_quote_proceeds:
+            group.profit_sweep_quote_proceeds = group.profit_sweep_exchange_quote_proceeds
         record_profit_sweep_lifetime_proceeds(group, group.profit_sweep_quote_proceeds)
         group.profit_sweep_instrument_name = f"{group.currency.upper()}_USDT"
-        if remaining_spot_profit_native(group) <= 0:
-            group.profit_sweep_status = "filled"
         reason = str(group.profit_sweep_reason or "")
         if "dust_pool_sweep" not in reason:
             group.profit_sweep_reason = (reason + "; dust_pool_sweep").strip("; ")
@@ -349,7 +445,7 @@ def run_dust_pool_profit_sweeps(
                 }
             )
             continue
-        available = _available_native(bot, context, currency, live=live) if live else remaining_pool
+        available = _available_native(bot, context, currency, live=live)
         target = min(remaining_pool, available)
         order_amount = align_option_order_amount(target, contract_size, min_trade_amount)
         if order_amount > remaining_pool:

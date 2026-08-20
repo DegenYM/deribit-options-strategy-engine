@@ -36,6 +36,13 @@ def profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
             return True
         if "premium_amount_synced" in reason and str(group.profit_sweep_order_id or "").strip():
             return True
+        # Manual / unlabeled may lack per-group order_id; dust needs exchange qty.
+        if "unlabeled_premium_reconciled" in reason:
+            return True
+        if "manual_swap" in reason:
+            return True
+        if "dust_pool_sweep" in reason:
+            return group.profit_sweep_exchange_native > 0
         return False
     if str(group.profit_sweep_order_id or "").strip():
         return True
@@ -46,7 +53,7 @@ def profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
     if "manual_swap" in reason:
         return True
     if "dust_pool_sweep" in reason:
-        return True
+        return group.profit_sweep_exchange_native > 0
     return True
 
 
@@ -358,7 +365,8 @@ def guard_profit_sweep_against_oversell(
         trade_cache=trade_cache,
     )
     if _profit_sweep_state_locked(group):
-        return True
+        # Keep journal amounts, but do not block a real exchange shortfall.
+        return remaining_spot_profit_native(group) <= 0
     native = native_profit_for_group(group)
     if native is None or native <= 0:
         return True
@@ -498,7 +506,11 @@ def sync_filled_profit_sweep_amounts_to_premium(
     *,
     currency: str | None = None,
 ) -> int:
-    """Mark filled sweeps at full premium native when state amount lags (clears UI remainder)."""
+    """Mark filled sweeps at full premium native when state amount lags (clears UI remainder).
+
+    Skip when ``profit_sweep_exchange_native`` is a known short fill — padding the
+    journal to full premium plus ``premium_amount_synced`` used to hide a real tail.
+    """
     updated = 0
     target = str(currency or "").upper()
     for group in groups:
@@ -513,6 +525,10 @@ def sync_filled_profit_sweep_amounts_to_premium(
             continue
         if group.profit_sweep_amount >= native:
             continue
+        exchange_native = group.profit_sweep_exchange_native
+        if exchange_native > 0 and exchange_native < native:
+            # Do not pad a known short fill up to full premium — that locks the tail.
+            continue
         group.profit_sweep_amount = native
         reason = str(group.profit_sweep_reason or "")
         if "premium_amount_synced" not in reason:
@@ -522,17 +538,40 @@ def sync_filled_profit_sweep_amounts_to_premium(
 
 
 def remaining_spot_profit_native(group: TradeGroup) -> Decimal:
-    """Held spot profit after prior sweeps (dashboard Remaining column)."""
+    """Held spot profit after prior sweeps (dashboard Remaining column).
+
+    When journal claims a full fill (``profit_sweep_amount == premium``) but
+    ``profit_sweep_exchange_native`` is short, keep the exchange shortfall so
+    dust-pool auto-sweep can still sell the tail.
+
+    A ledger-only ``filled`` row (``proceeds_reconciled`` / dust without a
+    per-group fill) must **not** return the full premium — that re-sells
+    already-swapped dust out of cover inventory.
+    """
     native = native_profit_for_group(group)
     if native is None or native <= 0:
         return Decimal("0")
+    if "retained_for_cover" in str(group.profit_sweep_reason or "").lower():
+        return Decimal("0")
     sweep = str(group.profit_sweep_status or "").lower()
-    sweep_amt = group.profit_sweep_amount if group.profit_sweep_amount > 0 else native
+    sweep_amt = group.profit_sweep_amount if group.profit_sweep_amount > 0 else Decimal("0")
     if sweep == "filled":
+        credited = sweep_amt if sweep_amt > 0 else Decimal("0")
+        journal_rem = max(Decimal("0"), native - min(credited, native)) if credited > 0 else native
+        exchange_native = group.profit_sweep_exchange_native
+        if exchange_native > 0:
+            exchange_rem = max(Decimal("0"), native - exchange_native)
+            return max(journal_rem if credited > 0 else Decimal("0"), exchange_rem)
+        if credited >= native:
+            return Decimal("0")
+        if credited > 0:
+            return journal_rem
         if not profit_sweep_has_exchange_fill(group):
-            return native
-        return max(Decimal("0"), native - min(sweep_amt, native))
+            return Decimal("0")
+        return native
     if sweep in {"pending", "submitted"}:
+        if sweep_amt <= 0:
+            return native
         return max(Decimal("0"), native - sweep_amt)
     return native
 
@@ -541,6 +580,9 @@ def to_sweep_native(group: TradeGroup) -> Decimal:
     """Native amount this run would sell (queued pending or unswept remainder)."""
     native = native_profit_for_group(group)
     if native is None or native <= 0:
+        return Decimal("0")
+    # Retained to top up cover — do not queue for profit swap.
+    if "retained_for_cover" in str(group.profit_sweep_reason or "").lower():
         return Decimal("0")
     status = str(group.profit_sweep_status or "").lower()
     if status in {"pending", "submitted"}:
@@ -640,7 +682,7 @@ def _ensure_pending_for_manual_sweep(
     *,
     trade_cache: ProfitSweepTradeCache | None = None,
 ) -> bool:
-    if _profit_sweep_state_locked(group):
+    if _profit_sweep_state_locked(group) and remaining_spot_profit_native(group) <= 0:
         return False
     prefix = bot.config.order_label_prefix
     if guard_profit_sweep_against_oversell(
@@ -670,8 +712,14 @@ def _ensure_pending_for_manual_sweep(
 
     status = str(group.profit_sweep_status or "").lower()
     if status == "filled":
+        already_sold = (
+            exchange_swept
+            if exchange_swept > 0
+            else (group.profit_sweep_exchange_native if group.profit_sweep_exchange_native > 0 else Decimal("0"))
+        )
         group.profit_sweep_status = "pending"
-        group.profit_sweep_amount = exchange_swept if exchange_swept > 0 else group.profit_sweep_amount
+        if already_sold > 0:
+            group.profit_sweep_amount = already_sold
         if not group.profit_sweep_reason:
             group.profit_sweep_reason = "manual_sweep"
         elif "resweep_remainder" not in group.profit_sweep_reason:
@@ -722,7 +770,11 @@ def reschedule_ledger_only_profit_sweeps(
     *,
     trade_cache: ProfitSweepTradeCache | None = None,
 ) -> int:
-    """Re-queue groups marked filled by proceeds_reconciled without an exchange spot fill."""
+    """Re-queue filled rows that never received proceeds or an exchange fill.
+
+    ``proceeds_reconciled`` / dust rows with recorded quote proceeds already
+    share a real sell. Re-queuing those sells cover inventory a second time.
+    """
     cache = trade_cache or ProfitSweepTradeCache(bot.client)
     prefix = bot.config.order_label_prefix
     rescheduled = 0
@@ -732,6 +784,10 @@ def reschedule_ledger_only_profit_sweeps(
         if str(group.profit_sweep_status or "").lower() != "filled":
             continue
         if profit_sweep_has_exchange_fill(group):
+            continue
+        if group.profit_sweep_quote_proceeds > 0 or group.profit_sweep_quote_proceeds_lifetime > 0:
+            continue
+        if group.profit_sweep_amount > 0:
             continue
         native = native_profit_for_group(group)
         if native is None or native <= 0:
@@ -753,6 +809,45 @@ def _preview_context(context: RuntimeContext) -> RuntimeContext:
     return replace(context, state=preview_state)
 
 
+def schedule_remaining_closed_profit_sweeps(
+    bot: DeribitOptionTrialBot,
+    groups: list[TradeGroup],
+    *,
+    group_id: str | None = None,
+    trade_cache: ProfitSweepTradeCache | None = None,
+) -> int:
+    """Queue leftover coin premium that was never sold, or only partially sold.
+
+    Covers ``reconciled_external`` closes that skipped the income-exit scheduler
+    and filled rows whose exchange fill is still short of premium.
+    """
+    cache = trade_cache or ProfitSweepTradeCache(bot.client)
+    prefix = bot.config.order_label_prefix
+    scheduled = 0
+    target = str(group_id or "").strip()
+    for group in groups:
+        if target and group.group_id != target:
+            continue
+        if guard_profit_sweep_against_oversell(
+            group,
+            bot.client,
+            prefix,
+            trade_cache=cache,
+        ):
+            continue
+        remaining = _exchange_remaining_native(
+            bot.client,
+            group,
+            prefix,
+            trade_cache=cache,
+        )
+        if remaining is None or remaining <= 0:
+            continue
+        if _ensure_pending_for_manual_sweep(bot, group, trade_cache=cache):
+            scheduled += 1
+    return scheduled
+
+
 def _run_profit_sweep_pass(
     bot: DeribitOptionTrialBot,
     context: RuntimeContext,
@@ -762,30 +857,13 @@ def _run_profit_sweep_pass(
     trade_cache: ProfitSweepTradeCache | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     prefix = bot.config.order_label_prefix
-    scheduled = 0
+    scheduled = schedule_remaining_closed_profit_sweeps(
+        bot,
+        context.state.groups,
+        group_id=group_id,
+        trade_cache=trade_cache,
+    )
     actions: list[dict[str, Any]] = []
-    for group in context.state.groups:
-        if group_id and group.group_id != group_id:
-            continue
-        if guard_profit_sweep_against_oversell(
-            group,
-            bot.client,
-            prefix,
-            trade_cache=trade_cache,
-        ):
-            continue
-        remaining = _exchange_remaining_native(
-            bot.client,
-            group,
-            prefix,
-            trade_cache=trade_cache,
-        )
-        if remaining is None or remaining <= 0:
-            continue
-        if to_sweep_native(group) <= 0 and remaining <= 0:
-            continue
-        if _ensure_pending_for_manual_sweep(bot, group, trade_cache=trade_cache):
-            scheduled += 1
 
     for group in context.state.groups:
         if group_id and group.group_id != group_id:

@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlNativeForProfitSwap, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, sumItmSpotExitNetUsdtByBook, sumItmSpotExitNetUsdtForTotalProfit, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -316,7 +316,10 @@ function sumRealizedPnlUsdcFromRows(rows, status) {
         status
       )
     : null;
-  if (fromDisposition !== null) return fromDisposition;
+  const itmNet = sumItmSpotExitNetUsdtForTotalProfit(rows);
+  if (fromDisposition !== null || Math.abs(itmNet) >= 0.005) {
+    return (fromDisposition ?? 0) + itmNet;
+  }
   let sum = 0;
   let any = false;
   for (const g of rows) {
@@ -351,62 +354,86 @@ export function sumStrategyRealizedPnlUsdcAtSpot(report, groups, status, stratId
   return sumRealizedPnlUsdcFromRows(rows, status);
 }
 
-/** Per-book lifetime realized USD (swapped USDT + unswept native × live spot). */
+function _mergeItmNetIntoUsdByBook(usdByBook, rows) {
+  const itmByBook = sumItmSpotExitNetUsdtByBook(rows);
+  if (!itmByBook) return usdByBook;
+  const out = usdByBook ? { ...usdByBook } : { BTC: 0, ETH: 0, USDC: 0 };
+  for (const book of ["BTC", "ETH"]) {
+    const net = num(itmByBook[book]) ?? 0;
+    if (Math.abs(net) < 0.005) continue;
+    out[book] = (num(out[book]) ?? 0) + net;
+  }
+  return out;
+}
+
+/** Per-book lifetime realized USD (premium swap + unswept × spot + ITM exit−restore net). */
 export function sumLifetimeRealizedPnlUsdcByBook(report, groups, status) {
+  const rows = lifetimeRealizedClosedRows(report, groups, status);
   const disposition = aggregateProfitDisposition(report, groups, status);
   const fromDisposition = realizedUsdByBookFromProfitDisposition(disposition, status);
-  if (fromDisposition) return fromDisposition;
+  if (fromDisposition) return _mergeItmNetIntoUsdByBook(fromDisposition, rows);
   const out = { BTC: 0, ETH: 0, USDC: 0 };
-  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
+  let any = false;
+  for (const g of rows) {
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
     const pnl = realizedPnlDisplayUsdc(g, status);
     if (pnl === null) continue;
     out[book] += pnl;
+    any = true;
   }
-  return out;
+  return any ? out : null;
 }
 
-/** Per-book lifetime premium profit at live spot (total earned, before swap display split). */
+/**
+ * Per-book lifetime earned USD for Profit composition — same coin set as Profit swap Earned,
+ * plus recognized ITM exit−restore net USDT.
+ */
 export function sumLifetimeEarnedUsdByBook(report, groups, status) {
   const out = { BTC: 0, ETH: 0, USDC: 0 };
+  let any = false;
   for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
-    const native = realizedPnlInAprBookNative(g, status);
-    if (native === null) continue;
-    if (book === "USDC") {
-      out.USDC += native;
-    } else {
-      const spot = spotUsdForBook(status, book);
-      if (spot !== null && spot > 0) out[book] += native * spot;
-    }
+    const usd = realizedPnlDisplayUsdc(g, status);
+    if (usd === null) continue;
+    out[book] += usd;
+    any = true;
   }
-  return out;
+  return any ? out : out;
 }
 
 /** Per-book profit composition: spread realized by book, plus total perp hedge (shown under USDC). */
 export function profitCompositionByBook(report, groups, status) {
+  const disposition = aggregateProfitDisposition(report, groups, status);
+  const summary = disposition ? summarizeProfitDisposition(disposition, { status }) : null;
+  // Earned native MUST match Profit swap 「兌換前」 (summary.spotEarned).
+  const earnedNativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
+  if (summary?.spotEarned) {
+    for (const book of ["BTC", "ETH"]) {
+      earnedNativeByBook[book] = num(summary.spotEarned[book]) ?? 0;
+    }
+  }
+  if (disposition) {
+    earnedNativeByBook.USDC = num(disposition.heldNative?.USDC) ?? 0;
+  }
   const earnedUsdByBook = sumLifetimeEarnedUsdByBook(report, groups, status);
-  const earnedNativeByBook = sumLifetimeRealizedPnlNativeByBook(report, groups, status);
   const usdByBook = sumLifetimeRealizedPnlUsdcByBook(report, groups, status);
   const swappedUsdtByBook = { BTC: 0, ETH: 0, USDC: 0 };
   const swappedNativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
   const nativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
-  const disposition = aggregateProfitDisposition(report, groups, status);
-  if (disposition) {
-    const summary = summarizeProfitDisposition(disposition, { status });
-    if (summary) {
-      for (const book of ["BTC", "ETH"]) {
-        const held = num(summary.spotHeld?.[book]) ?? 0;
-        const pending = num(summary.spotPending?.[book]) ?? 0;
-        let unswept = held + pending;
-        if (!isMeaningfulNativeForBook(unswept, book)) unswept = 0;
-        nativeByBook[book] = unswept;
-        swappedUsdtByBook[book] = num(summary.spotSoldQuote?.[book]) ?? 0;
-        swappedNativeByBook[book] = num(summary.spotSold?.[book]) ?? 0;
-      }
+  if (summary) {
+    for (const book of ["BTC", "ETH"]) {
+      const held = num(summary.spotHeld?.[book]) ?? 0;
+      const pending = num(summary.spotPending?.[book]) ?? 0;
+      let unswept = held + pending;
+      if (!isMeaningfulNativeForBook(unswept, book)) unswept = 0;
+      nativeByBook[book] = unswept;
+      swappedUsdtByBook[book] = num(summary.spotSoldQuote?.[book]) ?? 0;
+      swappedNativeByBook[book] = num(summary.spotSold?.[book]) ?? 0;
     }
+  }
+  if (disposition) {
     nativeByBook.USDC = num(disposition.heldNative?.USDC) ?? 0;
   }
   return {
@@ -420,12 +447,13 @@ export function profitCompositionByBook(report, groups, status) {
   };
 }
 
+/** Lifetime native PnL by book — same scope as Profit swap Earned (excludes ITM option native). */
 export function sumLifetimeRealizedPnlNativeByBook(report, groups, status) {
   const out = { BTC: 0, ETH: 0, USDC: 0 };
   for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
-    const native = realizedPnlInAprBookNative(g, status);
+    const native = realizedPnlNativeForProfitSwap(g, status);
     if (native === null) continue;
     out[book] += native;
   }
@@ -441,17 +469,34 @@ function _aggregateProfitDispositionRows(rows, status) {
     if (disp.book === "USDC") {
       out.heldNative.USDC += disp.held;
     } else {
-      out.heldNative[disp.book] += disp.held;
+      if (disp.held < 0) {
+        out.lossNative[disp.book] += disp.held;
+      } else {
+        out.heldNative[disp.book] += disp.held;
+      }
+      const coverRetained = num(disp.coverRetained) ?? 0;
+      if (coverRetained > 0) {
+        out.coverRetainedNative[disp.book] += coverRetained;
+      }
       out.pendingSweepNative[disp.book] += disp.pending;
-      out.sweptNativeRef[disp.book] += disp.sweptNative;
-      if (disp.sweptUsdt > 0) {
-        if (isPremiumProceedsPoolExcludedGroup(g)) {
-          out.excludedSweptQuoteProceedsByBook[disp.book] += disp.sweptUsdt;
-          if (disp.sweptNative > 0) {
-            out.excludedSweptNativeRefByBook[disp.book] += disp.sweptNative;
-          }
-        } else {
+      if (disp.sweptUsdt > 0 && isPremiumProceedsPoolExcludedGroup(g)) {
+        // Manual / unlabeled: keep native+quote only in excluded buckets (avoid Sold double-count).
+        out.excludedSweptQuoteProceedsByBook[disp.book] += disp.sweptUsdt;
+        if (disp.sweptNative > 0) {
+          out.excludedSweptNativeRefByBook[disp.book] += disp.sweptNative;
+        }
+      } else {
+        out.sweptNativeRef[disp.book] += disp.sweptNative;
+        if (disp.sweptUsdt > 0) {
           out.sweptQuoteProceedsByBook[disp.book] += disp.sweptUsdt;
+        }
+        if (disp.fromItmFold) {
+          if (disp.sweptNative > 0) {
+            out.foldedSweptNativeRefByBook[disp.book] += disp.sweptNative;
+          }
+          if (disp.sweptUsdt > 0) {
+            out.foldedSweptQuoteProceedsByBook[disp.book] += disp.sweptUsdt;
+          }
         }
       }
       out.sweptUsdt += disp.sweptUsdt;
@@ -475,7 +520,7 @@ export function aggregateProfitDisposition(report, groups, status, { windowDays 
   return disposition ? alignProfitDispositionToUsdtWallet(disposition, status) : null;
 }
 
-/** Lifetime Total profit: swapped USDT + unswept native × live spot (+ hedge). */
+/** Lifetime Total profit: premium swap + unswept × spot + ITM exit−restore net (+ hedge). */
 export function sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status) {
   const fromDisposition = sumRealizedPnlUsdcFromDisposition(report, groups, status);
   const hedge = resolveHedgeNetPnlUsd(status, report);
@@ -556,7 +601,7 @@ export function sumWindowRealizedPnlNativeByBook(report, groups, status, windowD
     if (closedMs === null || closedMs < cutoffMs) continue;
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
-    const native = realizedPnlInAprBookNative(g, status);
+    const native = realizedPnlNativeForProfitSwap(g, status);
     if (native === null) continue;
     out[book] += native;
   }

@@ -148,20 +148,79 @@ class GroupExitMixin:
             exit_eval_context_from_config(self.config),
         )
 
+    def _uses_coin_native_income_exit(self, group: TradeGroup) -> bool:
+        """Covered calls on BTC/ETH books measure premium capture in coin, not USDC."""
+        return self._is_covered_call_group(group) and group.is_coin_collateral()
+
     def _take_profit_triggered(self, context: RuntimeContext, group: TradeGroup) -> bool:
+        ctx = exit_eval_context_from_config(self.config)
+        if self._uses_coin_native_income_exit(group):
+            entry_native, close_native = self._income_exit_native_pair(context, group)
+            if entry_native is None:
+                close_debit = self._income_exit_close_debit(context, group)
+                return take_profit_triggered(group, close_debit_usdc=close_debit, ctx=ctx)
+            return take_profit_triggered(
+                group,
+                close_debit_usdc=None,
+                ctx=ctx,
+                entry_credit=entry_native,
+                close_debit=close_native,
+            )
         close_debit = self._income_exit_close_debit(context, group)
-        return take_profit_triggered(
-            group,
-            close_debit_usdc=close_debit,
-            ctx=exit_eval_context_from_config(self.config),
-        )
+        return take_profit_triggered(group, close_debit_usdc=close_debit, ctx=ctx)
 
     def _time_exit_triggered(self, context: RuntimeContext, group: TradeGroup) -> bool:
+        ctx = exit_eval_context_from_config(self.config)
+        if self._uses_coin_native_income_exit(group):
+            entry_native, close_native = self._income_exit_native_pair(context, group)
+            if entry_native is None:
+                close_debit = self._income_exit_close_debit(context, group)
+                return time_exit_triggered(group, close_debit_usdc=close_debit, ctx=ctx)
+            return time_exit_triggered(
+                group,
+                close_debit_usdc=None,
+                ctx=ctx,
+                entry_credit=entry_native,
+                close_debit=close_native,
+            )
         close_debit = self._income_exit_close_debit(context, group)
-        return time_exit_triggered(
-            group,
-            close_debit_usdc=close_debit,
-            ctx=exit_eval_context_from_config(self.config),
+        return time_exit_triggered(group, close_debit_usdc=close_debit, ctx=ctx)
+
+    def _income_exit_native_pair(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+    ) -> tuple[Decimal | None, Decimal | None]:
+        """Return ``(entry_native, close_native)`` for coin-collateral covered calls."""
+        from ..exit_eval import close_debit_native, entry_credit_native
+
+        entry_native = entry_credit_native(group)
+        if entry_native is None:
+            return None, None
+        ctx = exit_eval_context_from_config(self.config)
+        try:
+            short_book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
+        except Exception:
+            return entry_native, None
+        close_premium = income_exit_close_premium(short_book, ctx)
+        if close_premium is None:
+            return entry_native, None
+        markets = getattr(context, "markets_by_currency", None) or {}
+        try:
+            short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
+        except Exception:
+            return entry_native, None
+        fee_collateral = self._option_fee_native(
+            premium=close_premium,
+            quantity=group.quantity,
+            index_price=short_book.index_price,
+            quote_currency=short_instrument.quote_currency,
+            settlement_currency=short_instrument.settlement_currency,
+        )
+        return entry_native, close_debit_native(
+            premium=close_premium,
+            quantity=group.quantity,
+            fee_collateral=fee_collateral,
         )
 
     def _income_exit_close_debit(

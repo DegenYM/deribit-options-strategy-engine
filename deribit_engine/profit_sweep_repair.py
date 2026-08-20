@@ -349,10 +349,25 @@ def execute_premium_deficit_sell(
     from .wallet_ops import trade_spot
 
     actions: list[dict[str, Any]] = []
+    context = bot._load_runtime(live=live) if live else None
     for currency in ("BTC", "ETH"):
         deficit = sell_native.get(currency, Decimal(0))
         if deficit <= 0:
             continue
+        if context is not None:
+            cap = bot._profit_sweep_sellable_native_cap(context, currency, live=True)
+            if cap <= 0:
+                actions.append(
+                    {
+                        "action": "premium_align_sell_skipped",
+                        "currency": currency,
+                        "deficit_native": format_decimal(deficit, 8),
+                        "reason": "principal_or_cover_reserve",
+                        "live": live,
+                    }
+                )
+                continue
+            deficit = min(deficit, cap)
         instrument_name = bot._covered_call_profit_sweep_instrument(currency)
         contract_size, min_trade_amount = bot._spot_min_trade_amount(instrument_name, currency)
         order_amount = align_option_order_amount(deficit, contract_size, min_trade_amount)
@@ -419,6 +434,73 @@ def execute_buyback_native(
         )
         result["buyback_base_target"] = format_decimal(base_amount, 8)
         result["buyback_quote_budget"] = format_decimal(quote_spend, 4)
+        actions.append(result)
+    return actions
+
+
+def principal_restore_label(order_label_prefix: str, currency: str) -> str:
+    return f"{order_label_prefix}-principal-restore-{currency.lower()}"
+
+
+def _align_native_up(amount: Decimal, step: Decimal, min_trade: Decimal) -> Decimal:
+    from decimal import ROUND_UP
+
+    if amount <= 0:
+        return Decimal("0")
+    increment = step if step > 0 else min_trade
+    if increment <= 0:
+        return amount
+    aligned = (amount / increment).to_integral_value(rounding=ROUND_UP) * increment
+    if min_trade > 0 and aligned < min_trade:
+        aligned = min_trade
+    return aligned
+
+
+def execute_principal_restore(bot, *, live: bool = False) -> list[dict[str, Any]]:
+    """Buy wallet shortfall vs COLLATERAL_SPOT without a profit-sweep-buyback label.
+
+    ``profit-sweep-buyback`` reduces net sold and can make dust/align sell again.
+    """
+    from .wallet_ops import trade_spot
+
+    context = bot._load_runtime(live=live)
+    summaries = bot._account_summaries_by_currency() if live else context.summaries
+    actions: list[dict[str, Any]] = []
+    for currency in ("BTC", "ETH"):
+        principal = bot._covered_call_principal_reserve(currency)
+        if principal <= 0:
+            continue
+        summary = summaries.get(currency)
+        equity = summary.equity if summary is not None else Decimal("0")
+        shortfall = principal - equity
+        if shortfall <= 0:
+            continue
+        instrument_name = f"{currency}_USDT"
+        contract_size, min_trade_amount = bot._spot_min_trade_amount(instrument_name, currency)
+        order_amount = _align_native_up(shortfall, contract_size, min_trade_amount)
+        if order_amount <= 0:
+            continue
+        quote_spend = _quote_spend_for_base_buy(
+            bot.client,
+            instrument_name=instrument_name,
+            base_amount=order_amount,
+            proceeds_budget=Decimal("0"),
+        )
+        result = trade_spot(
+            bot.config,
+            bot.client,
+            from_currency="USDT",
+            to_currency=currency,
+            amount=format_decimal(quote_spend, 4),
+            instrument_name=instrument_name,
+            order_type=bot.config.covered_call_spot_order_type,
+            live=live,
+            label=principal_restore_label(bot.config.order_label_prefix, currency),
+        )
+        result["principal_restore_target"] = format_decimal(principal, 8)
+        result["principal_restore_equity"] = format_decimal(equity, 8)
+        result["principal_restore_shortfall"] = format_decimal(shortfall, 8)
+        result["principal_restore_amount"] = format_decimal(order_amount, 8)
         actions.append(result)
     return actions
 
@@ -750,11 +832,15 @@ def _exchange_gross_usdt_weights(
 
 
 def _should_skip_proceeds_reconcile_apply(group: TradeGroup) -> bool:
-    """Do not ledger-mark groups that still need a live premium spot sell."""
+    """Do not ledger-mark groups that still need a live premium spot sell.
+
+    Never invent ``filled`` + ``proceeds_reconciled`` without an exchange-confirmed
+    premium spot sell (labeled / dust / manual / unlabeled markers).
+    """
     status = str(group.profit_sweep_status or "").lower()
-    if status in {"pending", "submitted"}:
+    if status in {"pending", "submitted", "skipped", "failed"}:
         return True
-    if status == "filled" and not profit_sweep_has_exchange_fill(group):
+    if not profit_sweep_has_exchange_fill(group):
         return True
     return False
 

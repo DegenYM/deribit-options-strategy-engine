@@ -101,11 +101,19 @@ def take_profit_triggered(
     *,
     close_debit_usdc: Decimal | None,
     ctx: ExitEvalContext,
+    entry_credit: Decimal | None = None,
+    close_debit: Decimal | None = None,
 ) -> bool:
-    """True when executable close cost implies profit capture meets the TP threshold."""
-    if close_debit_usdc is None or group.entry_credit <= 0:
+    """True when executable close cost implies profit capture meets the TP threshold.
+
+    ``entry_credit`` / ``close_debit`` override the USDC pair when callers evaluate
+    coin-native premiums (covered-call inverse books).
+    """
+    entry = group.entry_credit if entry_credit is None else entry_credit
+    debit = close_debit_usdc if close_debit is None else close_debit
+    if debit is None or entry <= 0:
         return False
-    capture = profit_capture_from_close_debit(group.entry_credit, close_debit_usdc)
+    capture = profit_capture_from_close_debit(entry, debit)
     return capture >= dynamic_tp_capture_pct(group.dte_days, ctx)
 
 
@@ -114,18 +122,44 @@ def time_exit_triggered(
     *,
     close_debit_usdc: Decimal | None,
     ctx: ExitEvalContext,
+    entry_credit: Decimal | None = None,
+    close_debit: Decimal | None = None,
 ) -> bool:
     """True when DTE is inside the time-exit window and profit capture meets the floor."""
     if group.dte_days > Decimal(str(ctx.time_exit_dte)):
         return False
     if ctx.time_exit_min_profit_capture <= 0:
         return True
-    if group.entry_credit <= 0:
+    entry = group.entry_credit if entry_credit is None else entry_credit
+    debit = close_debit_usdc if close_debit is None else close_debit
+    if entry <= 0:
         return False
-    if close_debit_usdc is None:
+    if debit is None:
         return False
-    capture = profit_capture_from_close_debit(group.entry_credit, close_debit_usdc)
+    capture = profit_capture_from_close_debit(entry, debit)
     return capture >= ctx.time_exit_min_profit_capture
+
+
+def entry_credit_native(group: TradeGroup) -> Decimal | None:
+    """Net sold premium in coin units for inverse / coin-collateral shorts.
+
+    Returns ``None`` when entry fill price is missing so callers can fall back
+    to the USDC ledger.
+    """
+    if group.short_entry_average_price <= 0 or group.quantity <= 0:
+        return None
+    fee = max(group.entry_fee_collateral, Decimal("0"))
+    return max(group.short_entry_average_price * group.quantity - fee, Decimal("0"))
+
+
+def close_debit_native(
+    *,
+    premium: Decimal,
+    quantity: Decimal,
+    fee_collateral: Decimal,
+) -> Decimal:
+    """Buy-to-close cost in coin units (premium × qty + native fee)."""
+    return max(premium, Decimal("0")) * quantity + max(fee_collateral, Decimal("0"))
 
 
 def evaluate_early_exit_reason(

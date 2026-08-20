@@ -5,7 +5,9 @@ from conftest import FakeClient
 from deribit_engine.covered_call_settlement import (
     covered_call_settlement_loss_from_intrinsic,
     covered_call_settlement_loss_from_transaction_log,
+    covered_call_spot_exit_premium_native,
     covered_call_spot_exit_skips_settlement_loss,
+    covered_call_spot_exit_target_native,
     resolve_covered_call_settlement_loss,
 )
 from deribit_engine.models import TradeGroup
@@ -113,3 +115,44 @@ def test_resolve_skips_loss_for_robust_exit():
 def test_robust_reason_detection():
     assert covered_call_spot_exit_skips_settlement_loss(reason="covered_call_robust_exit") is True
     assert covered_call_spot_exit_skips_settlement_loss(reason="covered_call_settlement_exit") is False
+
+
+def test_spot_exit_target_settlement_with_swap_is_cover_plus_premium_minus_settle():
+    target = covered_call_spot_exit_target_native(
+        cover=Decimal("1"),
+        premium_native=Decimal("0.02"),
+        settlement_loss=Decimal("0.015"),
+        settlement_loss_source="transaction_log",
+        include_premium=True,
+    )
+    assert target == Decimal("1.005")
+
+
+def test_spot_exit_target_settlement_without_swap_is_cover_minus_settle():
+    target = covered_call_spot_exit_target_native(
+        cover=Decimal("1"),
+        premium_native=Decimal("0.02"),
+        settlement_loss=Decimal("0.015"),
+        settlement_loss_source="transaction_log",
+        include_premium=False,
+    )
+    assert target == Decimal("0.985")
+
+
+def test_spot_exit_target_robust_is_cover_only():
+    target = covered_call_spot_exit_target_native(
+        cover=Decimal("1"),
+        premium_native=Decimal("0.02"),
+        settlement_loss=Decimal("0"),
+        settlement_loss_source="skipped_robust",
+        include_premium=True,
+    )
+    assert target == Decimal("1")
+
+
+def test_spot_exit_premium_native_from_fill_price():
+    group = _group(quantity="1")
+    group.short_entry_average_price = Decimal("0.01")
+    group.entry_fee_collateral = Decimal("0.0003")
+    # Net premium = fill×qty − entry fee
+    assert covered_call_spot_exit_premium_native(group) == Decimal("0.0097")

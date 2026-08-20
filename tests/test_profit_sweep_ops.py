@@ -81,6 +81,21 @@ def test_remaining_spot_profit_native_filled_partial() -> None:
     assert to_sweep_native(group) == Decimal("0.000086")
 
 
+def test_remaining_spot_profit_native_uses_exchange_shortfall() -> None:
+    """Journal amount may equal full premium while exchange fill is short (dust tail)."""
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.001",
+        profit_sweep_quote_proceeds="95.5",
+        profit_sweep_order_id="ord-1",
+        profit_sweep_reason="take_profit; proceeds_reconciled",
+        profit_sweep_exchange_native="0.0009",
+        realized_pnl_collateral_native="0.001",
+    )
+    assert remaining_spot_profit_native(group) == Decimal("0.0001")
+    assert to_sweep_native(group) == Decimal("0.0001")
+
+
 def test_to_sweep_native_pending_full_queue() -> None:
     group = _group(
         profit_sweep_status="pending",
@@ -166,6 +181,64 @@ def test_reschedule_failed_profit_sweeps_ignores_skipped(tmp_path) -> None:
 
     assert reschedule_failed_profit_sweeps(engine, [group]) == 0
     assert group.profit_sweep_status == "skipped"
+
+
+def test_schedule_remaining_closed_profit_sweeps_queues_never_scheduled(tmp_path) -> None:
+    from conftest import FakeClient, make_config
+
+    from deribit_engine.engine import DeribitOptionTrialBot
+    from deribit_engine.profit_sweep_ops import schedule_remaining_closed_profit_sweeps
+
+    client = FakeClient(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH", "USDT"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    group = _group(
+        close_reason="reconciled_external",
+        realized_pnl_collateral_native="0.00266",
+    )
+
+    assert schedule_remaining_closed_profit_sweeps(engine, [group]) == 1
+    assert group.profit_sweep_status == "pending"
+    assert group.profit_sweep_amount == Decimal("0.00266")
+
+
+def test_schedule_remaining_queues_synced_exchange_shortfall(tmp_path) -> None:
+    """premium_amount_synced + filled must not hide an exchange shortfall (AN #0034/#0043)."""
+    from conftest import FakeClient, make_config
+
+    from deribit_engine.engine import DeribitOptionTrialBot
+    from deribit_engine.profit_sweep_ops import schedule_remaining_closed_profit_sweeps
+
+    client = FakeClient(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH", "USDT"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.001495",
+        profit_sweep_exchange_native="0.0008",
+        profit_sweep_quote_proceeds="1.5",
+        realized_pnl_collateral_native="0.001495",
+        profit_sweep_reason="take_profit; premium_amount_synced; proceeds_reconciled",
+        profit_sweep_order_id="BTC_USDT-1",
+    )
+
+    assert remaining_spot_profit_native(group) == Decimal("0.000695")
+    assert schedule_remaining_closed_profit_sweeps(engine, [group]) == 1
+    assert group.profit_sweep_status == "pending"
+    assert group.profit_sweep_amount == Decimal("0.0008")
+    assert to_sweep_native(group) == Decimal("0.000695")
 
 
 def test_dry_run_does_not_persist_state(tmp_path) -> None:
@@ -355,7 +428,7 @@ def test_heal_reconciled_proceeds_drift_skips_when_unlabeled_matches_wallet() ->
         reconcile.assert_not_called()
 
 
-def test_guard_skips_locked_reconciled_groups() -> None:
+def test_guard_does_not_overwrite_locked_reconciled_amounts() -> None:
     from unittest.mock import MagicMock
 
     group = _group(
@@ -381,7 +454,8 @@ def test_guard_skips_locked_reconciled_groups() -> None:
         ]
     }
     blocked = guard_profit_sweep_against_oversell(group, client, "cc")
-    assert blocked is True
+    # Journal remainder 0.0001 is still sellable; do not overwrite proceeds.
+    assert blocked is False
     assert group.profit_sweep_amount == Decimal("0.0009")
     assert group.profit_sweep_quote_proceeds == Decimal("90")
     client.get_user_trades_by_currency.assert_not_called()
@@ -418,7 +492,42 @@ def test_guard_allows_partial_exchange_remainder() -> None:
     assert rows[0].to_sweep_native == Decimal("0.000086")
 
 
-def test_reschedule_ledger_only_profit_sweeps_requeues_proceeds_reconciled() -> None:
+def test_remaining_spot_profit_native_ledger_fill_is_not_unswept() -> None:
+    """proceeds_reconciled with full journal amount is not a second sell."""
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.001",
+        profit_sweep_quote_proceeds="14.08",
+        realized_pnl_collateral_native="0.001",
+        profit_sweep_reason="take_profit; proceeds_reconciled",
+    )
+    assert remaining_spot_profit_native(group) == Decimal("0")
+    assert to_sweep_native(group) == Decimal("0")
+
+
+def test_reschedule_ledger_only_skips_attributed_proceeds() -> None:
+    from unittest.mock import MagicMock
+
+    from deribit_engine.profit_sweep_ops import reschedule_ledger_only_profit_sweeps
+
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.000406",
+        profit_sweep_quote_proceeds="14.08540529",
+        realized_pnl_collateral_native="0.000406",
+        profit_sweep_reason="take_profit; proceeds_reconciled",
+    )
+    bot = MagicMock()
+    bot.config.order_label_prefix = "cc"
+    bot.client = MagicMock()
+    bot.client.get_user_trades_by_currency.return_value = {"trades": []}
+
+    assert reschedule_ledger_only_profit_sweeps(bot, [group]) == 0
+    assert group.profit_sweep_status == "filled"
+    assert group.profit_sweep_quote_proceeds == Decimal("14.08540529")
+
+
+def test_reschedule_ledger_only_profit_sweeps_requeues_empty_fill() -> None:
     from unittest.mock import MagicMock
 
     from deribit_engine.profit_sweep_ops import (
@@ -428,8 +537,8 @@ def test_reschedule_ledger_only_profit_sweeps_requeues_proceeds_reconciled() -> 
 
     group = _group(
         profit_sweep_status="filled",
-        profit_sweep_amount="0.000406",
-        profit_sweep_quote_proceeds="14.08540529",
+        profit_sweep_amount="0",
+        profit_sweep_quote_proceeds="0",
         realized_pnl_collateral_native="0.000406",
         profit_sweep_reason="take_profit; proceeds_reconciled",
     )
@@ -555,6 +664,23 @@ def test_guard_locked_group_still_records_exchange_native() -> None:
         ]
     }
     blocked = guard_profit_sweep_against_oversell(group, client, "cc")
-    assert blocked is True
+    assert blocked is False
     assert group.profit_sweep_exchange_native == Decimal("0.0005")
     assert group.profit_sweep_amount == Decimal("0.0009")
+
+
+def test_guard_locked_fully_swept_still_blocks() -> None:
+    from unittest.mock import MagicMock
+
+    group = _group(
+        profit_sweep_status="filled",
+        profit_sweep_amount="0.001",
+        profit_sweep_exchange_native="0.001",
+        profit_sweep_quote_proceeds="90",
+        realized_pnl_collateral_native="0.001",
+        profit_sweep_reason="proceeds_reconciled; premium_amount_synced",
+    )
+    client = MagicMock()
+    blocked = guard_profit_sweep_against_oversell(group, client, "cc")
+    assert blocked is True
+    assert group.profit_sweep_amount == Decimal("0.001")

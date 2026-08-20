@@ -4,10 +4,12 @@ from decimal import Decimal
 
 import pytest
 
+from deribit_engine.exceptions import ExchangeError
 from deribit_engine.hedge_orders import (
     normalize_hedge_order_type,
     place_hedge_perp_order,
     resolve_hedge_perp_ioc_limit_price,
+    resolve_hedge_perp_maker_limit_price,
 )
 from deribit_engine.models import OptionInstrument, OrderBookSnapshot
 
@@ -71,6 +73,26 @@ def test_resolve_hedge_ioc_sell_skips_when_bid_below_slippage_floor():
     assert reason == "hedge_slippage_exceeded"
 
 
+def test_resolve_hedge_maker_buy_uses_best_bid():
+    price, reason = resolve_hedge_perp_maker_limit_price(
+        direction="buy",
+        book=_book(),
+        instrument=_perp_instrument(),
+    )
+    assert reason is None
+    assert price == Decimal("70000")
+
+
+def test_resolve_hedge_maker_sell_uses_best_ask():
+    price, reason = resolve_hedge_perp_maker_limit_price(
+        direction="sell",
+        book=_book(),
+        instrument=_perp_instrument(),
+    )
+    assert reason is None
+    assert price == Decimal("70001")
+
+
 def test_place_hedge_perp_order_limit_ioc():
     captured: dict = {}
 
@@ -95,6 +117,57 @@ def test_place_hedge_perp_order_limit_ioc():
     assert captured["order_type"] == "limit"
     assert captured["time_in_force"] == "immediate_or_cancel"
     assert captured["price"] == Decimal("70001")
+
+
+def test_place_hedge_perp_order_limit_maker():
+    captured: dict = {}
+
+    class FakeClient:
+        def place_order(self, **kwargs):
+            captured.update(kwargs)
+            return {"order": {"order_state": "open"}}
+
+    place_hedge_perp_order(
+        FakeClient(),
+        hedge_order_type="limit_maker",
+        hedge_limit_slippage_pct=Decimal("0.01"),
+        book=_book(),
+        instrument=_perp_instrument(),
+        direction="buy",
+        instrument_name="BTC_USDC-PERPETUAL",
+        amount=Decimal("0.01"),
+        label="trial-hedge-btc-position",
+        reduce_only=False,
+    )
+    assert captured["order_type"] == "limit"
+    assert captured["time_in_force"] == "good_til_cancelled"
+    assert captured["post_only"] is True
+    assert captured["reject_post_only"] is True
+    assert captured["price"] == Decimal("70000")
+
+
+def test_place_hedge_perp_order_limit_maker_post_only_reject_skips():
+    class FakeClient:
+        def place_order(self, **kwargs):
+            raise ExchangeError('private/buy failed: HTTP 400 {"error":{"code":11054,"message":"post_only_reject"}}')
+
+    result = place_hedge_perp_order(
+        FakeClient(),
+        hedge_order_type="limit_maker",
+        hedge_limit_slippage_pct=Decimal("0.01"),
+        book=_book(),
+        instrument=_perp_instrument(),
+        direction="buy",
+        instrument_name="BTC_USDC-PERPETUAL",
+        amount=Decimal("0.01"),
+        label="trial-hedge-btc-position",
+        reduce_only=False,
+    )
+    assert result == {"skipped": True, "reason": "hedge_post_only_reject"}
+
+
+def test_normalize_hedge_order_type_accepts_limit_maker():
+    assert normalize_hedge_order_type("limit_maker") == "limit_maker"
 
 
 def test_normalize_hedge_order_type_rejects_unknown():

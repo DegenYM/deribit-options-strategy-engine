@@ -2,11 +2,14 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from conftest import FakeClient, future_expiry, make_config
 
 from deribit_engine.engine import DeribitOptionTrialBot
+from deribit_engine.exceptions import ExchangeError
 from deribit_engine.models import (
     AccountSummary,
+    OpenOrder,
     OptionInstrument,
     OrderBookSnapshot,
     Position,
@@ -392,6 +395,9 @@ def test_covered_call_settlement_exit_prefers_transaction_log_for_spot_amount(tm
     client = FakeClient(btc_book_equity="0.5")
     group = _covered_call_group(strike=Decimal("69000"))
     group.expiration_timestamp_ms = 2_000_000
+    group.short_entry_average_price = Decimal("0.002")
+    group.entry_fee = Decimal("0")
+    group.entry_fee_collateral = Decimal("0")
     client.transaction_log = {
         "BTC": [
             {
@@ -408,6 +414,7 @@ def test_covered_call_settlement_exit_prefers_transaction_log_for_spot_amount(tm
         option_markets_profile="inverse_native",
         time_exit_dte=0,
         covered_call_spot_exit_enabled=True,
+        covered_call_profit_sweep_enabled=True,
         covered_call_robust_exit_enabled=False,
     )
     engine = DeribitOptionTrialBot(config, client)
@@ -419,6 +426,11 @@ def test_covered_call_settlement_exit_prefers_transaction_log_for_spot_amount(tm
 
     assert preview["settlement_loss_source"] == "transaction_log"
     assert preview["settlement_loss"] == "0.00909"
+    assert preview["include_premium"] is False
+    # Premium stays for Profit swap; ITM sells cover − settle only.
+    assert preview["premium"] == "0"
+    assert Decimal(preview["premium_available"]) > 0
+    # cover 0.1 − settle 0.00909 → aligned
     assert preview["amount"] == "0.0909"
 
 
@@ -727,6 +739,96 @@ def test_covered_call_profit_sweep_respects_open_collateral(tmp_path):
     assert amount > 0
 
 
+def test_covered_call_profit_sweep_retains_realized_loss_for_cover(tmp_path):
+    """After a coin loss, sweep keeps that native so equity can stay ≥ open cover."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.50096"))
+    open_group = _covered_call_group(dte_days=10)
+    open_group.status = "open"
+    open_group.covered_underlying_quantity = Decimal("0.5")
+    loss_group = _covered_call_group()
+    loss_group.group_id = "0002"
+    loss_group.status = "closed"
+    loss_group.realized_pnl_collateral_native = Decimal("-0.00004")
+    profit_group = _covered_call_group()
+    profit_group.group_id = "0003"
+    profit_group.status = "closed"
+    profit_group.realized_pnl_collateral_native = Decimal("0.001")
+    profit_group.profit_sweep_status = "pending"
+    profit_group.profit_sweep_amount = Decimal("0.001")
+    btc_summary = AccountSummary(
+        currency="BTC",
+        balance=Decimal("0.50096"),
+        equity=Decimal("0.50096"),
+        available_funds=Decimal("0.50096"),
+        available_withdrawal_funds=Decimal("0.50096"),
+        initial_margin=Decimal("0"),
+        maintenance_margin=Decimal("0"),
+        delta_total=Decimal("0"),
+        options_delta=Decimal("0"),
+        options_gamma=Decimal("0"),
+        options_theta=Decimal("0"),
+        total_equity_usd=Decimal("50000"),
+        total_initial_margin_usd=Decimal("0"),
+        total_maintenance_margin_usd=Decimal("0"),
+    )
+    ctx = SimpleNamespace(
+        state=SimpleNamespace(groups=[open_group, loss_group, profit_group]),
+        summaries={"BTC": btc_summary},
+    )
+    # free = 0.00096, loss reserve = 0.00004 → sellable 0.00092
+    assert engine._profit_sweep_sellable_native_cap(ctx, "BTC", live=False) == Decimal("0.00092")
+    amount = engine._profit_sweep_amount(ctx, profit_group, live=False)
+    assert amount <= Decimal("0.00092")
+    assert amount > 0
+
+
+def test_covered_call_profit_sweep_respects_principal_reserve_when_flat(tmp_path):
+    """When no open cover, do not sell agreed COLLATERAL_SPOT inventory."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+        collateral_spot_btc=Decimal("0.5"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.49978"))
+    profit_group = _covered_call_group()
+    profit_group.status = "closed"
+    profit_group.realized_pnl_collateral_native = Decimal("0.0002")
+    profit_group.profit_sweep_status = "pending"
+    profit_group.profit_sweep_amount = Decimal("0.0002")
+    btc_summary = AccountSummary(
+        currency="BTC",
+        balance=Decimal("0.49978"),
+        equity=Decimal("0.49978"),
+        available_funds=Decimal("0.49978"),
+        available_withdrawal_funds=Decimal("0.49978"),
+        initial_margin=Decimal("0"),
+        maintenance_margin=Decimal("0"),
+        delta_total=Decimal("0"),
+        options_delta=Decimal("0"),
+        options_gamma=Decimal("0"),
+        options_theta=Decimal("0"),
+        total_equity_usd=Decimal("31468"),
+        total_initial_margin_usd=Decimal("0"),
+        total_maintenance_margin_usd=Decimal("0"),
+    )
+    ctx = SimpleNamespace(
+        state=SimpleNamespace(groups=[profit_group]),
+        summaries={"BTC": btc_summary},
+    )
+    assert engine._profit_sweep_sellable_native_cap(ctx, "BTC", live=False) == Decimal("0")
+    assert engine._profit_sweep_amount(ctx, profit_group, live=False) == Decimal("0")
+
+
 def test_covered_call_profit_sweep_schedules_pending_on_income_exit(tmp_path):
     config = make_config(
         tmp_path,
@@ -747,6 +849,49 @@ def test_covered_call_profit_sweep_schedules_pending_on_income_exit(tmp_path):
     assert group.profit_sweep_reason == "take_profit"
 
 
+def test_covered_call_profit_sweep_schedules_reconciled_external(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group()
+    group.status = "closed"
+    group.close_reason = "reconciled_external"
+    group.realized_pnl_collateral_native = Decimal("0.00266")
+
+    engine._maybe_schedule_profit_sweep(group, reason="reconciled_external", live=True)
+
+    assert group.profit_sweep_status == "pending"
+    assert group.profit_sweep_amount == Decimal("0.00266")
+
+
+def test_covered_call_profit_sweep_requeue_filled_keeps_already_swept_amount(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(btc_book_equity="0.5"))
+    group = _covered_call_group()
+    group.status = "closed"
+    group.realized_pnl_collateral_native = Decimal("0.001")
+    group.profit_sweep_status = "filled"
+    group.profit_sweep_amount = Decimal("0.0008")
+    group.profit_sweep_quote_proceeds = Decimal("60")
+
+    engine._maybe_schedule_profit_sweep(group, reason="take_profit", live=True)
+
+    assert group.profit_sweep_status == "pending"
+    assert group.profit_sweep_amount == Decimal("0.0008")
+    assert engine._unswept_profit_native_for_sweep(group) == Decimal("0.0002")
+
+
 def test_covered_call_profit_sweep_disabled_leaves_status_empty(tmp_path):
     config = make_config(
         tmp_path,
@@ -761,6 +906,32 @@ def test_covered_call_profit_sweep_disabled_leaves_status_empty(tmp_path):
     engine._maybe_schedule_profit_sweep(group, reason="take_profit", live=True)
 
     assert group.profit_sweep_status == ""
+
+
+def test_covered_call_manage_sweeps_never_scheduled_reconciled_external(tmp_path):
+    client = FakeClient(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_profit_sweep_enabled=True,
+        traded_collaterals=("BTC", "ETH"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    group = _covered_call_group()
+    group.status = "closed"
+    group.close_reason = "reconciled_external"
+    group.realized_pnl_collateral_native = Decimal("0.0005")
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    result = engine.manage(live=True)
+
+    assert any(action["action"] == "covered_call_profit_sweep" for action in result["actions"])
+    saved = engine.state_store.load().groups[0]
+    assert saved.profit_sweep_status == "filled"
+    assert saved.profit_sweep_order_id
 
 
 def test_covered_call_profit_sweep_live_sells_usdt(tmp_path):
@@ -1037,6 +1208,74 @@ def test_covered_call_otm_time_exit_skipped_without_profit(tmp_path):
     assert actions == []
 
 
+def test_covered_call_coin_native_time_exit_ignores_usdc_index_pump(tmp_path):
+    """ETH premium cheaper in coin should time-exit even if USDC debit rose with spot."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        tp_capture_pct=Decimal("0.95"),
+        time_exit_dte=4,
+        time_exit_min_profit_capture=Decimal("0.10"),
+        enable_early_exit=False,
+        covered_call_spot_exit_enabled=False,
+        income_exit_max_spread_ratio=Decimal("0.50"),
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient(eth_book_equity="5"))
+    group = _covered_call_group(dte_days=1, strike=Decimal("1900"))
+    group.currency = "ETH"
+    group.collateral_currency = "ETH"
+    group.short_instrument_name = "ETH-31JUL26-1900-C"
+    group.quantity = Decimal("2")
+    group.short_entry_average_price = Decimal("0.01")
+    group.entry_fee_collateral = Decimal("0.00054")
+    group.entry_credit = Decimal("30.515226")  # USDC ledger (would look flat/negative vs ask*index)
+    group.covered_underlying_quantity = Decimal("2")
+    # Ask 0.008 ETH ≈ 20% coin-native capture; USDC path at idx 1876 is ~breakeven.
+    ctx = SimpleNamespace(
+        orderbook_cache={
+            group.short_instrument_name: _tight_book(
+                group.short_instrument_name,
+                bid="0.0075",
+                ask="0.008",
+                index_price="1876.5",
+            )
+        },
+        markets_by_currency={},
+    )
+
+    with patch.object(
+        engine,
+        "_close_group",
+        return_value=[{"action": "close_group_preview", "reason": "time_exit"}],
+    ) as close_mock:
+        with patch.object(engine, "_covered_call_itm", return_value=False):
+            with patch.object(
+                engine,
+                "_find_or_fetch_instrument",
+                return_value=OptionInstrument(
+                    instrument_name=group.short_instrument_name,
+                    base_currency="ETH",
+                    quote_currency="ETH",
+                    settlement_currency="ETH",
+                    strike=Decimal("1900"),
+                    expiration_timestamp_ms=0,
+                    option_type="call",
+                    instrument_type="reversed",
+                    instrument_state="open",
+                    contract_size=Decimal("1"),
+                    min_trade_amount=Decimal("0.1"),
+                    tick_size=Decimal("0.0001"),
+                    tick_size_steps=(),
+                ),
+            ):
+                with patch.object(engine, "_option_fee_native", return_value=Decimal("0.0002")):
+                    actions = engine._manage_covered_call_group(ctx, group, live=False)
+
+    close_mock.assert_called_once_with(ctx, group, reason="time_exit", live=False)
+    assert actions[0]["reason"] == "time_exit"
+
+
 def test_covered_call_collateralized_book_ignores_drawdown_derisk(tmp_path, fake_client):
     from datetime import UTC, datetime
 
@@ -1084,6 +1323,7 @@ def test_covered_call_settlement_exit_marks_pending_and_previews_spot_sell(tmp_p
         option_markets_profile="inverse_native",
         time_exit_dte=0,
         covered_call_spot_exit_enabled=True,
+        covered_call_profit_sweep_enabled=True,
         covered_call_robust_exit_enabled=False,
     )
     engine = DeribitOptionTrialBot(config, client)
@@ -1099,11 +1339,163 @@ def test_covered_call_settlement_exit_marks_pending_and_previews_spot_sell(tmp_p
     assert preview["covered_underlying_quantity"] == "0.1"
     assert preview["settlement_loss_source"] == "intrinsic"
     assert preview["settlement_loss"] == "0.00142857"
-    assert preview["amount"] == "0.0985"
+    assert preview["include_premium"] is False
+    # Settlement ITM sells cover − settle; premium remains for Profit swap.
+    assert preview["premium"] == "0"
+    assert Decimal(preview["premium_available"]) > 0
+    expected = Decimal(preview["covered_underlying_quantity"]) - Decimal(preview["settlement_loss"])
+    assert abs(Decimal(preview["remaining_structural"]) - expected) <= Decimal("0.00000002")
+    assert Decimal(preview["amount"]) <= Decimal(preview["remaining_structural"])
     saved = engine.state_store.load().groups[0]
     assert saved.status == "closed"
     assert saved.spot_exit_status == "pending"
     assert saved.spot_exit_instrument_name == "BTC_USDT"
+    assert saved.spot_exit_amount == Decimal("0")
+
+
+def test_covered_call_pre_expiry_buyback_does_not_schedule_settlement_spot_exit(tmp_path):
+    """Profitable buy-to-close before expiry must keep cover — not ITM settlement spot sell."""
+    client = FakeClient(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        time_exit_dte=0,
+        covered_call_spot_exit_enabled=True,
+        covered_call_profit_sweep_enabled=True,
+        covered_call_robust_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    group = _covered_call_group(dte_days=3, strike=Decimal("69000"))
+    group.short_entry_average_price = Decimal("0.01")
+    group.short_close_average_price = Decimal("0.0054")
+    state.groups.append(group)
+    engine.state_store.save(state)
+    # Position already gone (buy-to-close); spot still ITM vs strike.
+    client.positions = []
+
+    result = engine.manage(live=False)
+
+    assert not any(str(action.get("action") or "").startswith("covered_call_spot_exit") for action in result["actions"])
+    saved = engine.state_store.load().groups[0]
+    assert saved.status == "closed"
+    assert saved.close_reason == "reconciled_external"
+    assert not saved.spot_exit_status
+    assert saved.spot_exit_reason in {None, ""}
+
+
+def test_covered_call_settlement_exit_without_swap_excludes_premium(tmp_path):
+    client = FakeClient(btc_book_equity="0.5")
+    group = _covered_call_group(strike=Decimal("69000"))
+    group.expiration_timestamp_ms = 2_000_000
+    group.short_entry_average_price = Decimal("0.002")
+    group.entry_fee = Decimal("0")
+    group.entry_fee_collateral = Decimal("0")
+    client.transaction_log = {
+        "BTC": [
+            {
+                "timestamp": 2_000_000,
+                "type": "settlement",
+                "instrument_name": group.short_instrument_name,
+                "change": "-0.00909",
+            }
+        ]
+    }
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        time_exit_dte=0,
+        covered_call_spot_exit_enabled=True,
+        covered_call_profit_sweep_enabled=False,
+        covered_call_robust_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    preview = engine.manage(live=False)["actions"][0]
+
+    assert preview["include_premium"] is False
+    assert preview["premium"] == "0"
+    assert Decimal(preview["premium_available"]) > 0
+    # cover 0.1 − settle 0.00909 → aligned (premium kept as spot profit)
+    assert preview["amount"] == "0.0909"
+
+
+def test_covered_call_spot_exit_partial_fill_stays_pending_and_retries_remainder(tmp_path):
+    client = FakeClient(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_spot_exit_enabled=True,
+        covered_call_robust_exit_enabled=False,
+        covered_call_spot_max_slippage_pct=Decimal("0.05"),
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    group = _covered_call_group()
+    group.status = "closed"
+    group.closed_timestamp_ms = 1_746_000_000_000
+    group.spot_exit_status = "pending"
+    group.spot_exit_reason = "covered_call_settlement_exit"
+    group.short_label = "cc-btc-0001"
+    state = StrategyState()
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    label = "cc-btc-0001-spot-exit"
+    client.order_scripts_by_label[label] = [
+        {
+            "order_state": "cancelled",
+            "filled_amount": "0.05",
+            "average_price": "70000",
+            "trades": [
+                {
+                    "order_id": "partial-1",
+                    "instrument_name": "BTC_USDT",
+                    "direction": "sell",
+                    "price": Decimal("70000"),
+                    "amount": Decimal("0.05"),
+                    "fee": Decimal("0"),
+                    "fee_currency": "USDT",
+                    "index_price": Decimal("70000"),
+                    "timestamp": 1,
+                    "label": label,
+                }
+            ],
+        },
+        {
+            "order_state": "filled",
+            "filled_amount": "0.0485",
+            "average_price": "70000",
+        },
+    ]
+
+    context = engine._load_runtime()
+    first = engine._execute_covered_call_spot_exit(
+        context,
+        group,
+        reason="covered_call_settlement_exit",
+        live=True,
+    )
+    assert first["spot_exit_status"] == "pending"
+    assert group.spot_exit_status == "pending"
+    assert group.spot_exit_amount == Decimal("0.05")
+    assert group.spot_exit_quote_proceeds > 0
+
+    second = engine._execute_covered_call_spot_exit(
+        context,
+        group,
+        reason="covered_call_settlement_exit",
+        live=True,
+    )
+    assert second["action"] == "covered_call_spot_exit"
+    assert Decimal(second["amount"]) == Decimal("0.0485")
+    assert group.spot_exit_status == "filled"
+    assert group.spot_exit_amount == Decimal("0.0985")
 
 
 def test_dry_run_bull_put_spread_entry_includes_long_leg(tmp_path, fake_client):
@@ -1389,7 +1781,77 @@ def test_close_position_preview_skips_unknown_instrument(tmp_path, fake_client):
     )
 
     assert result["targets"] == []
+    assert result["actions"] == []
     assert result["skipped"] == [{"instrument_name": "BTC_USDC-14APR30-63000-P", "reason": "no_open_position"}]
+
+
+def test_close_position_preview_by_group_id(tmp_path, fake_client):
+    short = "BTC_USDC-14APR30-63000-P"
+    fake_client.positions = [
+        {
+            "instrument_name": short,
+            "direction": "sell",
+            "kind": "option",
+            "size": "0.1",
+            "size_currency": "0.1",
+            "mark_price": "610",
+            "average_price": "600",
+            "floating_profit_loss": "0",
+            "delta": "-0.11",
+        }
+    ]
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    group = _build_group(short_instrument_name=short)
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    result = engine.close_positions(group_ids=["0001"], live=False)
+
+    assert result["group_ids"] == ["0001"]
+    assert result["targets"] == []
+    assert len(result["actions"]) == 1
+    action = result["actions"][0]
+    assert action["action"] == "close_group_preview"
+    assert action["reason"] == "manual_close"
+    assert action["group_id"] == "0001"
+    assert action["requests"]["short_leg"]["instrument_name"] == short
+    assert group.status == "open"
+
+
+def test_close_position_group_id_not_found(tmp_path, fake_client):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+    engine.state_store.save(StrategyState())
+
+    result = engine.close_positions(group_ids=["9999"], live=False)
+
+    assert result["actions"] == []
+    assert result["skipped"] == [{"group_id": "9999", "reason": "group_not_found"}]
+
+
+def test_close_position_group_id_already_closed(tmp_path, fake_client):
+    short = "BTC_USDC-14APR30-63000-P"
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    group = _build_group(short_instrument_name=short)
+    group.status = "closed"
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    result = engine.close_positions(group_ids=["0001"], live=False)
+
+    assert result["actions"] == []
+    assert result["skipped"] == [{"group_id": "0001", "reason": "already_closed"}]
+
+
+def test_close_position_group_id_rejects_amount(tmp_path, fake_client):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(config, fake_client)
+    with pytest.raises(ExchangeError, match="--amount is not supported with --group-id"):
+        engine.close_positions(group_ids=["0001"], amount=Decimal("0.05"), live=False)
 
 
 def test_close_position_preview_short_option(tmp_path, fake_client):
@@ -1480,7 +1942,8 @@ def test_close_position_live_closes_perp(tmp_path, fake_client):
     assert order["direction"] == "sell"
     assert order["reduce_only"] is True
     assert order["order_type"] == "limit"
-    assert order.get("time_in_force") == "immediate_or_cancel"
+    assert order.get("time_in_force") == "good_til_cancelled"
+    assert order.get("post_only") is True
 
 
 def test_delta_totals_ignore_summary_delta_total(tmp_path, fake_client):
@@ -2212,6 +2675,59 @@ def test_per_position_reconcile_respects_deadband(tmp_path, fake_client):
     actions = engine._reconcile_position_hedges(ctx, live=False)
 
     assert actions == []
+
+
+def test_per_position_reconcile_maker_pending_waits_before_ioc(tmp_path, fake_client):
+    engine = _make_per_position_engine(
+        tmp_path,
+        fake_client,
+        hedge_order_type="limit_maker",
+        hedge_maker_max_cycles=3,
+        hedge_reconcile_deadband_btc=Decimal("0.001"),
+    )
+    state = StrategyState()
+    group = _build_group(short_instrument_name="BTC_USDC-14APR30-63000-P", currency="BTC")
+    group.hedge_size_base = Decimal("-0.10")
+    state.groups.append(group)
+    resting = OpenOrder(
+        order_id="h1",
+        instrument_name="BTC_USDC-PERPETUAL",
+        direction="sell",
+        order_state="open",
+        order_type="limit",
+        amount=Decimal("0.10"),
+        filled_amount=Decimal("0"),
+        price=Decimal("70001"),
+        average_price=Decimal("0"),
+        post_only=True,
+        reduce_only=False,
+        label="trial-hedge-btc-position",
+        creation_timestamp_ms=1,
+    )
+    ctx = SimpleNamespace(
+        state=state,
+        future_positions=[],
+        orderbook_cache={},
+        future_markets_by_name=engine._load_perpetual_markets(),
+        open_orders=[resting],
+    )
+
+    pending = engine._reconcile_position_hedges(ctx, live=False)
+    assert len(pending) == 1
+    assert pending[0]["action"] == "hedge_position_reconcile_pending"
+    assert pending[0]["hedge_maker_wait_cycles"] == 1
+    assert state.hedge_maker_wait_cycles["BTC"] == 1
+
+    pending2 = engine._reconcile_position_hedges(ctx, live=False)
+    assert pending2[0]["action"] == "hedge_position_reconcile_pending"
+    assert pending2[0]["hedge_maker_wait_cycles"] == 2
+
+    fallback = engine._reconcile_position_hedges(ctx, live=False)
+    assert any(a.get("action") == "cancel_hedge_order" for a in fallback)
+    place = [a for a in fallback if a.get("action") == "hedge_position_reconcile"]
+    assert len(place) == 1
+    assert place[0]["hedge_order_type"] == "limit_ioc"
+    assert place[0]["hedge_maker_wait_cycles"] == 3
 
 
 def test_per_position_reconcile_flattens_orphan_perp(tmp_path, fake_client):

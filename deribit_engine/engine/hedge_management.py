@@ -71,6 +71,14 @@ class HedgeManagementMixin:
             "live": live,
         }
         if live:
+            effective_type = self._resolve_hedge_order_type_for_currency(context, currency=currency)
+            if effective_type != "limit_maker":
+                self._cancel_open_hedge_orders(
+                    context,
+                    currency=currency,
+                    instrument_name=self._perp_instrument(currency),
+                    live=True,
+                )
             response = self._place_hedge_perp_order(
                 context,
                 direction="buy",
@@ -78,11 +86,17 @@ class HedgeManagementMixin:
                 amount=amount,
                 label=self._hedge_label(currency, "recovery"),
                 reduce_only=True,
+                order_type_override=effective_type,
             )
+            action["hedge_order_type"] = effective_type
             action["response"] = response
             if isinstance(response, dict) and response.get("skipped"):
                 action["skipped"] = True
                 action["skip_reason"] = response.get("reason")
+            elif effective_type != "limit_maker":
+                self._reset_hedge_maker_wait(context, currency)
+        else:
+            action["hedge_order_type"] = self._resolve_hedge_order_type_for_currency(context, currency=currency)
         return action
 
     def _contract_size_for_group(
@@ -207,9 +221,13 @@ class HedgeManagementMixin:
 
         Under per-position hedging the exchange still holds a single perp per
         currency, so we net every group's ``hedge_size_base`` and place one
-        market order to close the gap. Closed groups drop out of the sum, which
-        also flattens orphaned hedges and unwinds recovered positions without a
+        order to close the gap. Closed groups drop out of the sum, which also
+        flattens orphaned hedges and unwinds recovered positions without a
         separate code path.
+
+        With ``HEDGE_ORDER_TYPE=limit_maker``, resting post-only orders are
+        counted as pending size; after ``HEDGE_MAKER_MAX_CYCLES`` unfilled
+        cycles the engine cancels and falls back to ``limit_ioc``.
         """
         actions: list[dict[str, Any]] = []
         open_groups = self._open_groups(context.state)
@@ -226,13 +244,53 @@ class HedgeManagementMixin:
                 open_groups=open_groups,
             )
             current_base = self._current_hedge_base(context.future_positions, currency)
-            diff = target_base - current_base
-            deadband = self.config.hedge_reconcile_deadband_base(currency)
-            if abs(diff) <= deadband:
-                continue
             perp_name = self._perp_instrument(currency)
             uses_base = self._perp_uses_base_amount(currency)
             index_price = self._currency_index_price(currency, context.orderbook_cache)
+            deadband = self.config.hedge_reconcile_deadband_base(currency)
+            position_diff = target_base - current_base
+            if abs(position_diff) <= deadband:
+                self._reset_hedge_maker_wait(context, currency)
+                if self._open_hedge_orders(context, currency=currency, instrument_name=perp_name):
+                    actions.extend(
+                        self._cancel_open_hedge_orders(context, currency=currency, instrument_name=perp_name, live=live)
+                    )
+                continue
+
+            maker_mode = self.config.hedge_order_type == "limit_maker"
+            wait = self._bump_hedge_maker_wait(context, currency) if maker_mode else 0
+            max_wait = max(self.config.hedge_maker_max_cycles, 1)
+            force_ioc = maker_mode and wait >= max_wait
+            effective_type = "limit_ioc" if force_ioc else self.config.hedge_order_type
+
+            open_hedge = self._open_hedge_orders(context, currency=currency, instrument_name=perp_name)
+            pending_base = self._pending_hedge_base_from_orders(
+                open_hedge, uses_base=uses_base, index_price=index_price
+            )
+            effective_diff = target_base - (current_base + pending_base)
+
+            if maker_mode and not force_ioc and abs(effective_diff) <= deadband and open_hedge:
+                actions.append(
+                    {
+                        "action": "hedge_position_reconcile_pending",
+                        "currency": currency,
+                        "instrument_name": perp_name,
+                        "target_hedge_base": format_decimal(target_base, 8),
+                        "current_hedge_base": format_decimal(current_base, 8),
+                        "pending_hedge_base": format_decimal(pending_base, 8),
+                        "hedge_maker_wait_cycles": wait,
+                        "hedge_order_type": "limit_maker",
+                        "live": live,
+                    }
+                )
+                continue
+
+            if open_hedge and (force_ioc or abs(effective_diff) > deadband or not maker_mode):
+                actions.extend(
+                    self._cancel_open_hedge_orders(context, currency=currency, instrument_name=perp_name, live=live)
+                )
+
+            diff = position_diff
             if not uses_base and index_price <= 0:
                 continue
             raw_amount = abs(diff) if uses_base else abs(diff) * index_price
@@ -260,9 +318,11 @@ class HedgeManagementMixin:
                 "current_hedge_base": format_decimal(current_base, 8),
                 "new_hedge_base": format_decimal(new_base, 8),
                 "reduce_only": reduce_only,
-                "hedge_order_type": self.config.hedge_order_type,
+                "hedge_order_type": effective_type,
                 "live": live,
             }
+            if maker_mode:
+                action["hedge_maker_wait_cycles"] = wait
             if hedge_capped:
                 action["hedge_target_capped"] = True
                 action["raw_target_hedge_base"] = format_decimal(raw_target_base, 8)
@@ -274,11 +334,14 @@ class HedgeManagementMixin:
                     amount=order_amount,
                     label=self._hedge_label(currency, "position"),
                     reduce_only=reduce_only,
+                    order_type_override=effective_type,
                 )
                 action["response"] = response
                 if isinstance(response, dict) and response.get("skipped"):
                     action["skipped"] = True
                     action["skip_reason"] = response.get("reason")
+                elif effective_type != "limit_maker":
+                    self._reset_hedge_maker_wait(context, currency)
             actions.append(action)
         return actions
 

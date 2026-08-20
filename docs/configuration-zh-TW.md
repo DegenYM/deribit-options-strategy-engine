@@ -128,11 +128,13 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 初始 HWM（NAV_perf）= max(0, 累計淨入金 USDC 等價 − 備兌現貨 USDC 等價)
 ```
 
-若需手動指定起始高水位，可設 `INITIAL_HWM_NAV_PERF`。交易流水預設自 **2026-01-01 UTC** 起掃描（覆寫：`FEE_FLOW_START_DATE=YYYY-MM-DD`）。備兌現貨可選填 `COLLATERAL_SPOT_BTC` / `COLLATERAL_SPOT_ETH`（多數投資人留 0 即可）。
+若需手動指定起始高水位，可設 `INITIAL_HWM_NAV_PERF`。交易流水預設自 **2026-01-01 UTC** 起掃描（覆寫：`FEE_FLOW_START_DATE=YYYY-MM-DD`）。備兌現貨可選填 `COLLATERAL_SPOT_BTC` / `COLLATERAL_SPOT_ETH`（多數投資人留 0 即可）。Covered call 啟用 profit sweep 時，這兩個值也是**空倉本金下限**：sweep / dust pool 不得把 equity 賣到低於約定備兌數量。
 
 **Covered call 獲利兌 USDT（可選）**：在 `.env.investor` 設 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`（預設 false）。啟用後，covered_call 子帳在 income exit（take profit / time exit / early exit）獲利平倉時，會將該筆 native premium profit 自動 market 賣成 **USDT**；僅賣該筆 realized PnL，不動約定備兌現貨。修改後需**重啟**該子帳 live bot。Dashboard 會唯讀顯示開關狀態與每筆 sweep 紀錄。季末付費時若 profit 已在 USDT，通常只需兌剩餘 BTC/ETH 獲利。
 
-**Covered call ITM spot exit**：tier profile 預設 `COVERED_CALL_SPOT_EXIT_ENABLED=true`。ITM **結算後** pending spot 會 market 賣 **BTC_USDT / ETH_USDT**（與 profit sweep 相同 quote）。賣出數量 = `cover − settlement_loss`：優先讀 Deribit **transaction log** 的 settlement/delivery 扣幣，否則以 intrinsic 估算；避免結算已扣幣後 oversell。若改走 **robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=true`），會先買回 short call 再賣 spot，且不扣 settlement loss。
+**Covered call ITM spot exit**：tier profile 預設 `COVERED_CALL_SPOT_EXIT_ENABLED=true`。ITM **結算後** pending spot 會 market 賣 **BTC_USDT / ETH_USDT**，數量固定為 **`cover − settlement_loss`**（僅清算 cover）。權利金留在 native，顯示於 **Profit swap**；若 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`，exit 完成後會另排程 profit sweep 兌 USDT。
+
+settlement 優先讀 Deribit **transaction log**，否則 intrinsic。若改走 **robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=true`），會先買回 short call 再賣 spot cover（不扣 settlement）。
 
 啟用 `COVERED_CALL_SPOT_EXIT_ENABLED` 或 `COVERED_CALL_PROFIT_SWEEP_ENABLED` 時，config 會**自動**把 **USDT** 加入 `TRADED_COLLATERALS`，無需手動改 strategy env。
 
@@ -257,6 +259,11 @@ HEDGE_GIVEUP_LOSS_PCT=0
 # 縮小自動回補、連續 RECOVERY_NORMAL_CYCLES 輪未觸發就解除。false=沿用幣種淨 delta 對沖。
 PER_POSITION_HEDGE=false
 SOFT_HEDGE_NEUTRALIZE_PCT=0.7
+# Perp hedge 下單：market / limit_ioc（taker）/ limit_maker（掛簿 maker，預設）。
+# limit_maker 連續 HEDGE_MAKER_MAX_CYCLES 輪未補滿後改 limit_ioc。
+HEDGE_ORDER_TYPE=limit_maker
+HEDGE_LIMIT_SLIPPAGE_PCT=0.005
+HEDGE_MAKER_MAX_CYCLES=12
 MAX_CONCURRENT_GROUPS=6
 MAX_GROUPS_PER_CURRENCY=3
 ENTRY_COOLDOWN_MINUTES=20
@@ -310,7 +317,7 @@ bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json       
 
 | 策略 | 骨架檔 | 重點 |
 |------|--------|------|
-| `naked_short` | [`.env.naked_short`](../config/shared/strategies/.env.naked_short) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=both` |
+| `naked_short` | [`.env.naked_short`](../config/shared/strategies/.env.naked_short) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`） |
 | `bull_put_spread` | [`.env.bull_put_spread`](../config/shared/strategies/.env.bull_put_spread) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put` |
 | `covered_call` | [`.env.covered_call`](../config/shared/strategies/.env.covered_call) | `inverse_native`；`TRADED_COLLATERALS=BTC,ETH`；`SHORT_OPTION_SIDE=call`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`） |
 
@@ -323,6 +330,8 @@ bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json       
 - `COVERED_CALL_SPOT_EXIT_ENABLED=true`
 - `COVERED_CALL_ROBUST_EXIT_ENABLED=false`（主路徑為 settlement pending → spot；robust 需另行開啟）
 - `PUT_DTE_MIN=7`、`PUT_DTE_MAX=35`
+
+進場 spread：low 為 `INVERSE_MAX_SPREAD_RATIO=0.18`（18%）；medium／high 仍為 **0.15**。上漲週期只放寬 bid-ask 閘門，**不動** OTM／delta（保留現貨的核心仍是 strike 距離）。
 
 ### Legacy 單檔 workflow
 

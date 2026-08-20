@@ -35,18 +35,27 @@ class ExecutionMixin:
         self,
         *,
         instruments: list[str] | None = None,
+        group_ids: list[str] | None = None,
         list_only: bool = False,
         live: bool = False,
         order_type: str = "market",
         amount: Decimal | None = None,
     ) -> dict[str, Any]:
-        """Close specific exchange positions (options or perps), without portfolio-wide panic logic."""
+        """Close specific exchange positions or open trade groups (no portfolio-wide panic)."""
         normalized_order_type = str(order_type or "market").strip().lower()
         if normalized_order_type not in {"market", "limit"}:
             raise ExchangeError(f"close-position: unsupported order_type {order_type!r}")
 
         if not self.config.has_private_credentials:
             raise AuthenticationError("close-position requires private API credentials")
+
+        requested_groups = [str(gid).strip() for gid in (group_ids or []) if str(gid).strip()]
+        requested_groups = list(dict.fromkeys(requested_groups))
+        requested = [str(name).strip() for name in (instruments or []) if str(name).strip()]
+        requested = list(dict.fromkeys(requested))
+
+        if amount is not None and amount > 0 and requested_groups:
+            raise ExchangeError("close-position: --amount is not supported with --group-id")
 
         positions = [Position.from_api(row) for row in self.client.get_positions(currency="any", kind="any")]
         open_positions = [item for item in positions if abs(item.size) > 0]
@@ -58,17 +67,32 @@ class ExecutionMixin:
                 "list_only": True,
                 "positions": [self._position_close_row(item) for item in open_positions],
                 "targets": [],
+                "actions": [],
                 "skipped": [],
             }
 
-        requested = [str(name).strip() for name in (instruments or []) if str(name).strip()]
-        if not requested:
-            raise ExchangeError("close-position: pass --instrument NAME or use --list")
+        if not requested and not requested_groups:
+            raise ExchangeError("close-position: pass --instrument NAME, --group-id ID, or use --list")
 
         by_name = {item.instrument_name: item for item in open_positions}
         targets: list[dict[str, Any]] = []
+        actions: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
-        context = self._load_runtime(live=live) if live else None
+        context = self._load_runtime(live=live) if (live or requested_groups) else None
+
+        if requested_groups:
+            assert context is not None
+            open_by_id = {group.group_id: group for group in self._open_groups(context.state)}
+            for group_id in requested_groups:
+                group = open_by_id.get(group_id)
+                if group is None:
+                    known = next((g for g in context.state.groups if g.group_id == group_id), None)
+                    reason = "already_closed" if known is not None and known.status == "closed" else "group_not_found"
+                    skipped.append({"group_id": group_id, "reason": reason})
+                    continue
+                actions.extend(self._close_group(context, group, reason="manual_close", live=live))
+            if live:
+                self.state_store.save(context.state)
 
         for instrument_name in requested:
             position = by_name.get(instrument_name)
@@ -96,7 +120,8 @@ class ExecutionMixin:
                 )
                 continue
 
-            assert context is not None
+            if context is None:
+                context = self._load_runtime(live=True)
             label = f"{self.config.order_label_prefix}-manual-close"
             if is_option:
                 targets.append(
@@ -138,8 +163,10 @@ class ExecutionMixin:
             "live": live,
             "list_only": False,
             "order_type": normalized_order_type,
+            "group_ids": requested_groups,
             "positions": [self._position_close_row(item) for item in open_positions],
             "targets": targets,
+            "actions": actions,
             "skipped": skipped,
         }
 
@@ -326,28 +353,66 @@ class ExecutionMixin:
         reason: str,
         live: bool,
     ) -> dict[str, Any]:
-        if group.spot_exit_status in {"submitted", "filled"}:
+        if group.spot_exit_status == "submitted":
             return {
                 "action": "covered_call_spot_exit_skipped",
                 "group_id": group.group_id,
-                "reason": f"already_{group.spot_exit_status}",
+                "reason": "already_submitted",
+                "spot_exit_status": group.spot_exit_status,
+                "spot_exit_order_id": group.spot_exit_order_id or None,
+            }
+        if group.spot_exit_status == "filled":
+            return {
+                "action": "covered_call_spot_exit_skipped",
+                "group_id": group.group_id,
+                "reason": "already_filled",
                 "spot_exit_status": group.spot_exit_status,
                 "spot_exit_order_id": group.spot_exit_order_id or None,
             }
 
+        from ..spot_exit_ops import apply_spot_exit_quote_proceeds, spot_exit_filled_native
+
         instrument_name = self._covered_call_spot_instrument(group.currency)
         spot_plan = self._plan_covered_call_spot_exit(context, group, live=live, reason=reason)
         amount = spot_plan["amount"]
+        already_filled = spot_plan.get("already_filled") or spot_exit_filled_native(group)
+        remaining_structural = spot_plan.get("remaining_structural")
+        if remaining_structural is None:
+            folded_premium = spot_plan.get("premium") or Decimal("0")
+            remaining_structural = max(
+                spot_plan["cover"] + folded_premium - spot_plan["settlement_loss"] - already_filled,
+                Decimal("0"),
+            )
         if amount <= 0:
             if live:
-                group.spot_exit_status = "skipped"
-                group.spot_exit_reason = "spot_amount_below_min_or_unavailable"
+                if remaining_structural <= 0 and already_filled > 0:
+                    group.spot_exit_status = "filled"
+                    group.spot_exit_reason = reason
+                    self._maybe_schedule_profit_sweep(
+                        group,
+                        reason=reason or "covered_call_settlement_exit",
+                        live=True,
+                    )
+                elif already_filled > 0 or group.spot_exit_status in {"pending", "failed"}:
+                    # Funds temporarily locked / below min — keep retrying the remainder.
+                    group.spot_exit_status = "pending"
+                    group.spot_exit_reason = reason
+                else:
+                    group.spot_exit_status = "skipped"
+                    group.spot_exit_reason = "spot_amount_below_min_or_unavailable"
             return {
                 "action": "covered_call_spot_exit_skipped",
                 "group_id": group.group_id,
-                "reason": "spot_amount_below_min_or_unavailable",
+                "reason": (
+                    "spot_exit_complete"
+                    if remaining_structural <= 0 and already_filled > 0
+                    else "spot_amount_below_min_or_unavailable"
+                ),
                 "instrument_name": instrument_name,
                 "amount": format_decimal(amount, 8),
+                "already_filled": format_decimal(already_filled, 8),
+                "remaining_structural": format_decimal(remaining_structural, 8),
+                "spot_exit_status": group.spot_exit_status or None,
                 "live": live,
             }
 
@@ -358,15 +423,27 @@ class ExecutionMixin:
             "instrument_name": instrument_name,
             "amount": format_decimal(amount, 8),
             "covered_underlying_quantity": format_decimal(spot_plan["cover"], 8),
+            "premium": format_decimal(spot_plan.get("premium") or Decimal("0"), 8),
+            "premium_available": format_decimal(spot_plan.get("premium_available") or Decimal("0"), 8),
+            "include_premium": bool(spot_plan.get("include_premium")),
             "settlement_loss": format_decimal(spot_plan["settlement_loss"], 8),
             "settlement_loss_source": spot_plan["settlement_loss_source"],
+            "already_filled": format_decimal(already_filled, 8),
+            "remaining_structural": format_decimal(remaining_structural, 8),
             "order_type": self.config.covered_call_spot_order_type,
             "live": live,
         }
+        # Persist settlement sizing inputs for later full-cover spot restore.
+        settle_loss = spot_plan.get("settlement_loss")
+        if settle_loss is not None:
+            group.spot_exit_settlement_loss = max(to_decimal(settle_loss), Decimal("0"))
+        settle_src = str(spot_plan.get("settlement_loss_source") or "").strip()
+        if settle_src:
+            group.spot_exit_settlement_loss_source = settle_src
         if not live:
             return payload
 
-        group.spot_exit_amount = amount
+        # spot_exit_amount is cumulative filled native — do not overwrite with this order size.
         group.spot_exit_instrument_name = instrument_name
         group.spot_exit_reason = reason
         label = f"{group.short_label or self._spread_labels(group.currency, group.group_id)['short']}-spot-exit"
@@ -397,7 +474,11 @@ class ExecutionMixin:
             payload["reason"] = skip_reason
             payload["reference_mark_price"] = protected.get("reference_mark_price")
             payload["slippage_limit_price"] = protected.get("slippage_limit_price")
-            if skip_reason != "slippage_exceeded":
+            if skip_reason == "slippage_exceeded":
+                group.spot_exit_status = "pending"
+            elif already_filled > 0:
+                group.spot_exit_status = "pending"
+            else:
                 group.spot_exit_status = "skipped"
             payload["spot_exit_status"] = group.spot_exit_status or "pending"
             return payload
@@ -413,20 +494,40 @@ class ExecutionMixin:
         order_state = str(order.get("order_state") or "").lower()
         filled = self._response_filled_amount(response)
         group.spot_exit_order_id = str(order.get("order_id") or "")
-        if order_state == "filled" or filled >= amount:
-            group.spot_exit_status = "filled"
-            from ..spot_exit_ops import apply_spot_exit_quote_proceeds
-
-            proceeds = apply_spot_exit_quote_proceeds(group, self._order_trades(response))
+        if filled > 0:
+            group.spot_exit_amount = already_filled + filled
+            proceeds = apply_spot_exit_quote_proceeds(
+                group,
+                self._order_trades(response),
+                cumulative=already_filled > 0,
+            )
             if proceeds > 0:
-                payload["spot_exit_quote_proceeds"] = format_decimal(proceeds, 4)
-        elif order_state in {"cancelled", "rejected"}:
-            group.spot_exit_status = "failed"
+                payload["spot_exit_quote_proceeds"] = format_decimal(group.spot_exit_quote_proceeds, 4)
+        remainder_after = max(remaining_structural - filled, Decimal("0"))
+        # Dust below exchange min/step is not sellable — treat as complete.
+        if remainder_after > 0:
+            from ..utils import align_option_order_amount
+
+            contract_size, min_trade_amount = self._spot_min_trade_amount(instrument_name, group.currency)
+            if align_option_order_amount(remainder_after, contract_size, min_trade_amount) <= 0:
+                remainder_after = Decimal("0")
+        if (order_state == "filled" or filled >= amount) and remainder_after <= 0:
+            group.spot_exit_status = "filled"
+            # Cover sale done — queue remaining premium for Profit swap when enabled.
+            self._maybe_schedule_profit_sweep(
+                group,
+                reason=reason or "covered_call_settlement_exit",
+                live=True,
+            )
+        elif order_state in {"cancelled", "rejected", "filled"} or filled > 0:
+            # Partial IOC / available-capped fill: keep pending so manage sells the rest.
+            group.spot_exit_status = "pending"
         else:
             group.spot_exit_status = "submitted"
         payload["spot_exit_status"] = group.spot_exit_status
         payload["spot_exit_order_id"] = group.spot_exit_order_id or None
         payload["filled_amount"] = format_decimal(filled, 8)
+        payload["spot_exit_amount_cumulative"] = format_decimal(group.spot_exit_amount, 8)
         payload["response"] = response
         return payload
 
@@ -1162,14 +1263,24 @@ class ExecutionMixin:
         return {"order": {"filled_amount": "0", "average_price": "0", "order_state": "filled"}}
 
     def _execute_hedge_plan(self, context: RuntimeContext, plan: HedgePlan, *, live: bool) -> dict[str, Any]:
+        effective_type = self._resolve_hedge_order_type_for_currency(context, currency=plan.currency)
         payload = {
             "action": "hedge",
             "plan": plan.to_dict(),
             "live": live,
-            "hedge_order_type": self.config.hedge_order_type,
+            "hedge_order_type": effective_type,
         }
+        if self.config.hedge_order_type == "limit_maker":
+            payload["hedge_maker_wait_cycles"] = int(
+                context.state.hedge_maker_wait_cycles.get(plan.currency.upper(), 0)
+            )
         if not live:
             return payload
+        # Replace any resting maker before an IOC fallback fill.
+        if effective_type != "limit_maker":
+            self._cancel_open_hedge_orders(
+                context, currency=plan.currency, instrument_name=plan.instrument_name, live=True
+            )
         response = self._place_hedge_perp_order(
             context,
             direction=plan.side,
@@ -1177,34 +1288,41 @@ class ExecutionMixin:
             amount=plan.order_amount,
             label=self._hedge_label(plan.currency, plan.mode),
             reduce_only=plan.side == "buy" and plan.current_hedge_base < 0,
+            order_type_override=effective_type,
         )
         payload["response"] = response
         if isinstance(response, dict) and response.get("skipped"):
             payload["skipped"] = True
             payload["skip_reason"] = response.get("reason")
+        elif effective_type != "limit_maker":
+            self._reset_hedge_maker_wait(context, plan.currency)
         return payload
 
     def _close_perp_position(self, context: RuntimeContext, position: Position, *, live: bool) -> dict[str, Any] | None:
         if position.size == 0:
             return None
+        currency = position.instrument_name.split("_")[0]
+        effective_type = self._resolve_hedge_order_type_for_currency(context, currency=currency)
         if not live:
             return {
                 "action": "close_perp_preview",
                 "instrument_name": position.instrument_name,
                 "direction": position.direction,
-                "hedge_order_type": self.config.hedge_order_type,
+                "hedge_order_type": effective_type,
             }
+        if effective_type != "limit_maker":
+            self._cancel_open_hedge_orders(
+                context, currency=currency, instrument_name=position.instrument_name, live=True
+            )
         close_side = "buy" if position.direction == "sell" else "sell"
         response = self._place_hedge_perp_order(
             context,
             direction=close_side,
             instrument_name=position.instrument_name,
             amount=abs(position.size),
-            label=self._hedge_label(
-                position.instrument_name.split("_")[0],
-                "close",
-            ),
+            label=self._hedge_label(currency, "close"),
             reduce_only=True,
+            order_type_override=effective_type,
         )
         if isinstance(response, dict) and response.get("skipped"):
             return {
@@ -1214,6 +1332,8 @@ class ExecutionMixin:
                 "skip_reason": response.get("reason"),
                 "response": response,
             }
+        if effective_type != "limit_maker":
+            self._reset_hedge_maker_wait(context, currency)
         return {"action": "close_perp", "instrument_name": position.instrument_name, "response": response}
 
     def _option_exit_request(

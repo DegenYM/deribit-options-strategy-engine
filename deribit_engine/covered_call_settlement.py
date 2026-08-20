@@ -121,3 +121,33 @@ def resolve_covered_call_settlement_loss(
         short_instrument=short_instrument,
     )
     return intrinsic, "intrinsic"
+
+
+def covered_call_spot_exit_premium_native(group: TradeGroup) -> Decimal:
+    """Net entry premium in collateral coin (fill − entry fee)."""
+    net = group.entry_net_credit_collateral()
+    if net is None or net <= 0:
+        return Decimal("0")
+    return net
+
+
+def covered_call_spot_exit_target_native(
+    *,
+    cover: Decimal,
+    settlement_loss: Decimal,
+    settlement_loss_source: str,
+    premium_native: Decimal = Decimal("0"),
+    include_premium: bool = False,
+) -> Decimal:
+    """Structural spot-exit size before available-funds / min-size alignment.
+
+    Settlement ITM defaults to ``cover − settle`` (premium stays for Profit swap).
+    ``include_premium=True`` is legacy only: ``cover + premium − settle``.
+    Robust ITM: call already bought back — sell cover only.
+    """
+    if cover <= 0:
+        return Decimal("0")
+    if settlement_loss_source == "skipped_robust":
+        return cover
+    premium = max(premium_native, Decimal("0")) if include_premium else Decimal("0")
+    return max(cover + premium - max(settlement_loss, Decimal("0")), Decimal("0"))

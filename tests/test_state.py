@@ -156,3 +156,83 @@ def test_lock_file_is_created_alongside_state(tmp_path: Path) -> None:
     store.save(_sample_state())
     # POSIX-only; the lock file should have been created lazily during save.
     assert store.lock_path.exists() or os.name == "nt"
+
+
+def test_save_preserves_concurrent_spot_restore_from_disk(tmp_path: Path) -> None:
+    """Live cycle must not clobber mid-cycle CLI spot-restore writes."""
+
+    store = StrategyStateStore(tmp_path / "state.json")
+    base = _sample_state()
+    base.groups[0].group_id = "0068"
+    base.groups[0].status = "closed"
+    base.groups[0].spot_exit_status = "filled"
+    base.groups[0].spot_exit_amount = Decimal("0.9937")
+    base.groups[0].spot_exit_quote_proceeds_lifetime = Decimal("1844.08789")
+    store.save(base)
+
+    # Simulate live engine holding a stale in-memory copy (no restore).
+    live_memory = store.load()
+    assert live_memory.groups[0].spot_restore_status == ""
+
+    # CLI spot-restore writes restore fields to disk.
+    cli = store.load()
+    cli.groups[0].spot_restore_status = "filled"
+    cli.groups[0].spot_restore_amount = Decimal("0.9999")
+    cli.groups[0].spot_restore_order_id = "ETH_USDT-8855868857"
+    cli.groups[0].spot_restore_quote_spent = Decimal("1860.71391")
+    cli.groups[0].spot_restore_quote_spent_lifetime = Decimal("1860.71391")
+    cli.groups[0].spot_restore_reason = "manual_spot_restore"
+    store.save(cli)
+
+    # Live engine finishes cycle and saves stale memory — merge must keep restore.
+    live_memory.last_equity_usdc = Decimal("999")
+    store.save(live_memory)
+
+    reloaded = store.load()
+    g = reloaded.groups[0]
+    assert g.spot_restore_status == "filled"
+    assert g.spot_restore_order_id == "ETH_USDT-8855868857"
+    assert g.spot_restore_quote_spent_lifetime == Decimal("1860.71391")
+    # Engine's in-cycle bookkeeping still wins for top-level fields.
+    assert reloaded.last_equity_usdc == Decimal("999")
+
+
+def test_merge_prefers_richer_profit_sweep_on_disk() -> None:
+    from deribit_engine.state import merge_concurrent_group_updates
+
+    memory = _sample_state()
+    memory.groups[0].group_id = "0075"
+    memory.groups[0].profit_sweep_status = "pending"
+    memory.groups[0].profit_sweep_amount = Decimal("0.0001")
+
+    disk = _sample_state()
+    disk.groups[0].group_id = "0075"
+    disk.groups[0].profit_sweep_status = "filled"
+    disk.groups[0].profit_sweep_amount = Decimal("0.0001")
+    disk.groups[0].profit_sweep_quote_proceeds_lifetime = Decimal("6.40")
+    disk.groups[0].profit_sweep_order_id = "BTC_USDT-1"
+    disk.groups[0].profit_sweep_reason = "take_profit"
+
+    merged = merge_concurrent_group_updates(memory, disk)
+    assert merged == ["0075"]
+    assert memory.groups[0].profit_sweep_status == "filled"
+    assert memory.groups[0].profit_sweep_quote_proceeds_lifetime == Decimal("6.40")
+    assert memory.groups[0].profit_sweep_order_id == "BTC_USDT-1"
+
+
+def test_merge_does_not_regress_memory_ahead_of_disk() -> None:
+    from deribit_engine.state import merge_concurrent_group_updates
+
+    memory = _sample_state()
+    memory.groups[0].group_id = "0070"
+    memory.groups[0].spot_restore_status = "filled"
+    memory.groups[0].spot_restore_quote_spent_lifetime = Decimal("100")
+
+    disk = _sample_state()
+    disk.groups[0].group_id = "0070"
+    disk.groups[0].spot_restore_status = "pending"
+    disk.groups[0].spot_restore_quote_spent_lifetime = Decimal("10")
+
+    assert merge_concurrent_group_updates(memory, disk) == []
+    assert memory.groups[0].spot_restore_status == "filled"
+    assert memory.groups[0].spot_restore_quote_spent_lifetime == Decimal("100")

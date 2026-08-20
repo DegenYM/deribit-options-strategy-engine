@@ -146,7 +146,29 @@ class GroupRefreshMixin:
                     exc,
                 )
         group.mark_debit = max(group.current_debit + (short_debit_mark - short_debit_ask), Decimal("0"))
-        group.profit_capture = safe_div(max(group.entry_credit - group.current_debit, Decimal("0")), group.entry_credit)
+        from ..models import normalize_strategy_name
+
+        if normalize_strategy_name(group.strategy) == "covered_call" and group.is_coin_collateral():
+            # Coin-collateral covered calls: premium capture in coin units so ETH/BTC
+            # index moves do not distort take-profit / time-exit gates.
+            from ..exit_eval import close_debit_native, entry_credit_native
+
+            entry_native = entry_credit_native(group)
+            if entry_native is not None and entry_native > 0:
+                close_native = close_debit_native(
+                    premium=close_premium,
+                    quantity=group.quantity,
+                    fee_collateral=group.current_close_fee_collateral,
+                )
+                group.profit_capture = safe_div(max(entry_native - close_native, Decimal("0")), entry_native)
+            else:
+                group.profit_capture = safe_div(
+                    max(group.entry_credit - group.current_debit, Decimal("0")), group.entry_credit
+                )
+        else:
+            group.profit_capture = safe_div(
+                max(group.entry_credit - group.current_debit, Decimal("0")), group.entry_credit
+            )
         group.short_delta = abs(short_book.delta)
 
     def _delta_totals_by_currency(
