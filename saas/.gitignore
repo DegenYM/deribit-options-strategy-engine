@@ -1,0 +1,8 @@
+# SaaS runtime
+.env
+var/
+*.sqlite3
+__pycache__/
+.pytest_cache/
+.coverage
+.venv/
