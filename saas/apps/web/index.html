@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Covered — Deribit Covered Call</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Public+Sans:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="grain"></div>
+    <header class="top">
+      <div class="brand">
+        <span class="mark">C</span>
+        <div>
+          <strong>Covered</strong>
+          <small>BYOK Covered Call · Deribit</small>
+        </div>
+      </div>
+      <nav>
+        <a href="/legal/RISK_DISCLOSURE.zh-TW.md">風險揭露</a>
+        <a href="/legal/TERMS.md">條款</a>
+        <button id="logoutBtn" class="ghost hidden" type="button">登出</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="gate" class="panel">
+        <p class="kicker">軟體工具，不是代操</p>
+        <h1>在自己的 Deribit 子帳跑 Covered Call。</h1>
+        <p class="lede">
+          平台托管引擎，金鑰由你保管與撤銷。第一版只做備兌賣 call。APR 不是收益承諾。
+        </p>
+        <form id="loginForm" class="row">
+          <input type="email" id="email" required placeholder="you@example.com" />
+          <button type="submit">寄出登入連結</button>
+        </form>
+        <p id="loginHint" class="hint"></p>
+        <div id="plansMount" class="plans"></div>
+      </section>
+
+      <section id="app" class="hidden">
+        <div class="toolbar">
+          <div>
+            <p class="kicker" id="who"></p>
+            <h2>倉位與控制</h2>
+          </div>
+          <div class="kills">
+            <button id="pauseBtn" type="button" class="ghost">Pause</button>
+            <button id="panicBtn" type="button" class="panic">Panic close</button>
+          </div>
+        </div>
+        <p class="disclaimer">
+          本工具不構成投資建議。Covered Call 無法消除現貨下跌風險，Pause／Panic 不保證成交。
+        </p>
+
+        <div class="grid">
+          <article class="panel">
+            <h3>市場</h3>
+            <div id="market" class="stats"></div>
+          </article>
+          <article class="panel">
+            <h3>Bot</h3>
+            <div id="botMeta" class="stats"></div>
+            <div class="row wrap">
+              <button id="dryBtn" type="button">啟動 dry-run</button>
+              <button id="liveBtn" type="button" class="ghost">啟動 live</button>
+              <button id="stopBtn" type="button" class="ghost">停止</button>
+            </div>
+          </article>
+        </div>
+
+        <article class="panel">
+          <h3>開放中的備兌 call</h3>
+          <div id="groups" class="cards"></div>
+        </article>
+
+        <div class="grid">
+          <article class="panel">
+            <h3>Deribit API Key</h3>
+            <p class="hint">權限只要 account:read + trade:read_write。不要開 wallet。送出後密鑰不會再顯示。</p>
+            <form id="keyForm">
+              <label>Client ID <input id="clientId" required autocomplete="off" /></label>
+              <label>Client secret <input id="clientSecret" type="password" required autocomplete="off" /></label>
+              <div class="row">
+                <button type="submit">加密保存</button>
+                <button id="pingBtn" type="button" class="ghost">Ping</button>
+              </div>
+            </form>
+            <p id="keyStatus" class="hint"></p>
+          </article>
+          <article class="panel">
+            <h3>策略設定</h3>
+            <form id="settingsForm">
+              <label>
+                Risk tier
+                <select id="riskTier">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </label>
+              <fieldset class="coins">
+                <legend>標的</legend>
+                <label><input type="checkbox" name="coin" value="BTC" checked /> BTC</label>
+                <label><input type="checkbox" name="coin" value="ETH" /> ETH</label>
+              </fieldset>
+              <label class="check"><input type="checkbox" id="sweep" /> Profit sweep（Pro／Desk）</label>
+              <div class="row">
+                <button type="submit">儲存設定</button>
+              </div>
+            </form>
+          </article>
+          <article class="panel">
+            <h3>訂閱</h3>
+            <p id="billStatus" class="hint"></p>
+            <div class="row wrap" id="subscribeRow"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>
