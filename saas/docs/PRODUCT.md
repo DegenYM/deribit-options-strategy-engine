@@ -40,25 +40,26 @@
 1. **BYOK software-only**：金鑰在使用者 Deribit 帳戶，平台不碰錢包權限、不收 AUM。
 2. **單一策略**：v1 = Covered Call。Naked short、bull put、訊號 webhook 見 `PHASE2.md`。
 3. **先模擬再實單**：任何實單方案都要滿 `DRY_RUN_MIN_DAYS`（預設 7）天 dry-run。Scout 永不實單。
-4. **先調查再設定**：沒交開通問卷，不能存策略參數、不能啟動 bot。
+4. **先完成開通設定再啟動**：沒存開通表單，不能寫策略參數、不能啟動 bot。UX 是一頁設定，不是闖關問卷。
 5. **Kill switch 是產品核心**：Pause／Panic 永遠在控制台第一屏，且文案必須寫「不保證成交」。
 
 ## 4. 資訊架構
 
+對齊使用者習慣：FULY 是「登入 → 一頁機器人設定 → 報表」；本專案原使用者習慣是「打開 dashboard 看倉位」。不要做闖關精靈。
+
 ```
 公開
-  Landing        品牌、機制、不是什麼、FAQ、方案、登入
-  Legal          條款／隱私／風險揭露／行銷禁令
-登入後
-  Waitlist       問卷可先填；核准前不能綁 key、不能訂閱
-  開通精靈
-    1 調查       經驗／現貨／幣／資金帶／目的／回撤／五則勾選
-    2 建議       映射 Scout/Trader/Pro/Desk + tier + coins（可改訂）
-    3 清單       子帳、現貨、API 權限；然後才進控制台
-  控制台         行情、倉位、金鑰、參數、訂閱、Pause／Panic
+  Landing        短主標 + 登入、方案、摺疊 FAQ（樹冠來由放 FAQ）
+  Legal          條款／隱私／風險揭露
+登入後（立刻進控制台）
+  總覽           狀態、dry-run／live、Pause／Panic
+  倉位           開放中的 covered call
+  設定           一頁：現況下拉、一則風險勾選、建議方案、API、參數
 ```
 
-不要做的事：一登入就丟 risk tier 下拉；把舊 `investor.html` 整頁 fork 過來；在 landing 放歷史 APR 區間。
+待辦用頂部 chips（開通／核准／訂閱／金鑰／啟動），點了進對應分頁。Waitlist 是橫幅，不是另一個網站。
+
+後端仍：沒交開通設定就不能存策略參數、不能啟動 bot。畫面上這是設定表單，不是問卷牆。
 
 ## 5. 開通調查 → 建議映射
 

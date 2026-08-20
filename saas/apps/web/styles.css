@@ -803,10 +803,66 @@ input[type="checkbox"] {
   line-height: 1.55;
 }
 
-.stepper {
+.app-nav {
+  display: flex;
+  gap: 0.25rem;
+  width: fit-content;
+  padding: 0.2rem;
+  border-radius: var(--radius-md);
+  border: 1px solid color-mix(in srgb, var(--color-border-default) 70%, transparent);
+  background: color-mix(in srgb, var(--color-bg-surface) 55%, transparent);
+}
+
+.app-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  padding: 0.4rem 0.85rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.app-tab.is-active {
+  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  color: var(--color-text-primary);
+}
+
+.next-steps {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+.next-steps button {
+  cursor: pointer;
+}
+
+.setup-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.85rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.ack-box {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.4rem;
+}
+
+.inline-help {
+  margin: 0.35rem 0 0.8rem;
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+}
+
+.inline-help summary {
+  cursor: pointer;
+  color: var(--color-accent-soft);
 }
 
 .intake-fields {

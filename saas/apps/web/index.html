@@ -22,7 +22,7 @@
           <span class="brand-mark" aria-hidden="true">C</span>
           <div>
             <h1 class="page-title">Canopy</h1>
-            <p id="pageSubtitle" class="page-subtitle">樹冠罩住你已經持有的現貨。不是代操、不是屋頂。</p>
+            <p id="pageSubtitle" class="page-subtitle">樹冠罩住你已經持有的現貨。</p>
           </div>
         </div>
         <div id="statusCluster" class="header-status-cluster hidden" aria-label="帳戶狀態">
@@ -46,7 +46,7 @@
           <a class="footer-nav-link" href="/legal/RISK_DISCLOSURE.zh-TW.md">風險揭露</a>
           <a class="footer-nav-link" href="/legal/TERMS.md">條款</a>
           <span id="lastRefresh" class="hidden" aria-live="polite">上次更新：—</span>
-          <button id="refreshNow" type="button" class="ds-btn ds-btn-secondary hidden">Refresh</button>
+          <button id="refreshNow" type="button" class="ds-btn ds-btn-secondary hidden">重新整理</button>
           <button id="logoutBtn" type="button" class="ds-btn ds-btn-secondary hidden">登出</button>
         </div>
       </div>
@@ -55,97 +55,43 @@
     <main id="dashboard-main" class="dashboard-shell dashboard-main">
       <div id="landing">
         <section class="hero-panel">
-          <p id="heroEyebrow" class="section-eyebrow">Canopy · 樹冠</p>
-          <h2 id="heroTitle" class="hero-title">像樹冠一樣，罩在已有的 BTC／ETH 上。</h2>
+          <p id="heroEyebrow" class="section-eyebrow">Canopy · 樹冠 · Deribit</p>
+          <h2 id="heroTitle" class="hero-title">在自己的現貨上，自動備兌賣 call。</h2>
           <p id="heroLede" class="hero-lede">
-            Canopy 原意是森林最上層的樹冠：罩在已經長成的樹上，不是把樹搬進溫室。Covered Call
-            同一結構——先有現貨，再疊加備兌賣 call。金鑰與資產留在你的 Deribit 子帳。樹冠是遮蔭，不是屋頂：擋不住現貨下跌，權利金也不是收益承諾。
+            金鑰留在你的 Deribit 子帳。樹冠是遮蔭，不是屋頂——現貨下跌風險仍在，權利金不是收益承諾。
           </p>
           <form id="loginForm" class="login-row">
             <label class="field">
               <span>Email</span>
               <input type="email" id="email" required placeholder="you@example.com" autocomplete="email" />
             </label>
-            <button type="submit" class="ds-btn ds-btn-primary">寄出登入連結</button>
+            <button type="submit" class="ds-btn ds-btn-primary">登入</button>
           </form>
-          <p id="loginHint" class="hint"></p>
+          <p id="loginHint" class="hint">開發模式會直接登入，不必收信。</p>
         </section>
 
         <section class="section-card priority-section">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">How it works</p>
-              <h2 class="section-title">開通順序，對齊認真的交易 SaaS</h2>
-            </div>
-            <p class="section-copy">先調查、再建議方案、再綁 API。不會一登入就丟 risk tier 下拉給你填。</p>
-          </div>
-          <ol class="step-grid">
-            <li>
-              <span class="step-index">01</span>
-              <strong>調查</strong>
-              <p>經驗、現貨在哪、幣別、目的、回撤承受度，以及五則風險勾選。</p>
-            </li>
-            <li>
-              <span class="step-index">02</span>
-              <strong>建議</strong>
-              <p>映射 Scout／Trader／Pro／Desk 與參數。你可以改訂，不是強制。</p>
-            </li>
-            <li>
-              <span class="step-index">03</span>
-              <strong>清單</strong>
-              <p>子帳、現貨、API 權限白名單。然後才進控制台做 dry-run。</p>
-            </li>
-          </ol>
-        </section>
-
-        <section class="section-card priority-section">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">Why the name</p>
-              <h2 class="section-title">為什麼叫 Canopy</h2>
-            </div>
-            <p class="section-copy">名稱就是產品結構。不是裝飾性的科技詞。</p>
-          </div>
-          <ul id="whyPoints" class="not-list">
-            <li>樹冠罩在已長成的樹上，不是另起一座金庫。</li>
-            <li>備兌賣 call 也一樣：先有現貨，再疊加短 call。</li>
-            <li>資產與金鑰留在你的子帳；Canopy 只跑那一層覆蓋。</li>
-            <li>樹冠是遮蔭不是屋頂，所以不說保護本金、也不保證 APR。</li>
-          </ul>
-        </section>
-
-        <section class="section-card priority-section">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">Not this</p>
-              <h2 class="section-title">Canopy 不是什麼</h2>
-            </div>
-          </div>
-          <ul class="not-list">
-            <li>不是基金、投顧、跟單或代操</li>
-            <li>不保管資產、不收管理費或績效費</li>
-            <li>不保證 APR、勝率或本金</li>
-            <li>Pause／Panic 不保證成交</li>
-          </ul>
+          <p class="section-eyebrow">Plans</p>
+          <h2 class="section-title">方案</h2>
+          <p class="section-copy">訂閱費，不是績效費。APR 不是承諾。</p>
+          <div id="plansMount" class="plan-grid"></div>
         </section>
 
         <section class="section-card priority-section">
           <div class="section-heading">
             <div>
               <p class="section-eyebrow">FAQ</p>
-              <h2 class="section-title">開通前會被問到的事</h2>
+              <h2 class="section-title">常見問題</h2>
             </div>
           </div>
           <div class="faq-list">
-            <details open>
+            <details>
               <summary>為什麼叫 Canopy？</summary>
-              <p id="faqOrigin">
-                Canopy 是森林樹冠。罩在已經持有的現貨上方，不是把資產搬進平台。樹冠是遮蔭，不是屋頂。
-              </p>
+              <p id="faqOrigin">樹冠罩在已有的現貨上方，不是把資產搬進平台。樹冠是遮蔭，不是屋頂。</p>
             </details>
             <details>
-              <summary>為什麼要先做調查？</summary>
-              <p>Covered Call 需要你已經持有現貨。沒有樹，就沒有樹冠。問卷用來建議方案與 risk tier，避免還沒現貨就開實單。</p>
+              <summary>怎麼開始？</summary>
+              <p>登入後進設定：選你的現貨與風險、勾風險揭露、訂閱、貼 API，然後在總覽按 dry-run。跟一般交易機器人一樣，不是闖關問卷。</p>
             </details>
             <details>
               <summary>API 要開哪些權限？</summary>
@@ -153,140 +99,105 @@
             </details>
             <details>
               <summary>什麼時候才能實單？</summary>
-              <p>Scout 只有 dry-run。Trader／Pro／Desk 須先跑滿 7 天模擬。Live 解鎖後仍可隨時 Pause。</p>
-            </details>
-            <details>
-              <summary>被 call away 會怎樣？</summary>
-              <p>短 call 被行使時，子帳裡的現貨可能被賣掉。這是策略機制，不是系統故障。</p>
+              <p>Scout 只有模擬。Trader／Pro／Desk 須先跑滿 7 天 dry-run。</p>
             </details>
           </div>
-        </section>
-
-        <section class="section-card priority-section">
-          <p class="section-eyebrow plan-kicker">Plans</p>
-          <h2 class="section-title">方案</h2>
-          <p class="section-copy">價格是訂閱費，不是績效費。APR 不是承諾。</p>
-          <div id="plansMount" class="plan-grid"></div>
         </section>
       </div>
 
-      <section id="waitlist" class="section-card priority-section hidden">
-        <p class="section-eyebrow">Waitlist</p>
-        <h2 class="section-title">調查已收到，等待核准</h2>
-        <p class="section-copy" id="waitlistCopy">核准後才能綁定 API、訂閱與啟動 dry-run。</p>
-      </section>
-
-      <section id="onboarding" class="hidden app-stack">
-        <div class="stepper" aria-label="開通步驟">
-          <span id="stepChip1" class="inv-chip inv-chip--info">1 · 調查</span>
-          <span id="stepChip2" class="inv-chip inv-chip--neutral">2 · 建議</span>
-          <span id="stepChip3" class="inv-chip inv-chip--neutral">3 · 清單</span>
-        </div>
-
-        <form id="intakeForm" class="section-card priority-section">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">Intake</p>
-              <h2 class="section-title">開通前調查</h2>
-            </div>
-            <p class="section-copy">這不是 KYC，也不是投資建議。答案只用來預填方案與參數。</p>
-          </div>
-          <div id="intakeFields" class="intake-fields"></div>
-          <div class="control-row">
-            <button type="submit" class="ds-btn ds-btn-primary">送出調查</button>
-          </div>
-          <p id="intakeHint" class="hint"></p>
-        </form>
-
-        <section id="recommendPanel" class="section-card priority-section hidden">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">Recommendation</p>
-              <h2 class="section-title">建議方案</h2>
-            </div>
-            <p class="section-copy">可以改訂。沒有「正確」方案這件事。</p>
-          </div>
-          <div id="recommendBody" class="overview-panel"></div>
-          <p id="recommendBill" class="hint"></p>
-          <div class="control-row wrap" id="recommendSubscribe"></div>
-          <div class="control-row">
-            <button id="toChecklistBtn" type="button" class="ds-btn ds-btn-secondary">下一步：開通清單</button>
-          </div>
-        </section>
-
-        <section id="setupPanel" class="section-card priority-section hidden">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">Checklist</p>
-              <h2 class="section-title">綁定 API 之前</h2>
-            </div>
-          </div>
-          <ol id="setupChecklist" class="checklist"></ol>
-          <p class="section-copy">完成清單後進入控制台綁定金鑰。實單前必須先 dry-run。</p>
-          <div class="control-row">
-            <button id="enterAppBtn" type="button" class="ds-btn ds-btn-primary">進入控制台</button>
-          </div>
-        </section>
-      </section>
-
       <div id="app" class="hidden app-stack">
-        <aside class="exchange-outage-banner" role="note">
-          <p class="exchange-outage-title">風險提示</p>
-          <p class="exchange-outage-body">
-            本工具不構成投資建議。Covered Call 無法消除現貨下跌風險，Pause／Panic 不保證成交。
-          </p>
+        <aside id="waitlistBanner" class="exchange-outage-banner hidden" role="status">
+          <p class="exchange-outage-title">尚在候補</p>
+          <p class="exchange-outage-body" id="waitlistCopy">核准前可以先填設定，但不能綁金鑰或啟動。</p>
         </aside>
 
-        <aside id="applyBanner" class="recommend-banner hidden">
-          <div>
-            <p class="section-eyebrow">From intake</p>
-            <p id="applyCopy" class="section-copy"></p>
-          </div>
-          <button id="applyRecBtn" type="button" class="ds-btn ds-btn-primary">套用建議參數</button>
-        </aside>
+        <nav id="appNav" class="app-nav" aria-label="控制台">
+          <button type="button" class="app-tab is-active" data-tab="overview">總覽</button>
+          <button type="button" class="app-tab" data-tab="positions">倉位</button>
+          <button type="button" class="app-tab" data-tab="setup">設定</button>
+        </nav>
 
-        <section class="section-card priority-section">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">Overview</p>
-              <h2 class="section-title">倉位與控制</h2>
-            </div>
-            <p class="section-copy" id="who">—</p>
-          </div>
-          <div class="overview-panel">
-            <div class="control-row">
-              <button id="dryBtn" type="button" class="ds-btn ds-btn-primary">啟動 dry-run</button>
-              <button id="liveBtn" type="button" class="ds-btn">啟動 live</button>
-              <button id="stopBtn" type="button" class="ds-btn ds-btn-secondary">停止</button>
-              <button id="pauseBtn" type="button" class="ds-btn ds-btn-secondary">Pause</button>
-              <button id="panicBtn" type="button" class="ds-btn ds-btn-danger">Panic close</button>
-            </div>
-            <div id="botMeta" class="stat-grid"></div>
-          </div>
-        </section>
+        <div id="nextSteps" class="next-steps hidden" aria-label="還差什麼"></div>
 
-        <section class="section-card priority-section">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">Strategies &amp; positions</p>
-              <h2 class="section-title">開放中的備兌 call</h2>
-            </div>
-            <span id="groupMeta" class="open-meta-pill">—</span>
-          </div>
-          <div id="groups" class="open-position-list"></div>
-        </section>
-
-        <div class="control-grid">
+        <section id="tab-overview" class="tab-panel">
           <section class="section-card priority-section">
             <div class="section-heading">
               <div>
-                <p class="section-eyebrow">Credentials</p>
-                <h2 class="section-title">Deribit API Key</h2>
+                <p class="section-eyebrow">Overview</p>
+                <h2 class="section-title">機器人</h2>
+              </div>
+              <p class="section-copy" id="who">—</p>
+            </div>
+            <div class="overview-panel">
+              <div class="control-row">
+                <button id="dryBtn" type="button" class="ds-btn ds-btn-primary">啟動 dry-run</button>
+                <button id="liveBtn" type="button" class="ds-btn">啟動 live</button>
+                <button id="stopBtn" type="button" class="ds-btn ds-btn-secondary">停止</button>
+                <button id="pauseBtn" type="button" class="ds-btn ds-btn-secondary">Pause</button>
+                <button id="panicBtn" type="button" class="ds-btn ds-btn-danger">Panic close</button>
+              </div>
+              <p class="hint">Pause／Panic 會送出指令，不保證成交。</p>
+              <div id="botMeta" class="stat-grid"></div>
+            </div>
+          </section>
+        </section>
+
+        <section id="tab-positions" class="tab-panel hidden">
+          <section class="section-card priority-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">Positions</p>
+                <h2 class="section-title">開放中的備兌 call</h2>
+              </div>
+              <span id="groupMeta" class="open-meta-pill">—</span>
+            </div>
+            <div id="groups" class="open-position-list"></div>
+          </section>
+        </section>
+
+        <section id="tab-setup" class="tab-panel hidden">
+          <form id="intakeForm" class="section-card priority-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">Bot setup</p>
+                <h2 class="section-title">開通設定</h2>
+              </div>
+              <p class="section-copy">跟一般機器人一樣：選標的、存檔。答案只用來預填方案，不是 KYC。</p>
+            </div>
+            <div id="intakeFields" class="setup-grid"></div>
+            <div class="control-row">
+              <button type="submit" class="ds-btn ds-btn-primary">儲存並看建議方案</button>
+            </div>
+            <p id="intakeHint" class="hint"></p>
+          </form>
+
+          <section id="recommendPanel" class="section-card priority-section hidden">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">Plan</p>
+                <h2 class="section-title">建議方案</h2>
+              </div>
+              <p class="section-copy">可改訂。選好再綁 API。</p>
+            </div>
+            <div id="recommendBody"></div>
+            <p id="billStatus" class="hint"></p>
+            <div class="control-row wrap" id="subscribeRow"></div>
+          </section>
+
+          <section class="section-card priority-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">API</p>
+                <h2 class="section-title">Deribit 金鑰</h2>
               </div>
             </div>
             <p class="section-copy">
-              權限只要 account:read + trade:read_write。不要開 wallet。送出後密鑰不會再顯示。
+              權限：account:read + trade:read_write。不要開 wallet。用子帳。送出後密鑰不會再顯示。
             </p>
+            <details class="inline-help">
+              <summary>綁定前檢查</summary>
+              <ol id="setupChecklist" class="checklist"></ol>
+            </details>
             <form id="keyForm" class="stack-form">
               <label class="field">
                 <span>Client ID</span>
@@ -298,7 +209,7 @@
               </label>
               <div class="control-row">
                 <button type="submit" class="ds-btn ds-btn-primary">加密保存</button>
-                <button id="pingBtn" type="button" class="ds-btn ds-btn-secondary">Ping</button>
+                <button id="pingBtn" type="button" class="ds-btn ds-btn-secondary">測試連線</button>
               </div>
             </form>
             <p id="keyStatus" class="hint"></p>
@@ -307,17 +218,21 @@
           <section class="section-card priority-section">
             <div class="section-heading">
               <div>
-                <p class="section-eyebrow">Settings</p>
-                <h2 class="section-title">策略設定</h2>
+                <p class="section-eyebrow">Strategy</p>
+                <h2 class="section-title">策略參數</h2>
               </div>
             </div>
+            <aside id="applyBanner" class="recommend-banner hidden">
+              <p id="applyCopy" class="section-copy"></p>
+              <button id="applyRecBtn" type="button" class="ds-btn ds-btn-primary">套用建議</button>
+            </aside>
             <form id="settingsForm" class="stack-form">
               <label class="field">
-                <span>Risk tier</span>
+                <span>風險</span>
                 <select id="riskTier" class="ds-select ds-select-block">
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
+                  <option value="low">保守（low）</option>
+                  <option value="medium">平衡（medium）</option>
+                  <option value="high">積極（high）</option>
                 </select>
               </label>
               <fieldset class="coin-fieldset">
@@ -329,27 +244,16 @@
                 <input type="checkbox" id="sweep" /> Profit sweep（Pro／Desk）
               </label>
               <div class="control-row">
-                <button type="submit" class="ds-btn ds-btn-primary">儲存設定</button>
+                <button type="submit" class="ds-btn ds-btn-primary">儲存參數</button>
               </div>
             </form>
           </section>
-
-          <section class="section-card priority-section">
-            <div class="section-heading">
-              <div>
-                <p class="section-eyebrow">Billing</p>
-                <h2 class="section-title">訂閱</h2>
-              </div>
-            </div>
-            <p id="billStatus" class="section-copy"></p>
-            <div class="control-row wrap" id="subscribeRow"></div>
-          </section>
-        </div>
+        </section>
       </div>
     </main>
 
     <footer class="page-footer">
-      Canopy is shade, not a roof. Software, not investment advice. Covered Call does not remove spot downside.
+      樹冠是遮蔭，不是屋頂。不是投資建議。
       <span class="page-footer-links">
         <a class="footer-nav-link" href="/legal/PRIVACY.md">Privacy</a>
         ·
