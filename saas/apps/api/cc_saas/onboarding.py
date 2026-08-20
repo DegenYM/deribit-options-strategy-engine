@@ -28,9 +28,9 @@ ACKNOWLEDGEMENTS = (
 ACK_LABELS_ZH = {
     "not_advice": "我了解 Canopy（樹冠）是軟體工具，不是投資建議、基金或代操。",
     "no_apr": "我了解任何 APR、權利金或歷史績效都不是收益承諾。",
-    "spot_downside": "我了解 Covered Call 無法消除現貨下跌風險，call 被行使時現貨可能被賣掉。",
+    "spot_downside": "我了解掩護性買權無法消除現貨下跌風險，買權被履約時現貨可能被賣掉。",
     "keys_own": "我會用自己的 Deribit 子帳 API，不開 wallet 權限，並可隨時撤銷金鑰。",
-    "panic_no_fill": "我了解 Pause／Panic 會送出指令，但不保證成交、價格或滑價。",
+    "panic_no_fill": "我了解暫停／緊急平倉會送出指令，但不保證成交、價格或滑價。",
 }
 
 
@@ -107,15 +107,15 @@ def recommend(answers: IntakeAnswers) -> Recommendation:
         reasons.append("你需要多個子帳操作，建議 Desk。")
     elif answers.intent == "learn" or answers.inventory == "none" or answers.experience == "novice":
         plan_id = "scout"
-        reasons.append("先用 Scout 做 dry-run，熟悉選約與倉位再考慮實單。")
+        reasons.append("先用 Scout 做模擬，熟悉選約與倉位再考慮實單。")
         if answers.inventory == "none":
-            reasons.append("帳上還沒有現貨時，不應直接開實單 Covered Call。")
+            reasons.append("帳上還沒有現貨時，不應直接開實單掩護性買權。")
     elif answers.coins == "both" or answers.drawdown == "aggressive" or answers.want_sweep:
         plan_id = "pro"
         reasons.append("雙幣、較積極的 delta、或 profit sweep 需要 Pro。")
     else:
         plan_id = "trader"
-        reasons.append("單一標的、已有或將轉入現貨，Trader 可在 7 天 dry-run 後開實單。")
+        reasons.append("單一標的、已有或將轉入現貨，Trader 可在 7 天模擬後開實單。")
 
     if answers.intent == "overlay" and answers.inventory == "already_on_deribit" and plan_id == "scout":
         # Novice overlay on existing spot: still Scout first.
@@ -159,13 +159,13 @@ def survey_schema() -> dict[str, Any]:
                 "label_zh": "你賣過選擇權嗎？",
                 "options": [
                     {"id": "novice", "label_zh": "沒賣過，想先看引擎怎麼選約"},
-                    {"id": "options", "label_zh": "手動賣過 call／put"},
+                    {"id": "options", "label_zh": "手動賣過買權／賣權"},
                     {"id": "bots", "label_zh": "跑過自動交易或選擇權機器人"},
                 ],
             },
             {
                 "id": "inventory",
-                "label_zh": "要備兌的現貨在哪？",
+                "label_zh": "要當擔保的現貨在哪？",
                 "options": [
                     {"id": "none", "label_zh": "還沒有 BTC／ETH 現貨"},
                     {"id": "transferring", "label_zh": "有現貨，準備轉進 Deribit 子帳"},
@@ -195,17 +195,17 @@ def survey_schema() -> dict[str, Any]:
                 "label_zh": "這次開通的目的？",
                 "options": [
                     {"id": "learn", "label_zh": "先模擬，搞懂流程"},
-                    {"id": "overlay", "label_zh": "在已有現貨上疊加備兌賣 call"},
+                    {"id": "overlay", "label_zh": "在已有現貨上做掩護性買權"},
                     {"id": "desk", "label_zh": "多個子帳／之後要接訊號"},
                 ],
             },
             {
                 "id": "drawdown",
-                "label_zh": "現貨被 call away 時，你比較能接受哪一種？",
+                "label_zh": "現貨被買走時，你比較能接受哪一種？",
                 "options": [
-                    {"id": "conservative", "label_zh": "寧可少收權利金，也較不想被行權（low）"},
-                    {"id": "balanced", "label_zh": "平衡權利金與被行權機率（medium）"},
-                    {"id": "aggressive", "label_zh": "較能接受被行權，換更近的 delta（high）"},
+                    {"id": "conservative", "label_zh": "寧可少收權利金，也較不想被履約（保守）"},
+                    {"id": "balanced", "label_zh": "權利金與被履約機會取平衡（適中）"},
+                    {"id": "aggressive", "label_zh": "較能接受被履約，換較高權利金（積極）"},
                 ],
             },
         ],

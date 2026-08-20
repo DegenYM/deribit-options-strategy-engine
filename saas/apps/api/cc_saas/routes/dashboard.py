@@ -28,7 +28,7 @@ def dashboard(user: User = Depends(get_current_user), tenant: Tenant = Depends(g
         snapshot = load_worker_snapshot(_worker_settings(tenant, live=live))
     return {
         "strategy": "covered_call",
-        "disclaimer": "本工具不構成投資建議；Covered Call 無法消除現貨下跌風險，亦無收益保證。APR 不是承諾。",
+        "disclaimer": "本工具不構成投資建議；掩護性買權無法消除現貨下跌風險，亦無收益保證。APR 不是承諾。",
         "market": market,
         "bot": snapshot,
         "performance": snapshot.get("performance") or {},

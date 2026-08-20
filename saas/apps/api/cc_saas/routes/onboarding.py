@@ -100,11 +100,11 @@ def product_meta():
         "setup_checklist_zh": [
             "Deribit 帳戶已完成 KYC",
             "開一個子帳給 Canopy，不要用主帳",
-            "把要備兌的 BTC／ETH 現貨轉進該子帳",
+            "把要當擔保的 BTC／ETH 現貨轉進該子帳",
             "API 只開 account:read + trade:read_write，不開 wallet",
             "能設 IP 白名單就綁平台出口 IP",
             "關掉同一子帳上會搶單的其他自動策略",
-            "接受 call 被行使時現貨可能被賣掉",
+            "接受買權被履約時現貨可能被賣掉",
         ],
         "waitlist_only": settings.waitlist_only,
         "trial_days": settings.trial_days,

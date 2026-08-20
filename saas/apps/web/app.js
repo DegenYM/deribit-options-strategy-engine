@@ -121,7 +121,7 @@ function applyChrome(page) {
   $("headerMarkets").classList.toggle("hidden", !inApp);
   $("lastRefresh").classList.toggle("hidden", !inApp);
   $("refreshNow").classList.toggle("hidden", !inApp);
-  $("pageSubtitle").textContent = inApp ? "備兌賣 call 控制台" : "樹冠罩住你已經持有的現貨。";
+  $("pageSubtitle").textContent = inApp ? "掩護性買權控制台" : "樹冠罩住你已經持有的現貨。";
   const loginNav = $("loginNav");
   if (loggedIn) {
     loginNav.textContent = "控制台";
@@ -247,7 +247,7 @@ function applyBrand(product) {
   lastProduct = product;
   document.title = `${product.brand} · ${product.gloss_zh}`;
   $("heroEyebrow").textContent = `${product.brand} · ${product.gloss_zh} · Deribit`;
-  $("heroTitle").textContent = "在自己的現貨上，自動備兌賣 call。";
+  $("heroTitle").textContent = "在自己的現貨上，自動做掩護性買權。";
   $("heroLede").textContent = `${product.tagline_zh}金鑰留在你的 Deribit 子帳。${product.gloss_zh}是遮蔭，不是屋頂。`;
   $("faqOrigin").textContent = product.origin_zh;
   if (product.waitlist_only) {
@@ -470,7 +470,7 @@ async function refreshApp() {
     ["狀態", bot.desired],
     ["風險", bot.risk_tier],
     ["標的", (bot.coins || []).join(", ") || "—"],
-    ["live 解鎖", bot.live_unlocked ? "是" : "否"],
+    ["實單解鎖", bot.live_unlocked ? "是" : "否"],
     ["金鑰", bot.client_id ? `${bot.client_id} · ***${bot.secret_last4 || ""}` : "未設定"],
     ["BTC", fmtPrice(dash.market?.btc_usd)],
     ["ETH", fmtPrice(dash.market?.eth_usd)],
@@ -493,7 +493,7 @@ async function refreshApp() {
   $("groupMeta").textContent = `${groups.length} 筆`;
   $("groups").innerHTML = groups.length
     ? groups.map((g) => positionCard(g)).join("")
-    : `<div class="open-empty-state">還沒有開放中的 covered call。完成設定後在總覽啟動 dry-run。</div>`;
+    : `<div class="open-empty-state">還沒有開放中的掩護性買權。完成設定後在總覽開始模擬。</div>`;
   $("closedGroups").innerHTML = closed.length
     ? closed.map((g) => positionCard(g, { closed: true })).join("")
     : `<div class="open-empty-state">尚無平倉紀錄。</div>`;
@@ -643,7 +643,7 @@ $("liveBtn").addEventListener("click", () => setDesired("live"));
 $("stopBtn").addEventListener("click", () => setDesired("stopped"));
 $("pauseBtn").addEventListener("click", () => setDesired("paused"));
 $("panicBtn").addEventListener("click", () => {
-  if (confirm("Panic 會嘗試平倉（實單時為真單）。確定？")) setDesired("panic");
+  if (confirm("緊急平倉會嘗試平倉（實單時為真單）。確定？")) setDesired("panic");
 });
 
 (async function boot() {

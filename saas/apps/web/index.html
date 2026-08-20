@@ -62,7 +62,7 @@
       <div id="landing">
         <section class="hero-panel">
           <p id="heroEyebrow" class="section-eyebrow">Canopy · 樹冠 · Deribit</p>
-          <h2 id="heroTitle" class="hero-title">在自己的現貨上，自動備兌賣 call。</h2>
+          <h2 id="heroTitle" class="hero-title">在自己的現貨上，自動做掩護性買權。</h2>
           <p id="heroLede" class="hero-lede">
             金鑰留在你的 Deribit 子帳。樹冠是遮蔭，不是屋頂——現貨下跌風險仍在，權利金不是收益承諾。
           </p>
@@ -84,13 +84,13 @@
             </li>
             <li>
               <span class="step-index">02</span>
-              <b>只做 Covered Call</b>
-              <p>先有現貨，再賣備兌 call。不是基金、不是代操。</p>
+              <b>只做掩護性買權</b>
+              <p>先有現貨，再賣出買權。不是基金、不是代操。</p>
             </li>
             <li>
               <span class="step-index">03</span>
               <b>先模擬再實單</b>
-              <p>Scout 只有模擬。實單方案須先跑滿 7 天 dry-run。</p>
+              <p>Scout 只有模擬。實單方案須先跑滿 7 天模擬。</p>
             </li>
           </ol>
         </section>
@@ -108,12 +108,12 @@
               <p id="faqOrigin">樹冠罩在已有的現貨上方，不是把資產搬進平台。樹冠是遮蔭，不是屋頂。</p>
             </details>
             <details>
-              <summary>我完全不懂期權，能不能用？</summary>
-              <p>可以先讀<a class="footer-nav-link" href="/strategy" data-page="strategy">策略說明</a>。頁面假設你沒學過選擇權，並寫清最大獲益與最大虧損。仍建議你只拿輸得起的錢。</p>
+              <summary>我完全不懂選擇權，能不能用？</summary>
+              <p>可以先讀<a class="footer-nav-link" href="/strategy" data-page="strategy">策略說明</a>。頁面假設你沒學過選擇權，並寫清最大獲利與最大虧損。仍建議你只拿輸得起的錢。</p>
             </details>
             <details>
               <summary>怎麼開始？</summary>
-              <p>註冊後（非候補模式）會開啟最低方案 30 天試用。登入進控制台：填設定、綁 API，再從總覽啟動 dry-run。</p>
+              <p>註冊後（非候補模式）會開啟最低方案 30 天試用。登入進控制台：填設定、綁 API，再從總覽開始模擬。</p>
             </details>
             <details>
               <summary>API 要開哪些權限？</summary>
@@ -127,7 +127,7 @@
         <section class="hero-panel">
           <p class="section-eyebrow">Strategies</p>
           <h2 class="hero-title">策略種類與說明</h2>
-          <p id="strategyIntro" class="hero-lede">用到期損益圖看最大獲益與最大虧損。數字是示意，可拖動現貨價格。</p>
+          <p id="strategyIntro" class="hero-lede">用到期損益圖看最大獲利與最大虧損。數字是示意，可拖動現貨價格。</p>
         </section>
         <div id="strategyMount" class="page-stack"></div>
       </div>
@@ -198,13 +198,13 @@
             </div>
             <div class="overview-panel">
               <div class="control-row">
-                <button id="dryBtn" type="button" class="ds-btn ds-btn-primary">啟動 dry-run</button>
-                <button id="liveBtn" type="button" class="ds-btn">啟動 live</button>
+                <button id="dryBtn" type="button" class="ds-btn ds-btn-primary">開始模擬</button>
+                <button id="liveBtn" type="button" class="ds-btn">開始實單</button>
                 <button id="stopBtn" type="button" class="ds-btn ds-btn-secondary">停止</button>
-                <button id="pauseBtn" type="button" class="ds-btn ds-btn-secondary">Pause</button>
-                <button id="panicBtn" type="button" class="ds-btn ds-btn-danger">Panic close</button>
+                <button id="pauseBtn" type="button" class="ds-btn ds-btn-secondary">暫停</button>
+                <button id="panicBtn" type="button" class="ds-btn ds-btn-danger">緊急平倉</button>
               </div>
-              <p class="hint">Pause／Panic 會送出指令，不保證成交。</p>
+              <p class="hint">暫停／緊急平倉會送出指令，不保證成交。</p>
               <div id="botMeta" class="stat-grid"></div>
             </div>
           </section>
@@ -215,7 +215,7 @@
             <div class="section-heading">
               <div>
                 <p class="section-eyebrow">Positions</p>
-                <h2 class="section-title">開放中的備兌 call</h2>
+                <h2 class="section-title">開放中的掩護性買權</h2>
               </div>
               <span id="groupMeta" class="open-meta-pill">—</span>
             </div>

@@ -8,7 +8,7 @@
 
 - Regime：`normal` / `elevated` / `crisis`
 - IV rank（BTC／ETH DVOL）
-- 「接近可賣 call」：通過 delta／OTM／MIN_NET_APR 但尚未進場的候選
+- 「接近可賣買權」：通過 delta／OTM／MIN_NET_APR 但尚未進場的候選
 - Per-tenant Telegram／email；Desk 方案再加 webhook
 
 實作建議：`marketd` 寫入共享 snapshot，API 提供 `/api/signals`，worker 不重複打 public 端點。

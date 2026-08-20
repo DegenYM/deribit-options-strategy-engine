@@ -23,6 +23,8 @@ def test_strategies_explain_max_profit_and_max_loss():
     assert payload["v1_strategy"] == "covered_call"
     covered = next(item for item in payload["strategies"] if item["id"] == "covered_call")
     assert covered["available"] is True
+    assert covered["name_zh"].startswith("掩護性買權")
+    assert covered["max_profit"]["title_zh"] == "最大獲利"
     assert "權利金" in covered["max_profit"]["headline_zh"]
     assert "零" in covered["max_loss"]["headline_zh"]
     assert covered["diagram"]["kind"] == "covered_call"

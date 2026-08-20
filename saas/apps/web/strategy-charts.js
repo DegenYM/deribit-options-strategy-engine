@@ -141,7 +141,7 @@ function payoffSvg(d, cursor) {
   const stratPoly = polyline(d.kind, d, mapX, mapY, "chart-line chart-line--strategy");
   const capNote =
     d.kind === "covered_call"
-      ? `<text class="chart-tag" x="${mapX(Math.min(xMax - 5000, (d.strike || xMax) + 8000))}" y="${mapY(payoffAt(d.kind, xMax, d)) - 8}">最大獲益（再漲也停在這）</text>`
+      ? `<text class="chart-tag" x="${mapX(Math.min(xMax - 5000, (d.strike || xMax) + 8000))}" y="${mapY(payoffAt(d.kind, xMax, d)) - 8}">最大獲利（再漲也停在這）</text>`
       : d.kind === "naked_short_call"
         ? `<text class="chart-tag chart-tag--danger" x="${mapX(xMax) - 8}" y="${mapY(payoffAt(d.kind, xMax, d)) + 14}" text-anchor="end">虧損無上限 →</text>`
         : "";
@@ -274,7 +274,7 @@ function renderReadout(d, cursor) {
       ${spotLine}
     </div>
     <div class="readout-bounds">
-      <div><span class="payoff-kicker">圖上最大獲益</span><b class="pnl-pos">${fmtChartUsd(bounds.max)}</b></div>
+      <div><span class="payoff-kicker">圖上最大獲利</span><b class="pnl-pos">${fmtChartUsd(bounds.max)}</b></div>
       <div><span class="payoff-kicker">圖上最大虧損</span><b class="pnl-neg">${bounds.minLabel || fmtChartUsd(bounds.min)}</b></div>
     </div>
   </div>`;

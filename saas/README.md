@@ -1,6 +1,6 @@
 # Canopy
 
-獨立產品品牌 **Canopy**（樹冠）：在使用者已經持有的 Deribit 現貨上方，托管跑 Covered Call。名稱來由見 [`docs/PRODUCT.md`](docs/PRODUCT.md)。
+獨立產品品牌 **Canopy**（樹冠）：在使用者已經持有的 Deribit 現貨上方，托管跑掩護性買權（Covered Call）。名稱來由見 [`docs/PRODUCT.md`](docs/PRODUCT.md)。
 
 這不是代操、不是基金、不是投資建議。APR 與歷史績效**不是**收益承諾。詳見 [`legal/`](legal/)。
 
@@ -8,7 +8,7 @@
 
 ## 目錄
 
-- `apps/web` — dashboard（登入、金鑰、tier、Pause／Panic）
+- `apps/web` — dashboard（登入、金鑰、tier、暫停／緊急平倉）
 - `apps/api` — FastAPI 控制面（auth、Stripe、desired-state、audit）
 - `apps/supervisor` — 依 DB desired-state 啟動每租戶一個 worker
 - `apps/marketd` — 全站一份 Deribit public 行情
@@ -68,12 +68,12 @@ cd saas
 pytest -q
 ```
 
-## 方案（僅 Covered Call）
+## 方案（僅掩護性買權）
 
 | 方案 | USD／月 | 實單 | 幣 | tier | sweep |
 |------|---------|------|----|------|-------|
-| Scout | 49 | 否（dry-run） | BTC | low | 否 |
-| Trader | 99 | 需滿 7 天 dry-run | 1 幣 | low／medium | 否 |
+| Scout | 49 | 否（僅模擬） | BTC | low | 否 |
+| Trader | 99 | 需滿 7 天模擬 | 1 幣 | low／medium | 否 |
 | Pro | 179 | 是 | BTC+ETH | 三檔 | 是 |
 | Desk | 299 | 是 | BTC+ETH | 三檔 | 是（最多 3 子帳） |
 

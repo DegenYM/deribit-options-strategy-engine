@@ -15,7 +15,7 @@ HERO_TITLE_ZH = "像樹冠一樣，罩在已有的 BTC／ETH 上。"
 HERO_TITLE_EN = "A canopy over BTC and ETH you already hold."
 ORIGIN_ZH = (
     "Canopy 原意是森林最上層的樹冠：罩在已經長成的樹上，不是把樹搬進溫室。"
-    "Covered Call 同一結構——先有現貨，再疊加備兌賣 call。"
+    "掩護性買權同一結構——先有現貨，再賣出買權。"
     "金鑰與資產留在你的 Deribit 子帳。樹冠是遮蔭，不是屋頂："
     "擋不住現貨下跌，權利金也不是收益承諾。"
 )
@@ -27,7 +27,7 @@ ORIGIN_EN = (
 )
 WHY_POINTS_ZH = (
     "樹冠罩在已長成的樹上，不是另起一座金庫。",
-    "備兌賣 call 也一樣：先有現貨，再疊加短 call。",
+    "掩護性買權也一樣：先有現貨，再賣出買權。",
     "資產與金鑰留在你的子帳；Canopy 只跑那一層覆蓋。",
     "樹冠是遮蔭不是屋頂，所以不說保護本金、也不保證 APR。",
 )

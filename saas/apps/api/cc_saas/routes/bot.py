@@ -224,7 +224,7 @@ def set_desired(
         if not live_unlocked(user, plan):
             raise HTTPException(
                 status_code=403,
-                detail=f"需先完成 {app_settings.dry_run_min_days} 天 dry-run，或目前方案不含實單",
+                detail=f"需先完成 {app_settings.dry_run_min_days} 天模擬，或目前方案不含實單",
             )
     if desired in {"dry_run", "live"}:
         mark_paper_started(user)

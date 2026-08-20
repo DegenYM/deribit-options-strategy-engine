@@ -35,7 +35,7 @@ class Plan:
 
     def to_public_dict(self) -> dict[str, Any]:
         highlights_zh = [
-            "僅模擬，不下真實單" if not self.live_trading else "可實單（須先跑滿 dry-run）",
+            "僅模擬，不下真實單" if not self.live_trading else "可實單（須先跑滿模擬）",
             f"標的最多 {self.coins_max} 個：" + "／".join(self.allowed_coins),
             "風險檔：" + "／".join(self.allowed_tiers),
             "含 profit sweep" if self.profit_sweep else "不含 profit sweep",
@@ -85,7 +85,7 @@ PLANS: dict[PlanId, Plan] = {
         webhooks=False,
         dry_run_days_before_live=7,
         stripe_price_env="STRIPE_PRICE_SCOUT",
-        blurb_zh="Covered Call 模擬（dry-run）。熟悉 dashboard 與選約邏輯，不下真實單。",
+        blurb_zh="掩護性買權模擬下單。熟悉控制台與選約邏輯，不下真實單。",
         blurb_en="Covered Call paper trading only. Learn the dashboard without live orders.",
     ),
     "trader": Plan(
@@ -103,7 +103,7 @@ PLANS: dict[PlanId, Plan] = {
         webhooks=False,
         dry_run_days_before_live=7,
         stripe_price_env="STRIPE_PRICE_TRADER",
-        blurb_zh="單一標的實單 Covered Call。Telegram 告警與一鍵 Pause / Panic。",
+        blurb_zh="單一標的實單掩護性買權。Telegram 告警與一鍵暫停／緊急平倉。",
         blurb_en="Live Covered Call on one underlying, with Telegram alerts and kill switch.",
     ),
     "pro": Plan(
@@ -172,7 +172,7 @@ def comparison_matrix() -> dict[str, Any]:
             "id": "mode",
             "label_zh": "下單模式",
             "cells": {
-                plan.id: ("僅模擬" if not plan.live_trading else "模擬後可實單") for plan in plans
+                plan.id: ("只做模擬" if not plan.live_trading else "模擬後可實單") for plan in plans
             },
         },
         {
