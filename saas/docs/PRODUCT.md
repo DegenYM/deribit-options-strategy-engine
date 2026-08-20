@@ -1,6 +1,6 @@
 # Canopy 產品架構
 
-品牌名 **Canopy**。v1 只做一件事：在使用者**自己的 Deribit 子帳**上，托管跑 **Covered Call（備兌賣 call）**。
+品牌名 **Canopy**（樹冠）。v1 只做一件事：在使用者**自己的 Deribit 子帳**上，托管跑 **Covered Call（備兌賣 call）**。名稱來由是森林樹冠：罩在已有現貨上方，不是把資產搬進平台。
 
 對齊的參考對象是 [FULY.AI](https://www.fuly.ai/) 這類「交易所 BYOK 機器人 SaaS」，不是基金後台、也不是把舊投資人 portal 包一層。
 
@@ -17,16 +17,23 @@
 
 沒有前三層，控制台看起來會像內部 ops 工具。
 
-## 2. 品牌
+## 2. 品牌來由
 
-**Canopy**（不譯成中文品牌名，用法同 FULY）。
+**Canopy**（中文只作註解：**樹冠**，品牌名仍用英文）。
 
-- 意思：在你**已經持有**的 BTC／ETH 上方加一層備兌 call，像樹冠罩住現貨，不是替你保管資產。
-- 一句話：在自己的現貨上，自動備兌賣 call。
-- 不說：穩定被動收入、保證 APR、無風險權利金、保護本金、代操、跟單。
-- 視覺：沿用引擎 dashboard 的 Obsidian Terminal（DM Sans、IBM Plex Mono、炭黑、teal）。Landing／問卷／控制台同一套，不另做青銅落地頁。
+英語 canopy 是森林最上層的樹冠：罩在**已經長成的樹**上，不是把樹移進溫室，也不是屋頂。Covered Call 同一結構——你先持有 BTC／ETH，再在上方賣出備兌 call。產品因此叫 Canopy：覆蓋你已有的持倉，不保管、不代操。
 
-曾考慮 Overlay、Callkeep、Premia。不選 Aegis／Shield：聽起來像避險保證。不沿用舊 repo 的投資人品牌，以免被當成 AUM 產品。
+對外一句話：**樹冠罩住你已經持有的現貨。**
+
+必須並寫的限制（樹冠隱喻的另一半）：
+
+- 樹冠是遮蔭，不是屋頂 → 現貨下跌風險仍在
+- 不說保護本金、穩定被動收入、保證 APR、無風險權利金
+- 不沿用舊 repo 的投資人／AUM 品牌
+
+曾考慮 Overlay、Callkeep、Premia。不選 Aegis／Shield：聽起來像避險保證。
+
+視覺：沿用引擎 dashboard 的 Obsidian Terminal（DM Sans、IBM Plex Mono、炭黑、teal）。Landing／問卷／控制台同一套。
 
 ## 3. 產品原則
 

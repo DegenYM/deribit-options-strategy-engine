@@ -90,6 +90,9 @@ def test_product_meta_and_schema():
     client = make_client()
     product = client.get("/api/product").json()
     assert product["brand"] == "Canopy"
+    assert product["gloss_zh"] == "樹冠"
+    assert "樹冠" in product["origin_zh"]
+    assert "屋頂" in product["origin_zh"]
     assert product["strategy"] == "covered_call"
     assert "代操" in product["not_claims_zh"]
     schema = client.get("/api/onboarding/schema").json()

@@ -26,7 +26,7 @@ ACKNOWLEDGEMENTS = (
 )
 
 ACK_LABELS_ZH = {
-    "not_advice": "我了解 Canopy 是軟體工具，不是投資建議、基金或代操。",
+    "not_advice": "我了解 Canopy（樹冠）是軟體工具，不是投資建議、基金或代操。",
     "no_apr": "我了解任何 APR、權利金或歷史績效都不是收益承諾。",
     "spot_downside": "我了解 Covered Call 無法消除現貨下跌風險，call 被行使時現貨可能被賣掉。",
     "keys_own": "我會用自己的 Deribit 子帳 API，不開 wallet 權限，並可隨時撤銷金鑰。",

@@ -117,6 +117,16 @@ async function loadPlans() {
   });
 }
 
+function applyBrand(product) {
+  document.title = `${product.brand} · ${product.gloss_zh}`;
+  $("pageSubtitle").textContent = `${product.tagline_zh}不是代操、不是屋頂。`;
+  $("heroEyebrow").textContent = `${product.brand} · ${product.gloss_zh}`;
+  $("heroTitle").textContent = product.hero_title_zh;
+  $("heroLede").textContent = product.origin_zh;
+  $("faqOrigin").textContent = product.origin_zh;
+  $("whyPoints").innerHTML = (product.why_points_zh || []).map((line) => `<li>${line}</li>`).join("");
+}
+
 function renderIntake(schema, product) {
   const questions = schema.questions
     .map(
@@ -390,6 +400,7 @@ $("panicBtn").addEventListener("click", () => {
 
 (async function boot() {
   const [product, schema] = await Promise.all([api("/api/product"), api("/api/onboarding/schema")]);
+  applyBrand(product);
   renderIntake(schema, product);
   await loadPlans();
   try {

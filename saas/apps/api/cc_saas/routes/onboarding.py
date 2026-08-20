@@ -9,7 +9,22 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..audit import audit
-from ..brand import BRAND, EXCHANGE, MODEL, NOT_CLAIMS_ZH, PRODUCT_SLUG, STRATEGY, TAGLINE_EN, TAGLINE_ZH
+from ..brand import (
+    BRAND,
+    EXCHANGE,
+    GLOSS_ZH,
+    HERO_TITLE_EN,
+    HERO_TITLE_ZH,
+    MODEL,
+    NOT_CLAIMS_ZH,
+    ORIGIN_EN,
+    ORIGIN_ZH,
+    PRODUCT_SLUG,
+    STRATEGY,
+    TAGLINE_EN,
+    TAGLINE_ZH,
+    WHY_POINTS_ZH,
+)
 from ..db import get_db
 from ..deps import get_current_user, get_tenant
 from ..models import Onboarding, Tenant, User
@@ -68,8 +83,14 @@ def product_meta():
     return {
         "brand": BRAND,
         "slug": PRODUCT_SLUG,
+        "gloss_zh": GLOSS_ZH,
         "tagline_zh": TAGLINE_ZH,
         "tagline_en": TAGLINE_EN,
+        "hero_title_zh": HERO_TITLE_ZH,
+        "hero_title_en": HERO_TITLE_EN,
+        "origin_zh": ORIGIN_ZH,
+        "origin_en": ORIGIN_EN,
+        "why_points_zh": list(WHY_POINTS_ZH),
         "strategy": STRATEGY,
         "exchange": EXCHANGE,
         "model": MODEL,
@@ -84,7 +105,7 @@ def product_meta():
             "關掉同一子帳上會搶單的其他自動策略",
             "接受 call 被行使時現貨可能被賣掉",
         ],
-        "disclaimer": "Not investment advice. No APR guarantee.",
+        "disclaimer": "Not investment advice. No APR guarantee. A canopy is shade, not a roof.",
     }
 
 
