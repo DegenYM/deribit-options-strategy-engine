@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "deribit-options-strategy-engine"
 version = "0.1.0"
@@ -24,6 +28,9 @@ dev = [
     "pre-commit>=4,<5",
     "httpx>=0.27,<1",
 ]
+
+[tool.setuptools.packages.find]
+include = ["deribit_engine*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

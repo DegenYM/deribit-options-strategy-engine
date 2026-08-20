@@ -94,3 +94,12 @@ Most subcommands require `--account <slug>` (`frontend` is the exception—it ag
 ## Covered Call SaaS (separate product)
 
 A BYOK hosted Covered Call product lives under [`saas/`](saas/). It does **not** use the investor registry, AUM fees, or one-frontend-per-investor ops model. Start with [`saas/README.md`](saas/README.md).
+
+Install that product **from the `saas/` directory**, not this repo root:
+
+```bash
+git checkout cursor/covered-call-saas-1fce
+cd saas
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
