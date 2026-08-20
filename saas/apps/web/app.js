@@ -238,55 +238,9 @@ async function loadStrategies() {
     not_offered: "不提供",
   };
   $("strategyMount").innerHTML =
-    data.strategies
-      .map((s) => {
-        const example = s.example_zh
-          ? `<div class="example-box">
-              <h4>${escapeHtml(s.example_zh.title_zh)}</h4>
-              <p>${escapeHtml(s.example_zh.setup_zh)}</p>
-              <ul>${(s.example_zh.paths || [])
-                .map((path) => `<li><strong>${escapeHtml(path.label_zh)}</strong> ${escapeHtml(path.detail_zh)}</li>`)
-                .join("")}</ul>
-            </div>`
-          : "";
-        return `<article class="section-card priority-section strategy-card ${s.available ? "" : "strategy-card--soon"}">
-          <div class="section-heading">
-            <div>
-              <p class="section-eyebrow">${escapeHtml(s.name_en || "")}</p>
-              <h2 class="section-title">${escapeHtml(s.name_zh)}</h2>
-            </div>
-            <span class="open-meta-pill">${statusLabel[s.status] || s.status}</span>
-          </div>
-          <p class="section-copy">${escapeHtml(s.one_liner_zh)}</p>
-          <p class="hint">${escapeHtml(s.for_whom_zh || "")}</p>
-          <div class="payoff-grid">
-            <aside class="payoff payoff--gain">
-              <p class="payoff-kicker">${escapeHtml(s.max_profit.title_zh)}</p>
-              <h3>${escapeHtml(s.max_profit.headline_zh)}</h3>
-              <p>${escapeHtml(s.max_profit.body_zh)}</p>
-              <p class="hint">何時：${escapeHtml(s.max_profit.when_zh)}</p>
-              <p class="hint">${escapeHtml(s.max_profit.not_zh)}</p>
-            </aside>
-            <aside class="payoff payoff--loss">
-              <p class="payoff-kicker">${escapeHtml(s.max_loss.title_zh)}</p>
-              <h3>${escapeHtml(s.max_loss.headline_zh)}</h3>
-              <p>${escapeHtml(s.max_loss.body_zh)}</p>
-              <p class="hint">何時：${escapeHtml(s.max_loss.when_zh)}</p>
-              <p class="hint">${escapeHtml(s.max_loss.not_zh)}</p>
-            </aside>
-          </div>
-          <h3 class="mini-title">從零開始</h3>
-          <ul class="reason-list">${(s.beginner_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
-          <h3 class="mini-title">實際怎麼走</h3>
-          <ol class="reason-list">${(s.how_it_works_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ol>
-          ${example}
-          <h3 class="mini-title">風險</h3>
-          <ul class="reason-list">${(s.risks_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
-          <h3 class="mini-title">這不是</h3>
-          <ul class="not-list">${(s.not_this_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
-        </article>`;
-      })
-      .join("") + `<p class="hint">${escapeHtml(data.disclaimer_zh || "")}</p>`;
+    data.strategies.map((s) => strategyArticleHtml(s, statusLabel)).join("") +
+    `<p class="hint">${escapeHtml(data.disclaimer_zh || "")}</p>`;
+  bindStrategyCharts($("strategyMount"), data.strategies);
 }
 
 function applyBrand(product) {

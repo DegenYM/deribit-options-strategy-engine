@@ -83,6 +83,54 @@ COVERED_CALL: dict[str, Any] = {
         "不是保護本金或「穩穩的被動收入」。",
         "不是保證每月都收到權利金。",
     ],
+    "diagram": {
+        "kind": "covered_call",
+        "spot": 100000,
+        "strike": 110000,
+        "premium": 1500,
+        "x_min": 40000,
+        "x_max": 140000,
+        "underlying": "BTC",
+        "qty": 1,
+        "note_zh": "示意數字，不是預測、不是回測。可拖動到期現貨價格。",
+        "x_label_zh": "到期現貨價格",
+        "y_label_zh": "相對進場的損益",
+        "series": [
+            {"id": "spot", "label_zh": "只持有現貨"},
+            {"id": "strategy", "label_zh": "現貨 + 賣 call"},
+        ],
+        "pieces": [
+            {"id": "spot", "title_zh": "你已有現貨", "body_zh": "1 BTC 放在自己的子帳。漲跌都是你的。"},
+            {"id": "call", "title_zh": "再賣出買權", "body_zh": "對方付錢買「用 110,000 買走你 BTC」的權利。"},
+            {"id": "sum", "title_zh": "合在一起", "body_zh": "先收 1,500。漲太高現貨可能被買走；下跌幾乎照跌。"},
+        ],
+        "flow": [
+            {"title_zh": "持有現貨", "body_zh": "不是把幣交給平台。"},
+            {"title_zh": "賣出 call", "body_zh": "立刻收到權利金。"},
+            {"title_zh": "等到期", "body_zh": "低於履約價：留下幣與權利金。"},
+            {"title_zh": "或被買走", "body_zh": "高於履約價：幣按履約價賣出。"},
+        ],
+        "scenarios": [
+            {
+                "id": "sideways",
+                "spot": 105000,
+                "label_zh": "不太漲跌",
+                "caption_zh": "Call 作廢。你留下 BTC，並多了權利金。",
+            },
+            {
+                "id": "rally",
+                "spot": 130000,
+                "label_zh": "大漲，被買走",
+                "caption_zh": "現貨按 110,000 賣出。漲超過履約價的那段你拿不到。",
+            },
+            {
+                "id": "crash",
+                "spot": 50000,
+                "label_zh": "大跌",
+                "caption_zh": "Call 作廢，但現貨大虧。1,500 幾乎看不見。",
+            },
+        ],
+    },
 }
 
 CASH_SECURED_PUT: dict[str, Any] = {
@@ -121,6 +169,38 @@ CASH_SECURED_PUT: dict[str, Any] = {
         "v1 未提供，請勿把本頁當成操作手冊。",
     ],
     "not_this_zh": ["不是 Canopy 現在會幫你下的單。"],
+    "diagram": {
+        "kind": "cash_secured_put",
+        "spot": 100000,
+        "strike": 90000,
+        "premium": 2000,
+        "x_min": 0,
+        "x_max": 130000,
+        "underlying": "BTC",
+        "qty": 1,
+        "note_zh": "即將推出。示意圖只用來對照風險形狀，不是操作手冊。",
+        "x_label_zh": "到期現貨價格",
+        "y_label_zh": "這張賣 put 的損益",
+        "series": [
+            {"id": "strategy", "label_zh": "現金擔保賣 put"},
+        ],
+        "pieces": [
+            {"id": "cash", "title_zh": "先留現金", "body_zh": "準備好用履約價買入所需的錢。"},
+            {"id": "put", "title_zh": "賣出認沽", "body_zh": "收權利金，答應跌夠深時要買入。"},
+            {"id": "sum", "title_zh": "合在一起", "body_zh": "沒跌破：留下權利金。大跌：高價買入正在崩的幣。"},
+        ],
+        "flow": [
+            {"title_zh": "準備現金", "body_zh": "擔保買入。"},
+            {"title_zh": "賣出 put", "body_zh": "先收權利金。"},
+            {"title_zh": "沒跌破", "body_zh": "put 作廢，留下權利金。"},
+            {"title_zh": "跌破被指派", "body_zh": "你必須用履約價買入。"},
+        ],
+        "scenarios": [
+            {"id": "up", "spot": 110000, "label_zh": "現貨上漲", "caption_zh": "Put 作廢，最多賺到權利金。"},
+            {"id": "flat", "spot": 95000, "label_zh": "小跌仍在履約價上", "caption_zh": "仍是賺權利金。"},
+            {"id": "crash", "spot": 40000, "label_zh": "大跌被指派", "caption_zh": "用 90,000 買入只值 40,000 的幣。"},
+        ],
+    },
 }
 
 BULL_PUT_SPREAD: dict[str, Any] = {
@@ -153,6 +233,39 @@ BULL_PUT_SPREAD: dict[str, Any] = {
     "example_zh": None,
     "risks_zh": ["價差仍可能虧到上限。", "v1 未提供。"],
     "not_this_zh": ["不是 Canopy 現在會幫你下的單。"],
+    "diagram": {
+        "kind": "bull_put_spread",
+        "spot": 100000,
+        "short_strike": 90000,
+        "long_strike": 80000,
+        "premium": 1500,
+        "x_min": 50000,
+        "x_max": 120000,
+        "underlying": "BTC",
+        "qty": 1,
+        "note_zh": "即將推出。最大虧損被兩檔履約價框住，但上限仍可能很大。",
+        "x_label_zh": "到期現貨價格",
+        "y_label_zh": "價差損益",
+        "series": [
+            {"id": "strategy", "label_zh": "牛市認沽價差"},
+        ],
+        "pieces": [
+            {"id": "short", "title_zh": "賣較高履約價 put", "body_zh": "收權利金。"},
+            {"id": "long", "title_zh": "買較低履約價 put", "body_zh": "付權利金，換一個虧損天花板。"},
+            {"id": "sum", "title_zh": "淨權利金", "body_zh": "最多賺淨收；最多虧兩檔差距減淨收。"},
+        ],
+        "flow": [
+            {"title_zh": "賣出高履約 put", "body_zh": "收一筆。"},
+            {"title_zh": "買入低履約 put", "body_zh": "付一筆較小的。"},
+            {"title_zh": "現貨夠高", "body_zh": "兩張都作廢，留下淨權利金。"},
+            {"title_zh": "現貨夠低", "body_zh": "虧到兩檔差距減淨權利金。"},
+        ],
+        "scenarios": [
+            {"id": "up", "spot": 100000, "label_zh": "現貨維持高檔", "caption_zh": "最大獲益 = 淨權利金。"},
+            {"id": "mid", "spot": 85000, "label_zh": "落在兩檔之間", "caption_zh": "部分虧損。"},
+            {"id": "crash", "spot": 70000, "label_zh": "跌破較低履約價", "caption_zh": "碰到最大虧損。"},
+        ],
+    },
 }
 
 NAKED_SHORT: dict[str, Any] = {
@@ -185,6 +298,38 @@ NAKED_SHORT: dict[str, Any] = {
     "example_zh": None,
     "risks_zh": ["爆倉、追繳、無限損失。"],
     "not_this_zh": ["Canopy 不做裸賣。"],
+    "diagram": {
+        "kind": "naked_short_call",
+        "spot": 100000,
+        "strike": 110000,
+        "premium": 1500,
+        "x_min": 70000,
+        "x_max": 160000,
+        "underlying": "BTC",
+        "qty": 1,
+        "note_zh": "Canopy 不下這類單。右邊虧損沒有天花板，用來對照為什麼 v1 要備兌。",
+        "x_label_zh": "到期現貨價格",
+        "y_label_zh": "裸賣 call 損益",
+        "series": [
+            {"id": "strategy", "label_zh": "裸賣 call（不提供）"},
+        ],
+        "pieces": [
+            {"id": "none", "title_zh": "沒有現貨", "body_zh": "帳戶裡沒有對應的幣。"},
+            {"id": "call", "title_zh": "仍賣出 call", "body_zh": "只收到薄薄的權利金。"},
+            {"id": "sum", "title_zh": "大漲時", "body_zh": "必須到市場高價買幣交割。虧損理論上無上限。"},
+        ],
+        "flow": [
+            {"title_zh": "沒有樹", "body_zh": "沒有現貨。"},
+            {"title_zh": "只賣遮蔭", "body_zh": "收權利金。"},
+            {"title_zh": "現貨不漲", "body_zh": "最多賺權利金。"},
+            {"title_zh": "現貨狂漲", "body_zh": "虧損可以一直增加。"},
+        ],
+        "scenarios": [
+            {"id": "flat", "spot": 100000, "label_zh": "沒大漲", "caption_zh": "賺到權利金。"},
+            {"id": "strike", "spot": 110000, "label_zh": "剛好到履約價", "caption_zh": "仍約等於權利金。"},
+            {"id": "moon", "spot": 160000, "label_zh": "大漲", "caption_zh": "虧損已遠大於權利金，而且還能更大。"},
+        ],
+    },
 }
 
 STRATEGIES: tuple[dict[str, Any], ...] = (
@@ -195,8 +340,9 @@ STRATEGIES: tuple[dict[str, Any], ...] = (
 )
 
 INTRO_ZH = (
-    "先把名詞講清楚。以下用「完全沒學過期權」的方式寫。"
-    "Canopy 現在只幫你下 Covered Call；其他種類是對照與之後可能的方向，不是現在就能開的開關。"
+    "用圖看懂：下面是到期損益圖，不是文章。"
+    "數字是假的示意，可拖動「到期現貨價格」看損益怎麼變。"
+    "Canopy 現在只幫你下 Covered Call；其他圖是對照風險形狀，不是現在能開的開關。"
 )
 DISCLAIMER_ZH = (
     "不是投資建議。最大獲益／最大虧損是策略結構上的說明，實際數字還會被手續費、滑價、提前平倉與被行使時機改變。"
