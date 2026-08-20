@@ -20,8 +20,8 @@ jobs:
           cache: pip
           cache-dependency-path: saas/requirements-dev.txt
       - name: Install
-        run: pip install -r requirements-dev.txt
+        run: pip install -e ".[dev]"
       - name: Ruff
         run: ruff check packages/cc_engine/cc_engine apps tests
       - name: Pytest
-        run: PYTHONPATH=packages/cc_engine:apps/api:apps/supervisor:apps/marketd pytest -q
+        run: pytest -q

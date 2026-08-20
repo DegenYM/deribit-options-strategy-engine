@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "covered-call-saas"
 version = "0.1.0"
@@ -24,6 +28,9 @@ dev = [
     "pytest-socket>=0.7,<1",
     "ruff>=0.9,<1",
 ]
+
+[tool.setuptools.packages.find]
+where = ["packages/cc_engine", "apps/api", "apps/supervisor", "apps/marketd"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

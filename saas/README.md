@@ -18,21 +18,43 @@
 
 ## 本機啟動
 
+`cc_engine` / `cc_saas` 不在系統 Python 路徑裡。請在 **`saas/`** 目錄安裝這個套件，不要在 repo 根目錄直接 `import cc_engine`。
+
 ```bash
+git checkout cursor/covered-call-saas-1fce
 cd saas
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
 cp deploy/.env.example .env
-# 可選：docker compose -f deploy/compose.yml up --build
+```
+
+確認 import：
+
+```bash
+python -c "from cc_engine.settings import CoveredCallSettings; print(CoveredCallSettings)"
+```
+
+啟動 API（editable install 之後不必再設 PYTHONPATH）：
+
+```bash
+uvicorn cc_saas.main:app --reload --port 8080
+```
+
+若不想 `pip install -e .`，改用：
+
+```bash
+cd saas
+export PYTHONPATH=packages/cc_engine:apps/api:apps/supervisor:apps/marketd
+python -c "from cc_engine.settings import CoveredCallSettings; print('ok')"
 uvicorn cc_saas.main:app --app-dir apps/api --reload --port 8080
 ```
 
 另開兩個行程：
 
 ```bash
-PYTHONPATH=packages/cc_engine:apps/api:apps/supervisor python -m cc_supervisor.main
-PYTHONPATH=packages/cc_engine:apps/api:apps/marketd python -m cc_marketd.main
+python -m cc_supervisor.main
+python -m cc_marketd.main
 ```
 
 開發模式登入：`POST /api/auth/magic-link` 會回傳 `dev_token`。Waitlist 預設開啟，需 `POST /api/admin/approve`（管理員）或把第一個使用者在資料庫標成 `is_admin`。
@@ -43,7 +65,7 @@ PYTHONPATH=packages/cc_engine:apps/api:apps/marketd python -m cc_marketd.main
 
 ```bash
 cd saas
-PYTHONPATH=packages/cc_engine:apps/api:apps/supervisor:apps/marketd pytest -q
+pytest -q
 ```
 
 ## 方案（僅 Covered Call）
