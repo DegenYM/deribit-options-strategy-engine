@@ -10,7 +10,7 @@ from ..audit import audit
 from ..config import settings
 from ..crypto import hash_token, new_token
 from ..db import get_db
-from ..deps import get_current_user, issue_session
+from ..deps import get_current_user, get_tenant, issue_session
 from ..models import MagicLink, Tenant, User
 from ..timeutil import as_utc
 
@@ -88,7 +88,7 @@ def logout(response: Response):
 
 
 @router.get("/me")
-def me(user: User = Depends(get_current_user)):
+def me(user: User = Depends(get_current_user), tenant: Tenant = Depends(get_tenant)):
     return {
         "id": user.id,
         "email": user.email,
@@ -98,4 +98,5 @@ def me(user: User = Depends(get_current_user)):
         "paper_started_at": user.paper_started_at.isoformat() if user.paper_started_at else None,
         "live_unlocked_at": user.live_unlocked_at.isoformat() if user.live_unlocked_at else None,
         "dry_run_min_days": settings.dry_run_min_days,
+        "intake_complete": bool(tenant.onboarding and tenant.onboarding.intake_complete),
     }

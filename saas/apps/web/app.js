@@ -1,5 +1,7 @@
 const $ = (id) => document.getElementById(id);
 
+let cachedRecommendation = null;
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     credentials: "include",
@@ -44,6 +46,54 @@ function stampRefresh() {
   $("lastRefresh").textContent = `上次更新：${now.toLocaleTimeString()}`;
 }
 
+function setStep(current) {
+  [
+    ["stepChip1", 1],
+    ["stepChip2", 2],
+    ["stepChip3", 3],
+  ].forEach(([id, n]) => {
+    $(id).className = n === current ? "inv-chip inv-chip--info" : n < current ? "inv-chip inv-chip--success" : "inv-chip inv-chip--neutral";
+  });
+}
+
+function routeScreens(me) {
+  const loggedIn = Boolean(me);
+  show("landing", !loggedIn);
+  show("onboarding", loggedIn && !me.intake_complete);
+  show("waitlist", loggedIn && me.intake_complete && !me.approved);
+  show("app", loggedIn && me.intake_complete && me.approved);
+  $("logoutBtn").classList.toggle("hidden", !loggedIn);
+  $("statusCluster").classList.toggle("hidden", !(loggedIn && me.approved && me.intake_complete));
+  $("headerMarkets").classList.toggle("hidden", !(loggedIn && me.approved && me.intake_complete));
+  $("lastRefresh").classList.toggle("hidden", !(loggedIn && me.approved && me.intake_complete));
+  $("refreshNow").classList.toggle("hidden", !(loggedIn && me.approved && me.intake_complete));
+  if (loggedIn && !me.intake_complete) setStep(1);
+}
+
+function bindSubscribe(containerId, after) {
+  const root = $(containerId);
+  if (!root) return;
+  root.querySelectorAll("button[data-plan]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api("/api/billing/dev-subscribe", {
+          method: "POST",
+          body: JSON.stringify({ plan_id: btn.dataset.plan }),
+        });
+        if (after) await after();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+  });
+}
+
+function planButtons(plans) {
+  return plans
+    .map((plan) => `<button type="button" class="ds-btn" data-plan="${plan.id}">訂閱 ${plan.name}</button>`)
+    .join("");
+}
+
 async function loadPlans() {
   const { plans } = await api("/api/plans");
   $("plansMount").innerHTML = plans
@@ -56,33 +106,91 @@ async function loadPlans() {
       </article>`
     )
     .join("");
-  $("subscribeRow").innerHTML = plans
+  $("subscribeRow").innerHTML = planButtons(plans);
+  $("recommendSubscribe").innerHTML = planButtons(plans);
+  bindSubscribe("subscribeRow", refreshApp);
+  bindSubscribe("recommendSubscribe", async () => {
+    const bill = await api("/api/billing");
+    $("recommendBill").textContent = bill.plan_id
+      ? `已開通 ${bill.plan_id}（${bill.status}）`
+      : "尚未訂閱。";
+  });
+}
+
+function renderIntake(schema, product) {
+  const questions = schema.questions
     .map(
-      (plan) =>
-        `<button type="button" class="ds-btn" data-plan="${plan.id}">訂閱 ${plan.name}</button>`
+      (q) => `<fieldset class="choice-set">
+        <legend>${q.label_zh}</legend>
+        ${q.options
+          .map(
+            (opt) => `<label class="choice-card">
+              <input type="radio" name="${q.id}" value="${opt.id}" required />
+              <span>${opt.label_zh}</span>
+            </label>`
+          )
+          .join("")}
+      </fieldset>`
     )
     .join("");
-  document.querySelectorAll("#subscribeRow button").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      try {
-        await api("/api/billing/dev-subscribe", {
-          method: "POST",
-          body: JSON.stringify({ plan_id: btn.dataset.plan }),
-        });
-        await refreshApp();
-      } catch (err) {
-        alert(err.message);
-      }
-    });
-  });
+  const extras = `<label class="check"><input type="checkbox" id="wantSweep" /> 我想用 profit sweep（只有 Pro／Desk）</label>
+    <label class="check"><input type="checkbox" id="wantAlerts" /> 之後要 Telegram 告警</label>
+    <p class="section-eyebrow">請全部勾選</p>`;
+  const acks = product.acknowledgements
+    .map(
+      (ack) =>
+        `<label class="check ack"><input type="checkbox" name="ack" value="${ack.id}" required /> ${ack.label_zh}</label>`
+    )
+    .join("");
+  $("intakeFields").innerHTML = questions + extras + acks;
+  $("setupChecklist").innerHTML = product.setup_checklist_zh.map((item) => `<li>${item}</li>`).join("");
+}
+
+function showRecommendation(rec) {
+  cachedRecommendation = rec;
+  const plan = rec.plan || {};
+  $("recommendBody").innerHTML = `
+    <p class="section-eyebrow">${rec.plan_name || rec.plan_id}</p>
+    <p class="hero-lede" style="margin:0">${plan.blurb_zh || ""}</p>
+    <div class="stat-grid">
+      <div class="stat-tile"><div class="label">方案</div><div class="value">${rec.plan_id}</div></div>
+      <div class="stat-tile"><div class="label">risk tier</div><div class="value">${rec.risk_tier}</div></div>
+      <div class="stat-tile"><div class="label">coins</div><div class="value">${(rec.coins || []).join(", ")}</div></div>
+      <div class="stat-tile"><div class="label">sweep</div><div class="value">${rec.profit_sweep ? "是" : "否"}</div></div>
+    </div>
+    <ul class="reason-list">${(rec.reasons || []).map((line) => `<li>${line}</li>`).join("")}</ul>`;
+  show("recommendPanel", true);
+  setStep(2);
+}
+
+function readIntakeForm() {
+  const fd = new FormData($("intakeForm"));
+  const acks = [...document.querySelectorAll("input[name=ack]:checked")].map((el) => el.value);
+  return {
+    experience: fd.get("experience"),
+    inventory: fd.get("inventory"),
+    coins: fd.get("coins"),
+    capital_band: fd.get("capital_band"),
+    intent: fd.get("intent"),
+    drawdown: fd.get("drawdown"),
+    want_sweep: $("wantSweep").checked,
+    alerts: $("wantAlerts").checked,
+    acknowledgements: acks,
+  };
 }
 
 async function refreshApp() {
   const me = await api("/api/auth/me");
   $("who").textContent = `${me.email} · ${me.approved ? "已核准" : "waitlist"}`;
+  $("waitlistCopy").textContent = `${me.email} 的調查已保存。核准後才能綁定 API、訂閱與啟動 dry-run。`;
+  routeScreens(me);
+  if (!me.approved || !me.intake_complete) return;
+
   const dash = await api("/api/dashboard");
   const bot = await api("/api/bot/status");
   const bill = await api("/api/billing");
+  const onboarding = await api("/api/onboarding");
+  cachedRecommendation = onboarding.recommendation;
   $("billStatus").textContent = bill.plan_id
     ? `目前方案 ${bill.plan_id}（${bill.status}）`
     : "尚未訂閱。開發模式可用下方按鈕開通。";
@@ -97,7 +205,6 @@ async function refreshApp() {
   setChip($("desiredBadge"), `狀態 · ${bot.desired}`, desiredVariant(bot.desired));
   setChip($("tierBadge"), `Risk · ${bot.risk_tier || "—"}`, "warning");
   setChip($("credsBadge"), `金鑰 · ${bot.has_credentials ? "已綁定" : "未設定"}`, bot.has_credentials ? "success" : "neutral");
-  $("statusCluster").classList.remove("hidden");
 
   $("botMeta").innerHTML = [
     ["desired", bot.desired],
@@ -108,11 +215,19 @@ async function refreshApp() {
     ["現貨 BTC", fmtPrice(btc)],
     ["現貨 ETH", fmtPrice(eth)],
   ]
-    .map(
-      ([label, value]) =>
-        `<div class="stat-tile"><div class="label">${label}</div><div class="value">${value}</div></div>`
-    )
+    .map(([label, value]) => `<div class="stat-tile"><div class="label">${label}</div><div class="value">${value}</div></div>`)
     .join("");
+
+  const rec = onboarding.recommendation;
+  const settingsDiffer =
+    rec &&
+    (rec.risk_tier !== bot.risk_tier ||
+      rec.profit_sweep !== !!bot.profit_sweep ||
+      (rec.coins || []).join(",") !== (bot.coins || []).join(","));
+  show("applyBanner", Boolean(rec && settingsDiffer));
+  if (rec) {
+    $("applyCopy").textContent = `調查建議 ${rec.plan_id} · ${rec.risk_tier} · ${(rec.coins || []).join(", ")}`;
+  }
 
   const groups = dash.bot.open_groups || [];
   $("groupMeta").textContent = `${groups.length} open`;
@@ -154,8 +269,6 @@ $("loginForm").addEventListener("submit", async (event) => {
   });
   $("loginHint").textContent = "開發模式：正在使用回傳的 magic token 登入…";
   await api("/api/auth/verify", { method: "POST", body: JSON.stringify({ token: requested.dev_token }) });
-  show("gate", false);
-  show("app", true);
   $("logoutBtn").classList.remove("hidden");
   await refreshApp();
 });
@@ -167,10 +280,50 @@ $("logoutBtn").addEventListener("click", async () => {
 
 $("refreshNow").addEventListener("click", async () => {
   try {
-    await api("/api/auth/me");
     await refreshApp();
   } catch {
     $("loginHint").textContent = "尚未登入。";
+  }
+});
+
+$("intakeForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const saved = await api("/api/onboarding", {
+      method: "POST",
+      body: JSON.stringify(readIntakeForm()),
+    });
+    $("intakeHint").textContent = "調查已保存。";
+    showRecommendation(saved.recommendation);
+  } catch (err) {
+    $("intakeHint").textContent = err.message;
+  }
+});
+
+$("toChecklistBtn").addEventListener("click", () => {
+  show("setupPanel", true);
+  setStep(3);
+  $("setupPanel").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
+$("enterAppBtn").addEventListener("click", async () => {
+  await refreshApp();
+});
+
+$("applyRecBtn").addEventListener("click", async () => {
+  if (!cachedRecommendation) return;
+  try {
+    await api("/api/bot/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        risk_tier: cachedRecommendation.risk_tier,
+        coins: cachedRecommendation.coins,
+        profit_sweep: cachedRecommendation.profit_sweep,
+      }),
+    });
+    await refreshApp();
+  } catch (err) {
+    alert(err.message);
   }
 });
 
@@ -236,15 +389,13 @@ $("panicBtn").addEventListener("click", () => {
 });
 
 (async function boot() {
+  const [product, schema] = await Promise.all([api("/api/product"), api("/api/onboarding/schema")]);
+  renderIntake(schema, product);
   await loadPlans();
   try {
-    await api("/api/auth/me");
-    show("gate", false);
-    show("app", true);
     $("logoutBtn").classList.remove("hidden");
     await refreshApp();
   } catch {
-    show("gate", true);
-    show("app", false);
+    routeScreens(null);
   }
 })();

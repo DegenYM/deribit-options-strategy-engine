@@ -60,6 +60,7 @@ class Tenant(Base):
     subscription: Mapped[Subscription | None] = relationship(back_populates="tenant", uselist=False)
     bot_settings: Mapped[BotSettings | None] = relationship(back_populates="tenant", uselist=False)
     desired_state: Mapped[DesiredState | None] = relationship(back_populates="tenant", uselist=False)
+    onboarding: Mapped[Onboarding | None] = relationship(back_populates="tenant", uselist=False)
 
 
 class Credential(Base):
@@ -90,6 +91,31 @@ class Subscription(Base):
     )
 
     tenant: Mapped[Tenant] = relationship(back_populates="subscription")
+
+
+class Onboarding(Base):
+    __tablename__ = "onboardings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id"), unique=True)
+    experience: Mapped[str] = mapped_column(String(32), default="")
+    inventory: Mapped[str] = mapped_column(String(32), default="")
+    coins: Mapped[str] = mapped_column(String(16), default="BTC")
+    capital_band: Mapped[str] = mapped_column(String(16), default="")
+    intent: Mapped[str] = mapped_column(String(16), default="")
+    drawdown: Mapped[str] = mapped_column(String(16), default="")
+    want_sweep: Mapped[bool] = mapped_column(Boolean, default=False)
+    alerts: Mapped[bool] = mapped_column(Boolean, default=False)
+    acknowledgements: Mapped[str] = mapped_column(Text, default="[]")
+    recommended_plan_id: Mapped[str] = mapped_column(String(32), default="")
+    recommended_tier: Mapped[str] = mapped_column(String(16), default="")
+    recommended_coins: Mapped[str] = mapped_column(String(32), default="")
+    recommended_sweep: Mapped[bool] = mapped_column(Boolean, default=False)
+    recommend_reasons: Mapped[str] = mapped_column(Text, default="[]")
+    intake_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    tenant: Mapped[Tenant] = relationship(back_populates="onboarding")
 
 
 class BotSettings(Base):

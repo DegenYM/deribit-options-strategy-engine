@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from .brand import BRAND, PRODUCT_SLUG, STRATEGY, TAGLINE_EN
 from .config import settings
 from .db import init_db
 from .routes.admin import router as admin_router
@@ -14,14 +15,15 @@ from .routes.auth import router as auth_router
 from .routes.billing import router as billing_router
 from .routes.bot import router as bot_router
 from .routes.dashboard import router as dashboard_router
+from .routes.onboarding import router as onboarding_router
 
 
 def create_app() -> FastAPI:
     init_db()
     app = FastAPI(
-        title="Covered Call SaaS",
+        title=f"{BRAND} Covered Call",
         version="0.1.0",
-        description="BYOK hosted Covered Call automation. Not investment advice.",
+        description=f"{TAGLINE_EN} Not investment advice.",
     )
     app.add_middleware(
         CORSMiddleware,
@@ -31,6 +33,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(auth_router)
+    app.include_router(onboarding_router)
     app.include_router(billing_router)
     app.include_router(bot_router)
     app.include_router(dashboard_router)
@@ -40,8 +43,9 @@ def create_app() -> FastAPI:
     def health():
         return {
             "ok": True,
-            "product": "covered-call-saas",
-            "strategy": "covered_call",
+            "brand": BRAND,
+            "product": PRODUCT_SLUG,
+            "strategy": STRATEGY,
             "disclaimer": "Not investment advice. No APR guarantee.",
         }
 

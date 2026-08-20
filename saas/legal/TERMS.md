@@ -1,6 +1,6 @@
-# Covered Call SaaS — 服務條款（草案）
+# Canopy — 服務條款（草案）
 
-版本：0.1｜適用產品：Covered Call 全托管軟體工具（BYOK）
+版本：0.1｜適用產品：Canopy Covered Call 全托管軟體工具（BYOK）
 
 > 本文件為產品上線前草案，正式效力以律師審閱後版本為準。使用本服務即表示你已閱讀風險揭露。
 

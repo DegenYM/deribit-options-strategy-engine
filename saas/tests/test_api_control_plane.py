@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from cc_saas.db import SessionLocal
 from cc_saas.models import User
 from conftest import approve, make_client, signup
+from test_onboarding import _intake
 
 
 def test_health_and_plans():
@@ -31,6 +32,8 @@ def test_subscribe_settings_and_dry_run_gate():
     approve("live@example.com")
     sub = client.post("/api/billing/dev-subscribe", json={"plan_id": "trader"})
     assert sub.status_code == 200
+    intake = client.post("/api/onboarding", json=_intake())
+    assert intake.status_code == 200
     creds = client.post(
         "/api/bot/credentials",
         json={"client_id": "deribit-client", "client_secret": "abcdefghijklmnop"},

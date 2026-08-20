@@ -27,6 +27,11 @@ from ..entitlements import (
 )
 from ..models import BotSettings, Credential, DesiredState, Tenant, User
 
+
+def _assert_intake(tenant: Tenant) -> None:
+    if tenant.onboarding is None or not tenant.onboarding.intake_complete:
+        raise HTTPException(status_code=400, detail="請先完成開通前調查，再儲存設定或啟動 bot")
+
 router = APIRouter(prefix="/api/bot", tags=["bot"])
 
 ALLOWED_DESIRED = frozenset({"stopped", "dry_run", "live", "paused", "panic"})
@@ -170,6 +175,7 @@ def save_settings(
     db: Session = Depends(get_db),
 ):
     assert_approved(user)
+    _assert_intake(tenant)
     plan = active_plan(tenant.subscription)
     coins = [c.strip().upper() for c in body.coins if c.strip()]
     if not can_use_tier(plan, body.risk_tier):
@@ -207,6 +213,7 @@ def set_desired(
     db: Session = Depends(get_db),
 ):
     assert_approved(user)
+    _assert_intake(tenant)
     desired = body.desired.strip().lower()
     if desired not in ALLOWED_DESIRED:
         raise HTTPException(status_code=400, detail="非法 desired state")

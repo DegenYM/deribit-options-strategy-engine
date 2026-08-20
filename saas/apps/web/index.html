@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Covered Call · Deribit</title>
+    <title>Canopy · Deribit Covered Call</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -18,11 +18,12 @@
     <a class="skip-link" href="#dashboard-main">跳到內容</a>
     <header class="app-header">
       <div class="dashboard-shell header-shell">
-        <div class="header-title-block">
-          <h1 class="page-title">Covered Call</h1>
-          <p class="page-subtitle">
-            BYOK 備兌賣 call · 平台托管引擎。不是代操、不是投資建議。
-          </p>
+        <div class="header-title-block brand-lockup">
+          <span class="brand-mark" aria-hidden="true">C</span>
+          <div>
+            <h1 class="page-title">Canopy</h1>
+            <p class="page-subtitle">在自己持有的現貨上，自動備兌賣 call。不是代操、不是基金。</p>
+          </div>
         </div>
         <div id="statusCluster" class="header-status-cluster hidden" aria-label="帳戶狀態">
           <span id="whoBadge" class="inv-chip inv-chip--neutral">帳戶 · —</span>
@@ -31,7 +32,7 @@
           <span id="tierBadge" class="inv-chip inv-chip--warning">Risk · —</span>
           <span id="credsBadge" class="inv-chip inv-chip--neutral">金鑰 · —</span>
         </div>
-        <div class="header-market-strip" aria-label="現貨指數">
+        <div id="headerMarkets" class="header-market-strip hidden" aria-label="現貨指數">
           <div class="header-market-card header-market-card--btc">
             <span class="header-market-symbol">BTC</span>
             <span id="headerSpotBtc" class="header-market-price">—</span>
@@ -44,34 +45,165 @@
         <div class="header-actions">
           <a class="footer-nav-link" href="/legal/RISK_DISCLOSURE.zh-TW.md">風險揭露</a>
           <a class="footer-nav-link" href="/legal/TERMS.md">條款</a>
-          <span id="lastRefresh" aria-live="polite">上次更新：—</span>
-          <button id="refreshNow" type="button" class="ds-btn ds-btn-secondary">Refresh</button>
+          <span id="lastRefresh" class="hidden" aria-live="polite">上次更新：—</span>
+          <button id="refreshNow" type="button" class="ds-btn ds-btn-secondary hidden">Refresh</button>
           <button id="logoutBtn" type="button" class="ds-btn ds-btn-secondary hidden">登出</button>
         </div>
       </div>
     </header>
 
     <main id="dashboard-main" class="dashboard-shell dashboard-main">
-      <section id="gate" class="section-card priority-section">
-        <div class="section-heading">
-          <div>
-            <p class="section-eyebrow">Access</p>
-            <h2 class="section-title">在自己的 Deribit 子帳跑 Covered Call</h2>
-          </div>
-          <p class="section-copy">
-            金鑰由你保管與撤銷。第一版只做備兌賣 call。APR 不是收益承諾。
+      <div id="landing">
+        <section class="hero-panel">
+          <p class="section-eyebrow">BYOK · Deribit · Covered Call only</p>
+          <h2 class="hero-title">在自己的子帳跑備兌賣 call。</h2>
+          <p class="hero-lede">
+            Canopy 托管引擎，金鑰留在你的 Deribit。第一版只做 Covered Call。權利金不是收益承諾，現貨下跌風險仍在。
           </p>
+          <form id="loginForm" class="login-row">
+            <label class="field">
+              <span>Email</span>
+              <input type="email" id="email" required placeholder="you@example.com" autocomplete="email" />
+            </label>
+            <button type="submit" class="ds-btn ds-btn-primary">寄出登入連結</button>
+          </form>
+          <p id="loginHint" class="hint"></p>
+        </section>
+
+        <section class="section-card priority-section">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">How it works</p>
+              <h2 class="section-title">開通順序，對齊認真的交易 SaaS</h2>
+            </div>
+            <p class="section-copy">先調查、再建議方案、再綁 API。不會一登入就丟 risk tier 下拉給你填。</p>
+          </div>
+          <ol class="step-grid">
+            <li>
+              <span class="step-index">01</span>
+              <strong>調查</strong>
+              <p>經驗、現貨在哪、幣別、目的、回撤承受度，以及五則風險勾選。</p>
+            </li>
+            <li>
+              <span class="step-index">02</span>
+              <strong>建議</strong>
+              <p>映射 Scout／Trader／Pro／Desk 與參數。你可以改訂，不是強制。</p>
+            </li>
+            <li>
+              <span class="step-index">03</span>
+              <strong>清單</strong>
+              <p>子帳、現貨、API 權限白名單。然後才進控制台做 dry-run。</p>
+            </li>
+          </ol>
+        </section>
+
+        <section class="section-card priority-section">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">Not this</p>
+              <h2 class="section-title">Canopy 不是什麼</h2>
+            </div>
+          </div>
+          <ul class="not-list">
+            <li>不是基金、投顧、跟單或代操</li>
+            <li>不保管資產、不收管理費或績效費</li>
+            <li>不保證 APR、勝率或本金</li>
+            <li>Pause／Panic 不保證成交</li>
+          </ul>
+        </section>
+
+        <section class="section-card priority-section">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">FAQ</p>
+              <h2 class="section-title">開通前會被問到的事</h2>
+            </div>
+          </div>
+          <div class="faq-list">
+            <details open>
+              <summary>為什麼要先做調查？</summary>
+              <p>Covered Call 需要你已經持有現貨。問卷用來建議方案與 risk tier，避免還沒現貨就開實單。</p>
+            </details>
+            <details>
+              <summary>API 要開哪些權限？</summary>
+              <p>只要 account:read 與 trade:read_write。不要開 wallet。建議用子帳，並設 IP 白名單。</p>
+            </details>
+            <details>
+              <summary>什麼時候才能實單？</summary>
+              <p>Scout 只有 dry-run。Trader／Pro／Desk 須先跑滿 7 天模擬。Live 解鎖後仍可隨時 Pause。</p>
+            </details>
+            <details>
+              <summary>被 call away 會怎樣？</summary>
+              <p>短 call 被行使時，子帳裡的現貨可能被賣掉。這是策略機制，不是系統故障。</p>
+            </details>
+          </div>
+        </section>
+
+        <section class="section-card priority-section">
+          <p class="section-eyebrow plan-kicker">Plans</p>
+          <h2 class="section-title">方案</h2>
+          <p class="section-copy">價格是訂閱費，不是績效費。APR 不是承諾。</p>
+          <div id="plansMount" class="plan-grid"></div>
+        </section>
+      </div>
+
+      <section id="waitlist" class="section-card priority-section hidden">
+        <p class="section-eyebrow">Waitlist</p>
+        <h2 class="section-title">調查已收到，等待核准</h2>
+        <p class="section-copy" id="waitlistCopy">核准後才能綁定 API、訂閱與啟動 dry-run。</p>
+      </section>
+
+      <section id="onboarding" class="hidden app-stack">
+        <div class="stepper" aria-label="開通步驟">
+          <span id="stepChip1" class="inv-chip inv-chip--info">1 · 調查</span>
+          <span id="stepChip2" class="inv-chip inv-chip--neutral">2 · 建議</span>
+          <span id="stepChip3" class="inv-chip inv-chip--neutral">3 · 清單</span>
         </div>
-        <form id="loginForm" class="login-row">
-          <label class="field">
-            <span>Email</span>
-            <input type="email" id="email" required placeholder="you@example.com" autocomplete="email" />
-          </label>
-          <button type="submit" class="ds-btn ds-btn-primary">寄出登入連結</button>
+
+        <form id="intakeForm" class="section-card priority-section">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">Intake</p>
+              <h2 class="section-title">開通前調查</h2>
+            </div>
+            <p class="section-copy">這不是 KYC，也不是投資建議。答案只用來預填方案與參數。</p>
+          </div>
+          <div id="intakeFields" class="intake-fields"></div>
+          <div class="control-row">
+            <button type="submit" class="ds-btn ds-btn-primary">送出調查</button>
+          </div>
+          <p id="intakeHint" class="hint"></p>
         </form>
-        <p id="loginHint" class="hint"></p>
-        <p class="section-eyebrow plan-kicker">Plans</p>
-        <div id="plansMount" class="plan-grid"></div>
+
+        <section id="recommendPanel" class="section-card priority-section hidden">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">Recommendation</p>
+              <h2 class="section-title">建議方案</h2>
+            </div>
+            <p class="section-copy">可以改訂。沒有「正確」方案這件事。</p>
+          </div>
+          <div id="recommendBody" class="overview-panel"></div>
+          <p id="recommendBill" class="hint"></p>
+          <div class="control-row wrap" id="recommendSubscribe"></div>
+          <div class="control-row">
+            <button id="toChecklistBtn" type="button" class="ds-btn ds-btn-secondary">下一步：開通清單</button>
+          </div>
+        </section>
+
+        <section id="setupPanel" class="section-card priority-section hidden">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">Checklist</p>
+              <h2 class="section-title">綁定 API 之前</h2>
+            </div>
+          </div>
+          <ol id="setupChecklist" class="checklist"></ol>
+          <p class="section-copy">完成清單後進入控制台綁定金鑰。實單前必須先 dry-run。</p>
+          <div class="control-row">
+            <button id="enterAppBtn" type="button" class="ds-btn ds-btn-primary">進入控制台</button>
+          </div>
+        </section>
       </section>
 
       <div id="app" class="hidden app-stack">
@@ -80,6 +212,14 @@
           <p class="exchange-outage-body">
             本工具不構成投資建議。Covered Call 無法消除現貨下跌風險，Pause／Panic 不保證成交。
           </p>
+        </aside>
+
+        <aside id="applyBanner" class="recommend-banner hidden">
+          <div>
+            <p class="section-eyebrow">From intake</p>
+            <p id="applyCopy" class="section-copy"></p>
+          </div>
+          <button id="applyRecBtn" type="button" class="ds-btn ds-btn-primary">套用建議參數</button>
         </aside>
 
         <section class="section-card priority-section">
@@ -186,7 +326,7 @@
     </main>
 
     <footer class="page-footer">
-      Not investment advice. Covered Call does not remove spot downside.
+      Canopy is software, not investment advice. Covered Call does not remove spot downside.
       <span class="page-footer-links">
         <a class="footer-nav-link" href="/legal/PRIVACY.md">Privacy</a>
         ·

@@ -1,6 +1,8 @@
-# Covered Call SaaS
+# Canopy
 
-獨立產品：**使用者自備 Deribit API Key（BYOK）**，雲端托管只跑 **Covered Call**。
+獨立產品品牌 **Canopy**：使用者自備 Deribit API Key（BYOK），雲端托管只跑 **Covered Call**。
+
+產品架構（品牌、開通調查、控制台 IA）見 [`docs/PRODUCT.md`](docs/PRODUCT.md)。
 
 這不是代操、不是基金、不是投資建議。APR 與歷史績效**不是**收益承諾。詳見 [`legal/`](legal/)。
 
