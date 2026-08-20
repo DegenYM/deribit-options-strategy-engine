@@ -107,40 +107,102 @@ function formatIvRankPctText(pct) {
   return rounded.toFixed(1);
 }
 
-export function resolveIvRankPct(spotPayload, symbol) {
+function resolveUnitIntervalPct(ratioMap, pctMap, symbol) {
   const key = String(symbol || "").toUpperCase();
-  const rank = num(spotPayload?.iv_rank?.[key]);
+  const rank = num(ratioMap?.[key]);
   if (rank !== null) {
     if (rank >= 0 && rank <= 1) return roundIvRankPctOneDecimal(rank * 100);
     if (rank > 1 && rank <= 100) return roundIvRankPctOneDecimal(rank);
   }
-  const pctRaw = num(spotPayload?.iv_rank_pct?.[key]);
+  const pctRaw = num(pctMap?.[key]);
   if (pctRaw !== null && pctRaw >= 0 && pctRaw <= 100) {
     return roundIvRankPctOneDecimal(pctRaw);
   }
   return null;
 }
 
-function formatIvRankLabel(pct, symbol) {
+export function resolveIvRankPct(spotPayload, symbol) {
+  return resolveUnitIntervalPct(spotPayload?.iv_rank, spotPayload?.iv_rank_pct, symbol);
+}
+
+export function resolveIvPercentilePct(spotPayload, symbol) {
+  return resolveUnitIntervalPct(
+    spotPayload?.iv_percentile,
+    spotPayload?.iv_percentile_pct,
+    symbol
+  );
+}
+
+function formatIvLabel(dvol) {
+  if (dvol === null || dvol === undefined || !Number.isFinite(dvol) || dvol <= 0) {
+    return null;
+  }
+  const rounded = Math.round(dvol * 10) / 10;
+  const text = rounded.toFixed(1);
+  return {
+    text: i18n(`IV ${text}%`, `IV ${text}%`),
+    title: i18n(`Implied vol (DVOL) ${text}%`, `隱含波動率（DVOL）${text}%`),
+    value: rounded,
+  };
+}
+
+function formatIvRankLabel(pct) {
   const pctText = formatIvRankPctText(pct);
   if (pctText === null) return null;
   const rounded = roundIvRankPctOneDecimal(pct);
-  const dvol = num(STATE.lastDvol?.[symbol]);
   const lookback = num(STATE.ivRankLookbackDays);
   const detail =
-    dvol !== null && lookback !== null
+    lookback !== null
       ? i18n(
-          `IV Rank ${pctText}% (DVOL ${dvol}, ${lookback}d H/L range)`,
-          `IV Rank ${pctText}%（DVOL ${dvol}，${lookback} 日 K 高低區間）`
+          `IV Rank ${pctText}% (${lookback}d H/L range)`,
+          `IV Rank ${pctText}%（${lookback} 日 K 高低區間）`
         )
       : i18n(`IV Rank ${pctText}%`, `IV Rank ${pctText}%`);
   return { text: i18n(`IVR ${pctText}%`, `IVR ${pctText}%`), title: detail, pct: rounded };
+}
+
+function formatIvPercentileLabel(pct) {
+  const pctText = formatIvRankPctText(pct);
+  if (pctText === null) return null;
+  const rounded = roundIvRankPctOneDecimal(pct);
+  const lookback = num(STATE.ivRankLookbackDays);
+  const detail =
+    lookback !== null
+      ? i18n(
+          `IV Percentile ${pctText}% (share of ${lookback}d closes below current)`,
+          `IV Percentile ${pctText}%（過去 ${lookback} 日收盤低於現值的占比）`
+        )
+      : i18n(`IV Percentile ${pctText}%`, `IV Percentile ${pctText}%`);
+  return { text: i18n(`IVP ${pctText}%`, `IVP ${pctText}%`), title: detail, pct: rounded };
 }
 
 function ivrLevelClass(pct) {
   if (pct < 25) return "header-ivr--low";
   if (pct < 60) return "header-ivr--mid";
   return "header-ivr--high";
+}
+
+const VOL_LEVEL_CLASSES = ["header-ivr--low", "header-ivr--mid", "header-ivr--high"];
+
+function setHeaderVolChip(el, meta, { colorByPct = false } = {}) {
+  if (!el) return;
+  el.classList.remove(...VOL_LEVEL_CLASSES);
+  if (meta) {
+    el.hidden = false;
+    el.textContent = meta.text;
+    el.title = meta.title;
+    if (colorByPct && meta.pct != null && Number.isFinite(meta.pct)) {
+      el.dataset.pct = String(meta.pct);
+      el.classList.add(ivrLevelClass(meta.pct));
+    } else {
+      delete el.dataset.pct;
+    }
+  } else {
+    el.hidden = true;
+    el.textContent = "";
+    el.removeAttribute("title");
+    delete el.dataset.pct;
+  }
 }
 
 function formatPriceChange24hText(pct) {
@@ -159,10 +221,13 @@ function priceChange24hClass(pct) {
 
 function updateHeaderMarketLine(symbol, spotUsd, ivRankPct, priceChangePct24h = null) {
   const key = String(symbol || "").toUpperCase();
-  const priceEl = document.getElementById(`header-spot-${key.toLowerCase()}-price`);
-  const changeEl = document.getElementById(`header-spot-${key.toLowerCase()}-change`);
-  const ivrEl = document.getElementById(`header-spot-${key.toLowerCase()}-ivr`);
-  const legacyEl = document.getElementById(`header-spot-${key.toLowerCase()}`);
+  const slug = key.toLowerCase();
+  const priceEl = document.getElementById(`header-spot-${slug}-price`);
+  const changeEl = document.getElementById(`header-spot-${slug}-change`);
+  const ivEl = document.getElementById(`header-spot-${slug}-iv`);
+  const ivrEl = document.getElementById(`header-spot-${slug}-ivr`);
+  const ivpEl = document.getElementById(`header-spot-${slug}-ivp`);
+  const legacyEl = document.getElementById(`header-spot-${slug}`);
   const priceText =
     spotUsd !== null && spotUsd > 0 ? fmt.usd2.format(spotUsd) : "—";
   const fullSpotPart =
@@ -188,25 +253,21 @@ function updateHeaderMarketLine(symbol, spotUsd, ivRankPct, priceChangePct24h = 
       changeEl.removeAttribute("title");
     }
   }
-  const ivMeta = formatIvRankLabel(ivRankPct, key);
-  if (ivrEl) {
-    ivrEl.classList.remove("header-ivr--low", "header-ivr--mid", "header-ivr--high");
-    if (ivMeta) {
-      ivrEl.hidden = false;
-      ivrEl.textContent = ivMeta.text;
-      ivrEl.title = ivMeta.title;
-      ivrEl.dataset.ivrPct = String(ivMeta.pct);
-      ivrEl.classList.add(ivrLevelClass(ivMeta.pct));
-    } else {
-      ivrEl.hidden = true;
-      ivrEl.textContent = "";
-      ivrEl.removeAttribute("title");
-      delete ivrEl.dataset.ivrPct;
-    }
-  }
+  const ivMeta = formatIvLabel(num(STATE.lastDvol?.[key]));
+  const ivrMeta = formatIvRankLabel(ivRankPct);
+  const ivpMeta = formatIvPercentileLabel(STATE.lastIvPercentilePct?.[key]);
+  setHeaderVolChip(ivEl, ivMeta);
+  setHeaderVolChip(ivrEl, ivrMeta, { colorByPct: true });
+  setHeaderVolChip(ivpEl, ivpMeta, { colorByPct: true });
   if (legacyEl && !priceEl) {
-    legacyEl.textContent = ivMeta ? `${fullSpotPart} · ${ivMeta.text}` : fullSpotPart;
-    legacyEl.title = ivMeta?.title || "";
+    const chipParts = [ivMeta, ivrMeta, ivpMeta].filter(Boolean).map((m) => m.text);
+    legacyEl.textContent = chipParts.length
+      ? `${fullSpotPart} · ${chipParts.join(" · ")}`
+      : fullSpotPart;
+    legacyEl.title = [ivMeta, ivrMeta, ivpMeta]
+      .filter(Boolean)
+      .map((m) => m.title)
+      .join(" · ");
   }
 }
 
@@ -430,8 +491,10 @@ export function applySpotPayload(d, { renderDependentViews = false, updateDom = 
   STATE.lastPriceChangePct24h.ETH = num(d?.price_change_pct_24h?.ETH);
   STATE.lastIvRankPct.BTC = resolveIvRankPct(d, "BTC");
   STATE.lastIvRankPct.ETH = resolveIvRankPct(d, "ETH");
-  STATE.lastDvol.BTC = num(d?.dvol?.BTC);
-  STATE.lastDvol.ETH = num(d?.dvol?.ETH);
+  STATE.lastIvPercentilePct.BTC = resolveIvPercentilePct(d, "BTC");
+  STATE.lastIvPercentilePct.ETH = resolveIvPercentilePct(d, "ETH");
+  STATE.lastDvol.BTC = num(d?.dvol?.BTC ?? d?.iv?.BTC);
+  STATE.lastDvol.ETH = num(d?.dvol?.ETH ?? d?.iv?.ETH);
   STATE.ivRankLookbackDays = num(d?.iv_rank_lookback_days);
   if (updateDom) {
     updateHeaderSpotDom();

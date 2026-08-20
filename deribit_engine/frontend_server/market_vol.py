@@ -8,7 +8,7 @@ from typing import Any
 
 from ..client import DeribitClient
 from ..utils import format_decimal, to_decimal, utc_now_ms
-from ..vol_metrics import dvol_iv_rank_from_daily_rows
+from ..vol_metrics import dvol_iv_percentile_from_daily_rows, dvol_iv_rank_from_daily_rows
 
 _DEFAULT_CURRENCIES = ("BTC", "ETH")
 _DEFAULT_LOOKBACK_DAYS = 365
@@ -63,11 +63,13 @@ def fetch_iv_rank_snapshot(
     currencies: Iterable[str] = _DEFAULT_CURRENCIES,
     lookback_days: int = _DEFAULT_LOOKBACK_DAYS,
 ) -> dict[str, Any]:
-    """Return per-currency DVOL and IV rank for dashboard display."""
+    """Return per-currency DVOL, IV rank, and IV percentile for dashboard display."""
     end_timestamp = utc_now_ms()
     start_timestamp = end_timestamp - (lookback_days * 24 * 3600 * 1000)
     iv_rank: dict[str, str | None] = {}
     iv_rank_pct: dict[str, str | None] = {}
+    iv_percentile: dict[str, str | None] = {}
+    iv_percentile_pct: dict[str, str | None] = {}
     dvol: dict[str, str | None] = {}
     for currency in currencies:
         ccy = str(currency or "").upper()
@@ -86,6 +88,11 @@ def fetch_iv_rank_snapshot(
                 ts_ms=end_timestamp,
                 lookback_days=lookback_days,
             )
+            percentile = dvol_iv_percentile_from_daily_rows(
+                rows,
+                ts_ms=end_timestamp,
+                lookback_days=lookback_days,
+            )
             latest = to_decimal(rows[-1][4]) if rows else None
             if rank is not None:
                 iv_rank[ccy] = format_decimal(rank, 4)
@@ -94,14 +101,25 @@ def fetch_iv_rank_snapshot(
             else:
                 iv_rank[ccy] = None
                 iv_rank_pct[ccy] = None
+            if percentile is not None:
+                iv_percentile[ccy] = format_decimal(percentile, 4)
+                pct = (percentile * Decimal("100")).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+                iv_percentile_pct[ccy] = format_decimal(pct, 1)
+            else:
+                iv_percentile[ccy] = None
+                iv_percentile_pct[ccy] = None
             dvol[ccy] = format_decimal(latest, 2) if latest is not None and latest > 0 else None
         except Exception:
             iv_rank[ccy] = None
             iv_rank_pct[ccy] = None
+            iv_percentile[ccy] = None
+            iv_percentile_pct[ccy] = None
             dvol[ccy] = None
     return {
         "iv_rank": iv_rank,
         "iv_rank_pct": iv_rank_pct,
+        "iv_percentile": iv_percentile,
+        "iv_percentile_pct": iv_percentile_pct,
         "dvol": dvol,
         "iv_rank_lookback_days": lookback_days,
     }

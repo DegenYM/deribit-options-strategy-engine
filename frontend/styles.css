@@ -308,6 +308,7 @@ html {
 .header-market-card {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.35rem 0.45rem;
   min-width: 11.5rem;
   padding: 0.35rem 0.7rem;
@@ -365,7 +366,11 @@ html {
   letter-spacing: 0.02em;
 }
 
-.header-market-card .header-ivr {
+.header-vol-metrics {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
   margin-left: auto;
 }
 
@@ -381,6 +386,7 @@ html {
   color: color-mix(in srgb, var(--color-text-secondary) 95%, transparent);
 }
 
+.header-vol-chip,
 .header-ivr {
   white-space: nowrap;
   flex-shrink: 0;
@@ -394,6 +400,12 @@ html {
   font-weight: 600;
   letter-spacing: 0.03em;
   color: color-mix(in srgb, var(--color-semantic-info-text) 95%, transparent);
+}
+
+.header-iv {
+  border-color: color-mix(in srgb, var(--color-border-default) 55%, transparent);
+  background: color-mix(in srgb, var(--color-bg-surface) 55%, transparent);
+  color: color-mix(in srgb, var(--color-text-secondary) 95%, var(--color-text-primary));
 }
 
 .header-ivr--low {

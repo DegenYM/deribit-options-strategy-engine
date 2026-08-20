@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
     eth_change_24h_pct TEXT,
     iv_rank_btc_pct TEXT,
     iv_rank_eth_pct TEXT,
+    iv_percentile_btc_pct TEXT,
+    iv_percentile_eth_pct TEXT,
     dvol_btc TEXT,
     dvol_eth TEXT,
     source TEXT NOT NULL DEFAULT 'deribit_public'
@@ -44,6 +46,8 @@ class MarketSnapshotRow:
     eth_change_24h_pct: Decimal | None
     iv_rank_btc_pct: Decimal | None
     iv_rank_eth_pct: Decimal | None
+    iv_percentile_btc_pct: Decimal | None
+    iv_percentile_eth_pct: Decimal | None
     dvol_btc: Decimal | None
     dvol_eth: Decimal | None
     source: str
@@ -67,6 +71,13 @@ class MarketSnapshotRow:
             iv_rank["ETH"] = str(self.iv_rank_eth_pct)
         if iv_rank:
             out["iv_rank_pct"] = iv_rank
+        iv_percentile: dict[str, Any] = {}
+        if self.iv_percentile_btc_pct is not None:
+            iv_percentile["BTC"] = str(self.iv_percentile_btc_pct)
+        if self.iv_percentile_eth_pct is not None:
+            iv_percentile["ETH"] = str(self.iv_percentile_eth_pct)
+        if iv_percentile:
+            out["iv_percentile_pct"] = iv_percentile
         dvol: dict[str, Any] = {}
         if self.dvol_btc is not None:
             dvol["BTC"] = str(self.dvol_btc)
@@ -104,10 +115,19 @@ def _row_from_db(row: sqlite3.Row) -> MarketSnapshotRow:
         eth_change_24h_pct=_signed_decimal(row["eth_change_24h_pct"]),
         iv_rank_btc_pct=_non_negative_decimal(row["iv_rank_btc_pct"]),
         iv_rank_eth_pct=_non_negative_decimal(row["iv_rank_eth_pct"]),
+        iv_percentile_btc_pct=_non_negative_decimal(_row_get(row, "iv_percentile_btc_pct")),
+        iv_percentile_eth_pct=_non_negative_decimal(_row_get(row, "iv_percentile_eth_pct")),
         dvol_btc=_non_negative_decimal(row["dvol_btc"]),
         dvol_eth=_non_negative_decimal(row["dvol_eth"]),
         source=str(row["source"] or "deribit_public"),
     )
+
+
+def _row_get(row: sqlite3.Row, key: str) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
 
 
 class MarketSnapshotStore:
@@ -128,6 +148,11 @@ class MarketSnapshotStore:
         with self._lock:
             with self._connect() as conn:
                 conn.executescript(_SCHEMA)
+                cols = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)")}
+                if "iv_percentile_btc_pct" not in cols:
+                    conn.execute("ALTER TABLE market_snapshots ADD COLUMN iv_percentile_btc_pct TEXT")
+                if "iv_percentile_eth_pct" not in cols:
+                    conn.execute("ALTER TABLE market_snapshots ADD COLUMN iv_percentile_eth_pct TEXT")
                 conn.commit()
 
     def append_from_spot_payload(self, spot_payload: dict[str, Any], *, source: str = "deribit_public") -> int:
@@ -137,6 +162,7 @@ class MarketSnapshotStore:
             raise ValueError("spot payload missing BTC/ETH index prices")
         change = spot_payload.get("price_change_pct_24h") or {}
         iv_rank = spot_payload.get("iv_rank_pct") or {}
+        iv_percentile = spot_payload.get("iv_percentile_pct") or {}
         dvol = spot_payload.get("dvol") or {}
         with self._lock:
             with self._connect() as conn:
@@ -149,8 +175,9 @@ class MarketSnapshotStore:
                         ts_ms, btc_usd, eth_usd,
                         btc_change_24h_pct, eth_change_24h_pct,
                         iv_rank_btc_pct, iv_rank_eth_pct,
+                        iv_percentile_btc_pct, iv_percentile_eth_pct,
                         dvol_btc, dvol_eth, source
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ts_ms,
@@ -160,6 +187,8 @@ class MarketSnapshotStore:
                         str(change["ETH"]) if change.get("ETH") is not None else None,
                         str(iv_rank["BTC"]) if iv_rank.get("BTC") is not None else None,
                         str(iv_rank["ETH"]) if iv_rank.get("ETH") is not None else None,
+                        str(iv_percentile["BTC"]) if iv_percentile.get("BTC") is not None else None,
+                        str(iv_percentile["ETH"]) if iv_percentile.get("ETH") is not None else None,
                         str(dvol["BTC"]) if dvol.get("BTC") is not None else None,
                         str(dvol["ETH"]) if dvol.get("ETH") is not None else None,
                         source,

@@ -50,6 +50,7 @@ export const STATE = {
   lastSpotUsd: { BTC: null, ETH: null },
   lastPriceChangePct24h: { BTC: null, ETH: null },
   lastIvRankPct: { BTC: null, ETH: null },
+  lastIvPercentilePct: { BTC: null, ETH: null },
   lastDvol: { BTC: null, ETH: null },
   ivRankLookbackDays: null,
   activityOpenPage: 1,

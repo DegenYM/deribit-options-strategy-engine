@@ -91,18 +91,13 @@ def iv_minus_rv_spread(*, iv: Decimal, rv: Decimal) -> Decimal | None:
     return iv - rv
 
 
-def dvol_iv_rank_from_daily_rows(
+def _dvol_daily_candles(
     rows: Sequence[Sequence[Any] | tuple[Any, ...]],
     *,
     ts_ms: int,
-    lookback_days: int = 365,
-) -> Decimal | None:
-    """IV rank from DVOL daily candles (Deribit official method).
-
-    Uses the last ``lookback_days`` candles with ``ts <= ts_ms``:
-    range = min(low) .. max(high), current = last close.
-    See https://insights.deribit.com/education/iv-rank-and-iv-percentile/
-    """
+    lookback_days: int,
+) -> list[tuple[int, Decimal, Decimal, Decimal]]:
+    """Parse DVOL OHLC rows into ``(ts, high, low, close)`` up to ``ts_ms``."""
     candles: list[tuple[int, Decimal, Decimal, Decimal]] = []
     for row in rows or []:
         if not isinstance(row, list | tuple) or len(row) < 5:
@@ -115,15 +110,51 @@ def dvol_iv_rank_from_daily_rows(
         close = to_decimal(row[4])
         if high > 0 and low > 0 and close > 0:
             candles.append((ts, high, low, close))
-    if not candles:
+    if not candles or lookback_days <= 0:
+        return []
+    return candles[-lookback_days:]
+
+
+def dvol_iv_rank_from_daily_rows(
+    rows: Sequence[Sequence[Any] | tuple[Any, ...]],
+    *,
+    ts_ms: int,
+    lookback_days: int = 365,
+) -> Decimal | None:
+    """IV rank from DVOL daily candles (Deribit official method).
+
+    Uses the last ``lookback_days`` candles with ``ts <= ts_ms``:
+    range = min(low) .. max(high), current = last close.
+    See https://insights.deribit.com/education/iv-rank-and-iv-percentile/
+    """
+    window = _dvol_daily_candles(rows, ts_ms=ts_ms, lookback_days=lookback_days)
+    if not window:
         return None
-    window = candles[-lookback_days:]
     current = window[-1][3]
     yr_lo = min(c[2] for c in window)
     yr_hi = max(c[1] for c in window)
     if yr_hi <= yr_lo:
         return None
     return safe_div(current - yr_lo, yr_hi - yr_lo)
+
+
+def dvol_iv_percentile_from_daily_rows(
+    rows: Sequence[Sequence[Any] | tuple[Any, ...]],
+    *,
+    ts_ms: int,
+    lookback_days: int = 365,
+) -> Decimal | None:
+    """IV percentile in [0, 1] from DVOL daily closes (Deribit official method).
+
+    Share of lookback daily closes that sit *below* the latest close.
+    See https://insights.deribit.com/education/iv-rank-and-iv-percentile/
+    """
+    window = _dvol_daily_candles(rows, ts_ms=ts_ms, lookback_days=lookback_days)
+    if len(window) < 2:
+        return None
+    current = window[-1][3]
+    below = sum(1 for _ts, _high, _low, close in window if close < current)
+    return safe_div(Decimal(below), Decimal(len(window)))
 
 
 def dvol_iv_rank_at_ts(

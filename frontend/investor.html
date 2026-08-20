@@ -7,7 +7,7 @@
     <!-- <meta name="dashboard-api-base" content="https://your-dashboard.example.com" /> -->
     <title>Investor summary · Deribit options</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=935abedaea" as="script" />
+    <link rel="preload" href="/app-investor.js?v=3030be7c80" as="script" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -16,7 +16,7 @@
     />
     <link rel="stylesheet" href="/tailwind.css?v=c6fde4d604" />
     <link rel="stylesheet" href="/tokens.css?v=ds003" />
-    <link rel="stylesheet" href="/styles.css?v=c00146d4ef" />
+    <link rel="stylesheet" href="/styles.css?v=b2bc59b6d9" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -58,18 +58,26 @@
             <span id="risk-tier-badge" class="inv-chip inv-chip--warning hidden" hidden>Risk tier · —</span>
             <span id="profit-sweep-badge" class="inv-chip inv-chip--success hidden" hidden>Sweep · —</span>
           </div>
-          <div class="investor-header-spot header-market-strip" aria-label="Spot and IV Rank">
+          <div class="investor-header-spot header-market-strip" aria-label="Spot, IV, IV Rank and IV Percentile">
             <div id="header-spot-btc" class="header-market-card header-market-card--btc">
               <span class="header-market-symbol">BTC</span>
               <span id="header-spot-btc-price" class="header-market-price">—</span>
               <span id="header-spot-btc-change" class="header-price-change" hidden aria-label="24h change"></span>
-              <span id="header-spot-btc-ivr" class="header-ivr" hidden aria-label="IV Rank"></span>
+              <span class="header-vol-metrics">
+                <span id="header-spot-btc-iv" class="header-vol-chip header-iv" hidden aria-label="Implied Volatility"></span>
+                <span id="header-spot-btc-ivr" class="header-vol-chip header-ivr" hidden aria-label="IV Rank"></span>
+                <span id="header-spot-btc-ivp" class="header-vol-chip header-ivp" hidden aria-label="IV Percentile"></span>
+              </span>
             </div>
             <div id="header-spot-eth" class="header-market-card header-market-card--eth">
               <span class="header-market-symbol">ETH</span>
               <span id="header-spot-eth-price" class="header-market-price">—</span>
               <span id="header-spot-eth-change" class="header-price-change" hidden aria-label="24h change"></span>
-              <span id="header-spot-eth-ivr" class="header-ivr" hidden aria-label="IV Rank"></span>
+              <span class="header-vol-metrics">
+                <span id="header-spot-eth-iv" class="header-vol-chip header-iv" hidden aria-label="Implied Volatility"></span>
+                <span id="header-spot-eth-ivr" class="header-vol-chip header-ivr" hidden aria-label="IV Rank"></span>
+                <span id="header-spot-eth-ivp" class="header-vol-chip header-ivp" hidden aria-label="IV Percentile"></span>
+              </span>
             </div>
           </div>
         </div>
@@ -308,6 +316,6 @@
       class="hidden"
     ></div>
 
-    <script defer src="/app-investor.js?v=935abedaea"></script>
+    <script defer src="/app-investor.js?v=3030be7c80"></script>
   </body>
 </html>

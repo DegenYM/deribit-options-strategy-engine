@@ -312,7 +312,7 @@ def investor_metrics_db_path(repo_root: Path | str, investor_id: str) -> Path:
 
 
 def shared_market_db_path(repo_root: Path | str) -> Path:
-    """Shared BTC/ETH spot + IVR snapshots for all frontend processes."""
+    """Shared BTC/ETH spot + IV / IVR / IVP snapshots for all frontend processes."""
     return Path(repo_root) / "data" / "frontend_ledger" / "_shared" / "market.db"
 
 

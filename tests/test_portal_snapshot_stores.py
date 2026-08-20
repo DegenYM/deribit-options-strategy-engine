@@ -30,6 +30,8 @@ def test_market_snapshot_store_roundtrip(tmp_path: Path) -> None:
             "ETH": "3500",
             "price_change_pct_24h": {"BTC": "1.2", "ETH": "-0.5"},
             "iv_rank_pct": {"BTC": "55", "ETH": "40"},
+            "iv_percentile_pct": {"BTC": "62.5", "ETH": "38"},
+            "dvol": {"BTC": "48.2", "ETH": "55.1"},
         }
     )
     row = store.get(row_id)
@@ -39,6 +41,9 @@ def test_market_snapshot_store_roundtrip(tmp_path: Path) -> None:
     assert row.eth_change_24h_pct == Decimal("-0.5")
     payload = row.to_spot_api_payload()
     assert payload["price_change_pct_24h"] == {"BTC": "1.2", "ETH": "-0.5"}
+    assert payload["iv_rank_pct"] == {"BTC": "55", "ETH": "40"}
+    assert payload["iv_percentile_pct"] == {"BTC": "62.5", "ETH": "38"}
+    assert payload["dvol"] == {"BTC": "48.2", "ETH": "55.1"}
     assert store.latest() is not None
     deleted = store.purge_older_than(cutoff_ms=row.ts_ms + 1)
     assert deleted >= 1

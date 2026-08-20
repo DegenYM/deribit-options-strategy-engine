@@ -33,7 +33,7 @@ def register_core_routes(app: Any, runtime: RuntimeSetup) -> None:
 
     @app.get("/api/spot")
     def api_spot() -> dict[str, Any]:
-        """Public BTC/ETH USD index and IV rank for dashboard header (no private auth)."""
+        """Public BTC/ETH USD index, DVOL, IV rank and IV percentile (no private auth)."""
         try:
             store = runtime.market_store()
             if store is not None:

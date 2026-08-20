@@ -51,5 +51,9 @@ def test_fetch_iv_rank_snapshot_returns_per_currency_metrics():
     assert payload["dvol"]["ETH"] == "45"
     assert payload["iv_rank_pct"]["BTC"] == "91.7"
     assert payload["iv_rank_pct"]["ETH"] == "89.5"
+    assert payload["iv_percentile_pct"]["BTC"] == "66.7"
+    assert payload["iv_percentile_pct"]["ETH"] == "50"
     assert Decimal(payload["iv_rank"]["BTC"]) == Decimal("0.9166")
     assert Decimal(payload["iv_rank"]["ETH"]) == Decimal("0.8947")
+    assert Decimal(payload["iv_percentile"]["BTC"]) == Decimal("0.6666")
+    assert Decimal(payload["iv_percentile"]["ETH"]) == Decimal("0.5")

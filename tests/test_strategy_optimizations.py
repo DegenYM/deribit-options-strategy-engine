@@ -14,6 +14,7 @@ from deribit_engine.exit_eval import (
 from deribit_engine.models import OrderBookSnapshot, TradeGroup
 from deribit_engine.trade_apr import position_apr_capital_base, remaining_apr_for_group
 from deribit_engine.vol_metrics import (
+    dvol_iv_percentile_from_daily_rows,
     dvol_iv_rank_from_daily_rows,
     iv_rank,
     passes_iv_entry_gate,
@@ -146,6 +147,18 @@ def test_dvol_iv_rank_from_daily_rows_uses_candle_high_low_range():
     close_only = iv_rank(Decimal("55"), lookback=[Decimal("40"), Decimal("50"), Decimal("55")])
     assert close_only == Decimal("1")
     assert close_only != rank
+
+
+def test_dvol_iv_percentile_from_daily_rows_uses_closes_below_current():
+    rows = [
+        [1_000, 40.0, 45.0, 35.0, 40.0],
+        [2_000, 50.0, 55.0, 45.0, 50.0],
+        [3_000, 60.0, 70.0, 50.0, 55.0],
+    ]
+    pct = dvol_iv_percentile_from_daily_rows(rows, ts_ms=3_000, lookback_days=3)
+    # closes 40, 50, 55 — two of three sit below the latest close
+    assert pct == Decimal("2") / Decimal("3")
+    assert dvol_iv_percentile_from_daily_rows(rows, ts_ms=3_000, lookback_days=1) is None
 
 
 def test_iv_entry_gate_fail_open_when_metrics_missing():

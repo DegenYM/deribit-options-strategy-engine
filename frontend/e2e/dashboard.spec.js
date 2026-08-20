@@ -7,6 +7,9 @@ test.describe("dashboard smoke", () => {
     await expect(page).toHaveTitle(/Deribit Strategy Dashboard/i);
     await expect(page.locator("#aggregate-card")).toBeVisible();
     await expect(page.locator('script[src*="app.js"]')).toHaveCount(1);
+    await expect(page.locator("#header-spot-btc-iv")).toHaveCount(1);
+    await expect(page.locator("#header-spot-btc-ivr")).toHaveCount(1);
+    await expect(page.locator("#header-spot-btc-ivp")).toHaveCount(1);
   });
 
   test("investor summary page loads", async ({ page }) => {
@@ -14,6 +17,8 @@ test.describe("dashboard smoke", () => {
     expect(response?.ok()).toBeTruthy();
     await expect(page.locator("#aggregate-card")).toBeVisible();
     await expect(page.locator('script[src*="app-investor.js"]')).toHaveCount(1);
+    await expect(page.locator("#header-spot-eth-iv")).toHaveCount(1);
+    await expect(page.locator("#header-spot-eth-ivp")).toHaveCount(1);
   });
 
   test("health endpoint responds", async ({ request }) => {

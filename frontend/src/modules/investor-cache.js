@@ -58,6 +58,7 @@ function pickCacheFields(state) {
     lastSpotUsd: state.lastSpotUsd,
     lastPriceChangePct24h: state.lastPriceChangePct24h,
     lastIvRankPct: state.lastIvRankPct,
+    lastIvPercentilePct: state.lastIvPercentilePct,
     lastDvol: state.lastDvol,
     ivRankLookbackDays: state.ivRankLookbackDays,
   };
@@ -105,6 +106,12 @@ export function hydrateFromInvestorCache(cached) {
   }
   if (cached.lastIvRankPct) {
     STATE.lastIvRankPct = { ...STATE.lastIvRankPct, ...cached.lastIvRankPct };
+  }
+  if (cached.lastIvPercentilePct) {
+    STATE.lastIvPercentilePct = {
+      ...STATE.lastIvPercentilePct,
+      ...cached.lastIvPercentilePct,
+    };
   }
   if (cached.lastDvol) STATE.lastDvol = { ...STATE.lastDvol, ...cached.lastDvol };
   if (cached.ivRankLookbackDays != null) STATE.ivRankLookbackDays = cached.ivRankLookbackDays;
