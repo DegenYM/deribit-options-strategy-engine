@@ -1,0 +1,213 @@
+"""Public strategy catalog. v1 ships Covered Call; other types are listed as upcoming.
+
+Copy treats the reader as someone who has never traded options. Max profit and
+max loss must stay explicit; this is not investment advice.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+COVERED_CALL: dict[str, Any] = {
+    "id": "covered_call",
+    "name_zh": "備兌賣出買權（Covered Call）",
+    "name_en": "Covered Call",
+    "available": True,
+    "status": "available",
+    "one_liner_zh": "你已經持有 BTC 或 ETH，再賣出「買權」，先收下權利金；換來的是上漲空間被賣掉、下跌風險幾乎原封不動。",
+    "for_whom_zh": "已經持有現貨、願意接受「漲太多時現貨可能被買走」、並且明白權利金不是利息的人。",
+    "beginner_zh": [
+        "期權（選擇權）是一份合約，不是把幣「借出去收利息」。合約有買方與賣方。",
+        "買方付錢，買到的是權利：到期時可以決定要不要用約定價格成交。賣方收錢，換來的是義務：如果買方要成交，賣方必須履行。",
+        "買權（call）給買方「用履約價買入標的」的權利。你當賣方，等於答應：若到期時價格夠高，對方可以用履約價買走你的幣。",
+        "「備兌／covered」的意思是：你帳戶裡已經有對應的現貨，所以對方來買時你交得出幣。這跟空手賣 call（裸賣）不同——裸賣在大漲時虧損可以遠大於權利金。Canopy v1 只做備兌，不做裸賣。",
+        "權利金是對方付給你的費用，進你的帳戶後就是你的；它不是本金保護，也不是保證每月都會再收到一筆。",
+    ],
+    "how_it_works_zh": [
+        "先把要備兌的 BTC 或 ETH 放進你自己的 Deribit 子帳（不是把幣交給 Canopy）。",
+        "引擎依風險檔選出要賣的 call（履約價、到期日）。",
+        "成交後你立刻收到權利金；子帳裡的現貨被「罩住」，直到到期、被行使，或系統／你自己平倉。",
+        "到期若現貨低於履約價，call 作廢，你留下現貨與已收權利金，之後可以再賣下一張。",
+        "到期若現貨高於履約價，買方通常會行使：現貨按履約價賣出，你拿到現金，但拿不到履約價以上的漲幅。",
+    ],
+    "max_profit": {
+        "title_zh": "最大獲益",
+        "headline_zh": "大約等於你賣出這張 call 收到的權利金（扣掉手續費之後）。",
+        "body_zh": (
+            "Covered Call 的「選擇權這條腿」賺不到無限。現貨再怎麼漲，超過履約價的漲幅屬於買方。"
+            "你能鎖定的上方收益，就是進場時收下的權利金。若你提前買回 call 平倉，實際獲益會更少，甚至可能虧這條腿。"
+        ),
+        "when_zh": "到期時現貨仍低於履約價（call 作廢），或現貨剛好在履約價附近被行使、你已收滿權利金。",
+        "not_zh": "最大獲益不是現貨上漲的全部、不是 APR、也不是「每個月固定入帳」。",
+    },
+    "max_loss": {
+        "title_zh": "最大虧損",
+        "headline_zh": "現貨可以跌到接近零；你虧的是手上的 BTC／ETH，權利金幾乎補不住。",
+        "body_zh": (
+            "很多人把買方與賣方搞反：買 call 的人最多虧掉已付權利金；賣 covered call 的人不是這樣。"
+            "你仍然持有現貨，現貨從 10 萬跌到 1 萬，虧的是現貨市值。收到的權利金只是一個小數。"
+            "沒有「最多虧權利金」這件事。樹冠是遮蔭不是屋頂：賣 call 不會幫你停損現貨下跌。"
+        ),
+        "when_zh": "標的大跌、長期下跌，或你被迫在不好的價格平倉／現貨被行使後又想買回。",
+        "not_zh": "最大虧損不是權利金、不是訂閱費、也不是履約價減現價那種「看起來有限」的公式可以概括現貨歸零。",
+    },
+    "example_zh": {
+        "title_zh": "用假數字走一遍（不是預測、不是回測）",
+        "setup_zh": "假設你持有 1 BTC，現價 100,000 USD。你賣出履約價 110,000 的 call，收到權利金 1,500 USD（示意）。",
+        "paths": [
+            {
+                "label_zh": "現貨不太漲也不太跌",
+                "detail_zh": "到期現貨 105,000。Call 沒有價值，你留下 BTC 與 1,500。這筆選擇權的獲益大約就是權利金。現貨本身仍隨市值波動。",
+            },
+            {
+                "label_zh": "現貨大漲，被 call away",
+                "detail_zh": "到期現貨 130,000。買方會用 110,000 買走你的 BTC。你拿不到 110,000 以上的漲幅。選擇權這條腿的最大獲益仍約等於 1,500；你錯過的是現貨繼續漲的那一段。",
+            },
+            {
+                "label_zh": "現貨大跌",
+                "detail_zh": "到期現貨 50,000。Call 作廢，但你的 BTC 約虧 50,000。1,500 權利金幾乎沒有幫助。若現貨更接近 0，虧損可以接近整筆現貨。這就是最大虧損。",
+            },
+        ],
+    },
+    "risks_zh": [
+        "現貨下跌是主風險，權利金不是保險。",
+        "上漲時現貨可能被賣掉（assignment／call away），之後若幣價續漲你已不在車上。",
+        "提早平倉要付出買回 call 的成本，可能把已收權利金吐回去。",
+        "流動性差、滑價、手續費會吃掉帳面權利金。",
+        "交易所、API、網路或程式故障時，Pause／Panic 只是送出指令，不保證成交。",
+        "歷史 APR、回測、別人的績效都不是你會賺到的金額。",
+    ],
+    "not_this_zh": [
+        "不是把幣存進平台收息。",
+        "不是基金、代操、投顧或跟單。",
+        "不是保護本金或「穩穩的被動收入」。",
+        "不是保證每月都收到權利金。",
+    ],
+}
+
+CASH_SECURED_PUT: dict[str, Any] = {
+    "id": "cash_secured_put",
+    "name_zh": "現金擔保賣出認沽（Cash-Secured Put）",
+    "name_en": "Cash-Secured Put",
+    "available": False,
+    "status": "coming_soon",
+    "one_liner_zh": "你先準備好現金，賣出「賣權」收權利金；若價格跌破履約價，你有義務用該價格買入現貨。",
+    "for_whom_zh": "v1 尚未提供。列在這裡只為說明「還有其他策略種類」，不是邀請你現在去手動做。",
+    "beginner_zh": [
+        "賣權（put）給買方「用履約價把標的賣給你」的權利。你當賣方，等於答應：跌夠深時，你必須用較高的履約價買入。",
+        "「現金擔保」表示帳戶裡已留好買入所需資金，不是無限槓桿。",
+    ],
+    "how_it_works_zh": [
+        "即將推出，Canopy v1 不會下這類單。",
+    ],
+    "max_profit": {
+        "title_zh": "最大獲益",
+        "headline_zh": "大約等於收到的權利金（扣費用）。",
+        "body_zh": "價格沒跌破履約價、put 作廢時，你留下權利金。賺不到無限。",
+        "when_zh": "到期時現貨高於履約價。",
+        "not_zh": "不是保證入帳。",
+    },
+    "max_loss": {
+        "title_zh": "最大虧損",
+        "headline_zh": "標的可以接近零，你仍須用履約價買入；虧損約為履約價減去權利金，可以非常大。",
+        "body_zh": "這不是「最多虧權利金」。權利金只是買方付給你的費用；你可能被迫高價買入正在崩跌的幣。",
+        "when_zh": "標的大跌並被指派。",
+        "not_zh": "不是有限像買方那樣只虧權利金。",
+    },
+    "example_zh": None,
+    "risks_zh": [
+        "被指派後持有下跌中的現貨。",
+        "資金被鎖在擔保現金裡。",
+        "v1 未提供，請勿把本頁當成操作手冊。",
+    ],
+    "not_this_zh": ["不是 Canopy 現在會幫你下的單。"],
+}
+
+BULL_PUT_SPREAD: dict[str, Any] = {
+    "id": "bull_put_spread",
+    "name_zh": "牛市認沽價差（Bull Put Spread）",
+    "name_en": "Bull Put Spread",
+    "available": False,
+    "status": "coming_soon",
+    "one_liner_zh": "同時賣一張較高履約價的 put、買一張較低履約價的 put，用價差把最大虧損框在兩檔履約價之間。",
+    "for_whom_zh": "v1 尚未提供。",
+    "beginner_zh": [
+        "價差是兩張期權組合：一邊收權利金、一邊付權利金，淨收或淨付一筆較小的金額。",
+        "最大虧損通常等於兩檔履約價差距減去淨權利金，不再是現貨歸零那種「整筆現貨」。這跟 Covered Call 的風險形狀不同。",
+    ],
+    "how_it_works_zh": ["即將推出，Canopy v1 不會下這類單。"],
+    "max_profit": {
+        "title_zh": "最大獲益",
+        "headline_zh": "進場時的淨權利金（扣費用）。",
+        "body_zh": "價格夠高、兩張 put 都作廢時，留下淨權利金。",
+        "when_zh": "到期現貨高於賣出那檔履約價。",
+        "not_zh": "不是無限獲利。",
+    },
+    "max_loss": {
+        "title_zh": "最大虧損",
+        "headline_zh": "大約是兩檔履約價的差距，減去你已收的淨權利金。",
+        "body_zh": "比裸賣 put 有上限，但上限仍可能很大，而且保證金、提前平倉、流動性都可能讓實際虧損不同於教科書公式。",
+        "when_zh": "到期現貨低於買入那檔履約價。",
+        "not_zh": "不是零風險；有上限不等于小。",
+    },
+    "example_zh": None,
+    "risks_zh": ["價差仍可能虧到上限。", "v1 未提供。"],
+    "not_this_zh": ["不是 Canopy 現在會幫你下的單。"],
+}
+
+NAKED_SHORT: dict[str, Any] = {
+    "id": "naked_short",
+    "name_zh": "裸賣期權（Naked Short）",
+    "name_en": "Naked short options",
+    "available": False,
+    "status": "not_offered",
+    "one_liner_zh": "帳戶裡沒有對應現貨或足額擔保就賣出期權。大漲或大跌時虧損可以遠大於權利金。",
+    "for_whom_zh": "Canopy 不提供。列出來是為了對照：為什麼 v1 堅持「備兌」。",
+    "beginner_zh": [
+        "沒有現貨卻賣 call，價格大漲時你必須到市場高價買幣再交割，虧損理論上無上限。",
+        "這就是「樹冠」隱喻的反面：沒有樹，只賣遮蔭。",
+    ],
+    "how_it_works_zh": ["本產品不下這類單。"],
+    "max_profit": {
+        "title_zh": "最大獲益",
+        "headline_zh": "仍大約只有權利金。",
+        "body_zh": "報酬有限、風險可以極大，所以不適合當成「多賺一點權利金」的升級版。",
+        "when_zh": "期權作廢。",
+        "not_zh": "不是 Canopy 的策略。",
+    },
+    "max_loss": {
+        "title_zh": "最大虧損",
+        "headline_zh": "賣出裸 call 時理論上無上限；賣出裸 put 時可接近履約價整段（標的歸零）。",
+        "body_zh": "權利金完全無法代表最大虧損。",
+        "when_zh": "標的劇烈朝不利方向移動。",
+        "not_zh": "不要用本產品做這件事。",
+    },
+    "example_zh": None,
+    "risks_zh": ["爆倉、追繳、無限損失。"],
+    "not_this_zh": ["Canopy 不做裸賣。"],
+}
+
+STRATEGIES: tuple[dict[str, Any], ...] = (
+    COVERED_CALL,
+    CASH_SECURED_PUT,
+    BULL_PUT_SPREAD,
+    NAKED_SHORT,
+)
+
+INTRO_ZH = (
+    "先把名詞講清楚。以下用「完全沒學過期權」的方式寫。"
+    "Canopy 現在只幫你下 Covered Call；其他種類是對照與之後可能的方向，不是現在就能開的開關。"
+)
+DISCLAIMER_ZH = (
+    "不是投資建議。最大獲益／最大虧損是策略結構上的說明，實際數字還會被手續費、滑價、提前平倉與被行使時機改變。"
+    "過去績效與 APR 不是收益承諾。"
+)
+
+
+def public_catalog() -> dict[str, Any]:
+    return {
+        "intro_zh": INTRO_ZH,
+        "disclaimer_zh": DISCLAIMER_ZH,
+        "v1_strategy": "covered_call",
+        "strategies": list(STRATEGIES),
+    }

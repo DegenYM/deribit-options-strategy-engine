@@ -11,7 +11,8 @@ from ..db import get_db
 from ..deps import get_current_user, get_tenant
 from ..entitlements import assert_approved
 from ..models import Tenant, User
-from ..plans import public_catalog
+from ..plans import DETAILS_PENDING_ZH, comparison_matrix, public_catalog
+from ..timeutil import as_utc
 
 router = APIRouter(tags=["billing"])
 
@@ -22,7 +23,14 @@ class SubscribeBody(BaseModel):
 
 @router.get("/api/plans")
 def list_plans():
-    return {"strategy": "covered_call", "plans": public_catalog()}
+    return {
+        "strategy": "covered_call",
+        "details_pending_zh": DETAILS_PENDING_ZH,
+        "trial_days": settings.trial_days,
+        "trial_plan_id": settings.trial_plan_id,
+        "comparison": comparison_matrix(),
+        "plans": public_catalog(),
+    }
 
 
 @router.get("/api/billing")
@@ -31,6 +39,9 @@ def billing_status(user: User = Depends(get_current_user), tenant: Tenant = Depe
     return {
         "plan_id": sub.plan_id if sub else None,
         "status": sub.status if sub else "inactive",
+        "trial_ends_at": as_utc(sub.trial_ends_at).isoformat() if sub and sub.trial_ends_at else None,
+        "trial_days": settings.trial_days,
+        "trial_plan_id": settings.trial_plan_id,
         "stripe_configured": bool(settings.stripe_secret_key),
         "dev_billing": settings.allow_dev_billing,
     }

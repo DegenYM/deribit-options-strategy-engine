@@ -15,6 +15,9 @@ def test_public_catalog_is_covered_call_only():
     scout = get_plan("scout")
     assert scout.live_trading is False
     assert scout.allowed_tiers == ("low",)
+    public = public_catalog()
+    assert public[0]["trial_eligible"] is True
+    assert public[1]["trial_eligible"] is False
     trader = get_plan("trader")
     assert trader.live_trading is True
     assert trader.coins_max == 1

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +16,7 @@ from .routes.billing import router as billing_router
 from .routes.bot import router as bot_router
 from .routes.dashboard import router as dashboard_router
 from .routes.onboarding import router as onboarding_router
+from .routes.strategies import router as strategies_router
 
 
 def create_app() -> FastAPI:
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(auth_router)
     app.include_router(onboarding_router)
+    app.include_router(strategies_router)
     app.include_router(billing_router)
     app.include_router(bot_router)
     app.include_router(dashboard_router)
@@ -69,6 +71,12 @@ def create_app() -> FastAPI:
         @app.get("/")
         def index():
             return FileResponse(web_dir / "index.html")
+
+        @app.get("/{page}")
+        def spa(page: str):
+            if page in {"strategy", "pricing", "login", "signup", "app"}:
+                return FileResponse(web_dir / "index.html")
+            raise HTTPException(status_code=404, detail="not found")
 
     return app
 

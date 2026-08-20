@@ -18,13 +18,19 @@
     <a class="skip-link" href="#dashboard-main">跳到內容</a>
     <header class="app-header">
       <div class="dashboard-shell header-shell">
-        <div class="header-title-block brand-lockup">
+        <a class="header-title-block brand-lockup" href="/" data-page="landing" id="homeLink">
           <span class="brand-mark" aria-hidden="true">C</span>
           <div>
             <h1 class="page-title">Canopy</h1>
             <p id="pageSubtitle" class="page-subtitle">樹冠罩住你已經持有的現貨。</p>
           </div>
-        </div>
+        </a>
+        <nav id="publicNav" class="site-nav" aria-label="網站">
+          <a href="/" data-page="landing">首頁</a>
+          <a href="/strategy" data-page="strategy">策略說明</a>
+          <a href="/pricing" data-page="pricing">方案</a>
+          <a href="/login" data-page="login" id="loginNav">登入／試用</a>
+        </nav>
         <div id="statusCluster" class="header-status-cluster hidden" aria-label="帳戶狀態">
           <span id="whoBadge" class="inv-chip inv-chip--neutral">帳戶 · —</span>
           <span id="planBadge" class="inv-chip inv-chip--neutral">方案 · —</span>
@@ -60,21 +66,33 @@
           <p id="heroLede" class="hero-lede">
             金鑰留在你的 Deribit 子帳。樹冠是遮蔭，不是屋頂——現貨下跌風險仍在，權利金不是收益承諾。
           </p>
-          <form id="loginForm" class="login-row">
-            <label class="field">
-              <span>Email</span>
-              <input type="email" id="email" required placeholder="you@example.com" autocomplete="email" />
-            </label>
-            <button type="submit" class="ds-btn ds-btn-primary">登入</button>
-          </form>
-          <p id="loginHint" class="hint">開發模式會直接登入，不必收信。</p>
+          <div class="hero-actions">
+            <a class="ds-btn ds-btn-primary" href="/login" data-page="login">登入／開始試用</a>
+            <a class="ds-btn ds-btn-secondary" href="/strategy" data-page="strategy">先看策略說明</a>
+            <a class="ds-btn ds-btn-secondary" href="/pricing" data-page="pricing">看方案</a>
+          </div>
         </section>
 
         <section class="section-card priority-section">
-          <p class="section-eyebrow">Plans</p>
-          <h2 class="section-title">方案</h2>
-          <p class="section-copy">訂閱費，不是績效費。APR 不是承諾。</p>
-          <div id="plansMount" class="plan-grid"></div>
+          <p class="section-eyebrow">How it works</p>
+          <h2 class="section-title">三件事</h2>
+          <ol class="step-grid">
+            <li>
+              <span class="step-index">01</span>
+              <b>你自己的子帳</b>
+              <p>BYOK：API 金鑰留在 Deribit，平台不保管幣。</p>
+            </li>
+            <li>
+              <span class="step-index">02</span>
+              <b>只做 Covered Call</b>
+              <p>先有現貨，再賣備兌 call。不是基金、不是代操。</p>
+            </li>
+            <li>
+              <span class="step-index">03</span>
+              <b>先模擬再實單</b>
+              <p>Scout 只有模擬。實單方案須先跑滿 7 天 dry-run。</p>
+            </li>
+          </ol>
         </section>
 
         <section class="section-card priority-section">
@@ -90,18 +108,64 @@
               <p id="faqOrigin">樹冠罩在已有的現貨上方，不是把資產搬進平台。樹冠是遮蔭，不是屋頂。</p>
             </details>
             <details>
+              <summary>我完全不懂期權，能不能用？</summary>
+              <p>可以先讀<a class="footer-nav-link" href="/strategy" data-page="strategy">策略說明</a>。頁面假設你沒學過選擇權，並寫清最大獲益與最大虧損。仍建議你只拿輸得起的錢。</p>
+            </details>
+            <details>
               <summary>怎麼開始？</summary>
-              <p>登入後進設定：選你的現貨與風險、勾風險揭露、訂閱、貼 API，然後在總覽按 dry-run。跟一般交易機器人一樣，不是闖關問卷。</p>
+              <p>註冊後（非候補模式）會開啟最低方案 30 天試用。登入進控制台：填設定、綁 API，再從總覽啟動 dry-run。</p>
             </details>
             <details>
               <summary>API 要開哪些權限？</summary>
               <p>只要 account:read 與 trade:read_write。不要開 wallet。建議用子帳，並設 IP 白名單。</p>
             </details>
-            <details>
-              <summary>什麼時候才能實單？</summary>
-              <p>Scout 只有模擬。Trader／Pro／Desk 須先跑滿 7 天 dry-run。</p>
-            </details>
           </div>
+        </section>
+      </div>
+
+      <div id="strategyPage" class="hidden page-stack">
+        <section class="hero-panel">
+          <p class="section-eyebrow">Strategies</p>
+          <h2 class="hero-title">策略種類與說明</h2>
+          <p id="strategyIntro" class="hero-lede">把投資者當成完全沒學過期權來寫。風險、最大虧損、最大獲益都會說清楚。</p>
+        </section>
+        <div id="strategyMount" class="page-stack"></div>
+      </div>
+
+      <div id="pricingPage" class="hidden page-stack">
+        <section class="hero-panel">
+          <p class="section-eyebrow">Pricing</p>
+          <h2 class="hero-title">訂閱方案</h2>
+          <p id="pricingLede" class="hero-lede">訂閱費，不是績效費。方案細節仍會調整。</p>
+          <p class="hint">新帳號可先用最低方案（Scout）試用 30 天。APR 不是承諾。</p>
+        </section>
+        <div id="pricingCards" class="plan-grid"></div>
+        <section class="section-card priority-section">
+          <h2 class="section-title">方案比較</h2>
+          <div class="table-wrap">
+            <table class="plan-compare" id="pricingTable"></table>
+          </div>
+        </section>
+      </div>
+
+      <div id="loginPage" class="hidden">
+        <section class="hero-panel login-panel">
+          <p class="section-eyebrow">Account</p>
+          <h2 class="hero-title">登入或註冊</h2>
+          <p id="loginLede" class="hero-lede">輸入 email。沒有帳號會自動建立，並啟用最低方案 30 天試用。</p>
+          <form id="loginForm" class="login-row">
+            <label class="field">
+              <span>Email</span>
+              <input type="email" id="email" required placeholder="you@example.com" autocomplete="email" />
+            </label>
+            <button type="submit" class="ds-btn ds-btn-primary">繼續</button>
+          </form>
+          <p id="loginHint" class="hint">開發模式會直接登入，不必收信。</p>
+          <p class="hint">
+            先搞懂策略再訂閱：<a class="footer-nav-link" href="/strategy" data-page="strategy">策略說明</a>
+            ·
+            <a class="footer-nav-link" href="/pricing" data-page="pricing">方案</a>
+          </p>
         </section>
       </div>
 
@@ -109,6 +173,9 @@
         <aside id="waitlistBanner" class="exchange-outage-banner hidden" role="status">
           <p class="exchange-outage-title">尚在候補</p>
           <p class="exchange-outage-body" id="waitlistCopy">核准前可以先填設定，但不能綁金鑰或啟動。</p>
+        </aside>
+        <aside id="trialBanner" class="trial-banner hidden" role="status">
+          <p id="trialCopy">Scout 試用中。</p>
         </aside>
 
         <nav id="appNav" class="app-nav" aria-label="控制台">
@@ -120,10 +187,11 @@
         <div id="nextSteps" class="next-steps hidden" aria-label="還差什麼"></div>
 
         <section id="tab-overview" class="tab-panel">
+          <div id="perfMount" class="inv-dashboard"></div>
           <section class="section-card priority-section">
             <div class="section-heading">
               <div>
-                <p class="section-eyebrow">Overview</p>
+                <p class="section-eyebrow">Controls</p>
                 <h2 class="section-title">機器人</h2>
               </div>
               <p class="section-copy" id="who">—</p>
@@ -152,6 +220,15 @@
               <span id="groupMeta" class="open-meta-pill">—</span>
             </div>
             <div id="groups" class="open-position-list"></div>
+          </section>
+          <section class="section-card priority-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">Closed</p>
+                <h2 class="section-title">最近平倉</h2>
+              </div>
+            </div>
+            <div id="closedGroups" class="open-position-list"></div>
           </section>
         </section>
 

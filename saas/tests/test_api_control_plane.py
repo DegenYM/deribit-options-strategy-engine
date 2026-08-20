@@ -79,3 +79,4 @@ def test_subscribe_settings_and_dry_run_gate():
     assert dash.status_code == 200
     assert dash.json()["strategy"] == "covered_call"
     assert "投資建議" in dash.json()["disclaimer"]
+    assert "performance" in dash.json()

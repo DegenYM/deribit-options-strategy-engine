@@ -86,6 +86,7 @@ class Subscription(Base):
     status: Mapped[str] = mapped_column(String(32), default="inactive")
     stripe_customer_id: Mapped[str] = mapped_column(String(64), default="")
     stripe_subscription_id: Mapped[str] = mapped_column(String(64), default="")
+    trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

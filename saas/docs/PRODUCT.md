@@ -49,11 +49,14 @@
 
 ```
 公開
-  Landing        短主標 + 登入、方案、摺疊 FAQ（樹冠來由放 FAQ）
+  /              Landing：短主標、連到策略／方案／登入
+  /strategy      策略種類與說明（當讀者完全不懂期權；寫清最大獲益／最大虧損）
+  /pricing       訂閱方案比較（細節仍會調整）
+  /login         登入；新帳號在非 waitlist 模式啟用最低方案 30 天試用
   Legal          條款／隱私／風險揭露
-登入後（立刻進控制台）
-  總覽           狀態、dry-run／live、Pause／Panic
-  倉位           開放中的 covered call
+登入後 /app
+  總覽           績效面板（總權益、累計獲利、APR 免責、未實現權利金、勝率、持倉天數）+ dry-run／live／Pause／Panic
+  倉位           開放中的 covered call 與最近平倉
   設定           一頁：現況下拉、一則風險勾選、建議方案、API、參數
 ```
 
@@ -98,7 +101,7 @@
 
 沿用原專案元件：sticky header、chips、BTC／ETH 現貨卡、section card、stat tile、open-position card。
 
-第一屏只有：狀態、倉位、dry-run／live／Pause／Panic。金鑰與參數放第二層，避免再變「設定表單當首頁」。
+第一屏是績效面板（對齊原專案 KPI：總權益、累計獲利、未實現權利金、勝率／持倉天數），下面才是 dry-run／live／Pause／Panic。沒有倉位時數字顯示 —。金鑰與參數放設定分頁。
 
 ## 8. 方案角色（不變）
 

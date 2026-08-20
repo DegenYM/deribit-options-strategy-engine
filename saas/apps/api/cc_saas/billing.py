@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any
 
 from fastapi import HTTPException
@@ -11,7 +12,14 @@ from .models import Subscription, Tenant
 from .plans import get_plan
 
 
-def apply_plan(db: Session, tenant: Tenant, plan_id: str, *, status: str = "active") -> Subscription:
+def apply_plan(
+    db: Session,
+    tenant: Tenant,
+    plan_id: str,
+    *,
+    status: str = "active",
+    trial_ends_at: datetime | None = None,
+) -> Subscription:
     get_plan(plan_id)
     sub = tenant.subscription
     if sub is None:
@@ -20,6 +28,10 @@ def apply_plan(db: Session, tenant: Tenant, plan_id: str, *, status: str = "acti
         tenant.subscription = sub
     sub.plan_id = plan_id
     sub.status = status
+    if status == "trialing":
+        sub.trial_ends_at = trial_ends_at
+    else:
+        sub.trial_ends_at = None
     return sub
 
 

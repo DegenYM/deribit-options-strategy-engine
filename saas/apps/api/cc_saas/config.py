@@ -29,6 +29,8 @@ class Settings:
     public_base_url: str
     allow_dev_billing: bool
     waitlist_only: bool
+    trial_days: int
+    trial_plan_id: str
 
     @classmethod
     def from_environ(cls) -> Settings:
@@ -55,6 +57,8 @@ class Settings:
             public_base_url=os.environ.get("PUBLIC_BASE_URL", "http://127.0.0.1:8080"),
             allow_dev_billing=_bool("ALLOW_DEV_BILLING", default=True),
             waitlist_only=_bool("WAITLIST_ONLY", default=True),
+            trial_days=int(os.environ.get("TRIAL_DAYS", "30")),
+            trial_plan_id=os.environ.get("TRIAL_PLAN_ID", "scout").strip().lower() or "scout",
         )
 
 

@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from cc_engine.settings import CoveredCallSettings
-from cc_engine.snapshot import load_worker_snapshot
+from cc_engine.snapshot import empty_snapshot, load_worker_snapshot
 from cc_engine.worker import CoveredCallWorker
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -256,6 +256,6 @@ def panic_bot(
 @router.get("/snapshot")
 def snapshot(user: User = Depends(get_current_user), tenant: Tenant = Depends(get_tenant)):
     if tenant.credential is None:
-        return {"ok": True, "open_groups": [], "closed_groups": [], "heartbeat": None}
+        return empty_snapshot(tenant_id=tenant.id)
     live = bool(tenant.desired_state and tenant.desired_state.desired == "live")
     return load_worker_snapshot(_worker_settings(tenant, live=live))

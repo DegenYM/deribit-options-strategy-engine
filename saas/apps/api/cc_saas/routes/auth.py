@@ -11,8 +11,10 @@ from ..config import settings
 from ..crypto import hash_token, new_token
 from ..db import get_db
 from ..deps import get_current_user, get_tenant, issue_session
+from ..entitlements import subscription_is_live
 from ..models import MagicLink, Tenant, User
 from ..timeutil import as_utc
+from ..trials import provision_signup
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -60,10 +62,13 @@ def verify_magic_link(body: VerifyRequest, response: Response, db: Session = Dep
     user = db.query(User).filter(User.email == row.email).one_or_none()
     created = False
     if user is None:
-        user = User(email=row.email, waitlisted=True, approved=not settings.waitlist_only)
+        user = User(email=row.email, waitlisted=True, approved=False)
         db.add(user)
         db.flush()
-        db.add(Tenant(user_id=user.id, name="default"))
+        tenant = Tenant(user_id=user.id, name="default")
+        db.add(tenant)
+        db.flush()
+        provision_signup(db, user, tenant)
         created = True
     raw_session = new_token()
     issue_session(db, user, raw_session)
@@ -89,6 +94,8 @@ def logout(response: Response):
 
 @router.get("/me")
 def me(user: User = Depends(get_current_user), tenant: Tenant = Depends(get_tenant)):
+    sub = tenant.subscription
+    trial_live = bool(sub and sub.status == "trialing" and subscription_is_live(sub))
     return {
         "id": user.id,
         "email": user.email,
@@ -99,4 +106,10 @@ def me(user: User = Depends(get_current_user), tenant: Tenant = Depends(get_tena
         "live_unlocked_at": user.live_unlocked_at.isoformat() if user.live_unlocked_at else None,
         "dry_run_min_days": settings.dry_run_min_days,
         "intake_complete": bool(tenant.onboarding and tenant.onboarding.intake_complete),
+        "plan_id": sub.plan_id if sub else None,
+        "subscription_status": sub.status if sub else "inactive",
+        "trial_days": settings.trial_days,
+        "trial_plan_id": settings.trial_plan_id,
+        "trial_ends_at": as_utc(sub.trial_ends_at).isoformat() if sub and sub.trial_ends_at else None,
+        "trial_active": trial_live,
     }

@@ -25,6 +25,7 @@ from ..brand import (
     TAGLINE_ZH,
     WHY_POINTS_ZH,
 )
+from ..config import settings
 from ..db import get_db
 from ..deps import get_current_user, get_tenant
 from ..models import Onboarding, Tenant, User
@@ -105,6 +106,9 @@ def product_meta():
             "關掉同一子帳上會搶單的其他自動策略",
             "接受 call 被行使時現貨可能被賣掉",
         ],
+        "waitlist_only": settings.waitlist_only,
+        "trial_days": settings.trial_days,
+        "trial_plan_id": settings.trial_plan_id,
         "disclaimer": "Not investment advice. No APR guarantee. A canopy is shade, not a roof.",
     }
 

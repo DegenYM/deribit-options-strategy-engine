@@ -4,6 +4,8 @@ let cachedRecommendation = null;
 let ackIds = [];
 let currentTab = "overview";
 let lastMe = null;
+let lastProduct = null;
+let routing = false;
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -17,7 +19,8 @@ async function api(path, options = {}) {
 }
 
 function show(id, on) {
-  $(id).classList.toggle("hidden", !on);
+  const el = $(id);
+  if (el) el.classList.toggle("hidden", !on);
 }
 
 function money(plan) {
@@ -29,6 +32,41 @@ function fmtPrice(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
   return n.toLocaleString("en-US", { maximumFractionDigits: n >= 1000 ? 0 : 2 });
+}
+
+function fmtUsd(value) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: n >= 1000 ? 0 : 2 });
+}
+
+function fmtPct(value) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  return n.toLocaleString("en-US", { style: "percent", maximumFractionDigits: 1, minimumFractionDigits: 1 });
+}
+
+function fmtDays(value) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  return `${n.toFixed(1)} 天`;
+}
+
+function pnlClass(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n === 0) return "";
+  return n > 0 ? "pnl-pos" : "pnl-neg";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function setChip(el, text, variant) {
@@ -48,6 +86,23 @@ function stampRefresh() {
   $("lastRefresh").textContent = `更新 ${new Date().toLocaleTimeString()}`;
 }
 
+function pageFromPath() {
+  const path = (location.pathname.replace(/\/+$/, "") || "/");
+  if (path === "/strategy") return "strategy";
+  if (path === "/pricing") return "pricing";
+  if (path === "/login" || path === "/signup") return "login";
+  if (path === "/app") return "app";
+  return "landing";
+}
+
+function pageId(name) {
+  if (name === "strategy") return "strategyPage";
+  if (name === "pricing") return "pricingPage";
+  if (name === "login") return "loginPage";
+  if (name === "app") return "app";
+  return "landing";
+}
+
 function showTab(name) {
   currentTab = name;
   document.querySelectorAll(".app-tab").forEach((btn) => {
@@ -58,21 +113,65 @@ function showTab(name) {
   });
 }
 
-function routeScreens(me) {
-  const loggedIn = Boolean(me);
-  show("landing", !loggedIn);
-  show("app", loggedIn);
+function applyChrome(page) {
+  const loggedIn = Boolean(lastMe);
+  const inApp = page === "app";
   $("logoutBtn").classList.toggle("hidden", !loggedIn);
-  $("statusCluster").classList.toggle("hidden", !loggedIn);
-  $("headerMarkets").classList.toggle("hidden", !loggedIn);
-  $("lastRefresh").classList.toggle("hidden", !loggedIn);
-  $("refreshNow").classList.toggle("hidden", !loggedIn);
+  $("statusCluster").classList.toggle("hidden", !inApp);
+  $("headerMarkets").classList.toggle("hidden", !inApp);
+  $("lastRefresh").classList.toggle("hidden", !inApp);
+  $("refreshNow").classList.toggle("hidden", !inApp);
+  $("pageSubtitle").textContent = inApp ? "備兌賣 call 控制台" : "樹冠罩住你已經持有的現貨。";
+  const loginNav = $("loginNav");
   if (loggedIn) {
-    $("pageSubtitle").textContent = "備兌賣 call 控制台";
-    show("waitlistBanner", !me.approved);
-    if (!me.intake_complete) showTab("setup");
+    loginNav.textContent = "控制台";
+    loginNav.setAttribute("href", "/app");
+    loginNav.dataset.page = "app";
+  } else {
+    loginNav.textContent = "登入／試用";
+    loginNav.setAttribute("href", "/login");
+    loginNav.dataset.page = "login";
   }
-  lastMe = me;
+  document.querySelectorAll(".site-nav a").forEach((link) => {
+    link.classList.toggle("is-active", link.dataset.page === page || (page === "app" && link.dataset.page === "app"));
+  });
+}
+
+function showPage(name) {
+  ["landing", "strategyPage", "pricingPage", "loginPage", "app"].forEach((id) => {
+    show(id, id === pageId(name));
+  });
+  applyChrome(name);
+}
+
+function navigate(path, { replace = false } = {}) {
+  if (location.pathname !== path) {
+    if (replace) history.replaceState({}, "", path);
+    else history.pushState({}, "", path);
+  }
+  return route();
+}
+
+async function route() {
+  if (routing) return;
+  routing = true;
+  try {
+    let page = pageFromPath();
+    if (lastMe && (page === "landing" || page === "login")) {
+      history.replaceState({}, "", "/app");
+      page = "app";
+    }
+    if (!lastMe && page === "app") {
+      history.replaceState({}, "", "/login");
+      page = "login";
+    }
+    showPage(page);
+    if (page === "strategy") await loadStrategies();
+    if (page === "pricing") await loadPricing();
+    if (page === "app" && lastMe) await refreshApp();
+  } finally {
+    routing = false;
+  }
 }
 
 function bindSubscribe(containerId, after) {
@@ -93,30 +192,115 @@ function bindSubscribe(containerId, after) {
   });
 }
 
-async function loadPlans() {
-  const { plans } = await api("/api/plans");
-  $("plansMount").innerHTML = plans
+function renderPlanCards(plans, mountId) {
+  const root = $(mountId);
+  if (!root) return;
+  root.innerHTML = plans
     .map(
-      (plan) => `<article class="plan">
-        <b>${plan.name}</b>
+      (plan) => `<article class="plan${plan.trial_eligible ? " plan--trial" : ""}">
+        <b>${escapeHtml(plan.name)}</b>
         <div class="plan-price">${money(plan)}</div>
-        <p>${plan.blurb_zh}</p>
-        <small>${plan.disclaimer_zh}</small>
+        <p>${escapeHtml(plan.blurb_zh)}</p>
+        <ul class="plan-highlights">${(plan.highlights_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+        ${plan.trial_eligible ? `<small>新帳號試用方案（${lastProduct?.trial_days || 30} 天）</small>` : ""}
+        <small>${escapeHtml(plan.disclaimer_zh)}</small>
       </article>`
     )
     .join("");
-  $("subscribeRow").innerHTML = plans
+}
+
+async function loadPricing() {
+  const catalog = await api("/api/plans");
+  $("pricingLede").textContent = catalog.details_pending_zh || "訂閱費，不是績效費。";
+  renderPlanCards(catalog.plans, "pricingCards");
+  const cmp = catalog.comparison || { plan_ids: [], rows: [], plan_names: {} };
+  const ids = cmp.plan_ids || [];
+  const head = `<thead><tr><th>項目</th>${ids.map((id) => `<th>${escapeHtml(cmp.plan_names?.[id] || id)}</th>`).join("")}</tr></thead>`;
+  const body = `<tbody>${(cmp.rows || [])
+    .map(
+      (row) =>
+        `<tr><th>${escapeHtml(row.label_zh)}</th>${ids.map((id) => `<td>${escapeHtml(row.cells?.[id] || "—")}</td>`).join("")}</tr>`
+    )
+    .join("")}</tbody>`;
+  $("pricingTable").innerHTML = head + body;
+  $("subscribeRow").innerHTML = catalog.plans
     .map((plan) => `<button type="button" class="ds-btn" data-plan="${plan.id}">訂閱 ${plan.name}</button>`)
     .join("");
   bindSubscribe("subscribeRow", refreshApp);
 }
 
+async function loadStrategies() {
+  const data = await api("/api/strategies");
+  $("strategyIntro").textContent = data.intro_zh || "";
+  const statusLabel = {
+    available: "目前提供",
+    coming_soon: "即將推出",
+    not_offered: "不提供",
+  };
+  $("strategyMount").innerHTML =
+    data.strategies
+      .map((s) => {
+        const example = s.example_zh
+          ? `<div class="example-box">
+              <h4>${escapeHtml(s.example_zh.title_zh)}</h4>
+              <p>${escapeHtml(s.example_zh.setup_zh)}</p>
+              <ul>${(s.example_zh.paths || [])
+                .map((path) => `<li><strong>${escapeHtml(path.label_zh)}</strong> ${escapeHtml(path.detail_zh)}</li>`)
+                .join("")}</ul>
+            </div>`
+          : "";
+        return `<article class="section-card priority-section strategy-card ${s.available ? "" : "strategy-card--soon"}">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">${escapeHtml(s.name_en || "")}</p>
+              <h2 class="section-title">${escapeHtml(s.name_zh)}</h2>
+            </div>
+            <span class="open-meta-pill">${statusLabel[s.status] || s.status}</span>
+          </div>
+          <p class="section-copy">${escapeHtml(s.one_liner_zh)}</p>
+          <p class="hint">${escapeHtml(s.for_whom_zh || "")}</p>
+          <div class="payoff-grid">
+            <aside class="payoff payoff--gain">
+              <p class="payoff-kicker">${escapeHtml(s.max_profit.title_zh)}</p>
+              <h3>${escapeHtml(s.max_profit.headline_zh)}</h3>
+              <p>${escapeHtml(s.max_profit.body_zh)}</p>
+              <p class="hint">何時：${escapeHtml(s.max_profit.when_zh)}</p>
+              <p class="hint">${escapeHtml(s.max_profit.not_zh)}</p>
+            </aside>
+            <aside class="payoff payoff--loss">
+              <p class="payoff-kicker">${escapeHtml(s.max_loss.title_zh)}</p>
+              <h3>${escapeHtml(s.max_loss.headline_zh)}</h3>
+              <p>${escapeHtml(s.max_loss.body_zh)}</p>
+              <p class="hint">何時：${escapeHtml(s.max_loss.when_zh)}</p>
+              <p class="hint">${escapeHtml(s.max_loss.not_zh)}</p>
+            </aside>
+          </div>
+          <h3 class="mini-title">從零開始</h3>
+          <ul class="reason-list">${(s.beginner_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+          <h3 class="mini-title">實際怎麼走</h3>
+          <ol class="reason-list">${(s.how_it_works_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ol>
+          ${example}
+          <h3 class="mini-title">風險</h3>
+          <ul class="reason-list">${(s.risks_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+          <h3 class="mini-title">這不是</h3>
+          <ul class="not-list">${(s.not_this_zh || []).map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>
+        </article>`;
+      })
+      .join("") + `<p class="hint">${escapeHtml(data.disclaimer_zh || "")}</p>`;
+}
+
 function applyBrand(product) {
+  lastProduct = product;
   document.title = `${product.brand} · ${product.gloss_zh}`;
   $("heroEyebrow").textContent = `${product.brand} · ${product.gloss_zh} · Deribit`;
   $("heroTitle").textContent = "在自己的現貨上，自動備兌賣 call。";
   $("heroLede").textContent = `${product.tagline_zh}金鑰留在你的 Deribit 子帳。${product.gloss_zh}是遮蔭，不是屋頂。`;
   $("faqOrigin").textContent = product.origin_zh;
+  if (product.waitlist_only) {
+    $("loginLede").textContent = "輸入 email 登入或註冊。目前為候補模式：核准前不能綁金鑰或啟動。";
+  } else {
+    $("loginLede").textContent = `輸入 email。沒有帳號會自動建立，並啟用 ${product.trial_plan_id || "Scout"} 方案 ${product.trial_days || 30} 天試用。`;
+  }
 }
 
 function renderIntake(schema, product) {
@@ -194,7 +378,7 @@ function renderNextSteps({ me, bill, bot }) {
   const items = [
     { ok: me.intake_complete, label: "開通設定", tab: "setup" },
     { ok: me.approved, label: "帳號核准", tab: "setup" },
-    { ok: Boolean(bill.plan_id), label: "訂閱", tab: "setup" },
+    { ok: Boolean(bill.plan_id), label: "訂閱或試用", tab: "setup" },
     { ok: bot.has_credentials, label: "API 金鑰", tab: "setup" },
     { ok: ["dry_run", "live", "paused"].includes(bot.desired), label: "已啟動", tab: "overview" },
   ];
@@ -215,17 +399,82 @@ function renderNextSteps({ me, bill, bot }) {
   show("nextSteps", true);
 }
 
+function renderPerformance(perf, disclaimer) {
+  const since = perf?.since ? `自 ${perf.since}` : "尚未有倉位";
+  const winHold =
+    perf?.win_rate == null && perf?.avg_holding_days == null
+      ? "—"
+      : `${fmtPct(perf.win_rate)} · ${fmtDays(perf.avg_holding_days)}`;
+  $("perfMount").innerHTML = `
+    <section class="inv-panel inv-panel--hero" aria-label="投資組合摘要">
+      <div class="inv-split">
+        <div class="inv-kpi inv-kpi--equity">
+          <span class="inv-kpi-label">總權益</span>
+          <span class="inv-kpi-value inv-kpi-value--hero font-mono tabular-nums">${fmtUsd(perf?.total_equity_usdc)}</span>
+          <span class="inv-kpi-foot">${perf?.has_data ? "子帳權益（引擎上次同步）" : "綁定金鑰並啟動後才會有數字"}</span>
+        </div>
+        <div class="inv-kpi">
+          <span class="inv-kpi-label">累計獲利</span>
+          <span class="inv-kpi-value inv-kpi-value--hero font-mono tabular-nums ${pnlClass(perf?.lifetime_pnl_usdc)}">${fmtUsd(perf?.lifetime_pnl_usdc)}</span>
+          <span class="inv-kpi-foot">APR ${fmtPct(perf?.lifetime_apr)} · 不是收益承諾</span>
+        </div>
+      </div>
+    </section>
+    <div class="inv-stat-row">
+      <div class="inv-stat">
+        <span class="inv-stat-label">未實現權利金</span>
+        <span class="inv-stat-value font-mono tabular-nums">${fmtUsd(perf?.open_credit_usdc)}</span>
+        <span class="inv-kpi-foot">${perf?.open_count ?? 0} 筆開放中</span>
+      </div>
+      <div class="inv-stat">
+        <span class="inv-stat-label">勝率 · 持倉天數</span>
+        <span class="inv-stat-value font-mono tabular-nums">${winHold}</span>
+        <span class="inv-kpi-foot">${since} · ${perf?.realized_count ?? 0} 筆已結算</span>
+      </div>
+    </div>
+    <p class="hint">${escapeHtml(perf?.disclaimer_zh || disclaimer || "")}</p>`;
+}
+
+function positionCard(g, { closed = false } = {}) {
+  const accent = String(g.currency || "").toLowerCase() === "btc" ? " open-position-card--btc" : "";
+  const pnl = closed ? `<span class="${pnlClass(g.realized_pnl)}">pnl ${g.realized_pnl ?? "—"}</span>` : "";
+  return `<article class="open-position-card${accent}">
+    <div class="open-position-header">
+      <h3>${escapeHtml(g.short_instrument || "—")}</h3>
+      <span class="open-book-pill">${escapeHtml(g.currency || "—")}</span>
+      <span class="open-book-pill">${closed ? "closed" : "call"}</span>
+    </div>
+    <div class="open-position-detail-row">
+      <span>qty ${escapeHtml(g.quantity ?? "—")}</span>
+      <span>strike ${escapeHtml(g.strike ?? "—")}</span>
+      <span>DTE ${escapeHtml(g.dte_days ?? "—")}</span>
+      <span>premium ${escapeHtml(g.entry_credit ?? "—")}</span>
+      ${pnl}
+      ${g.close_reason ? `<span>${escapeHtml(g.close_reason)}</span>` : ""}
+    </div>
+  </article>`;
+}
+
 async function refreshApp() {
   const me = await api("/api/auth/me");
+  lastMe = me;
   $("who").textContent = me.email;
   $("waitlistCopy").textContent = `${me.email} 已在候補。核准前可先填開通設定，但不能綁金鑰或啟動。`;
-  routeScreens(me);
+  show("waitlistBanner", !me.approved);
+  if (me.trial_active && me.trial_ends_at) {
+    const ends = new Date(me.trial_ends_at);
+    $("trialCopy").textContent = `${me.plan_id || "Scout"} 試用中，結束於 ${ends.toLocaleDateString()}。`;
+    show("trialBanner", true);
+  } else {
+    show("trialBanner", false);
+  }
+  applyChrome("app");
 
   const onboarding = await api("/api/onboarding").catch(() => ({ recommendation: null, answers: null }));
   if (onboarding.answers) fillIntake(onboarding.answers);
   if (onboarding.recommendation) showRecommendation(onboarding.recommendation);
 
-  let dash = { market: null, bot: { open_groups: [] } };
+  let dash = { market: null, bot: { open_groups: [], closed_groups: [], performance: {} }, performance: {}, disclaimer: "" };
   let bot = {
     desired: "stopped",
     risk_tier: "low",
@@ -236,15 +485,17 @@ async function refreshApp() {
     secret_last4: "",
     profit_sweep: false,
   };
-  let bill = { plan_id: null, status: null };
-  if (me.approved) {
+  let bill = { plan_id: me.plan_id, status: me.subscription_status };
+  try {
     dash = await api("/api/dashboard");
     bot = await api("/api/bot/status");
     bill = await api("/api/billing");
+  } catch {
+    /* waitlist or missing entitlements still render empty KPIs */
   }
 
   $("billStatus").textContent = bill.plan_id
-    ? `目前方案 ${bill.plan_id}（${bill.status}）`
+    ? `目前方案 ${bill.plan_id}（${bill.status}${bill.trial_ends_at ? " · 試用至 " + new Date(bill.trial_ends_at).toLocaleDateString() : ""}）`
     : me.approved
       ? "尚未訂閱。選一個方案即可（開發模式不必走 Stripe）。"
       : "核准後才能訂閱。";
@@ -252,10 +503,14 @@ async function refreshApp() {
   $("headerSpotBtc").textContent = fmtPrice(dash.market?.btc_usd);
   $("headerSpotEth").textContent = fmtPrice(dash.market?.eth_usd);
   setChip($("whoBadge"), me.email, me.approved ? "success" : "warning");
-  setChip($("planBadge"), bill.plan_id || "未訂閱", bill.plan_id ? "info" : "neutral");
+  const planLabel = me.trial_active ? `${bill.plan_id || me.plan_id} 試用` : bill.plan_id || me.plan_id || "未訂閱";
+  setChip($("planBadge"), planLabel, bill.plan_id || me.plan_id ? "info" : "neutral");
   setChip($("desiredBadge"), bot.desired, desiredVariant(bot.desired));
   setChip($("tierBadge"), `風險 · ${bot.risk_tier || "—"}`, "warning");
   setChip($("credsBadge"), bot.has_credentials ? "金鑰已綁" : "未綁金鑰", bot.has_credentials ? "success" : "neutral");
+
+  const perf = dash.performance || dash.bot?.performance || {};
+  renderPerformance(perf, dash.disclaimer);
 
   $("botMeta").innerHTML = [
     ["狀態", bot.desired],
@@ -280,27 +535,14 @@ async function refreshApp() {
   if (rec) $("applyCopy").textContent = `建議 ${rec.plan_id} · ${rec.risk_tier} · ${(rec.coins || []).join(", ")}`;
 
   const groups = dash.bot.open_groups || [];
+  const closed = dash.bot.closed_groups || [];
   $("groupMeta").textContent = `${groups.length} 筆`;
   $("groups").innerHTML = groups.length
-    ? groups
-        .map((g) => {
-          const accent = String(g.currency || "").toLowerCase() === "btc" ? " open-position-card--btc" : "";
-          return `<article class="open-position-card${accent}">
-            <div class="open-position-header">
-              <h3>${g.short_instrument}</h3>
-              <span class="open-book-pill">${g.currency || "—"}</span>
-              <span class="open-book-pill">call</span>
-            </div>
-            <div class="open-position-detail-row">
-              <span>qty ${g.quantity ?? "—"}</span>
-              <span>strike ${g.strike ?? "—"}</span>
-              <span>DTE ${g.dte_days ?? "—"}</span>
-              <span>premium ${g.entry_credit ?? "—"}</span>
-            </div>
-          </article>`;
-        })
-        .join("")
+    ? groups.map((g) => positionCard(g)).join("")
     : `<div class="open-empty-state">還沒有開放中的 covered call。完成設定後在總覽啟動 dry-run。</div>`;
+  $("closedGroups").innerHTML = closed.length
+    ? closed.map((g) => positionCard(g, { closed: true })).join("")
+    : `<div class="open-empty-state">尚無平倉紀錄。</div>`;
 
   $("keyStatus").textContent = bot.has_credentials ? "已保存（密鑰不回顯）" : "尚未綁定";
   $("riskTier").value = bot.risk_tier || "low";
@@ -309,11 +551,25 @@ async function refreshApp() {
   });
   $("sweep").checked = !!bot.profit_sweep;
   renderNextSteps({ me, bill, bot });
+  if (!me.intake_complete) showTab("setup");
   stampRefresh();
 }
 
 document.querySelectorAll(".app-tab").forEach((btn) => {
   btn.addEventListener("click", () => showTab(btn.dataset.tab));
+});
+
+document.body.addEventListener("click", (event) => {
+  const link = event.target.closest("a[data-page]");
+  if (!link) return;
+  const url = new URL(link.href, location.origin);
+  if (url.origin !== location.origin) return;
+  event.preventDefault();
+  navigate(url.pathname);
+});
+
+window.addEventListener("popstate", () => {
+  route().catch(() => {});
 });
 
 $("loginForm").addEventListener("submit", async (event) => {
@@ -324,17 +580,22 @@ $("loginForm").addEventListener("submit", async (event) => {
   });
   $("loginHint").textContent = "開發模式：直接登入中…";
   await api("/api/auth/verify", { method: "POST", body: JSON.stringify({ token: requested.dev_token }) });
-  await refreshApp();
+  lastMe = await api("/api/auth/me");
+  await navigate("/app");
 });
 
 $("logoutBtn").addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST" });
-  location.reload();
+  lastMe = null;
+  location.href = "/";
 });
 
-$("refreshNow").addEventListener("click", () => refreshApp().catch(() => {
-  $("loginHint").textContent = "尚未登入。";
-}));
+$("refreshNow").addEventListener("click", () =>
+  refreshApp().catch(() => {
+    lastMe = null;
+    navigate("/login");
+  })
+);
 
 $("intakeForm").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -435,10 +696,11 @@ $("panicBtn").addEventListener("click", () => {
   const [product, schema] = await Promise.all([api("/api/product"), api("/api/onboarding/schema")]);
   applyBrand(product);
   renderIntake(schema, product);
-  await loadPlans();
+  await loadPricing();
   try {
-    await refreshApp();
+    lastMe = await api("/api/auth/me");
   } catch {
-    routeScreens(null);
+    lastMe = null;
   }
+  await route();
 })();

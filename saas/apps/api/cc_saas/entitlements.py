@@ -15,8 +15,20 @@ class EntitlementError(HTTPException):
         super().__init__(status_code=status_code, detail=detail)
 
 
-def active_plan(sub: Subscription | None) -> Plan:
+def subscription_is_live(sub: Subscription | None, *, now: datetime | None = None) -> bool:
     if sub is None or sub.status not in {"active", "trialing"}:
+        return False
+    if sub.status == "trialing" and sub.trial_ends_at is not None:
+        clock = now or datetime.now(tz=UTC)
+        if as_utc(sub.trial_ends_at) < clock:
+            return False
+    return True
+
+
+def active_plan(sub: Subscription | None) -> Plan:
+    if not subscription_is_live(sub):
+        if sub is not None and sub.status == "trialing":
+            raise EntitlementError("試用已結束，請訂閱方案後繼續使用")
         raise EntitlementError("需要有效訂閱才能使用此功能")
     return get_plan(sub.plan_id)
 
