@@ -1,3 +1,23 @@
+function isCoinPayoff(d) {
+  return Boolean(d && d.kind === "covered_call" && d.premium_coin != null);
+}
+
+function coinCode(d) {
+  return String(d?.underlying || "BTC").toUpperCase();
+}
+
+function premiumCoinOf(d) {
+  return Number(d.premium_coin) || 0;
+}
+
+function settlementCoin(d, price) {
+  const s = Number(price);
+  const strike = Number(d.strike) || 0;
+  const qty = Number(d.qty) || 1;
+  if (!(s > 0) || s <= strike) return 0;
+  return (qty * (s - strike)) / s;
+}
+
 function payoffAt(kind, price, d) {
   const s = Number(price);
   const spot = Number(d.spot) || 0;
@@ -5,6 +25,10 @@ function payoffAt(kind, price, d) {
   const premium = Number(d.premium) || 0;
   const shortK = Number(d.short_strike) || 0;
   const longK = Number(d.long_strike) || 0;
+  if (isCoinPayoff(d)) {
+    if (kind === "covered_call") return premiumCoinOf(d) - settlementCoin(d, s);
+    if (kind === "spot") return 0;
+  }
   if (kind === "covered_call") {
     return s >= strike ? strike - spot + premium : s - spot + premium;
   }
@@ -26,6 +50,21 @@ function payoffAt(kind, price, d) {
   return 0;
 }
 
+function overlayUsdAt(kind, price, d) {
+  const coin = payoffAt(kind, price, d);
+  if (!isCoinPayoff(d)) return coin;
+  return coin * Number(price);
+}
+
+function bookUsdAt(kind, price, d) {
+  const s = Number(price);
+  const spot0 = Number(d.spot) || 0;
+  const qty = Number(d.qty) || 1;
+  if (!isCoinPayoff(d)) return payoffAt(kind, price, d);
+  if (kind === "spot") return qty * (s - spot0);
+  return (qty + payoffAt("covered_call", price, d)) * s - qty * spot0;
+}
+
 function fmtChartUsd(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "—";
@@ -37,6 +76,19 @@ function fmtChartUsd(value) {
   return `${sign}$${abs.toFixed(0)}`;
 }
 
+function fmtChartCoin(value, coin) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  const abs = Math.abs(n);
+  const sign = n < 0 ? "−" : n > 0 ? "+" : "";
+  const digits = abs >= 0.1 ? 3 : 4;
+  return `${sign}${abs.toFixed(digits)} ${coin}`;
+}
+
+function fmtPnlPair(coinValue, usdValue, coin) {
+  return `<span class="pnl-coin">${fmtChartCoin(coinValue, coin)}</span><span class="pnl-usd">${fmtChartUsd(usdValue)} U</span>`;
+}
+
 function fmtAxisUsd(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "";
@@ -44,6 +96,14 @@ function fmtAxisUsd(value) {
   const abs = Math.abs(n);
   if (abs >= 1000) return `${sign}$${Math.round(abs / 1000)}k`;
   return `${sign}$${Math.round(abs)}`;
+}
+
+function fmtAxisCoin(value, coin) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  if (Math.abs(n) < 1e-9) return `0 ${coin}`;
+  const sign = n < 0 ? "−" : "";
+  return `${sign}${Math.abs(n).toFixed(2)} ${coin}`;
 }
 
 function extremaFor(d) {
@@ -94,9 +154,11 @@ function polyline(kind, d, mapX, mapY, cls) {
 }
 
 function payoffSvg(d, cursor) {
+  const coin = coinCode(d);
+  const coinChart = isCoinPayoff(d);
   const W = 720;
   const H = 340;
-  const left = 58;
+  const left = coinChart ? 78 : 58;
   const right = 18;
   const top = 18;
   const bottom = 42;
@@ -111,11 +173,12 @@ function payoffSvg(d, cursor) {
   const hasSpot = (d.series || []).some((row) => row.id === "spot");
   const yTicks = [yMin, 0, yMax];
   const xTicks = [xMin, d.spot, d.strike || d.short_strike, xMax].filter((v, i, arr) => v != null && arr.indexOf(v) === i);
+  const fmtY = (y) => (coinChart ? fmtAxisCoin(y, coin) : fmtAxisUsd(y));
   const grid = yTicks
     .map((y) => `<line class="chart-grid" x1="${left}" x2="${left + width}" y1="${mapY(y)}" y2="${mapY(y)}" />`)
     .join("");
   const yLabels = yTicks
-    .map((y) => `<text class="chart-label" x="${left - 8}" y="${mapY(y) + 4}" text-anchor="end">${fmtAxisUsd(y)}</text>`)
+    .map((y) => `<text class="chart-label" x="${left - 8}" y="${mapY(y) + 4}" text-anchor="end">${fmtY(y)}</text>`)
     .join("");
   const xLabels = xTicks
     .filter((x) => x >= xMin && x <= xMax)
@@ -141,12 +204,14 @@ function payoffSvg(d, cursor) {
   const stratPoly = polyline(d.kind, d, mapX, mapY, "chart-line chart-line--strategy");
   const capNote =
     d.kind === "covered_call"
-      ? `<text class="chart-tag" x="${mapX(Math.min(xMax - 5000, (d.strike || xMax) + 8000))}" y="${mapY(payoffAt(d.kind, xMax, d)) - 8}">最大獲利（再漲也停在這）</text>`
+      ? `<text class="chart-tag" x="${mapX(Math.min(xMax - 5000, (d.strike || xMax) + 8000))}" y="${mapY(payoffAt(d.kind, Math.min(d.strike || xMax, xMax), d)) - 8}">最大獲利（幣本位，價外）</text>`
       : d.kind === "naked_short_call"
         ? `<text class="chart-tag chart-tag--danger" x="${mapX(xMax) - 8}" y="${mapY(payoffAt(d.kind, xMax, d)) + 14}" text-anchor="end">虧損無上限 →</text>`
         : "";
-  const lossNote =
-    d.kind === "covered_call"
+  const lossNote = coinChart
+    ? `<text class="chart-tag chart-tag--danger" x="${left + 8}" y="${mapY(payoffAt(d.kind, xMin, d)) - 8}">下跌：幣還在，U 市值掉</text>
+       <text class="chart-tag chart-tag--danger" x="${mapX(xMax) - 8}" y="${mapY(payoffAt(d.kind, xMax, d)) + 14}" text-anchor="end">價內結算扣幣 →</text>`
+    : d.kind === "covered_call"
       ? `<text class="chart-tag chart-tag--danger" x="${left + 8}" y="${mapY(payoffAt(d.kind, xMin, d)) - 8}">現貨下跌（還能更低）</text>`
       : "";
   return `<svg class="payoff-svg" viewBox="0 0 ${W} ${H}" role="img" aria-label="到期損益圖">
@@ -163,7 +228,7 @@ function payoffSvg(d, cursor) {
     ${yLabels}
     ${xLabels}
     <text class="chart-axis-title" x="${left + width / 2}" y="${H - 1}" text-anchor="middle">${escapeHtml(d.x_label_zh || "")}</text>
-    <text class="chart-axis-title" x="14" y="${top + height / 2}" text-anchor="middle" transform="rotate(-90 14 ${top + height / 2})">${escapeHtml(d.y_label_zh || "")}</text>
+    <text class="chart-axis-title" x="16" y="${top + height / 2}" text-anchor="middle" transform="rotate(-90 16 ${top + height / 2})">${escapeHtml(d.y_label_zh || "")}</text>
     <line class="chart-cursor" x1="${cursorX}" x2="${cursorX}" y1="${top}" y2="${top + height}" />
     <circle class="chart-dot" cx="${cursorX}" cy="${strategyY}" r="5" />
   </svg>`;
@@ -171,6 +236,17 @@ function payoffSvg(d, cursor) {
 
 function maxMinPayoff(d) {
   const premium = Number(d.premium) || 0;
+  const coin = coinCode(d);
+  if (isCoinPayoff(d)) {
+    const maxCoin = premiumCoinOf(d);
+    const minCoin = payoffAt(d.kind, d.x_max, d);
+    return {
+      max: maxCoin,
+      min: minCoin,
+      maxLabel: `${fmtChartCoin(maxCoin, coin)} · 進場約 ${fmtChartUsd(premium)} U`,
+      minLabel: `圖右約 ${fmtChartCoin(minCoin, coin)}；現貨→0 時幣本位仍是權利金，U 市值接近歸零`,
+    };
+  }
   if (d.kind === "covered_call") {
     const spot = Number(d.spot) || 0;
     const strike = Number(d.strike) || 0;
@@ -201,7 +277,10 @@ function scenarioPnl(d, spotPrice) {
   const hasSpot = (d.series || []).some((row) => row.id === "spot");
   return {
     strategy,
+    strategyUsd: overlayUsdAt(d.kind, spotPrice, d),
+    bookUsd: bookUsdAt(d.kind, spotPrice, d),
     spot: hasSpot ? payoffAt("spot", spotPrice, d) : null,
+    spotUsd: hasSpot ? bookUsdAt("spot", spotPrice, d) : null,
   };
 }
 
@@ -238,17 +317,29 @@ function renderFlow(flow) {
 }
 
 function renderScenarios(d) {
+  const coin = coinCode(d);
+  const coinChart = isCoinPayoff(d);
   return `<div class="scenario-grid">${(d.scenarios || [])
     .map((row) => {
       const pnl = scenarioPnl(d, row.spot);
+      const main = coinChart
+        ? `<p class="scenario-pnl font-mono ${pnlClass(pnl.strategy)}">${fmtPnlPair(pnl.strategy, pnl.strategyUsd, coin)}</p>`
+        : `<p class="scenario-pnl font-mono ${pnlClass(pnl.strategy)}">${fmtChartUsd(pnl.strategy)}</p>`;
       const spotLine =
-        pnl.spot == null
+        pnl.spotUsd == null
           ? ""
-          : `<div class="scenario-compare">只持有現貨 <span class="font-mono ${pnlClass(pnl.spot)}">${fmtChartUsd(pnl.spot)}</span></div>`;
+          : coinChart
+            ? `<div class="scenario-compare">只持現貨 <span class="font-mono ${pnlClass(pnl.spotUsd)}">0 ${coin} · ${fmtChartUsd(pnl.spotUsd)} U</span></div>`
+            : `<div class="scenario-compare">只持有現貨 <span class="font-mono ${pnlClass(pnl.spot)}">${fmtChartUsd(pnl.spot)}</span></div>`;
+      const bookLine =
+        coinChart
+          ? `<div class="scenario-compare">整包 vs 進場 <span class="font-mono ${pnlClass(pnl.bookUsd)}">${fmtChartUsd(pnl.bookUsd)} U</span></div>`
+          : "";
       return `<article class="scenario-card">
         <p class="scenario-kicker">${escapeHtml(row.label_zh)}</p>
         <p class="scenario-spot font-mono">到期現貨 ${fmtChartUsd(row.spot).replace("+", "")}</p>
-        <p class="scenario-pnl font-mono ${pnlClass(pnl.strategy)}">${fmtChartUsd(pnl.strategy)}</p>
+        ${main}
+        ${bookLine}
         ${spotLine}
         <p class="hint">${escapeHtml(row.caption_zh)}</p>
       </article>`;
@@ -259,23 +350,32 @@ function renderScenarios(d) {
 function renderReadout(d, cursor) {
   const pnl = scenarioPnl(d, cursor);
   const bounds = maxMinPayoff(d);
-  const spotLine =
-    pnl.spot == null
-      ? ""
-      : `<div class="readout-compare">若只持有現貨：<strong class="${pnlClass(pnl.spot)}">${fmtChartUsd(pnl.spot)}</strong></div>`;
+  const coin = coinCode(d);
+  const coinChart = isCoinPayoff(d);
+  const strategyBlock = coinChart
+    ? `<span class="readout-pnl font-mono ${pnlClass(pnl.strategy)}">${fmtPnlPair(pnl.strategy, pnl.strategyUsd, coin)}</span>
+       <div class="readout-compare">整包 vs 進場：<strong class="${pnlClass(pnl.bookUsd)}">${fmtChartUsd(pnl.bookUsd)} U</strong></div>
+       <div class="readout-compare">若只持現貨：<strong>0 ${coin} · <span class="${pnlClass(pnl.spotUsd)}">${fmtChartUsd(pnl.spotUsd)} U</span></strong></div>`
+    : `<span class="readout-pnl font-mono ${pnlClass(pnl.strategy)}">${fmtChartUsd(pnl.strategy)}</span>
+       ${
+         pnl.spot == null
+           ? ""
+           : `<div class="readout-compare">若只持有現貨：<strong class="${pnlClass(pnl.spot)}">${fmtChartUsd(pnl.spot)}</strong></div>`
+       }`;
+  const maxText = bounds.maxLabel || fmtChartUsd(bounds.max);
+  const minText = bounds.minLabel || fmtChartUsd(bounds.min);
   return `<div class="chart-readout">
     <div>
       <span class="inv-kpi-label">拖到的到期現貨</span>
       <span class="readout-spot font-mono">${fmtChartUsd(cursor).replace("+", "")}</span>
     </div>
     <div>
-      <span class="inv-kpi-label">這筆策略損益</span>
-      <span class="readout-pnl font-mono ${pnlClass(pnl.strategy)}">${fmtChartUsd(pnl.strategy)}</span>
-      ${spotLine}
+      <span class="inv-kpi-label">${coinChart ? "這張買權損益" : "這筆策略損益"}</span>
+      ${strategyBlock}
     </div>
     <div class="readout-bounds">
-      <div><span class="payoff-kicker">圖上最大獲利</span><b class="pnl-pos">${fmtChartUsd(bounds.max)}</b></div>
-      <div><span class="payoff-kicker">圖上最大虧損</span><b class="pnl-neg">${bounds.minLabel || fmtChartUsd(bounds.min)}</b></div>
+      <div><span class="payoff-kicker">圖上最大獲利</span><b class="pnl-pos">${maxText}</b></div>
+      <div><span class="payoff-kicker">${coinChart ? "圖上價內最差（幣）" : "圖上最大虧損"}</span><b class="pnl-neg">${minText}</b></div>
     </div>
   </div>`;
 }

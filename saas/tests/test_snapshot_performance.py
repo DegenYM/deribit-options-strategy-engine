@@ -69,6 +69,9 @@ def test_snapshot_performance_kpis(tmp_path: Path):
     assert perf["total_equity_usdc"] == 50000.0
     assert perf["lifetime_pnl_usdc"] == 200.0
     assert perf["open_credit_usdc"] == 1000.0
+    assert perf["open_credit_native_by_book"]["BTC"] == 0.01
+    assert perf["lifetime_pnl_native_by_book"]["BTC"] == 0.002
+    assert snap["closed_groups"][0]["realized_pnl_native"] == "0.002"
     assert perf["win_rate"] == 1.0
     assert perf["avg_holding_days"] == 1.0
     assert perf["open_count"] == 1

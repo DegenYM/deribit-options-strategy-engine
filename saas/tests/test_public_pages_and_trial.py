@@ -29,11 +29,16 @@ def test_strategies_explain_max_profit_and_max_loss():
     assert "零" in covered["max_loss"]["headline_zh"]
     assert covered["diagram"]["kind"] == "covered_call"
     assert covered["diagram"]["premium"] == 1500
+    assert covered["diagram"]["premium_coin"] == 0.015
+    assert covered["diagram"]["pnl_basis"] == "coin"
+    assert "幣本位" in covered["diagram"]["y_label_zh"]
     assert len(covered["diagram"]["scenarios"]) == 3
     charts = client.get("/assets/strategy-charts.js")
     assert charts.status_code == 200
     assert "payoffSvg" in charts.text
     assert "payoffAt" in charts.text
+    assert "premium_coin" in charts.text
+    assert "fmtChartCoin" in charts.text
     assert all(item.get("diagram", {}).get("kind") for item in payload["strategies"])
     assert any(item["status"] == "coming_soon" for item in payload["strategies"])
     product = client.get("/api/product").json()

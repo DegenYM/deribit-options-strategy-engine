@@ -41,6 +41,29 @@ function fmtUsd(value) {
   return n.toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: n >= 1000 ? 0 : 2 });
 }
 
+function fmtNative(value, book) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "—";
+  const code = String(book || "").toUpperCase();
+  const sign = n > 0 ? "+" : n < 0 ? "−" : "";
+  const abs = Math.abs(n);
+  const digits = abs >= 1 ? 3 : abs >= 0.01 ? 4 : 6;
+  return `${sign}${abs.toFixed(digits)} ${code}`;
+}
+
+function fmtNativeBooks(byBook) {
+  const entries = Object.entries(byBook || {}).filter(([, value]) => value != null);
+  if (!entries.length) return "";
+  return entries.map(([book, value]) => fmtNative(value, book)).join(" · ");
+}
+
+function fmtCoinThenUsd(nativeText, usdValue) {
+  if (!nativeText) return fmtUsd(usdValue);
+  if (usdValue == null || usdValue === "") return nativeText;
+  return `${nativeText}<span class="pnl-usd">${fmtUsd(usdValue)} U</span>`;
+}
+
 function fmtPct(value) {
   if (value == null || value === "") return "—";
   const n = Number(value);
@@ -359,26 +382,30 @@ function renderPerformance(perf, disclaimer) {
     perf?.win_rate == null && perf?.avg_holding_days == null
       ? "—"
       : `${fmtPct(perf.win_rate)} · ${fmtDays(perf.avg_holding_days)}`;
+  const nativePnl = fmtNativeBooks(perf?.lifetime_pnl_native_by_book);
+  const nativeCredit = fmtNativeBooks(perf?.open_credit_native_by_book);
+  const pnlClassValue =
+    Object.values(perf?.lifetime_pnl_native_by_book || {})[0] ?? perf?.lifetime_pnl_usdc;
   $("perfMount").innerHTML = `
     <section class="inv-panel inv-panel--hero" aria-label="投資組合摘要">
       <div class="inv-split">
         <div class="inv-kpi inv-kpi--equity">
           <span class="inv-kpi-label">總權益</span>
           <span class="inv-kpi-value inv-kpi-value--hero font-mono tabular-nums">${fmtUsd(perf?.total_equity_usdc)}</span>
-          <span class="inv-kpi-foot">${perf?.has_data ? "子帳權益（引擎上次同步）" : "綁定金鑰並啟動後才會有數字"}</span>
+          <span class="inv-kpi-foot">${perf?.has_data ? "子帳權益（引擎上次同步，U 本位）" : "綁定金鑰並啟動後才會有數字"}</span>
         </div>
         <div class="inv-kpi">
           <span class="inv-kpi-label">累計獲利</span>
-          <span class="inv-kpi-value inv-kpi-value--hero font-mono tabular-nums ${pnlClass(perf?.lifetime_pnl_usdc)}">${fmtUsd(perf?.lifetime_pnl_usdc)}</span>
-          <span class="inv-kpi-foot">APR ${fmtPct(perf?.lifetime_apr)} · 不是收益承諾</span>
+          <span class="inv-kpi-value inv-kpi-value--hero font-mono tabular-nums ${pnlClass(pnlClassValue)}">${fmtCoinThenUsd(nativePnl, perf?.lifetime_pnl_usdc)}</span>
+          <span class="inv-kpi-foot">幣本位為主 · APR ${fmtPct(perf?.lifetime_apr)} · 不是收益承諾</span>
         </div>
       </div>
     </section>
     <div class="inv-stat-row">
       <div class="inv-stat">
         <span class="inv-stat-label">未實現權利金</span>
-        <span class="inv-stat-value font-mono tabular-nums">${fmtUsd(perf?.open_credit_usdc)}</span>
-        <span class="inv-kpi-foot">${perf?.open_count ?? 0} 筆開放中</span>
+        <span class="inv-stat-value font-mono tabular-nums">${fmtCoinThenUsd(nativeCredit, perf?.open_credit_usdc)}</span>
+        <span class="inv-kpi-foot">${perf?.open_count ?? 0} 筆開放中 · 幣本位搭配 U</span>
       </div>
       <div class="inv-stat">
         <span class="inv-stat-label">勝率 · 持倉天數</span>
@@ -390,19 +417,30 @@ function renderPerformance(perf, disclaimer) {
 }
 
 function positionCard(g, { closed = false } = {}) {
-  const accent = String(g.currency || "").toLowerCase() === "btc" ? " open-position-card--btc" : "";
-  const pnl = closed ? `<span class="${pnlClass(g.realized_pnl)}">pnl ${g.realized_pnl ?? "—"}</span>` : "";
+  const book = String(g.collateral_currency || g.currency || "").toUpperCase();
+  const accent = book === "BTC" ? " open-position-card--btc" : "";
+  const credit =
+    book === "BTC" || book === "ETH"
+      ? fmtCoinThenUsd(fmtNative(g.entry_credit, book), g.entry_credit_usdc)
+      : fmtUsd(g.entry_credit_usdc ?? g.entry_credit);
+  const pnlValue = g.realized_pnl_native ?? g.realized_pnl;
+  const pnl = closed
+    ? `<span class="${pnlClass(pnlValue)}">${fmtCoinThenUsd(
+        g.realized_pnl_native != null ? fmtNative(g.realized_pnl_native, book) : "",
+        g.realized_pnl
+      )}</span>`
+    : "";
   return `<article class="open-position-card${accent}">
     <div class="open-position-header">
       <h3>${escapeHtml(g.short_instrument || "—")}</h3>
-      <span class="open-book-pill">${escapeHtml(g.currency || "—")}</span>
-      <span class="open-book-pill">${closed ? "closed" : "call"}</span>
+      <span class="open-book-pill">${escapeHtml(book || "—")}</span>
+      <span class="open-book-pill">${closed ? "已平倉" : "買權"}</span>
     </div>
     <div class="open-position-detail-row">
-      <span>qty ${escapeHtml(g.quantity ?? "—")}</span>
-      <span>strike ${escapeHtml(g.strike ?? "—")}</span>
-      <span>DTE ${escapeHtml(g.dte_days ?? "—")}</span>
-      <span>premium ${escapeHtml(g.entry_credit ?? "—")}</span>
+      <span>數量 ${escapeHtml(g.quantity ?? "—")}</span>
+      <span>履約價 ${escapeHtml(g.strike ?? "—")}</span>
+      <span>剩餘天數 ${escapeHtml(g.dte_days ?? "—")}</span>
+      <span>權利金 ${credit}</span>
       ${pnl}
       ${g.close_reason ? `<span>${escapeHtml(g.close_reason)}</span>` : ""}
     </div>

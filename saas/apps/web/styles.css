@@ -1247,9 +1247,36 @@ input[type="checkbox"] {
   font-size: 0.8125rem;
 }
 
-.readout-bounds b {
+.pnl-coin {
   display: block;
-  font-family: var(--font-mono);
+}
+
+.pnl-usd {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  letter-spacing: -0.02em;
+}
+
+.readout-pnl .pnl-usd,
+.scenario-pnl .pnl-usd {
+  font-size: 0.8rem;
+}
+
+.inv-kpi-value .pnl-usd,
+.inv-stat-value .pnl-usd {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.55em;
+  font-weight: 650;
+}
+
+.open-position-detail-row .pnl-usd {
+  display: inline;
+  margin: 0 0 0 0.35rem;
+  font-size: 0.85em;
 }
 
 .scenario-grid {
