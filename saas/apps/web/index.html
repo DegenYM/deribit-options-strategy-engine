@@ -2,128 +2,197 @@
 <html lang="zh-Hant">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Covered — Deribit Covered Call</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Covered Call · Deribit</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Public+Sans:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
+    <link rel="stylesheet" href="/assets/tokens.css" />
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
-  <body>
-    <div class="grain"></div>
-    <header class="top">
-      <div class="brand">
-        <span class="mark">C</span>
-        <div>
-          <strong>Covered</strong>
-          <small>BYOK Covered Call · Deribit</small>
+  <body class="app-body">
+    <a class="skip-link" href="#dashboard-main">跳到內容</a>
+    <header class="app-header">
+      <div class="dashboard-shell header-shell">
+        <div class="header-title-block">
+          <h1 class="page-title">Covered Call</h1>
+          <p class="page-subtitle">
+            BYOK 備兌賣 call · 平台托管引擎。不是代操、不是投資建議。
+          </p>
+        </div>
+        <div id="statusCluster" class="header-status-cluster hidden" aria-label="帳戶狀態">
+          <span id="whoBadge" class="inv-chip inv-chip--neutral">帳戶 · —</span>
+          <span id="planBadge" class="inv-chip inv-chip--neutral">方案 · —</span>
+          <span id="desiredBadge" class="inv-chip inv-chip--neutral">狀態 · —</span>
+          <span id="tierBadge" class="inv-chip inv-chip--warning">Risk · —</span>
+          <span id="credsBadge" class="inv-chip inv-chip--neutral">金鑰 · —</span>
+        </div>
+        <div class="header-market-strip" aria-label="現貨指數">
+          <div class="header-market-card header-market-card--btc">
+            <span class="header-market-symbol">BTC</span>
+            <span id="headerSpotBtc" class="header-market-price">—</span>
+          </div>
+          <div class="header-market-card header-market-card--eth">
+            <span class="header-market-symbol">ETH</span>
+            <span id="headerSpotEth" class="header-market-price">—</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <a class="footer-nav-link" href="/legal/RISK_DISCLOSURE.zh-TW.md">風險揭露</a>
+          <a class="footer-nav-link" href="/legal/TERMS.md">條款</a>
+          <span id="lastRefresh" aria-live="polite">上次更新：—</span>
+          <button id="refreshNow" type="button" class="ds-btn ds-btn-secondary">Refresh</button>
+          <button id="logoutBtn" type="button" class="ds-btn ds-btn-secondary hidden">登出</button>
         </div>
       </div>
-      <nav>
-        <a href="/legal/RISK_DISCLOSURE.zh-TW.md">風險揭露</a>
-        <a href="/legal/TERMS.md">條款</a>
-        <button id="logoutBtn" class="ghost hidden" type="button">登出</button>
-      </nav>
     </header>
 
-    <main>
-      <section id="gate" class="panel">
-        <p class="kicker">軟體工具，不是代操</p>
-        <h1>在自己的 Deribit 子帳跑 Covered Call。</h1>
-        <p class="lede">
-          平台托管引擎，金鑰由你保管與撤銷。第一版只做備兌賣 call。APR 不是收益承諾。
-        </p>
-        <form id="loginForm" class="row">
-          <input type="email" id="email" required placeholder="you@example.com" />
-          <button type="submit">寄出登入連結</button>
+    <main id="dashboard-main" class="dashboard-shell dashboard-main">
+      <section id="gate" class="section-card priority-section">
+        <div class="section-heading">
+          <div>
+            <p class="section-eyebrow">Access</p>
+            <h2 class="section-title">在自己的 Deribit 子帳跑 Covered Call</h2>
+          </div>
+          <p class="section-copy">
+            金鑰由你保管與撤銷。第一版只做備兌賣 call。APR 不是收益承諾。
+          </p>
+        </div>
+        <form id="loginForm" class="login-row">
+          <label class="field">
+            <span>Email</span>
+            <input type="email" id="email" required placeholder="you@example.com" autocomplete="email" />
+          </label>
+          <button type="submit" class="ds-btn ds-btn-primary">寄出登入連結</button>
         </form>
         <p id="loginHint" class="hint"></p>
-        <div id="plansMount" class="plans"></div>
+        <p class="section-eyebrow plan-kicker">Plans</p>
+        <div id="plansMount" class="plan-grid"></div>
       </section>
 
-      <section id="app" class="hidden">
-        <div class="toolbar">
-          <div>
-            <p class="kicker" id="who"></p>
-            <h2>倉位與控制</h2>
-          </div>
-          <div class="kills">
-            <button id="pauseBtn" type="button" class="ghost">Pause</button>
-            <button id="panicBtn" type="button" class="panic">Panic close</button>
-          </div>
-        </div>
-        <p class="disclaimer">
-          本工具不構成投資建議。Covered Call 無法消除現貨下跌風險，Pause／Panic 不保證成交。
-        </p>
+      <div id="app" class="hidden app-stack">
+        <aside class="exchange-outage-banner" role="note">
+          <p class="exchange-outage-title">風險提示</p>
+          <p class="exchange-outage-body">
+            本工具不構成投資建議。Covered Call 無法消除現貨下跌風險，Pause／Panic 不保證成交。
+          </p>
+        </aside>
 
-        <div class="grid">
-          <article class="panel">
-            <h3>市場</h3>
-            <div id="market" class="stats"></div>
-          </article>
-          <article class="panel">
-            <h3>Bot</h3>
-            <div id="botMeta" class="stats"></div>
-            <div class="row wrap">
-              <button id="dryBtn" type="button">啟動 dry-run</button>
-              <button id="liveBtn" type="button" class="ghost">啟動 live</button>
-              <button id="stopBtn" type="button" class="ghost">停止</button>
+        <section class="section-card priority-section">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">Overview</p>
+              <h2 class="section-title">倉位與控制</h2>
             </div>
-          </article>
-        </div>
+            <p class="section-copy" id="who">—</p>
+          </div>
+          <div class="overview-panel">
+            <div class="control-row">
+              <button id="dryBtn" type="button" class="ds-btn ds-btn-primary">啟動 dry-run</button>
+              <button id="liveBtn" type="button" class="ds-btn">啟動 live</button>
+              <button id="stopBtn" type="button" class="ds-btn ds-btn-secondary">停止</button>
+              <button id="pauseBtn" type="button" class="ds-btn ds-btn-secondary">Pause</button>
+              <button id="panicBtn" type="button" class="ds-btn ds-btn-danger">Panic close</button>
+            </div>
+            <div id="botMeta" class="stat-grid"></div>
+          </div>
+        </section>
 
-        <article class="panel">
-          <h3>開放中的備兌 call</h3>
-          <div id="groups" class="cards"></div>
-        </article>
+        <section class="section-card priority-section">
+          <div class="section-heading">
+            <div>
+              <p class="section-eyebrow">Strategies &amp; positions</p>
+              <h2 class="section-title">開放中的備兌 call</h2>
+            </div>
+            <span id="groupMeta" class="open-meta-pill">—</span>
+          </div>
+          <div id="groups" class="open-position-list"></div>
+        </section>
 
-        <div class="grid">
-          <article class="panel">
-            <h3>Deribit API Key</h3>
-            <p class="hint">權限只要 account:read + trade:read_write。不要開 wallet。送出後密鑰不會再顯示。</p>
-            <form id="keyForm">
-              <label>Client ID <input id="clientId" required autocomplete="off" /></label>
-              <label>Client secret <input id="clientSecret" type="password" required autocomplete="off" /></label>
-              <div class="row">
-                <button type="submit">加密保存</button>
-                <button id="pingBtn" type="button" class="ghost">Ping</button>
+        <div class="control-grid">
+          <section class="section-card priority-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">Credentials</p>
+                <h2 class="section-title">Deribit API Key</h2>
+              </div>
+            </div>
+            <p class="section-copy">
+              權限只要 account:read + trade:read_write。不要開 wallet。送出後密鑰不會再顯示。
+            </p>
+            <form id="keyForm" class="stack-form">
+              <label class="field">
+                <span>Client ID</span>
+                <input id="clientId" required autocomplete="off" />
+              </label>
+              <label class="field">
+                <span>Client secret</span>
+                <input id="clientSecret" type="password" required autocomplete="off" />
+              </label>
+              <div class="control-row">
+                <button type="submit" class="ds-btn ds-btn-primary">加密保存</button>
+                <button id="pingBtn" type="button" class="ds-btn ds-btn-secondary">Ping</button>
               </div>
             </form>
             <p id="keyStatus" class="hint"></p>
-          </article>
-          <article class="panel">
-            <h3>策略設定</h3>
-            <form id="settingsForm">
-              <label>
-                Risk tier
-                <select id="riskTier">
+          </section>
+
+          <section class="section-card priority-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">Settings</p>
+                <h2 class="section-title">策略設定</h2>
+              </div>
+            </div>
+            <form id="settingsForm" class="stack-form">
+              <label class="field">
+                <span>Risk tier</span>
+                <select id="riskTier" class="ds-select ds-select-block">
                   <option value="low">low</option>
                   <option value="medium">medium</option>
                   <option value="high">high</option>
                 </select>
               </label>
-              <fieldset class="coins">
+              <fieldset class="coin-fieldset">
                 <legend>標的</legend>
-                <label><input type="checkbox" name="coin" value="BTC" checked /> BTC</label>
-                <label><input type="checkbox" name="coin" value="ETH" /> ETH</label>
+                <label class="check"><input type="checkbox" name="coin" value="BTC" checked /> BTC</label>
+                <label class="check"><input type="checkbox" name="coin" value="ETH" /> ETH</label>
               </fieldset>
-              <label class="check"><input type="checkbox" id="sweep" /> Profit sweep（Pro／Desk）</label>
-              <div class="row">
-                <button type="submit">儲存設定</button>
+              <label class="check">
+                <input type="checkbox" id="sweep" /> Profit sweep（Pro／Desk）
+              </label>
+              <div class="control-row">
+                <button type="submit" class="ds-btn ds-btn-primary">儲存設定</button>
               </div>
             </form>
-          </article>
-          <article class="panel">
-            <h3>訂閱</h3>
-            <p id="billStatus" class="hint"></p>
-            <div class="row wrap" id="subscribeRow"></div>
-          </article>
+          </section>
+
+          <section class="section-card priority-section">
+            <div class="section-heading">
+              <div>
+                <p class="section-eyebrow">Billing</p>
+                <h2 class="section-title">訂閱</h2>
+              </div>
+            </div>
+            <p id="billStatus" class="section-copy"></p>
+            <div class="control-row wrap" id="subscribeRow"></div>
+          </section>
         </div>
-      </section>
+      </div>
     </main>
+
+    <footer class="page-footer">
+      Not investment advice. Covered Call does not remove spot downside.
+      <span class="page-footer-links">
+        <a class="footer-nav-link" href="/legal/PRIVACY.md">Privacy</a>
+        ·
+        <a class="footer-nav-link" href="/legal/MARKETING.md">Marketing rules</a>
+      </span>
+    </footer>
     <script src="/assets/app.js"></script>
   </body>
 </html>

@@ -19,20 +19,48 @@ function money(plan) {
   return `USD ${plan.price_usd_month} / NT$${plan.price_twd_month.toLocaleString()}`;
 }
 
+function fmtPrice(value) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value);
+  return n.toLocaleString("en-US", { maximumFractionDigits: n >= 1000 ? 0 : 2 });
+}
+
+function setChip(el, text, variant) {
+  el.className = `inv-chip inv-chip--${variant}`;
+  el.textContent = text;
+}
+
+function desiredVariant(desired) {
+  if (desired === "live") return "success";
+  if (desired === "dry_run") return "info";
+  if (desired === "paused") return "warning";
+  if (desired === "panic") return "danger";
+  return "neutral";
+}
+
+function stampRefresh() {
+  const now = new Date();
+  $("lastRefresh").textContent = `上次更新：${now.toLocaleTimeString()}`;
+}
+
 async function loadPlans() {
   const { plans } = await api("/api/plans");
   $("plansMount").innerHTML = plans
     .map(
       (plan) => `<article class="plan">
         <b>${plan.name}</b>
-        <div>${money(plan)}</div>
+        <div class="plan-price">${money(plan)}</div>
         <p>${plan.blurb_zh}</p>
         <small>${plan.disclaimer_zh}</small>
       </article>`
     )
     .join("");
   $("subscribeRow").innerHTML = plans
-    .map((plan) => `<button type="button" data-plan="${plan.id}">訂閱 ${plan.name}</button>`)
+    .map(
+      (plan) =>
+        `<button type="button" class="ds-btn" data-plan="${plan.id}">訂閱 ${plan.name}</button>`
+    )
     .join("");
   document.querySelectorAll("#subscribeRow button").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -58,34 +86,64 @@ async function refreshApp() {
   $("billStatus").textContent = bill.plan_id
     ? `目前方案 ${bill.plan_id}（${bill.status}）`
     : "尚未訂閱。開發模式可用下方按鈕開通。";
-  $("market").innerHTML = dash.market
-    ? `<div><span>BTC</span><span>${dash.market.btc_usd ?? "—"}</span></div>
-       <div><span>ETH</span><span>${dash.market.eth_usd ?? "—"}</span></div>`
-    : `<div><span>行情 daemon</span><span>尚未寫入 snapshot</span></div>`;
-  $("botMeta").innerHTML = `
-    <div><span>desired</span><span>${bot.desired}</span></div>
-    <div><span>tier</span><span>${bot.risk_tier}</span></div>
-    <div><span>coins</span><span>${(bot.coins || []).join(", ")}</span></div>
-    <div><span>live 解鎖</span><span>${bot.live_unlocked ? "是" : "否"}</span></div>
-    <div><span>金鑰</span><span>${bot.client_id ? bot.client_id + " · ***" + (bot.secret_last4 || "") : "未設定"}</span></div>`;
+
+  const btc = dash.market?.btc_usd;
+  const eth = dash.market?.eth_usd;
+  $("headerSpotBtc").textContent = fmtPrice(btc);
+  $("headerSpotEth").textContent = fmtPrice(eth);
+
+  setChip($("whoBadge"), `帳戶 · ${me.email}`, me.approved ? "success" : "warning");
+  setChip($("planBadge"), `方案 · ${bill.plan_id || "未訂閱"}`, bill.plan_id ? "info" : "neutral");
+  setChip($("desiredBadge"), `狀態 · ${bot.desired}`, desiredVariant(bot.desired));
+  setChip($("tierBadge"), `Risk · ${bot.risk_tier || "—"}`, "warning");
+  setChip($("credsBadge"), `金鑰 · ${bot.has_credentials ? "已綁定" : "未設定"}`, bot.has_credentials ? "success" : "neutral");
+  $("statusCluster").classList.remove("hidden");
+
+  $("botMeta").innerHTML = [
+    ["desired", bot.desired],
+    ["tier", bot.risk_tier],
+    ["coins", (bot.coins || []).join(", ") || "—"],
+    ["live 解鎖", bot.live_unlocked ? "是" : "否"],
+    ["金鑰", bot.client_id ? `${bot.client_id} · ***${bot.secret_last4 || ""}` : "未設定"],
+    ["現貨 BTC", fmtPrice(btc)],
+    ["現貨 ETH", fmtPrice(eth)],
+  ]
+    .map(
+      ([label, value]) =>
+        `<div class="stat-tile"><div class="label">${label}</div><div class="value">${value}</div></div>`
+    )
+    .join("");
+
   const groups = dash.bot.open_groups || [];
+  $("groupMeta").textContent = `${groups.length} open`;
   $("groups").innerHTML = groups.length
     ? groups
-        .map(
-          (g) => `<div class="card">
-            <strong>${g.short_instrument}</strong>
-            <span>${g.currency} · qty ${g.quantity} · DTE ${g.dte_days}</span>
-            <span>premium ${g.entry_credit}</span>
-          </div>`
-        )
+        .map((g) => {
+          const book = String(g.currency || "").toLowerCase();
+          const accent = book === "btc" ? " open-position-card--btc" : "";
+          return `<article class="open-position-card${accent}">
+            <div class="open-position-header">
+              <h3>${g.short_instrument}</h3>
+              <span class="open-book-pill">${g.currency || "—"}</span>
+              <span class="open-book-pill">call</span>
+            </div>
+            <div class="open-position-detail-row">
+              <span>qty ${g.quantity ?? "—"}</span>
+              <span>strike ${g.strike ?? "—"}</span>
+              <span>DTE ${g.dte_days ?? "—"}</span>
+              <span>premium ${g.entry_credit ?? "—"}</span>
+            </div>
+          </article>`;
+        })
         .join("")
-    : `<p class="hint">目前沒有開放中的 covered call。</p>`;
+    : `<div class="open-empty-state">目前沒有開放中的 covered call。</div>`;
   $("keyStatus").textContent = bot.has_credentials ? "已保存（密鑰不回顯）" : "尚未綁定";
   $("riskTier").value = bot.risk_tier || "low";
   document.querySelectorAll("input[name=coin]").forEach((el) => {
     el.checked = (bot.coins || []).includes(el.value);
   });
   $("sweep").checked = !!bot.profit_sweep;
+  stampRefresh();
 }
 
 $("loginForm").addEventListener("submit", async (event) => {
@@ -105,6 +163,15 @@ $("loginForm").addEventListener("submit", async (event) => {
 $("logoutBtn").addEventListener("click", async () => {
   await api("/api/auth/logout", { method: "POST" });
   location.reload();
+});
+
+$("refreshNow").addEventListener("click", async () => {
+  try {
+    await api("/api/auth/me");
+    await refreshApp();
+  } catch {
+    $("loginHint").textContent = "尚未登入。";
+  }
 });
 
 $("keyForm").addEventListener("submit", async (event) => {
