@@ -51,8 +51,10 @@ from ..utils import (
     utc_now_ms,
 )
 from ..vol_metrics import (
+    INDEX_RETURN_48H_MS,
     dvol_iv_rank_from_daily_rows,
     index_chart_close_series,
+    index_return_over_lookback,
     iv_minus_rv_spread,
     realized_vol_annualized_from_index_series,
     trend_signal_from_index_series,
@@ -1973,6 +1975,25 @@ class EngineBase:
         if any_success:
             # API responded but didn't have enough candles yet — treat as unknown.
             return None
+        return None
+
+    def _index_return_48h(self, currency: str) -> Decimal | None:
+        """48h index return for rally entry-halt, or None if the feed is thin/unavailable.
+
+        Missing 48h history is fail-open (no rally halt from this window). Dump
+        detection still uses ``_index_drawdown_24h``.
+        """
+        if not self.config.enable_index_rally_entry_halt:
+            return None
+        for index_name in (f"{currency.lower()}_usdc", f"{currency.lower()}_usd"):
+            try:
+                points = self.client.get_index_chart_data(index_name, range_name="1w")
+            except Exception:
+                continue
+            series = index_chart_close_series(points)
+            ret = index_return_over_lookback(series, lookback_ms=INDEX_RETURN_48H_MS)
+            if ret is not None:
+                return ret
         return None
 
     def _dvol_ratio(self, currency: str) -> Decimal | None:

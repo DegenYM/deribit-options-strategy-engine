@@ -150,6 +150,7 @@ class FakeClient:
         *,
         drawdowns=None,
         dvol_ratios=None,
+        returns_48h=None,
         btc_book_equity: str | None = None,
         eth_book_equity: str | None = None,
         btc_initial_margin: str | None = None,
@@ -159,6 +160,7 @@ class FakeClient:
     ):
         self.drawdowns = drawdowns or {"BTC": Decimal("-0.02"), "ETH": Decimal("-0.02")}
         self.dvol_ratios = dvol_ratios or {"BTC": Decimal("1.10"), "ETH": Decimal("1.10")}
+        self.returns_48h = returns_48h
         self.btc_book_equity = btc_book_equity
         self.eth_book_equity = eth_book_equity
         self.btc_initial_margin = btc_initial_margin
@@ -531,6 +533,16 @@ class FakeClient:
 
     def get_index_chart_data(self, index_name, *, range_name="1d"):
         currency = "BTC" if index_name.startswith("btc") else "ETH"
+        now_ms = 1_800_000_000_000
+        if range_name in ("1w", "7d"):
+            ret = (self.returns_48h if self.returns_48h is not None else self.drawdowns).get(currency, Decimal("0"))
+            start = Decimal("100")
+            end = start * (Decimal("1") + ret)
+            return [
+                [now_ms - 3 * 24 * 3600 * 1000, start],
+                [now_ms - 2 * 24 * 3600 * 1000, start],
+                [now_ms, end],
+            ]
         start = Decimal("100")
         end = start * (Decimal("1") + self.drawdowns[currency])
         return [[1, start], [2, end]]

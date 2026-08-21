@@ -6,9 +6,13 @@ from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
-from .utils import safe_div, to_decimal
+from .models import RiskRegime
+from .utils import format_decimal, safe_div, to_decimal
 
 ONE = Decimal("1")
+MS_PER_HOUR = 3_600_000
+INDEX_RETURN_24H_MS = 24 * MS_PER_HOUR
+INDEX_RETURN_48H_MS = 48 * MS_PER_HOUR
 
 
 def iv_rank(
@@ -220,6 +224,110 @@ def trend_signal_from_index_series(
         if close > 0:
             closes.append(close)
     return trend_signal_vs_ma(closes, ma_window=ma_window, ref_pct=ref_pct)
+
+
+def index_return_over_lookback(
+    series: Sequence[tuple[int, Decimal | float | str]],
+    *,
+    lookback_ms: int,
+    min_coverage: Decimal = Decimal("0.90"),
+) -> Decimal | None:
+    """Return ``(end / start) - 1`` over ``lookback_ms``.
+
+    ``start`` is the last close at or before ``end_ts - lookback_ms``. Returns
+    ``None`` when history does not cover at least ``min_coverage`` of the window,
+    so a 24h series is not treated as a 48h move.
+    """
+    points: list[tuple[int, Decimal]] = []
+    for ts, val in series:
+        close = to_decimal(val)
+        if int(ts) > 0 and close > 0:
+            points.append((int(ts), close))
+    if lookback_ms <= 0 or len(points) < 2:
+        return None
+    end_ts, end_px = points[-1]
+    target_ts = end_ts - lookback_ms
+    start: tuple[int, Decimal] | None = None
+    for ts, px in points:
+        if ts <= target_ts:
+            start = (ts, px)
+        else:
+            break
+    if start is None:
+        return None
+    start_ts, start_px = start
+    if start_px <= 0:
+        return None
+    coverage = Decimal(end_ts - start_ts)
+    needed = Decimal(lookback_ms) * min_coverage
+    if coverage < needed:
+        return None
+    return (end_px / start_px) - ONE
+
+
+def classify_macro_regime(
+    *,
+    return_24h: Decimal,
+    dvol_ratio: Decimal,
+    return_48h: Decimal | None = None,
+    index_drawdown_elevated_pct: Decimal,
+    index_drawdown_crisis_pct: Decimal,
+    dvol_elevated_multiplier: Decimal,
+    dvol_crisis_multiplier: Decimal,
+    enable_index_rally_entry_halt: bool = True,
+    index_rally_24h_pct: Decimal = Decimal("0.05"),
+    index_rally_48h_pct: Decimal = Decimal("0.07"),
+    enable_index_dump_entry_halt: bool = True,
+) -> tuple[RiskRegime, list[str]]:
+    """Map index return + DVOL ratio to ``normal`` / ``elevated`` / ``crisis``.
+
+    Rapid upside (24h / 48h rally) is ``elevated`` only — it pauses new entries
+    via the existing non-NORMAL halt, and must never become ``crisis`` (which can
+    hard-derisk open winners).
+
+    Dump / DVOL mapping can be skipped (``enable_index_dump_entry_halt=False``)
+    so covered-call books still open into a red day; rally halt is unchanged.
+    """
+    dump_notes: list[str] = []
+    dump_regime: RiskRegime | None = None
+    if return_24h <= -index_drawdown_crisis_pct:
+        dump_regime = RiskRegime.CRISIS
+        dump_notes = [
+            "index_24h_drawdown <= -index_drawdown_crisis_pct "
+            f"({format_decimal(return_24h, 8)} <= -{format_decimal(index_drawdown_crisis_pct, 6)})",
+        ]
+    elif dvol_ratio > dvol_crisis_multiplier:
+        dump_regime = RiskRegime.CRISIS
+        dump_notes = [
+            "dvol_ratio > dvol_crisis_multiplier "
+            f"({format_decimal(dvol_ratio, 6)} > {format_decimal(dvol_crisis_multiplier, 6)})",
+        ]
+    elif return_24h <= -index_drawdown_elevated_pct or dvol_ratio > dvol_elevated_multiplier:
+        dump_regime = RiskRegime.ELEVATED
+        dump_notes = [
+            f"elevated: drawdown={format_decimal(return_24h, 8)} "
+            f"dvol_ratio={format_decimal(dvol_ratio, 6)} "
+            f"(thresholds -elevated {format_decimal(index_drawdown_elevated_pct, 6)} / "
+            f"{format_decimal(dvol_elevated_multiplier, 6)})",
+        ]
+    if dump_regime is not None and enable_index_dump_entry_halt:
+        return dump_regime, dump_notes
+    if enable_index_rally_entry_halt:
+        if index_rally_24h_pct > 0 and return_24h >= index_rally_24h_pct:
+            return RiskRegime.ELEVATED, [
+                "index_24h_rally >= index_rally_24h_pct "
+                f"({format_decimal(return_24h, 8)} >= {format_decimal(index_rally_24h_pct, 6)})",
+            ]
+        if return_48h is not None and index_rally_48h_pct > 0 and return_48h >= index_rally_48h_pct:
+            return RiskRegime.ELEVATED, [
+                "index_48h_rally >= index_rally_48h_pct "
+                f"({format_decimal(return_48h, 8)} >= {format_decimal(index_rally_48h_pct, 6)})",
+            ]
+    if dump_notes:
+        return RiskRegime.NORMAL, [
+            f"{note}; dump/dvol not halting entries (ENABLE_INDEX_DUMP_ENTRY_HALT=false)" for note in dump_notes
+        ]
+    return RiskRegime.NORMAL, ["market_conditions_normal"]
 
 
 def passes_iv_entry_gate(
