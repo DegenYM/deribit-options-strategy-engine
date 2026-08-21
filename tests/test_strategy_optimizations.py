@@ -14,8 +14,10 @@ from deribit_engine.exit_eval import (
 from deribit_engine.models import OrderBookSnapshot, TradeGroup
 from deribit_engine.trade_apr import position_apr_capital_base, remaining_apr_for_group
 from deribit_engine.vol_metrics import (
+    classify_macro_regime,
     dvol_iv_percentile_from_daily_rows,
     dvol_iv_rank_from_daily_rows,
+    index_return_over_lookback,
     iv_rank,
     passes_iv_entry_gate,
     realized_vol_annualized,
@@ -463,3 +465,87 @@ def test_trend_side_bias_disabled_is_neutral(tmp_path):
 def test_config_defaults_trend_side_bias_on(tmp_path):
     config = make_config(tmp_path)
     assert config.enable_trend_side_bias is True
+    assert config.enable_index_rally_entry_halt is True
+    assert config.index_rally_24h_pct == Decimal("0.05")
+    assert config.index_rally_48h_pct == Decimal("0.07")
+
+
+def _macro_kwargs(**overrides):
+    values = dict(
+        dvol_ratio=Decimal("1.10"),
+        index_drawdown_elevated_pct=Decimal("0.04"),
+        index_drawdown_crisis_pct=Decimal("0.06"),
+        dvol_elevated_multiplier=Decimal("1.25"),
+        dvol_crisis_multiplier=Decimal("1.60"),
+        enable_index_rally_entry_halt=True,
+        index_rally_24h_pct=Decimal("0.05"),
+        index_rally_48h_pct=Decimal("0.07"),
+    )
+    values.update(overrides)
+    return values
+
+
+def test_index_return_over_lookback_requires_coverage():
+    now = 1_800_000_000_000
+    hour = 3_600_000
+    series = [
+        (now - 24 * hour, Decimal("100")),
+        (now, Decimal("108")),
+    ]
+    assert index_return_over_lookback(series, lookback_ms=48 * hour) is None
+    two_day = [
+        (now - 72 * hour, Decimal("100")),
+        (now - 48 * hour, Decimal("100")),
+        (now, Decimal("108")),
+    ]
+    ret = index_return_over_lookback(two_day, lookback_ms=48 * hour)
+    assert ret == Decimal("0.08")
+
+
+def test_classify_macro_regime_rally_is_elevated_not_crisis():
+    from deribit_engine.models import RiskRegime
+
+    regime, detail = classify_macro_regime(return_24h=Decimal("0.08"), **_macro_kwargs())
+    assert regime is RiskRegime.ELEVATED
+    assert any("index_24h_rally" in note for note in detail)
+
+    regime_48, detail_48 = classify_macro_regime(
+        return_24h=Decimal("0.02"),
+        return_48h=Decimal("0.09"),
+        **_macro_kwargs(),
+    )
+    assert regime_48 is RiskRegime.ELEVATED
+    assert any("index_48h_rally" in note for note in detail_48)
+
+
+def test_classify_macro_regime_dump_still_outranks_rally():
+    from deribit_engine.models import RiskRegime
+
+    regime, _detail = classify_macro_regime(
+        return_24h=Decimal("-0.07"),
+        return_48h=Decimal("0.12"),
+        **_macro_kwargs(),
+    )
+    assert regime is RiskRegime.CRISIS
+
+
+def test_classify_macro_regime_quiet_green_day_stays_normal():
+    from deribit_engine.models import RiskRegime
+
+    regime, detail = classify_macro_regime(
+        return_24h=Decimal("0.02"),
+        return_48h=Decimal("0.03"),
+        **_macro_kwargs(),
+    )
+    assert regime is RiskRegime.NORMAL
+    assert detail == ["market_conditions_normal"]
+
+
+def test_classify_macro_regime_can_disable_rally_halt():
+    from deribit_engine.models import RiskRegime
+
+    regime, _detail = classify_macro_regime(
+        return_24h=Decimal("0.10"),
+        **_macro_kwargs(enable_index_rally_entry_halt=False),
+    )
+    assert regime is RiskRegime.NORMAL

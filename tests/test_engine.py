@@ -2046,18 +2046,18 @@ def test_regime_falls_back_to_elevated_when_drawdown_unavailable(tmp_path):
 def test_regime_uses_cached_value_when_feeds_fail_after_success(tmp_path):
     config = make_config(tmp_path, option_markets_profile="linear_usdc")
 
-    calls = {"chart": 0, "dvol": 0}
-
     class FlakyFakeClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.fail = False
+
         def get_index_chart_data(self, index_name, *, range_name="1d"):
-            calls["chart"] += 1
-            if calls["chart"] > 1:
+            if self.fail:
                 raise RuntimeError("boom")
             return super().get_index_chart_data(index_name, range_name=range_name)
 
         def get_volatility_index_data(self, currency, *, start_timestamp, end_timestamp, resolution="1D"):
-            calls["dvol"] += 1
-            if calls["dvol"] > 1:
+            if self.fail:
                 raise RuntimeError("boom")
             return super().get_volatility_index_data(
                 currency,
@@ -2066,15 +2066,17 @@ def test_regime_uses_cached_value_when_feeds_fail_after_success(tmp_path):
                 resolution=resolution,
             )
 
-    engine = DeribitOptionTrialBot(config, FlakyFakeClient())
+    client = FlakyFakeClient()
+    engine = DeribitOptionTrialBot(config, client)
     instruments = [
         __import__("deribit_engine.models", fromlist=["OptionInstrument"]).OptionInstrument.from_api(item)
         for item in engine.client.get_instruments("BTC", kind="option", expired=False)
     ]
 
-    first_regime, first_detail = engine._determine_regime_with_detail("BTC", markets=instruments, orderbook_cache={})
+    first_regime, _first_detail = engine._determine_regime_with_detail("BTC", markets=instruments, orderbook_cache={})
     assert first_regime is RiskRegime.NORMAL
 
+    client.fail = True
     second_regime, second_detail = engine._determine_regime_with_detail("BTC", markets=instruments, orderbook_cache={})
     # feeds now fail — must reuse cached value from the first call, not escalate to crisis.
     assert second_regime is RiskRegime.NORMAL
@@ -2090,6 +2092,54 @@ def test_index_drawdown_returns_none_when_client_errors(tmp_path):
 
     engine = DeribitOptionTrialBot(config, DeadFakeClient())
     assert engine._index_drawdown_24h("BTC") is None
+    assert engine._index_return_48h("BTC") is None
+
+
+def _btc_instruments(engine):
+    return [
+        __import__("deribit_engine.models", fromlist=["OptionInstrument"]).OptionInstrument.from_api(item)
+        for item in engine.client.get_instruments("BTC", kind="option", expired=False)
+    ]
+
+
+def test_regime_24h_rally_is_elevated_not_crisis(tmp_path):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(
+        config,
+        FakeClient(drawdowns={"BTC": Decimal("0.08"), "ETH": Decimal("-0.02")}),
+    )
+    regime, detail = engine._determine_regime_with_detail("BTC", markets=_btc_instruments(engine), orderbook_cache={})
+    assert regime is RiskRegime.ELEVATED
+    assert any("index_24h_rally" in note for note in detail)
+
+
+def test_regime_48h_rally_halts_when_24h_is_quiet(tmp_path):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(
+        config,
+        FakeClient(
+            drawdowns={"BTC": Decimal("0.02"), "ETH": Decimal("-0.02")},
+            returns_48h={"BTC": Decimal("0.09"), "ETH": Decimal("-0.02")},
+        ),
+    )
+    regime, detail = engine._determine_regime_with_detail("BTC", markets=_btc_instruments(engine), orderbook_cache={})
+    assert regime is RiskRegime.ELEVATED
+    assert any("index_48h_rally" in note for note in detail)
+
+
+def test_regime_rally_halt_can_be_disabled(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        enable_index_rally_entry_halt=False,
+    )
+    engine = DeribitOptionTrialBot(
+        config,
+        FakeClient(drawdowns={"BTC": Decimal("0.10"), "ETH": Decimal("-0.02")}),
+    )
+    regime, detail = engine._determine_regime_with_detail("BTC", markets=_btc_instruments(engine), orderbook_cache={})
+    assert regime is RiskRegime.NORMAL
+    assert detail == ["market_conditions_normal"]
 
 
 def test_dvol_ratio_returns_none_when_client_errors(tmp_path):

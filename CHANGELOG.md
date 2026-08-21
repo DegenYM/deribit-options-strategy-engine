@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - Portal snapshot cache: `portal_snapshots.db` per investor, shared `market.db`, background schedulers, and investor portal `source=portal_cache` bundle API.
+- Index rally entry halt: 24h/48h upside pauses new entries as `elevated` (not `crisis`).
 - Covered call profit sweep (`COVERED_CALL_PROFIT_SWEEP_ENABLED`), `./bot profit-sweep`, and ops repair scripts (`align_premium_swap`, `reconcile_premium_proceeds`, `repair_double_profit_sweep`).
 - Frontend ledger `equity_native_by_book` backfill (`scripts/backfill_ledger_equity_native.py`).
 - Investor portal browser cache (`frontend/src/modules/investor-cache.js`) and design tokens (`frontend/tokens.css`).

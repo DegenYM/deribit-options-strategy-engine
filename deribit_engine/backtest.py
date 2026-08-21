@@ -34,6 +34,7 @@ from .stress import StressScenario, stress_short_option_loss_breakdown_usdc, sum
 from .trade_apr import opened_notional_for_position
 from .utils import ONE, ZERO, dte_days, safe_div, to_decimal
 from .vol_metrics import (
+    classify_macro_regime,
     dvol_iv_rank_at_ts,
     iv_minus_rv_spread,
     passes_iv_entry_gate,
@@ -157,19 +158,24 @@ def _regime_from_drawdown_and_dvol(
     *,
     spot_return_24h: Decimal | None,
     dvol_ratio: Decimal | None,
+    spot_return_48h: Decimal | None = None,
 ) -> RiskRegime:
-    # Mirror engine philosophy: crisis if index drawdown or DVOL ratio beyond threshold.
-    if spot_return_24h is not None:
-        if spot_return_24h <= -config.index_drawdown_crisis_pct:
-            return RiskRegime.CRISIS
-        if spot_return_24h <= -config.index_drawdown_elevated_pct:
-            return RiskRegime.ELEVATED
-    if dvol_ratio is not None:
-        if dvol_ratio >= config.dvol_crisis_multiplier:
-            return RiskRegime.CRISIS
-        if dvol_ratio >= config.dvol_elevated_multiplier:
-            return RiskRegime.ELEVATED
-    return RiskRegime.NORMAL
+    # Mirror live engine: dump/DVOL can be crisis; a fast rally is elevated only.
+    if spot_return_24h is None or dvol_ratio is None:
+        return RiskRegime.NORMAL
+    regime, _detail = classify_macro_regime(
+        return_24h=spot_return_24h,
+        dvol_ratio=dvol_ratio,
+        return_48h=spot_return_48h,
+        index_drawdown_elevated_pct=config.index_drawdown_elevated_pct,
+        index_drawdown_crisis_pct=config.index_drawdown_crisis_pct,
+        dvol_elevated_multiplier=config.dvol_elevated_multiplier,
+        dvol_crisis_multiplier=config.dvol_crisis_multiplier,
+        enable_index_rally_entry_halt=config.enable_index_rally_entry_halt,
+        index_rally_24h_pct=config.index_rally_24h_pct,
+        index_rally_48h_pct=config.index_rally_48h_pct,
+    )
+    return regime
 
 
 def _estimate_sigma_from_dvol(dvol_close: Any | None) -> float:
@@ -619,6 +625,11 @@ def run_backtest(
             ret = None
             if spot > 0 and prev > 0:
                 ret = (spot / prev) - ONE
+            prev_48_ms = _ms(day - timedelta(days=2))
+            prev_48 = to_decimal(pick_nearest_value(series, ts_ms=prev_48_ms) or 0)
+            ret_48h = None
+            if spot > 0 and prev_48 > 0:
+                ret_48h = (spot / prev_48) - ONE
             dvol_series = dvol_by_ccy[c.upper()]
             dv_today = to_decimal(pick_nearest_value(dvol_series, ts_ms=day_ms) or 0)
             # crude baseline: use last 30 points median-ish by selecting 15th after sorting
@@ -632,7 +643,7 @@ def run_backtest(
             if baseline is not None and baseline > 0 and dv_today > 0:
                 dvol_ratio = dv_today / baseline
             regime_by_ccy[c.upper()] = _regime_from_drawdown_and_dvol(
-                config, spot_return_24h=ret, dvol_ratio=dvol_ratio
+                config, spot_return_24h=ret, dvol_ratio=dvol_ratio, spot_return_48h=ret_48h
             )
 
         # 3) Entry: one new leg per day max, obey crisis halt + book weights + IM cap approximation.

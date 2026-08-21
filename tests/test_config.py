@@ -130,6 +130,25 @@ def test_load_config_parses_currency_specific_iv_rank(tmp_path: Path):
     assert config.iv_rank_bounds("SOL") == (Decimal("0.30"), Decimal("0.90"))
 
 
+def test_load_config_parses_index_rally_entry_halt(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "ENABLE_INDEX_RALLY_ENTRY_HALT=true",
+                "INDEX_RALLY_24H_PCT=0.045",
+                "INDEX_RALLY_48H_PCT=0.08",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.enable_index_rally_entry_halt is True
+    assert config.index_rally_24h_pct == Decimal("0.045")
+    assert config.index_rally_48h_pct == Decimal("0.08")
+
+
 def test_short_option_side_both_overrides_legacy_flags(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text(

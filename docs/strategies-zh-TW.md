@@ -21,6 +21,8 @@
 - 只做流動性足夠的 short leg：`OI`、`book notional`、`spread ratio` 都要過門檻
 - `MIN_LIQUID_EXPIRIES_REQUIRED` 可控制 DTE 視窗內至少需要幾個可交易 expiry 才允許開倉
 - regime 分為 `normal / elevated / crisis`
+- **快速拉升暫停開倉**：24h 或 48h 指數漲幅超過 `INDEX_RALLY_24H_PCT` / `INDEX_RALLY_48H_PCT` 時，該標的標成 `elevated`，沿用既有「非 normal 不開新倉」閘門。這不是 `crisis`，**不會**因此 hard-derisk 既有倉
+- 既有 `ENABLE_TREND_SIDE_BIAS` 只會在 put/call 之間偏排序，**不會**在單邊策略（covered call / short put）停開倉
 - `crisis` 不開新倉；`hard stop` 直接平倉；`soft trigger` 優先 roll，不行就平倉；`TP` 與 `time exit` 都會主動退場
 
 ## 策略比較
