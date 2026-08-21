@@ -160,7 +160,9 @@ def _regime_from_drawdown_and_dvol(
     dvol_ratio: Decimal | None,
     spot_return_48h: Decimal | None = None,
 ) -> RiskRegime:
-    # Mirror live engine: dump/DVOL can be crisis; a fast rally is elevated only.
+    # Mirror live engine: dump/DVOL can be crisis unless dump entry halt is off;
+    # a fast rally is elevated only.
+
     if spot_return_24h is None or dvol_ratio is None:
         return RiskRegime.NORMAL
     regime, _detail = classify_macro_regime(
@@ -174,6 +176,7 @@ def _regime_from_drawdown_and_dvol(
         enable_index_rally_entry_halt=config.enable_index_rally_entry_halt,
         index_rally_24h_pct=config.index_rally_24h_pct,
         index_rally_48h_pct=config.index_rally_48h_pct,
+        enable_index_dump_entry_halt=config.enable_index_dump_entry_halt,
     )
     return regime
 

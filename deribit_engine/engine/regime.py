@@ -2,9 +2,9 @@
 :mod:`management`.
 
 Macro feeds: 24h index drawdown, DVOL ratio, and optional 24h/48h index rally.
-A fast rally is ``elevated`` (never ``crisis``). Naked short put additionally
-elevates after consecutive down days so the scanner does not sell more puts
-into a grind.
+A fast rally is ``elevated`` (never ``crisis``). Dump / DVOL mapping can be
+disabled per strategy (covered call). Naked short put additionally elevates
+after consecutive down days so the scanner does not sell more puts into a grind.
 """
 
 from __future__ import annotations
@@ -101,6 +101,7 @@ class RegimeMixin:
             enable_index_rally_entry_halt=self.config.enable_index_rally_entry_halt,
             index_rally_24h_pct=self.config.index_rally_24h_pct,
             index_rally_48h_pct=self.config.index_rally_48h_pct,
+            enable_index_dump_entry_halt=self.config.enable_index_dump_entry_halt,
         )
 
         self._last_regime_cache[currency] = (regime, utc_now_ms())
