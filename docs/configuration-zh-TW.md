@@ -244,6 +244,7 @@ INDEX_DRAWDOWN_CRISIS_PCT=0.055
 DVOL_ELEVATED_MULTIPLIER=1.20
 DVOL_CRISIS_MULTIPLIER=1.50
 # Fast upside pause (elevated only — does not hard-derisk open groups).
+# Strategy skeletons in config/shared/strategies/.env.* set the same defaults.
 ENABLE_INDEX_RALLY_ENTRY_HALT=true
 INDEX_RALLY_24H_PCT=0.05
 INDEX_RALLY_48H_PCT=0.07
