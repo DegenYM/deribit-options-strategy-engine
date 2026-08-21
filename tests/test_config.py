@@ -147,6 +147,16 @@ def test_load_config_parses_index_rally_entry_halt(tmp_path: Path):
     assert config.enable_index_rally_entry_halt is True
     assert config.index_rally_24h_pct == Decimal("0.045")
     assert config.index_rally_48h_pct == Decimal("0.08")
+    assert config.enable_index_dump_entry_halt is True
+
+
+def test_load_config_parses_index_dump_entry_halt_off(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("ENABLE_INDEX_DUMP_ENTRY_HALT=false\n")
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.enable_index_dump_entry_halt is False
 
 
 def test_short_option_side_both_overrides_legacy_flags(tmp_path: Path):

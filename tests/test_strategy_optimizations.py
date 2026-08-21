@@ -466,6 +466,7 @@ def test_config_defaults_trend_side_bias_on(tmp_path):
     config = make_config(tmp_path)
     assert config.enable_trend_side_bias is True
     assert config.enable_index_rally_entry_halt is True
+    assert config.enable_index_dump_entry_halt is True
     assert config.index_rally_24h_pct == Decimal("0.05")
     assert config.index_rally_48h_pct == Decimal("0.07")
 
@@ -480,6 +481,7 @@ def _macro_kwargs(**overrides):
         enable_index_rally_entry_halt=True,
         index_rally_24h_pct=Decimal("0.05"),
         index_rally_48h_pct=Decimal("0.07"),
+        enable_index_dump_entry_halt=True,
     )
     values.update(overrides)
     return values
@@ -549,3 +551,31 @@ def test_classify_macro_regime_can_disable_rally_halt():
         **_macro_kwargs(enable_index_rally_entry_halt=False),
     )
     assert regime is RiskRegime.NORMAL
+
+
+def test_classify_macro_regime_can_disable_dump_halt():
+    from deribit_engine.models import RiskRegime
+
+    regime, detail = classify_macro_regime(
+        return_24h=Decimal("-0.08"),
+        **_macro_kwargs(enable_index_dump_entry_halt=False),
+    )
+    assert regime is RiskRegime.NORMAL
+    assert any("ENABLE_INDEX_DUMP_ENTRY_HALT=false" in note for note in detail)
+
+    dvol_regime, _dvol_detail = classify_macro_regime(
+        return_24h=Decimal("-0.01"),
+        **_macro_kwargs(dvol_ratio=Decimal("1.80"), enable_index_dump_entry_halt=False),
+    )
+    assert dvol_regime is RiskRegime.NORMAL
+
+
+def test_classify_macro_regime_dump_halt_off_still_pauses_rally():
+    from deribit_engine.models import RiskRegime
+
+    regime, detail = classify_macro_regime(
+        return_24h=Decimal("0.08"),
+        **_macro_kwargs(enable_index_dump_entry_halt=False),
+    )
+    assert regime is RiskRegime.ELEVATED
+    assert any("index_24h_rally" in note for note in detail)

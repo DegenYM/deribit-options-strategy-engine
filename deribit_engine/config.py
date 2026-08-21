@@ -204,6 +204,9 @@ class BotConfig:
     enable_index_rally_entry_halt: bool = True
     index_rally_24h_pct: Decimal = Decimal("0.05")
     index_rally_48h_pct: Decimal = Decimal("0.07")
+    # Pause new entries on 24h dump / DVOL elevated+crisis. Covered call turns
+    # this off: spot is already held, and a dump makes short calls safer.
+    enable_index_dump_entry_halt: bool = True
     # Dynamic take-profit thresholds by DTE.
     enable_dynamic_tp: bool = False
     tp_capture_pct_dte_long: Decimal = Decimal("0.40")
@@ -993,6 +996,7 @@ def load_config(
         ),
         index_rally_24h_pct=to_decimal(_optional(values, "INDEX_RALLY_24H_PCT", "0.05")),
         index_rally_48h_pct=to_decimal(_optional(values, "INDEX_RALLY_48H_PCT", "0.07")),
+        enable_index_dump_entry_halt=_to_bool(_optional(values, "ENABLE_INDEX_DUMP_ENTRY_HALT", "true"), default=True),
         enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "false"), default=False),
         tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.40")),
         tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.60")),

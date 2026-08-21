@@ -2142,6 +2142,32 @@ def test_regime_rally_halt_can_be_disabled(tmp_path):
     assert detail == ["market_conditions_normal"]
 
 
+def test_covered_call_dump_does_not_halt_entries(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        option_strategy="covered_call",
+        enable_index_dump_entry_halt=False,
+    )
+    engine = DeribitOptionTrialBot(
+        config,
+        FakeClient(drawdowns={"BTC": Decimal("-0.08"), "ETH": Decimal("-0.02")}),
+    )
+    regime, detail = engine._determine_regime_with_detail("BTC", markets=_btc_instruments(engine), orderbook_cache={})
+    assert regime is RiskRegime.NORMAL
+    assert any("ENABLE_INDEX_DUMP_ENTRY_HALT=false" in note for note in detail)
+
+
+def test_naked_short_dump_still_crisis(tmp_path):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+    engine = DeribitOptionTrialBot(
+        config,
+        FakeClient(drawdowns={"BTC": Decimal("-0.08"), "ETH": Decimal("-0.02")}),
+    )
+    regime, _detail = engine._determine_regime_with_detail("BTC", markets=_btc_instruments(engine), orderbook_cache={})
+    assert regime is RiskRegime.CRISIS
+
+
 def test_dvol_ratio_returns_none_when_client_errors(tmp_path):
     config = make_config(tmp_path, option_markets_profile="linear_usdc")
 

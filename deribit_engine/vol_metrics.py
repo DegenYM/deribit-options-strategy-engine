@@ -277,30 +277,41 @@ def classify_macro_regime(
     enable_index_rally_entry_halt: bool = True,
     index_rally_24h_pct: Decimal = Decimal("0.05"),
     index_rally_48h_pct: Decimal = Decimal("0.07"),
+    enable_index_dump_entry_halt: bool = True,
 ) -> tuple[RiskRegime, list[str]]:
     """Map index return + DVOL ratio to ``normal`` / ``elevated`` / ``crisis``.
 
     Rapid upside (24h / 48h rally) is ``elevated`` only — it pauses new entries
     via the existing non-NORMAL halt, and must never become ``crisis`` (which can
     hard-derisk open winners).
+
+    Dump / DVOL mapping can be skipped (``enable_index_dump_entry_halt=False``)
+    so covered-call books still open into a red day; rally halt is unchanged.
     """
+    dump_notes: list[str] = []
+    dump_regime: RiskRegime | None = None
     if return_24h <= -index_drawdown_crisis_pct:
-        return RiskRegime.CRISIS, [
+        dump_regime = RiskRegime.CRISIS
+        dump_notes = [
             "index_24h_drawdown <= -index_drawdown_crisis_pct "
             f"({format_decimal(return_24h, 8)} <= -{format_decimal(index_drawdown_crisis_pct, 6)})",
         ]
-    if dvol_ratio > dvol_crisis_multiplier:
-        return RiskRegime.CRISIS, [
+    elif dvol_ratio > dvol_crisis_multiplier:
+        dump_regime = RiskRegime.CRISIS
+        dump_notes = [
             "dvol_ratio > dvol_crisis_multiplier "
             f"({format_decimal(dvol_ratio, 6)} > {format_decimal(dvol_crisis_multiplier, 6)})",
         ]
-    if return_24h <= -index_drawdown_elevated_pct or dvol_ratio > dvol_elevated_multiplier:
-        return RiskRegime.ELEVATED, [
+    elif return_24h <= -index_drawdown_elevated_pct or dvol_ratio > dvol_elevated_multiplier:
+        dump_regime = RiskRegime.ELEVATED
+        dump_notes = [
             f"elevated: drawdown={format_decimal(return_24h, 8)} "
             f"dvol_ratio={format_decimal(dvol_ratio, 6)} "
             f"(thresholds -elevated {format_decimal(index_drawdown_elevated_pct, 6)} / "
             f"{format_decimal(dvol_elevated_multiplier, 6)})",
         ]
+    if dump_regime is not None and enable_index_dump_entry_halt:
+        return dump_regime, dump_notes
     if enable_index_rally_entry_halt:
         if index_rally_24h_pct > 0 and return_24h >= index_rally_24h_pct:
             return RiskRegime.ELEVATED, [
@@ -312,6 +323,10 @@ def classify_macro_regime(
                 "index_48h_rally >= index_rally_48h_pct "
                 f"({format_decimal(return_48h, 8)} >= {format_decimal(index_rally_48h_pct, 6)})",
             ]
+    if dump_notes:
+        return RiskRegime.NORMAL, [
+            f"{note}; dump/dvol not halting entries (ENABLE_INDEX_DUMP_ENTRY_HALT=false)" for note in dump_notes
+        ]
     return RiskRegime.NORMAL, ["market_conditions_normal"]
 
 
