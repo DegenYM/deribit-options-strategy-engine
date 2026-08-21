@@ -21,7 +21,8 @@
 - 只做流動性足夠的 short leg：`OI`、`book notional`、`spread ratio` 都要過門檻
 - `MIN_LIQUID_EXPIRIES_REQUIRED` 可控制 DTE 視窗內至少需要幾個可交易 expiry 才允許開倉
 - regime 分為 `normal / elevated / crisis`
-- `crisis` 仍**完全停開新倉**。`elevated`（含 24h 指數回撤與 DVOL 放大）對 **`covered_call`** 不停開：仍可進場，但把有效 `*_DELTA_MAX` 收緊 `ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.02**，絕不低於既有 `*_DELTA_MIN`）。**`naked_short` 預設停開**（無底倉的 short put 是下跌尾部，elevated／連續下跌正是最不該新賣保險的時候）；要改走「收緊後仍可賣」須設 `NAKED_ALLOW_ELEVATED_ENTRY=true`，此時用較大的 `NAKED_ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.04**）。Naked 連續下跌（兩個交易日各自 ≥ `NAKED_ENTRY_DOWN_DAY_PCT`）升為 elevated 後走同一條停開路徑。`data_unavailable` 一律停開。`hard stop` 直接平倉；`soft trigger` 優先 roll，不行就平倉；`TP` 與 `time exit` 都會主動退場。naked short 防守需連續 **2** 個 manage cycle 確認（`DEFENSE_CONFIRM_CYCLES=2`）。
+- **快速拉升**：24h 或 48h 指數漲幅超過 `INDEX_RALLY_24H_PCT` / `INDEX_RALLY_48H_PCT` 時，該標的標成 `elevated`（不是 `crisis`，**不會**因此 hard-derisk 既有倉）。既有 `ENABLE_TREND_SIDE_BIAS` 只會在 put/call 之間偏排序，**不會**停開倉
+- `crisis` 仍**完全停開新倉**。`elevated`（含 24h 指數回撤、DVOL 放大、快速拉升）對 **`covered_call`** 不停開：仍可進場，但把有效 `*_DELTA_MAX` 收緊 `ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.02**，絕不低於既有 `*_DELTA_MIN`）。**`naked_short` 預設停開**（無底倉的 short put 是下跌尾部，elevated／連續下跌正是最不該新賣保險的時候）；要改走「收緊後仍可賣」須設 `NAKED_ALLOW_ELEVATED_ENTRY=true`，此時用較大的 `NAKED_ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.04**）。Naked 連續下跌（兩個交易日各自 ≥ `NAKED_ENTRY_DOWN_DAY_PCT`）升為 elevated 後走同一條停開路徑。`data_unavailable` 一律停開。`hard stop` 直接平倉；`soft trigger` 優先 roll，不行就平倉；`TP` 與 `time exit` 都會主動退場。naked short 防守需連續 **2** 個 manage cycle 確認（`DEFENSE_CONFIRM_CYCLES=2`）。
 
 ## 策略比較
 
