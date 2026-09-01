@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Admin · Investor frontends</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/tailwind.css?v=c6fde4d604" />
+    <link rel="stylesheet" href="/tokens.css?v=ds003" />
+    <link rel="stylesheet" href="/styles.css?v=f4b972995b" />
+  </head>
+  <body class="app-body admin-body">
+    <a class="skip-link" href="#admin-main">Skip to content</a>
+    <div class="admin-shell">
+      <header class="admin-header">
+        <div class="admin-header-copy">
+          <h1 class="page-title">Admin</h1>
+          <p class="page-subtitle">Local only · Switch and embed each investor’s ops dashboard</p>
+        </div>
+        <div class="admin-header-meta" aria-label="Admin status">
+          <span id="admin-bind-badge" class="status-badge">127.0.0.1</span>
+          <span id="admin-count-badge" class="status-badge">investors: —</span>
+          <span id="admin-health-badge" class="status-badge">healthy: —</span>
+        </div>
+        <div class="header-actions">
+          <span id="admin-last-refresh" aria-live="polite">Last refresh: —</span>
+          <button id="admin-refresh" type="button" class="ds-btn ds-btn-secondary">Refresh</button>
+        </div>
+      </header>
+
+      <aside class="admin-sidebar" aria-label="Investor list">
+        <div class="admin-sidebar-head">
+          <span class="admin-sidebar-title">Investors</span>
+          <span id="admin-sidebar-hint" class="admin-sidebar-hint">Loading…</span>
+        </div>
+        <nav id="admin-investor-list" class="admin-investor-list"></nav>
+      </aside>
+
+      <main id="admin-main" class="admin-main">
+        <div class="admin-toolbar">
+          <div class="admin-toolbar-copy">
+            <h2 id="admin-selected-name" class="admin-selected-name">Select an investor</h2>
+            <p id="admin-selected-meta" class="admin-selected-meta">List comes from registry.toml</p>
+          </div>
+          <div class="admin-toolbar-actions">
+            <a id="admin-open-ops" class="ds-btn" href="#" target="_blank" rel="noopener" hidden>Open ops</a>
+            <a id="admin-open-portal" class="ds-btn ds-btn-secondary" href="#" target="_blank" rel="noopener" hidden>
+              Open portal
+            </a>
+            <button id="admin-frontend-start" type="button" class="ds-btn ds-btn-secondary" hidden>Start frontend</button>
+            <button id="admin-frontend-restart" type="button" class="ds-btn ds-btn-secondary" hidden>Restart frontend</button>
+            <button id="admin-frontend-stop" type="button" class="ds-btn ds-btn-secondary" hidden>Stop frontend</button>
+          </div>
+        </div>
+        <div id="admin-trade-bar" class="admin-trade-bar" hidden>
+          <button id="admin-panic" type="button" class="ds-btn ds-btn-danger">Panic close</button>
+        </div>
+        <p id="admin-action-status" class="admin-action-status" hidden></p>
+        <dialog id="admin-action-dialog" class="admin-dialog">
+          <form id="admin-action-form" class="admin-dialog-form">
+            <h3 id="admin-dialog-title" class="admin-dialog-title">Action</h3>
+            <p id="admin-dialog-lead" class="admin-dialog-lead"></p>
+            <div id="admin-dialog-targets" class="admin-dialog-targets"></div>
+            <label id="admin-dialog-confirm-wrap" class="admin-dialog-confirm" hidden>
+              Type <code>LIVE</code> to submit
+              <input id="admin-dialog-confirm" type="text" autocomplete="off" spellcheck="false" />
+            </label>
+            <pre id="admin-dialog-preview" class="admin-dialog-preview" hidden></pre>
+            <p id="admin-dialog-error" class="admin-dialog-error" hidden></p>
+            <div class="admin-dialog-actions">
+              <button id="admin-dialog-cancel" type="button" class="ds-btn ds-btn-secondary">Cancel</button>
+              <button id="admin-dialog-preview-btn" type="button" class="ds-btn">Preview</button>
+              <button id="admin-dialog-live-btn" type="button" class="ds-btn ds-btn-danger" disabled>Confirm live</button>
+            </div>
+          </form>
+        </dialog>
+        <div class="admin-workspace">
+          <div id="admin-frame-empty" class="admin-frame-empty">
+            Select an investor on the left to embed their ops dashboard.
+          </div>
+          <iframe id="admin-frame" class="admin-frame" title="Investor ops dashboard" hidden></iframe>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/admin.js?v=0d3d22fdb7"></script>
+  </body>
+</html>

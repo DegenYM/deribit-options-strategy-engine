@@ -58,13 +58,28 @@ def spot_exit_filled_native(group: TradeGroup) -> Decimal:
     return group.spot_exit_amount if group.spot_exit_amount > 0 else Decimal("0")
 
 
+def spot_exit_quote_currency(
+    group: TradeGroup,
+    instrument_name: str | None = None,
+) -> str:
+    """Quote currency of the ITM cover sale (USDT legacy, USDC when cash-secured)."""
+    name = str(instrument_name or group.spot_exit_instrument_name or "").upper()
+    if name.endswith("_USDC"):
+        return "USDC"
+    return "USDT"
+
+
 def apply_spot_exit_quote_proceeds(
     group: TradeGroup,
     trades: list[dict[str, Any]],
     *,
     cumulative: bool = False,
 ) -> Decimal:
-    proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
+    trade_instrument = ""
+    if trades:
+        trade_instrument = str(trades[0].get("instrument_name") or "")
+    quote = spot_exit_quote_currency(group, trade_instrument or None)
+    proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency=quote)
     if proceeds <= 0:
         return Decimal("0")
     if cumulative:
@@ -293,10 +308,13 @@ def reconcile_spot_exit_from_exchange(
 
     trades.sort(key=lambda row: int(row.get("timestamp") or 0))
     amount = sum(to_decimal(row.get("amount")) for row in trades)
-    proceeds = spot_sell_quote_proceeds_from_trades(trades, quote_currency="USDT")
     last = trades[-1]
     last_order_id = str(last.get("order_id") or "").strip()
     instrument_name = str(last.get("instrument_name") or f"{group.currency.upper()}_USDT")
+    proceeds = spot_sell_quote_proceeds_from_trades(
+        trades,
+        quote_currency=spot_exit_quote_currency(group, instrument_name),
+    )
 
     # Partial IOC cancels leave labeled fills; keep pending so manage can sell the remainder.
     if status in {"failed", "submitted", "pending"}:
@@ -325,6 +343,43 @@ def reconcile_spot_exits_in_groups(
         if reconcile_spot_exit_from_exchange(group, client=client):
             repaired += 1
     return repaired
+
+
+INCOMPLETE_SPOT_EXIT_STATUSES = frozenset({"pending", "submitted", "failed"})
+
+
+def incomplete_spot_exit_remaining_native(group: TradeGroup) -> Decimal:
+    """Native still queued for an incomplete ITM/settlement spot sell.
+
+    Used to keep that inventory out of available cover so a new covered call
+    cannot open on coins that are still being sold.
+    """
+    if group.status != "closed" or not group.is_covered_call_group():
+        return Decimal("0")
+    status = str(group.spot_exit_status or "").lower()
+    if status not in INCOMPLETE_SPOT_EXIT_STATUSES:
+        return Decimal("0")
+    if spot_restore_blocks_exit_remainder(group):
+        return Decimal("0")
+    cover = group.covered_underlying_quantity if group.covered_underlying_quantity > 0 else group.quantity
+    if cover <= 0:
+        return Decimal("0")
+    already = spot_exit_filled_native(group)
+    settlement = group.spot_exit_settlement_loss if group.spot_exit_settlement_loss > 0 else Decimal("0")
+    return max(cover - settlement - already, Decimal("0"))
+
+
+def pending_spot_exit_remaining_native(groups: list[TradeGroup], currency: str) -> Decimal:
+    ccy = currency.upper()
+    return sum(
+        (incomplete_spot_exit_remaining_native(group) for group in groups if group.currency.upper() == ccy),
+        Decimal("0"),
+    )
+
+
+def spot_exit_blocks_new_covered_call(groups: list[TradeGroup], currency: str) -> bool:
+    """True when this book still has unsold ITM cover that must finish selling first."""
+    return pending_spot_exit_remaining_native(groups, currency) > 0
 
 
 def spot_restore_blocks_exit_remainder(group: TradeGroup) -> bool:

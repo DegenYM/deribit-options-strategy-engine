@@ -11,7 +11,14 @@ from typing import TYPE_CHECKING, Any
 
 from .exceptions import ExchangeError
 from .models import OrderBookSnapshot, TradeGroup
-from .utils import align_option_order_amount, format_decimal, is_post_only_reject, to_decimal
+from .utils import (
+    align_option_order_amount,
+    ceil_option_order_amount,
+    ceil_to_step,
+    format_decimal,
+    is_post_only_reject,
+    to_decimal,
+)
 from .wallet_ops import spot_buy_quote_spent_from_trades
 
 if TYPE_CHECKING:
@@ -20,6 +27,8 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 SleepFn = Callable[[float], None]
+DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT = Decimal("0.001")
+SPOT_RESTORE_OPERATOR_CANCELLED = "operator_cancelled"
 
 
 def record_spot_restore_lifetime_spent(group: TradeGroup, spent: Decimal) -> None:
@@ -214,18 +223,97 @@ def spot_restore_lot_threshold(currency: str) -> Decimal:
     return Decimal("0.001") if str(currency or "").upper() == "ETH" else Decimal("0.0001")
 
 
+def default_option_restore_lot(currency: str) -> Decimal:
+    """USDC linear ``min_trade_amount`` fallback (live BTC 0.01 / ETH 0.1)."""
+    return Decimal("0.1") if str(currency or "").upper() == "ETH" else Decimal("0.01")
+
+
+def lookup_usdc_linear_option_lot(client: DeribitClient | None, currency: str) -> Decimal:
+    """USDC linear option min lot from the catalog, else the documented fallback."""
+    typical = default_option_restore_lot(currency)
+    if client is None:
+        return typical
+    try:
+        rows = client.get_instruments("USDC", kind="option", expired=False) or []
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("spot_restore: USDC linear lot lookup failed currency=%s", currency, exc_info=True)
+        return typical
+    prefix = f"{str(currency or '').upper()}_USDC-"
+    found: list[Decimal] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("instrument_name") or "")
+        if not name.startswith(prefix) or "PERPETUAL" in name.upper():
+            continue
+        amount = to_decimal(row.get("min_trade_amount"))
+        if amount > 0:
+            found.append(amount)
+    return min(found) if found else typical
+
+
+def align_spot_restore_buy_amount(
+    *,
+    amount: Decimal,
+    spot_contract_size: Decimal,
+    spot_min_trade: Decimal,
+    option_lot: Decimal,
+    cap: Decimal | None,
+    size_mode: str,
+) -> Decimal:
+    """Ceil default restore buys to the USDC linear lot (BTC 0.01 / ETH 0.1), then the spot grid.
+
+    Dust below the *spot* min is omitted. Explicit ``--amount`` / ``--usdt`` only
+    ceil to the spot step so a partial manual size is not inflated to a full lot.
+    """
+    if amount <= 0:
+        return Decimal("0")
+    if spot_min_trade > 0 and amount < spot_min_trade:
+        return Decimal("0")
+    cover = cap if cap is not None and cap > 0 else None
+    if str(size_mode or "") == "full_unrestored" and option_lot > 0:
+        aligned = ceil_to_step(amount, option_lot)
+        if cover is not None and aligned > cover:
+            aligned = cover
+        amount = aligned
+    return ceil_option_order_amount(amount, spot_contract_size, spot_min_trade, cap=cover)
+
+
 def align_spot_restore_amount(
     client: DeribitClient,
     *,
     instrument_name: str,
     amount: Decimal,
+    cap: Decimal | None = None,
 ) -> Decimal:
-    """Floor ``amount`` to the spot instrument grid; ``0`` means below exchange min."""
+    """Ceil restore buys to the spot grid; ``0`` means below exchange min. Never exceed ``cap``."""
     from .wallet_ops import _lookup_spot_instrument
 
     base = instrument_name.split("_", 1)[0]
     instrument = _lookup_spot_instrument(client, instrument_name, base)
-    return align_option_order_amount(amount, instrument.contract_size, instrument.min_trade_amount)
+    return ceil_option_order_amount(
+        amount,
+        instrument.contract_size,
+        instrument.min_trade_amount,
+        cap=cap,
+    )
+
+
+def spot_restore_operator_cancelled(group: TradeGroup) -> bool:
+    status = str(group.spot_restore_status or "").lower()
+    if status in {"skipped", "cancelled", "canceled"}:
+        return True
+    reason = str(group.spot_restore_reason or "").lower()
+    return SPOT_RESTORE_OPERATOR_CANCELLED in reason
+
+
+def mark_spot_restore_operator_cancelled(group: TradeGroup) -> None:
+    group.spot_restore_status = "skipped"
+    group.spot_restore_order_id = ""
+    reason = str(group.spot_restore_reason or "").strip()
+    tag = SPOT_RESTORE_OPERATOR_CANCELLED
+    if tag not in reason:
+        group.spot_restore_reason = f"{reason};{tag}" if reason else tag
 
 
 def is_spot_restore_dust_amount(
@@ -314,6 +402,196 @@ def itm_spot_exit_net_usdt_for_total_profit(group: TradeGroup) -> Decimal | None
     if folded > 0:
         net -= folded
     return net
+
+
+def evaluate_auto_spot_restore(
+    group: TradeGroup,
+    *,
+    buy_price: Decimal,
+    min_edge_pct: Decimal = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT,
+) -> dict[str, Any]:
+    """Whether buying back ITM-sold cover at ``buy_price`` would lock in USDT profit.
+
+    Restore reconstitutes cover. Net = remaining exit proceeds − estimated buy
+    spend (already-restored USDT is subtracted). ``min_edge_pct`` is a buffer so
+    fees/slippage do not wipe the edge (max buy = breakeven × (1 − edge)).
+    """
+    from .spot_exit_ops import spot_exit_realized_usdt
+
+    payload: dict[str, Any] = {
+        "ok": False,
+        "reason": "",
+        "buy_price": format_decimal(buy_price, 4) if buy_price > 0 else None,
+        "min_edge_pct": format_decimal(min_edge_pct, 6),
+    }
+    if group.status != "closed" or not group.is_covered_call_group():
+        payload["reason"] = "not_closed_covered_call"
+        return payload
+    exit_status = str(group.spot_exit_status or "").lower()
+    if exit_status == "skipped":
+        payload["reason"] = "spot_exit_skipped"
+        return payload
+    if exit_status != "filled":
+        payload["reason"] = "spot_exit_not_filled"
+        return payload
+    restore_status = str(group.spot_restore_status or "").lower()
+    if spot_restore_operator_cancelled(group):
+        payload["reason"] = "operator_cancelled"
+        return payload
+    if restore_status == "submitted":
+        payload["reason"] = "restore_in_flight"
+        return payload
+    if not group_has_itm_spot_exit_fills(group):
+        payload["reason"] = "no_spot_exit_fill"
+        return payload
+    unrestored = unrestored_spot_exit_native(group)
+    proceeds = spot_exit_realized_usdt(group)
+    already_spent = spot_restore_realized_usdt(group)
+    remaining_proceeds = proceeds - already_spent
+    payload["unrestored"] = format_decimal(unrestored, 8)
+    payload["exit_proceeds"] = format_decimal(proceeds, 4) if proceeds > 0 else None
+    payload["already_spent"] = format_decimal(already_spent, 4) if already_spent > 0 else None
+    payload["remaining_proceeds"] = format_decimal(remaining_proceeds, 4) if remaining_proceeds != 0 else "0"
+    if unrestored <= 0:
+        payload["reason"] = "already_restored" if restore_status == "filled" else "nothing_to_restore"
+        return payload
+    if proceeds <= 0:
+        payload["reason"] = "no_exit_proceeds"
+        return payload
+    if remaining_proceeds <= 0:
+        payload["reason"] = "no_remaining_proceeds"
+        return payload
+    if buy_price <= 0:
+        payload["reason"] = "no_buy_price"
+        return payload
+    edge = min_edge_pct if min_edge_pct > 0 else Decimal("0")
+    if edge >= 1:
+        edge = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
+    breakeven = remaining_proceeds / unrestored
+    max_buy = breakeven * (Decimal("1") - edge)
+    estimated = unrestored * buy_price * SPOT_RESTORE_ORDER_BUDGET_BUFFER
+    estimated_net = remaining_proceeds - estimated
+    payload["breakeven_price"] = format_decimal(breakeven, 4)
+    payload["max_buy_price"] = format_decimal(max_buy, 4)
+    payload["estimated_spend"] = format_decimal(estimated, 4)
+    payload["estimated_net_usdt"] = format_decimal(estimated_net, 4)
+    if buy_price > max_buy or estimated_net <= 0:
+        payload["reason"] = "price_not_favorable"
+        return payload
+    payload["ok"] = True
+    payload["reason"] = "favorable"
+    return payload
+
+
+def auto_spot_restore_cap_price(
+    group: TradeGroup,
+    *,
+    min_edge_pct: Decimal = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT,
+) -> Decimal:
+    """Highest USDT price that still leaves a non-negative restore round-trip."""
+    from .spot_exit_ops import spot_exit_realized_usdt
+
+    unrestored = unrestored_spot_exit_native(group)
+    remaining = spot_exit_realized_usdt(group) - spot_restore_realized_usdt(group)
+    if unrestored <= 0 or remaining <= 0:
+        return Decimal("0")
+    edge = min_edge_pct if min_edge_pct > 0 else Decimal("0")
+    if edge >= 1:
+        edge = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
+    return (remaining / unrestored) * (Decimal("1") - edge)
+
+
+def evaluate_auto_spot_restore_park(
+    group: TradeGroup,
+    *,
+    min_edge_pct: Decimal = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT,
+) -> dict[str, Any]:
+    """Whether we can park a GTC limit at the restore cap (ignores current ask)."""
+    from .spot_exit_ops import spot_exit_realized_usdt
+
+    payload: dict[str, Any] = {"ok": False, "reason": ""}
+    if group.status != "closed" or not group.is_covered_call_group():
+        payload["reason"] = "not_closed_covered_call"
+        return payload
+    exit_status = str(group.spot_exit_status or "").lower()
+    if exit_status == "skipped":
+        payload["reason"] = "spot_exit_skipped"
+        return payload
+    if exit_status != "filled":
+        payload["reason"] = "spot_exit_not_filled"
+        return payload
+    if spot_restore_operator_cancelled(group):
+        payload["reason"] = "operator_cancelled"
+        return payload
+    if not group_has_itm_spot_exit_fills(group):
+        payload["reason"] = "no_spot_exit_fill"
+        return payload
+    unrestored = unrestored_spot_exit_native(group)
+    remaining = spot_exit_realized_usdt(group) - spot_restore_realized_usdt(group)
+    cap = auto_spot_restore_cap_price(group, min_edge_pct=min_edge_pct)
+    payload["unrestored"] = format_decimal(unrestored, 8)
+    payload["remaining_proceeds"] = format_decimal(remaining, 4) if remaining != 0 else "0"
+    payload["max_buy_price"] = format_decimal(cap, 4) if cap > 0 else None
+    payload["min_edge_pct"] = format_decimal(
+        min_edge_pct if 0 < min_edge_pct < 1 else DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT,
+        6,
+    )
+    if unrestored <= 0:
+        payload["reason"] = "already_restored"
+        return payload
+    if remaining <= 0:
+        payload["reason"] = "no_remaining_proceeds"
+        return payload
+    if cap <= 0:
+        payload["reason"] = "no_cap_price"
+        return payload
+    payload["ok"] = True
+    payload["reason"] = "park_limit"
+    return payload
+
+
+def _spot_restore_order_is_open(client: DeribitClient, order_id: str | None) -> bool:
+    oid = str(order_id or "").strip()
+    if not oid:
+        return False
+    try:
+        raw = client.get_order_state(oid)
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("spot_restore: get_order_state failed order=%s", oid, exc_info=True)
+        return False
+    order = raw.get("order") if isinstance(raw, dict) and isinstance(raw.get("order"), dict) else raw
+    if not isinstance(order, dict):
+        return False
+    state = str(order.get("order_state") or "").lower()
+    return state in {"open", "untriggered", "new"}
+
+
+def attach_auto_spot_restore_preview(
+    payload: dict[str, Any],
+    group: TradeGroup,
+    *,
+    buy_price: Decimal,
+    min_edge_pct: Decimal | None = None,
+    enabled: bool = False,
+    price_source: str = "",
+) -> None:
+    """Annotate a restore preview with auto-buy threshold vs current ask."""
+    edge = min_edge_pct if min_edge_pct is not None else DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
+    if edge < 0 or edge >= 1:
+        edge = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
+    decision = evaluate_auto_spot_restore(group, buy_price=buy_price, min_edge_pct=edge)
+    payload["auto_spot_restore_enabled"] = bool(enabled)
+    payload["auto_would_buy"] = bool(decision.get("ok"))
+    payload["auto_reason"] = decision.get("reason")
+    payload["auto_breakeven_price"] = decision.get("breakeven_price")
+    payload["auto_max_buy_price"] = decision.get("max_buy_price")
+    payload["auto_ask"] = decision.get("buy_price")
+    payload["auto_ask_source"] = price_source or None
+    payload["auto_estimated_net_usdt"] = decision.get("estimated_net_usdt")
+    payload["auto_min_edge_pct"] = decision.get("min_edge_pct")
+    payload["auto_unrestored"] = decision.get("unrestored")
+    payload["auto_exit_proceeds"] = decision.get("exit_proceeds")
+    payload["auto_remaining_proceeds"] = decision.get("remaining_proceeds")
 
 
 def sum_itm_spot_exit_net_usdt_for_total_profit(rows: list[dict[str, Any]]) -> Decimal:
@@ -476,13 +754,16 @@ def format_spot_restore_human_report(summary: SpotRestoreRunSummary) -> list[str
         order_type = str(action.get("order_type") or "limit").lower()
         if order_type == "limit":
             limit_px = action.get("limit_price") or price
-            wait_s = action.get("wait_seconds") or DEFAULT_SPOT_RESTORE_WAIT_SECONDS
-            lines.append(f"      訂單: limit@bid GTC post_only  限價={limit_px}  wait={wait_s}s")
+            if action.get("park_resting"):
+                lines.append(f"      訂單: limit GTC @買回上限  限價={limit_px}  （掛著等成交，不市價）")
+            else:
+                wait_s = action.get("wait_seconds") or DEFAULT_SPOT_RESTORE_WAIT_SECONDS
+                lines.append(f"      訂單: limit@bid GTC post_only  限價={limit_px}  wait={wait_s}s")
         else:
             order_budget = action.get("order_budget_usdt") or action.get("quote_budget_usdt")
             if order_budget:
                 lines.append(
-                    f"      下單預算: {order_budget} USDT  (buy × price × {SPOT_RESTORE_ORDER_BUDGET_BUFFER} 緩衝)"
+                    f"      USDT 檢查: {order_budget} USDT  (buy × ask × {SPOT_RESTORE_ORDER_BUDGET_BUFFER}；實際下單為 native 數量)"
                 )
             lines.append("      訂單: market")
         exit_status = action.get("spot_exit_status") or ""
@@ -495,6 +776,26 @@ def format_spot_restore_human_report(summary: SpotRestoreRunSummary) -> list[str
             if exit_usdt:
                 parts.append(f"proceeds={exit_usdt} USDT")
             lines.append(f"      spot_exit: {'  '.join(parts)}")
+        if action.get("auto_max_buy_price") or action.get("auto_reason"):
+            enabled = "開啟" if action.get("auto_spot_restore_enabled") else "關閉（僅預覽）"
+            edge = action.get("auto_min_edge_pct") or format_decimal(DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT, 6)
+            lines.append(f"      自動買回: {enabled}  邊距={edge}")
+            breakeven = action.get("auto_breakeven_price")
+            max_buy = action.get("auto_max_buy_price")
+            if breakeven or max_buy:
+                lines.append(
+                    f"      損益兩平: {breakeven or '—'} USDT  "
+                    f"買回上限: {max_buy or '—'} USDT  （自動掛此價 GTC，成交前不再下單）"
+                )
+            ask = action.get("auto_ask") or "—"
+            ask_src = action.get("auto_ask_source") or ""
+            ask_note = f" ({ask_src})" if ask_src else ""
+            if action.get("auto_would_buy"):
+                net = action.get("auto_estimated_net_usdt") or "—"
+                lines.append(f"      現況: 會買  ask {ask} USDT{ask_note}  預估淨利 {net} USDT")
+            else:
+                reason = action.get("auto_reason") or "—"
+                lines.append(f"      現況: 不會買  ({reason})  ask {ask} USDT{ask_note}")
     return lines
 
 
@@ -699,8 +1000,9 @@ def reconcile_spot_restores_in_groups(
     return repaired
 
 
-# Thin cushion only — ITM restore usually spends nearly all exit USDT; 2% blocked live buys.
-SPOT_RESTORE_ORDER_BUDGET_BUFFER = Decimal("1.005")
+# Fee/slip cushion for USDT sufficiency + auto-restore estimate only.
+# Live market restore buys the native target (never this extra as extra coins).
+SPOT_RESTORE_ORDER_BUDGET_BUFFER = Decimal("1.001")
 DEFAULT_SPOT_RESTORE_WAIT_SECONDS = 120
 
 
@@ -849,7 +1151,7 @@ def place_spot_restore_limit_buy(
 
     base = instrument_name.split("_", 1)[0]
     instrument = _lookup_spot_instrument(client, instrument_name, base)
-    target = align_option_order_amount(amount, instrument.contract_size, instrument.min_trade_amount)
+    target = ceil_option_order_amount(amount, instrument.contract_size, instrument.min_trade_amount)
     if target <= 0:
         return {
             "skipped": True,
@@ -978,6 +1280,129 @@ def place_spot_restore_limit_buy(
     return payload
 
 
+def place_spot_restore_market_buy(
+    client: DeribitClient,
+    *,
+    instrument_name: str,
+    amount: Decimal,
+    label: str,
+) -> dict[str, Any]:
+    """Market buy the aligned native target — do not spend extra USDT that overshoots cover."""
+    from .wallet_ops import _lookup_spot_instrument
+
+    base = instrument_name.split("_", 1)[0]
+    instrument = _lookup_spot_instrument(client, instrument_name, base)
+    target = ceil_option_order_amount(amount, instrument.contract_size, instrument.min_trade_amount)
+    if target <= 0:
+        return {
+            "skipped": True,
+            "reason": "amount_below_min",
+            "requested_amount": format_decimal(amount, 8),
+            "filled_native": "0",
+            "trades": [],
+        }
+    response = client.place_buy_order(
+        instrument_name=instrument_name,
+        amount=target,
+        label=label,
+        order_type="market",
+    )
+    order = _response_order(response)
+    order_id = str(order.get("order_id") or "").strip()
+    trades = list(response.get("trades") or []) if isinstance(response, dict) else []
+    if not trades and order_id:
+        try:
+            trades = list(client.get_user_trades_by_order(order_id) or [])
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("spot_restore market: trades lookup failed order=%s", order_id, exc_info=True)
+            trades = []
+    buy_trades = [t for t in trades if str(t.get("direction") or "").lower() in {"", "buy"}]
+    filled_native = sum((to_decimal(t.get("amount")) for t in buy_trades), Decimal("0"))
+    if filled_native <= 0:
+        filled_native = _response_filled_amount(response)
+    return {
+        "skipped": filled_native <= 0,
+        "reason": None if filled_native > 0 else "unfilled",
+        "order_type": "market",
+        "order_id": order_id or None,
+        "filled_native": format_decimal(filled_native, 8),
+        "trades": buy_trades,
+        "response": response,
+        "requested_amount": format_decimal(target, 8),
+    }
+
+
+def place_spot_restore_resting_limit_buy(
+    client: DeribitClient,
+    *,
+    instrument_name: str,
+    amount: Decimal,
+    price: Decimal,
+    label: str,
+) -> dict[str, Any]:
+    """Park a GTC limit buy at ``price`` and return immediately (do not wait / cancel)."""
+    from .wallet_ops import _align_spot_limit_price, _lookup_spot_instrument
+
+    base = instrument_name.split("_", 1)[0]
+    instrument = _lookup_spot_instrument(client, instrument_name, base)
+    target = ceil_option_order_amount(amount, instrument.contract_size, instrument.min_trade_amount)
+    limit_px = _align_spot_limit_price(price, instrument)
+    if target <= 0:
+        return {
+            "skipped": True,
+            "reason": "amount_below_min",
+            "requested_amount": format_decimal(amount, 8),
+            "filled_native": "0",
+            "trades": [],
+        }
+    if limit_px <= 0:
+        return {
+            "skipped": True,
+            "reason": "limit_price_unavailable",
+            "filled_native": "0",
+            "trades": [],
+        }
+    response = client.place_buy_order(
+        instrument_name=instrument_name,
+        amount=target,
+        price=limit_px,
+        label=label,
+        order_type="limit",
+        time_in_force="good_til_cancelled",
+        post_only=False,
+    )
+    order = _response_order(response)
+    order_id = str(order.get("order_id") or "").strip()
+    trades = list(response.get("trades") or []) if isinstance(response, dict) else []
+    if not trades and order_id:
+        try:
+            trades = list(client.get_user_trades_by_order(order_id) or [])
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("spot_restore park: trades lookup failed order=%s", order_id, exc_info=True)
+            trades = []
+    buy_trades = [t for t in trades if str(t.get("direction") or "").lower() in {"", "buy"}]
+    filled_native = sum((to_decimal(t.get("amount")) for t in buy_trades), Decimal("0"))
+    if filled_native <= 0:
+        filled_native = _response_filled_amount(response)
+    order_state = str(order.get("order_state") or "").lower()
+    parked = filled_native <= 0 and (order_state in {"", "open", "untriggered", "new"} or bool(order_id))
+    return {
+        "skipped": filled_native <= 0 and not parked,
+        "parked": parked,
+        "reason": None if filled_native > 0 or parked else "unfilled",
+        "order_type": "limit",
+        "time_in_force": "good_til_cancelled",
+        "post_only": False,
+        "limit_price": format_decimal(limit_px, 4),
+        "order_id": order_id or None,
+        "order_state": order_state or None,
+        "filled_native": format_decimal(filled_native, 8),
+        "trades": buy_trades,
+        "response": response,
+        "requested_amount": format_decimal(target, 8),
+    }
+
+
 def build_spot_restore_buy_amount_composition(
     plan: dict[str, Decimal | str | bool],
     *,
@@ -1080,8 +1505,8 @@ def attach_spot_restore_preview_quote(
     else:
         payload["estimated_usdt_meaning"] = "notional = buy_amount × current_price (best ask)"
         payload["order_budget_usdt_meaning"] = (
-            f"live order spend cap = buy_amount × current_price × {SPOT_RESTORE_ORDER_BUDGET_BUFFER} "
-            "(+0.5% cushion so market buy does not undersize on ask walk)"
+            f"USDT sufficiency check = buy_amount × ask × {SPOT_RESTORE_ORDER_BUDGET_BUFFER}; "
+            "live market order is native buy_amount (no extra coins)"
         )
     # Keep legacy aliases used by earlier previews / scripts.
     payload["restore_amount"] = payload["buy_amount"]
@@ -1220,6 +1645,8 @@ def execute_spot_restore_for_group(
     order_type: str | None = None,
     wait_seconds: int | None = None,
     sleep_fn: SleepFn | None = None,
+    restore_reason: str = "manual_spot_restore",
+    park_resting: bool = False,
 ) -> dict[str, Any]:
     """Buy back cover sold by ITM spot exit; records spot_restore_* for accounting.
 
@@ -1247,20 +1674,59 @@ def execute_spot_restore_for_group(
     currency = group.currency.upper()
     instrument_name = f"{currency}_USDT"
     label = spot_restore_order_label(group, bot.config.order_label_prefix)
+    auto_restore = str(restore_reason or "").startswith("auto_spot_restore")
+    if auto_restore:
+        # Auto restore may only park a cap-priced GTC. Never market-buy.
+        park_resting = True
     resolved_order_type = str(order_type or getattr(bot.config, "spot_restore_order_type", None) or "limit").lower()
+    if park_resting:
+        resolved_order_type = "limit"
     if resolved_order_type not in {"limit", "market"}:
         resolved_order_type = "limit"
+    if auto_restore and resolved_order_type == "market":
+        return {
+            "action": "spot_restore_skipped",
+            "group_id": group.group_id,
+            "reason": "auto_restore_market_forbidden",
+        }
     resolved_wait = int(
         wait_seconds
         if wait_seconds is not None
         else getattr(bot.config, "spot_restore_wait_seconds", DEFAULT_SPOT_RESTORE_WAIT_SECONDS)
     )
     resolved_wait = max(1, resolved_wait)
-    trade_price, price_source = _spot_restore_buy_quote(
-        bot.client,
-        instrument_name=instrument_name,
-        order_type=resolved_order_type,
+    park_min_edge = to_decimal(
+        getattr(bot.config, "covered_call_auto_spot_restore_min_edge_pct", None)
+        or DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
     )
+    if park_resting:
+        cap = auto_spot_restore_cap_price(group, min_edge_pct=park_min_edge)
+        trade_price, price_source = cap, "auto_max_buy"
+    else:
+        trade_price, price_source = _spot_restore_buy_quote(
+            bot.client,
+            instrument_name=instrument_name,
+            order_type=resolved_order_type,
+        )
+    auto_ask, auto_ask_source = trade_price, price_source
+    if resolved_order_type != "market":
+        try:
+            auto_ask, auto_ask_source = _spot_restore_buy_quote(
+                bot.client,
+                instrument_name=instrument_name,
+                order_type="market",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    auto_kwargs = {
+        "buy_price": auto_ask,
+        "min_edge_pct": to_decimal(
+            getattr(bot.config, "covered_call_auto_spot_restore_min_edge_pct", None)
+            or DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
+        ),
+        "enabled": bool(getattr(bot.config, "covered_call_auto_spot_restore_enabled", False)),
+        "price_source": auto_ask_source,
+    }
     quote_for_unrestored = (
         _quote_budget_for_base_buy(
             bot.client,
@@ -1291,6 +1757,7 @@ def execute_spot_restore_for_group(
         }
         if sized.get("requested") is not None:
             payload["requested"] = format_decimal(sized["requested"], 8)
+        attach_auto_spot_restore_preview(payload, group, **auto_kwargs)
         return payload
 
     target = sized["target"]
@@ -1298,10 +1765,15 @@ def execute_spot_restore_for_group(
     from .wallet_ops import _lookup_spot_instrument
 
     spot_instrument = _lookup_spot_instrument(bot.client, instrument_name, currency)
-    aligned_target = align_option_order_amount(
-        target,
-        spot_instrument.contract_size,
-        spot_instrument.min_trade_amount,
+    cover_cap = to_decimal(plan["cover"])
+    option_lot = lookup_usdc_linear_option_lot(bot.client, currency)
+    aligned_target = align_spot_restore_buy_amount(
+        amount=target,
+        spot_contract_size=spot_instrument.contract_size,
+        spot_min_trade=spot_instrument.min_trade_amount,
+        option_lot=option_lot,
+        cap=cover_cap if cover_cap > 0 else None,
+        size_mode=str(sized.get("size_mode") or ""),
     )
     if target > 0 and aligned_target <= 0:
         # Below exchange min/step: omit (never round up past cover).
@@ -1335,8 +1807,10 @@ def execute_spot_restore_for_group(
             payload["marked_complete"] = True
             payload["spot_restore_status"] = group.spot_restore_status or None
             payload["spot_restore_reason"] = group.spot_restore_reason or None
+        attach_auto_spot_restore_preview(payload, group, **auto_kwargs)
         return payload
 
+    target = aligned_target
     quote_budget = sized.get("quote_budget")
     if quote_budget is None:
         quote_budget = _quote_budget_for_base_buy(
@@ -1365,16 +1839,21 @@ def execute_spot_restore_for_group(
         "premium_still_held_est": bool(plan.get("premium_still_held_est")),
         "spot_exit_status": str(group.spot_exit_status or "") or None,
         "restore_target": format_decimal(to_decimal(plan["target"]), 8),
+        "option_lot": format_decimal(option_lot, 8),
         "size_mode": sized.get("size_mode"),
         "order_type": resolved_order_type,
         "label": label,
         "live": live,
+        "restore_reason": restore_reason or "manual_spot_restore",
     }
     if resolved_order_type == "limit":
         payload["limit_price"] = format_decimal(trade_price, 4) if trade_price > 0 else None
         payload["time_in_force"] = "good_til_cancelled"
-        payload["post_only"] = True
-        payload["wait_seconds"] = resolved_wait
+        payload["post_only"] = False if park_resting else True
+        payload["wait_seconds"] = 0 if park_resting else resolved_wait
+        if park_resting:
+            payload["park_resting"] = True
+            payload["limit_price_source"] = "auto_max_buy"
     attach_spot_restore_preview_quote(
         payload,
         buy_amount=target,
@@ -1393,10 +1872,59 @@ def execute_spot_restore_for_group(
         payload["requested_usdt"] = format_decimal(sized["requested_usdt"], 4)
     if sized.get("usdt_capped_to_unrestored"):
         payload["usdt_capped_to_unrestored"] = True
+    attach_auto_spot_restore_preview(payload, group, **auto_kwargs)
     if not live:
         return payload
 
-    if resolved_order_type == "limit":
+    if park_resting:
+        if _spot_restore_order_is_open(bot.client, group.spot_restore_order_id):
+            payload["action"] = "spot_restore_skipped"
+            payload["reason"] = "restore_in_flight"
+            payload["spot_restore_order_id"] = group.spot_restore_order_id or None
+            return payload
+        if trade_price <= 0:
+            payload["action"] = "spot_restore_skipped"
+            payload["reason"] = "no_cap_price"
+            return payload
+        result = place_spot_restore_resting_limit_buy(
+            bot.client,
+            instrument_name=instrument_name,
+            amount=target,
+            price=trade_price,
+            label=label,
+        )
+        payload.update(
+            {
+                k: v
+                for k, v in result.items()
+                if k not in {"trades", "response", "skipped", "reason", "filled_native", "order_id", "parked"}
+            }
+        )
+        if result.get("skipped") and not result.get("parked"):
+            payload["action"] = "spot_restore_skipped"
+            payload["reason"] = result.get("reason")
+            payload["filled_native"] = result.get("filled_native") or "0"
+            if result.get("order_id"):
+                payload["spot_restore_order_id"] = result.get("order_id")
+            return payload
+        order_id = str(result.get("order_id") or "").strip()
+        buy_trades = list(result.get("trades") or [])
+        filled_native = to_decimal(result.get("filled_native"))
+        if filled_native <= 0 and buy_trades:
+            filled_native = sum((to_decimal(t.get("amount")) for t in buy_trades), Decimal("0"))
+        avg_fallback = trade_price
+        if filled_native <= 0 and result.get("parked") and order_id:
+            group.spot_restore_status = "submitted"
+            group.spot_restore_instrument_name = instrument_name
+            group.spot_restore_reason = restore_reason or "auto_spot_restore_park"
+            group.spot_restore_order_id = order_id
+            payload["action"] = "spot_restore_submitted"
+            payload["reason"] = "parked_limit"
+            payload["spot_restore_status"] = group.spot_restore_status
+            payload["spot_restore_order_id"] = order_id
+            payload["filled_native"] = "0"
+            return payload
+    elif resolved_order_type == "limit":
         result = place_spot_restore_limit_buy(
             bot.client,
             instrument_name=instrument_name,
@@ -1436,39 +1964,36 @@ def execute_spot_restore_for_group(
             filled_native = sum((to_decimal(t.get("amount")) for t in buy_trades), Decimal("0"))
         avg_fallback = trade_price
     else:
-        from .wallet_ops import trade_spot
-
-        result = trade_spot(
-            bot.config,
+        if auto_restore or park_resting:
+            payload["action"] = "spot_restore_skipped"
+            payload["reason"] = "auto_restore_market_forbidden"
+            return payload
+        result = place_spot_restore_market_buy(
             bot.client,
-            from_currency="USDT",
-            to_currency=currency,
-            amount=format_decimal(quote_budget, 4),
             instrument_name=instrument_name,
-            order_type="market",
-            live=True,
+            amount=target,
             label=label,
         )
-        payload.update({k: v for k, v in result.items() if k not in {"action", "live"}})
-        if result.get("action") == "trade_spot_skipped":
+        payload.update(
+            {
+                k: v
+                for k, v in result.items()
+                if k not in {"trades", "response", "skipped", "reason", "filled_native", "order_id"}
+            }
+        )
+        if result.get("skipped"):
             payload["action"] = "spot_restore_skipped"
             payload["reason"] = result.get("reason")
+            payload["filled_native"] = result.get("filled_native") or "0"
+            if result.get("order_id"):
+                payload["spot_restore_order_id"] = result.get("order_id")
             return payload
-
         order_id = str(result.get("order_id") or "").strip()
-        response = result.get("response") if isinstance(result.get("response"), dict) else {}
-        trades = list(response.get("trades") or [])
-        if not trades and order_id:
-            try:
-                trades = list(bot.client.get_user_trades_by_order(order_id) or [])
-            except Exception:  # noqa: BLE001
-                LOGGER.debug("spot_restore: trades lookup failed order=%s", order_id, exc_info=True)
-                trades = []
-        buy_trades = [t for t in trades if str(t.get("direction") or "").lower() == "buy"]
-        filled_native = sum((to_decimal(t.get("amount")) for t in buy_trades), Decimal("0"))
-        if filled_native <= 0:
-            filled_native = to_decimal(result.get("amount"))
-        avg_fallback = to_decimal(result.get("average_price"))
+        buy_trades = list(result.get("trades") or [])
+        filled_native = to_decimal(result.get("filled_native"))
+        if filled_native <= 0 and buy_trades:
+            filled_native = sum((to_decimal(t.get("amount")) for t in buy_trades), Decimal("0"))
+        avg_fallback = trade_price
 
     if filled_native <= 0:
         payload["action"] = "spot_restore_skipped"
@@ -1480,7 +2005,7 @@ def execute_spot_restore_for_group(
 
     group.spot_restore_status = "filled"
     group.spot_restore_instrument_name = instrument_name
-    group.spot_restore_reason = "manual_spot_restore"
+    group.spot_restore_reason = restore_reason or "manual_spot_restore"
     if order_id:
         group.spot_restore_order_id = order_id
     group.spot_restore_amount = prior + filled_native

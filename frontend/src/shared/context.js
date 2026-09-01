@@ -12,6 +12,12 @@ export const DASHBOARD_MODE =
       : "ops";
 export const INVESTOR = DASHBOARD_MODE === "investor";
 
+/** Ops dashboard iframed by `./bot admin` (`?embed=1` or nested frame). */
+export const ADMIN_EMBED =
+  !INVESTOR &&
+  typeof window !== "undefined" &&
+  (window.self !== window.top || /(?:\?|&)embed=1(?:&|$)/.test(String(window.location.search || "")));
+
 export const INVESTOR_LOCALE = (() => {
   if (!INVESTOR) return "en";
   const raw = String(

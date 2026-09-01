@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, activityOpenRows, activityPaginationHtml, aggregateMaintenanceHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, exchangeOutageBannerHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, formatRiskTierSummary, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeRiskTier, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, riskTierChipHtml, riskTierForStrategy, riskTierLabel, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, summarizeSpotExitDisposition, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, adminGroupActionsHtml, activityOpenRows, activityPaginationHtml, aggregateMaintenanceHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, cashSecuredMetaLine, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, exchangeOutageBannerHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, formatRiskTierSummary, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeRiskTier, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, riskTierChipHtml, riskTierForStrategy, riskTierLabel, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, summarizeCashSecuredDisposition, summarizeSpotExitDisposition, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumStrategyRealizedPnlUsdcAtSpot, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
@@ -586,6 +586,9 @@ export function renderAggregate(status, report) {
   const spotExitSummary = summary
     ? summarizeSpotExitDisposition(STATE.groups, { status })
     : null;
+  const cashSecuredSummary = summary
+    ? summarizeCashSecuredDisposition(STATE.groups)
+    : null;
   const { equityNativeByBook, equityUsdByBook } = overviewEquityBreakdown(portfolio, status);
   const sinceLine =
     lifetimeStartMs !== null
@@ -608,6 +611,7 @@ export function renderAggregate(status, report) {
     profitCompositionByBook: profitComposition,
     lifetimeProfitDisposition,
     spotExitSummary,
+    cashSecuredSummary,
     closedCount,
     windowLabelDays,
     windowPnl,
@@ -823,7 +827,14 @@ export function openPositionStrategyClass(id) {
   const key = normalizeStrategyId(id);
   if (key === "covered_call") return "open-position-call";
   if (key === "bull_put_spread") return "open-position-spread";
+  if (key === "cash_secured") return "open-position-csp";
   return "open-position-put";
+}
+
+function cashSecuredPositionTagHtml(g, groups) {
+  const meta = cashSecuredMetaLine(g, groups);
+  if (!meta) return "";
+  return `<span>${escapeHtml(meta[0])} ${escapeHtml(meta[1])}</span>`;
 }
 
 export function openPositionToneClass(value) {
@@ -904,7 +915,8 @@ export function openPositionDetailHtml(g, status, groups) {
   }
   return `
     <span>${i18n("Strike", "履約價")} ${fmtStrike(openRowLegStrike(g, "short"))}</span>
-    <span>${escapeHtml(strategyLegDetail(g))}</span>`;
+    <span>${escapeHtml(strategyLegDetail(g))}</span>
+    ${cashSecuredPositionTagHtml(g, groups)}`;
 }
 
 export function openPositionCardInvestorHtml(g, status, groups) {
@@ -958,6 +970,12 @@ export function openPositionCardInvestorHtml(g, status, groups) {
             <span class="inv-pos-tag">${escapeHtml(coll)}</span>
             <span class="inv-pos-tag inv-pos-tag--status">${escapeHtml(statusLabel)}</span>
             ${detailTags}
+            ${(() => {
+              const meta = cashSecuredMetaLine(g, groups);
+              return meta
+                ? `<span class="inv-pos-tag">${escapeHtml(meta[0])} ${escapeHtml(meta[1])}</span>`
+                : "";
+            })()}
           </div>
         </div>
         <div class="inv-position-pnl">
@@ -1018,6 +1036,7 @@ export function openPositionCardDesktopHtml(g, status, groups) {
             <h3>${escapeHtml(openPositionTitle(g))}</h3>
             <span class="open-book-pill">${escapeHtml(bookPill)}</span>
             <span class="open-status-pill">${openPositionStatusLabel(pnlUsd)}</span>
+            ${adminGroupActionsHtml(g)}
           </div>
           <div class="open-position-instruments">
             <span>${escapeHtml(g.short_instrument_name || "—")}</span>
@@ -1302,6 +1321,7 @@ export function renderStrategyGroups(status, report, groups) {
     if (!isDashboardStrategy(id)) continue;
     if (!byStrategy.has(id)) byStrategy.set(id, []);
     byStrategy.get(id).push(g);
+    ids.add(id);
   }
   const groupsHtml = strategyOrder(ids)
     .filter((id) => byStrategy.has(id))

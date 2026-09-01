@@ -1042,7 +1042,7 @@ def test_health_dashboard_strategies_from_accounts_toml(tmp_path, monkeypatch) -
 
     body = client.get("/api/health").json()
 
-    assert body["dashboard_strategies"] == ["covered_call"]
+    assert body["dashboard_strategies"] == ["covered_call", "cash_secured"]
     assert body["investor_id"] == "alpha"
 
 
@@ -1092,7 +1092,20 @@ def test_investor_html_injects_dashboard_strategies(tmp_path, monkeypatch) -> No
 
     html = client.get("/investor.html").text
 
-    assert 'window.__DASHBOARD_STRATEGIES__=["covered_call"]' in html
+    assert 'window.__DASHBOARD_STRATEGIES__=["covered_call", "cash_secured"]' in html
+
+
+def test_dashboard_strategies_adds_cash_secured_beside_covered_call() -> None:
+    from deribit_engine.frontend_server.helpers import _with_cash_secured_strategy
+
+    assert _with_cash_secured_strategy(["covered_call"]) == ["covered_call", "cash_secured"]
+    assert _with_cash_secured_strategy(["covered_call", "cash_secured"]) == ["covered_call", "cash_secured"]
+    assert _with_cash_secured_strategy(["naked_short"]) == ["naked_short"]
+    assert _with_cash_secured_strategy(["naked_short", "covered_call"]) == [
+        "naked_short",
+        "covered_call",
+        "cash_secured",
+    ]
 
 
 def test_dashboard_strategies_fallback_to_loaded_accounts(tmp_path, monkeypatch) -> None:

@@ -85,7 +85,7 @@
 
 **選約原則**：排序為 **delta → 更深 OTM → TARGET APR（軟）**；硬門檻只有 delta 帶與 `*_PUT_OTM_MIN`（無 OTM max）。骨架 IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，關閉 `MIN_IV_MINUS_RV`）。
 
-**風險重點**：尾部風險最高；極端行情可能觸發 soft roll、hard stop。Low tier 限制同時最多 2 組倉位（`MAX_GROUPS_PER_CURRENCY=2`）；loss 防禦為 soft ＜ hard 階梯（low：35% → 50%）。
+**風險重點**：尾部風險最高；極端行情可能觸發 soft roll、hard stop。Low tier 限制同時最多 2 組倉位（`MAX_GROUPS_PER_CURRENCY=2`）；loss 防禦為 soft ＜ hard 階梯（low：35% → 50%；medium：40% → 55%；high：50% → 60%）。骨架 `DEFENSE_CONFIRM_CYCLES=2`，並在連續 2 日各自跌 ≥ 1.5% 時升為 elevated、不開新倉。
 
 ---
 

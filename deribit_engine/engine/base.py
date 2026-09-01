@@ -1429,7 +1429,16 @@ class EngineBase:
         candidates: list[NakedPutCandidate],
     ) -> list[NakedPutCandidate]:
         """Keep scan winners whose underlying regime and collateral book may still enter."""
-        return [c for c in candidates if not candidate_entry_halted(context.snapshot, c)]
+        kept: list[NakedPutCandidate] = []
+        for candidate in candidates:
+            if candidate_entry_halted(context.snapshot, candidate):
+                continue
+            if self.config.option_strategy == "covered_call":
+                ccy = (candidate.currency or "").upper()
+                if ccy and self._covered_call_spot_exit_blocks_entry(context.state, ccy):
+                    continue
+            kept.append(candidate)
+        return kept
 
     def _underlying_entry_halted(self, context: RuntimeContext, underlying: str) -> bool:
         return underlying_entry_halted(context.snapshot, underlying)
@@ -1616,6 +1625,15 @@ class EngineBase:
         return {
             "long": f"{prefix}-spread-{lower}-{group_id}-long",
             "short": f"{prefix}-spread-{lower}-{group_id}-short",
+            "hedge": f"{prefix}-hedge-{lower}-{group_id}",
+        }
+
+    def _cash_secured_labels(self, currency: str, group_id: str) -> dict[str, str]:
+        prefix = self.config.order_label_prefix
+        lower = currency.lower()
+        return {
+            "long": f"{prefix}-csp-{lower}-{group_id}-long",
+            "short": f"{prefix}-csp-{lower}-{group_id}-short",
             "hedge": f"{prefix}-hedge-{lower}-{group_id}",
         }
 

@@ -84,6 +84,45 @@ def test_regime_entry_option_sides_by_strategy(tmp_path: Path):
     assert load_config(naked_both, require_private=False).regime_entry_option_sides() == ("put", "call")
 
 
+def test_load_config_parses_naked_entry_down_streak(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=naked_short",
+                "SHORT_OPTION_SIDE=put",
+                "NAKED_ENTRY_DOWN_STREAK_DAYS=2",
+                "NAKED_ENTRY_DOWN_DAY_PCT=0.02",
+                "DEFENSE_CONFIRM_CYCLES=2",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.naked_entry_down_streak_days == 2
+    assert config.naked_entry_down_day_pct == Decimal("0.02")
+    assert config.defense_confirm_cycles == 2
+    assert config.naked_put_blocks_on_down_streak is True
+
+
+def test_naked_put_blocks_on_down_streak_requires_puts(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=naked_short",
+                "SHORT_OPTION_SIDE=call",
+                "NAKED_ENTRY_DOWN_STREAK_DAYS=2",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+    assert config.enable_short_put is False
+    assert config.naked_put_blocks_on_down_streak is False
+
+
 def test_load_config_parses_currency_specific_min_open_interest(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -291,6 +330,41 @@ def test_covered_call_spot_exit_appends_usdt_collateral(tmp_path: Path):
 
     assert config.covered_call_spot_exit_enabled is True
     assert "USDT" in config.traded_collaterals
+
+
+def test_covered_call_auto_spot_restore_appends_usdt_collateral(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "TRADED_COLLATERALS=BTC,ETH",
+                "COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=true",
+                "COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT=0.01",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.covered_call_auto_spot_restore_enabled is True
+    assert config.covered_call_auto_spot_restore_min_edge_pct == Decimal("0.01")
+    assert "USDT" in config.traded_collaterals
+
+
+def test_covered_call_auto_spot_restore_rejects_invalid_edge(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT=1",
+            ]
+        )
+    )
+
+    with pytest.raises(ConfigurationError, match="COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT"):
+        load_config(env_file, require_private=False)
 
 
 def test_covered_call_profit_sweep_appends_usdt_collateral(tmp_path: Path):

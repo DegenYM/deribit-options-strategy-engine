@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -614,6 +615,37 @@ class StrategySelector:
             return iv_reason
         return None
 
+    def _cash_secured_put_rejection_reason(
+        self,
+        currency: str,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+    ) -> str | None:
+        """Liquidity-only gate: strike/DTE are chosen by the wheel, not delta/OTM/IV."""
+        if instrument.option_type != OptionSide.PUT.value:
+            return "not_put"
+        if instrument.base_currency.upper() != currency.upper():
+            return "wrong_base_currency"
+        if not self._instrument_active(instrument):
+            return "instrument_not_active"
+        if book.index_price <= 0:
+            return "index_price<=0"
+        if book.best_bid_price <= 0:
+            return "best_bid<=0"
+        if book.best_bid_amount <= 0:
+            return "bid_size<=0"
+        if book.best_ask_price <= 0:
+            return "best_ask<=0"
+        if book.best_ask_price < book.best_bid_price:
+            return "crossed_book"
+        min_oi, _max_spread, min_notional = self.config.cash_secured_liquidity_gates()
+        if book.open_interest < min_oi:
+            return "open_interest_below_min"
+        if book.book_notional_usdc < min_notional:
+            return "book_notional_below_min"
+        # CSP takes the bid with IOC; wide bid/ask is not an entry gate.
+        return None
+
     def _naked_short_put_rejection_reason(
         self,
         currency: str,
@@ -1024,6 +1056,41 @@ class StrategySelector:
             return None, breason or "build_failed"
         return cand, None
 
+    def refresh_cash_secured_put_candidate(
+        self,
+        *,
+        instrument: OptionInstrument,
+        book: OrderBookSnapshot,
+        regime: RiskRegime,
+        summary_equity: Decimal,
+        summary_maintenance_margin: Decimal,
+        collateral_currency: str,
+        currency: str,
+        quantity: Decimal,
+        existing_im_for_expiry: Decimal,
+    ) -> tuple[NakedPutCandidate | None, str | None]:
+        if quantity <= 0:
+            return None, "quantity<=0"
+        rej = self._cash_secured_put_rejection_reason(currency, instrument, book)
+        if rej is not None:
+            return None, f"rejection:{rej}"
+        cand, breason = self._try_build_naked_put_for_quantity(
+            instrument=instrument,
+            book=book,
+            regime=regime,
+            summary_equity=summary_equity,
+            summary_maintenance_margin=summary_maintenance_margin,
+            collateral_currency=collateral_currency,
+            currency=currency,
+            quantity=quantity,
+            existing_im_for_expiry=existing_im_for_expiry,
+            relax_apr=True,
+            skip_margin_caps=True,
+        )
+        if cand is None:
+            return None, breason or "build_failed"
+        return replace(cand, strategy="cash_secured"), None
+
     def refresh_naked_call_candidate(
         self,
         *,
@@ -1180,6 +1247,7 @@ class StrategySelector:
         quantity: Decimal,
         existing_im_for_expiry: Decimal,
         relax_apr: bool,
+        skip_margin_caps: bool = False,
     ) -> tuple[NakedPutCandidate | None, str | None]:
         """Side-agnostic naked short builder; put/call differ only in margin/bounds/option_type."""
         is_call = option_type == "call"
@@ -1234,15 +1302,16 @@ class StrategySelector:
             )
         im_total = im_1 * quantity
         mm_total = mm_1 * quantity
-        per_leg_cap = self.config.per_leg_im_cap(currency, option_type=option_type)
-        if im_total > summary_equity * per_leg_cap:
-            return None, "per_leg_im_cap"
-        exp_cap = self.config.expiry_im_cap(currency)
-        if existing_im_for_expiry + im_total > summary_equity * exp_cap:
-            return None, "expiry_im_cap"
-        hard_mm = self.config.hard_mm_utilization(currency)
-        if summary_maintenance_margin + mm_total > summary_equity * hard_mm:
-            return None, "hard_mm_utilization"
+        if not skip_margin_caps:
+            per_leg_cap = self.config.per_leg_im_cap(currency, option_type=option_type)
+            if im_total > summary_equity * per_leg_cap:
+                return None, "per_leg_im_cap"
+            exp_cap = self.config.expiry_im_cap(currency)
+            if existing_im_for_expiry + im_total > summary_equity * exp_cap:
+                return None, "expiry_im_cap"
+            hard_mm = self.config.hard_mm_utilization(currency)
+            if summary_maintenance_margin + mm_total > summary_equity * hard_mm:
+                return None, "hard_mm_utilization"
         margin_efficiency = (net_prem - fee_native) / im_total if im_total > 0 else Decimal("0")
         target_price = self.sell_mid_price(instrument, book)
         short_leg = self._short_put_spread_leg(
@@ -1308,6 +1377,7 @@ class StrategySelector:
         quantity: Decimal,
         existing_im_for_expiry: Decimal,
         relax_apr: bool,
+        skip_margin_caps: bool = False,
     ) -> tuple[NakedPutCandidate | None, str | None]:
         return self._try_build_naked_for_quantity(
             option_type="put",
@@ -1321,6 +1391,7 @@ class StrategySelector:
             quantity=quantity,
             existing_im_for_expiry=existing_im_for_expiry,
             relax_apr=relax_apr,
+            skip_margin_caps=skip_margin_caps,
         )
 
     def _build_naked_put_for_quantity(

@@ -1,11 +1,22 @@
 from decimal import Decimal
 
-from deribit_engine.utils import align_option_order_amount, dumps_json
+from deribit_engine.utils import align_option_order_amount, ceil_option_order_amount, dumps_json
 
 
 def test_align_option_order_amount_uses_smaller_step_than_contract_size():
     assert align_option_order_amount(Decimal("0.6"), Decimal("1"), Decimal("0.1")) == Decimal("0.6")
     assert align_option_order_amount(Decimal("0.05"), Decimal("1"), Decimal("0.1")) == Decimal("0")
+
+
+def test_ceil_option_order_amount_rounds_up_but_omits_dust_and_respects_cap():
+    assert ceil_option_order_amount(Decimal("0.09978985"), Decimal("0.0001"), Decimal("0.0001")) == Decimal("0.0998")
+    assert ceil_option_order_amount(Decimal("0.00005"), Decimal("0.0001"), Decimal("0.0001")) == Decimal("0")
+    assert ceil_option_order_amount(
+        Decimal("0.09995"),
+        Decimal("0.0001"),
+        Decimal("0.0001"),
+        cap=Decimal("0.09995"),
+    ) == Decimal("0.0999")
 
 
 def test_dumps_json_preserves_unicode_text():

@@ -8,6 +8,7 @@
 - 投組總覽 USDC card：total equity、total profit（lifetime + 30d window）、lifetime/window APR、win rate、avg holding days
 - 圖表：open max loss vs book equity（USDC）、累積 realized PnL、每日 PnL + 30d MA、rolling APR
 - Open spreads 表 / Recent closed trades 表
+- ITM 之後的 **現金擔保賣權（CSP）**：與 covered call 同一套策略卡／持倉卡／活動紀錄（獨立策略 id `cash_secured`）。開倉會顯示履約價、DTE、權利金、進場年化；活動與持倉標 CSP chip、來自 ITM group。CSP **ITM** 到期補回現貨時會顯示「補回現貨」／「已補回現貨」
 - 黑天鵝壓力測試卡（同 `./bot stress-current`，會依 `OPTION_STRATEGY` 顯示 `naked_short` / `bull_put_spread` / `covered_call` 的風險解讀）
 
 ## 啟動
@@ -19,6 +20,22 @@ pip install -r requirements.txt
 ./bot frontend --no-scheduler        # 關掉背景 equity ledger
 ./bot --investor youming frontend
 ```
+
+## 管理者後台（所有投資人 frontend）
+
+`./bot admin` 會在 **本機** 開一個獨立控制台（預設 `http://127.0.0.1:8750`），從 `config/platform/registry.toml` 列出所有投資人，探活各自 dashboard，並可嵌入該人的 ops 頁（`/index.html`）。
+
+```bash
+./bot admin                  # http://127.0.0.1:8750
+./bot admin --port 8750
+```
+
+- **只綁 127.0.0.1**。不要把這個埠寫進 Cloudflare Tunnel / Access；投資人頁維持各自 hostname。
+- 非 loopback bind 必須加 `--allow-public`（仍不該對外）。
+- 可從後台 **啟動 / 停止 / 重啟** 該投資人 frontend（走既有 launchd：`./bot investor frontend …`）。
+- 交易鈕只在嵌入的 ops 卡片上：**Close**（開倉 group）與 **Recover market**（ITM 未買回）。頂列另有 **Panic close**。都是先 Preview，再輸入 `LIVE` 才實單。Recover 會先取消該 group 已掛的自動限價單再市價。**不會**出現在 `investor.html`。
+
+左側選投資人後，右側 iframe 開的是本機 `http://127.0.0.1:<frontend_port>/index.html`；該 frontend 沒起來時會顯示啟動提示。
 
 預設背景 scheduler 每 `FRONTEND_SNAPSHOT_INTERVAL_SEC` 秒（預設 300）讀一次帳戶
 快照，append 到 `data/frontend_ledger/<investor_id>/`（多子帳時為 `.../<investor_id>/<slug>/equity_<UTC date>.jsonl`）。

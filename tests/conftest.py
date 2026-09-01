@@ -137,7 +137,7 @@ def make_config(tmp_path: Path, **overrides) -> BotConfig:
         covered_call_slot_sizing=True,
     )
     values.update(overrides)
-    if values.get("covered_call_profit_sweep_enabled"):
+    if values.get("covered_call_profit_sweep_enabled") or values.get("covered_call_auto_spot_restore_enabled"):
         traded = list(values.get("traded_collaterals") or ("BTC", "ETH", "USDC"))
         if "USDT" not in traded:
             values["traded_collaterals"] = tuple(traded + ["USDT"])

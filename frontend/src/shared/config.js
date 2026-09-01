@@ -74,6 +74,18 @@ export const STRATEGIES = [
     descriptionZh: "在持有現貨擔保下賣出買權，以權利金增強收益。",
   },
   {
+    id: "cash_secured",
+    title: "Cash-Secured Put",
+    titleZh: "現金擔保賣權",
+    short: "Cash-Secured",
+    shortZh: "CSP",
+    chipShort: "CSP",
+    chipShortZh: "CSP",
+    accentClass: "strategy-card-csp",
+    description: "Short-dated USDC put funded by ITM cover proceeds.",
+    descriptionZh: "ITM 賣 cover 所得 USDC 擔保的短天期賣權。",
+  },
+  {
     id: "naked_short",
     title: "Naked Short",
     titleZh: "單賣選擇權（裸賣）",

@@ -38,8 +38,8 @@ await build({
 // browsers always refetch when (and only when) the file actually changed. This
 // avoids the stale-cache mismatch where some users keep old CSS/JS because the
 // version string was not bumped manually after editing styles.css / app*.js.
-const HASHED_ASSETS = ["app.js", "app-investor.js", "styles.css", "tailwind.css"];
-const HTML_FILES = ["index.html", "investor.html", "investor.zh.html"];
+const HASHED_ASSETS = ["app.js", "app-investor.js", "styles.css", "tailwind.css", "src/admin.js"];
+const HTML_FILES = ["index.html", "investor.html", "investor.zh.html", "admin.html"];
 
 const assetVersions = Object.fromEntries(
   HASHED_ASSETS.map((name) => [

@@ -231,6 +231,15 @@ class ScannerMixin:
             )
             return blockers
         if candidates:
+            if self.config.option_strategy == "covered_call":
+                from ..spot_exit_ops import pending_spot_exit_remaining_native
+
+                for currency in selected_currencies:
+                    remaining = pending_spot_exit_remaining_native(context.state.groups, currency)
+                    if remaining > 0:
+                        blockers.append(
+                            f"{currency} [covered_call]: ITM spot_exit pending remaining={format_decimal(remaining, 8)}"
+                        )
             cooled_books = [
                 book
                 for book in sorted({(c.collateral_currency or c.currency or "").upper() for c in candidates})
@@ -240,13 +249,21 @@ class ScannerMixin:
                 blockers.append(
                     f"entry_cooldown_active: {', '.join(cooled_books)} ({self.config.entry_cooldown_minutes}m)"
                 )
-                return blockers
-            return []
+            return blockers
         if not include_scan_diagnostics:
             blockers: list[str] = []
             snap = context.snapshot
             if snap.portfolio_wide_entry_halt:
                 return list(snap.halt_entry_reasons)
+            if self.config.option_strategy == "covered_call":
+                from ..spot_exit_ops import pending_spot_exit_remaining_native
+
+                for currency in selected_currencies:
+                    remaining = pending_spot_exit_remaining_native(context.state.groups, currency)
+                    if remaining > 0:
+                        blockers.append(
+                            f"{currency} [covered_call]: ITM spot_exit pending remaining={format_decimal(remaining, 8)}"
+                        )
             for currency in selected_currencies:
                 if snap.halt_new_entries_by_currency.get(currency.upper(), False):
                     regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
@@ -467,6 +484,12 @@ class ScannerMixin:
                 detail = snap.regime_detail_by_currency.get(ccy, ())
                 blockers.append(f"{ccy}: regime=crisis — {'; '.join(detail)}")
                 continue
+            if self._covered_call_spot_exit_blocks_entry(context.state, ccy):
+                from ..spot_exit_ops import pending_spot_exit_remaining_native
+
+                remaining = pending_spot_exit_remaining_native(context.state.groups, ccy)
+                blockers.append(f"{ccy} [covered_call]: ITM spot_exit pending remaining={format_decimal(remaining, 8)}")
+                continue
             summary = context.summaries.get(ccy)
             if summary is None or summary.equity <= 0:
                 blockers.append(f"{ccy}/{ccy} [covered_call]: book equity<=0 or missing account summary")
@@ -655,6 +678,8 @@ class ScannerMixin:
                     continue
             elif self.config.option_strategy == "covered_call":
                 if self._strategy_at_currency_limit(context.state, "covered_call", currency):
+                    continue
+                if self._covered_call_spot_exit_blocks_entry(context.state, currency):
                     continue
             regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
             if regime is not RiskRegime.NORMAL:

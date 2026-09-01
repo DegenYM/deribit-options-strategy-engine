@@ -57,3 +57,24 @@ def test_cross_book_flow_matches_btc_to_usdt_profit_sweep():
 
     assert adjustments["BTC"] < Decimal("0")
     assert adjustments["USDT"] > Decimal("0")
+
+
+def test_cross_book_flow_matches_usdt_to_usdc_convert():
+    """Manual USDT → USDC convert must not look like a USDT wipeout."""
+    adjustments = cross_book_flow_adjustments_native(
+        per_book_native_equities={
+            "USDT": Decimal("0.76"),
+            "USDC": Decimal("7353.39"),
+        },
+        per_book_native_day_start={
+            "USDT": Decimal("7296.49"),
+            "USDC": Decimal("57.39"),
+        },
+        day_net_flow_native_by_book={"USDT": Decimal("0"), "USDC": Decimal("0")},
+        day_net_flow_usdc_by_book={"USDT": Decimal("0"), "USDC": Decimal("0")},
+        index_price_by_book={},
+        min_match_usdc=Decimal("10"),
+    )
+
+    assert adjustments["USDT"] < Decimal("-7000")
+    assert adjustments["USDC"] > Decimal("7000")

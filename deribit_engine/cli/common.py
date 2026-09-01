@@ -66,7 +66,7 @@ def render(data, json_output: bool) -> None:
 
 
 def apply_investor_cli_args(args: argparse.Namespace) -> None:
-    if getattr(args, "command", None) == "investor":
+    if getattr(args, "command", None) in {"investor", "admin"}:
         return
     investor = getattr(args, "investor", None)
     if not investor:
@@ -110,6 +110,7 @@ def apply_investor_cli_args(args: argparse.Namespace) -> None:
 
     if not account_slug:
         if args.command in {
+            "admin",
             "backfill-trade-journal",
             "frontend",
             "fee-snapshot",

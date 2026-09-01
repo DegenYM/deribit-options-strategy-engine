@@ -7,6 +7,7 @@ def test_format_command_catalog_lists_core_commands() -> None:
     assert "spot-restore" in text
     assert "profit-sweep" in text
     assert "investor" in text
+    assert "admin" in text
     assert "Covered call ops" in text
     assert "Usage:" in text
 
@@ -38,3 +39,12 @@ def test_bare_bot_prints_catalog(capsys) -> None:
     out = capsys.readouterr().out
     assert "Deribit options strategy bot" in out
     assert "manage" in out
+
+
+def test_scan_help_mentions_cash_secured_preview() -> None:
+    parser = _build_parser()
+    text = format_nested_command_help(parser, "scan")
+    assert text is not None
+    assert "--cash-secured" in text
+    assert "--from-group" in text
+    assert "--strike-floor-pct" in text

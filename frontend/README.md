@@ -40,8 +40,12 @@ tailwind.config.js
 tokens.css             # design tokens (CSS variables; served as static file)
 styles.css             # custom component CSS (non-Tailwind)
 app.js                 # operator bundle (npm run build)
-app-investor.js        # investor portal bundle
+    app-investor.js        # investor portal bundle
+    admin.html             # local admin console (all investor frontends)
+    src/admin.js           # admin console module (served as-is)
 ```
+
+管理者後台：`./bot admin` → `http://127.0.0.1:8750`（見 [`docs/dashboard-zh-TW.md`](../docs/dashboard-zh-TW.md#管理者後台所有投資人-frontend)）。
 
 Investor portal 會優先使用後端 `portal_snapshots.db` 預組 bundle（`source=portal_cache`）；`investor-cache.js` 在瀏覽器端快取完整 dashboard payload，減少冷啟動等待。後端 scheduler 與 env 見 [`docs/dashboard-zh-TW.md`](../docs/dashboard-zh-TW.md#背景快照與快取)。
 

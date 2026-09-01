@@ -369,6 +369,14 @@ class ExecutionMixin:
                 "spot_exit_status": group.spot_exit_status,
                 "spot_exit_order_id": group.spot_exit_order_id or None,
             }
+        if group.spot_exit_status == "skipped":
+            return {
+                "action": "covered_call_spot_exit_skipped",
+                "group_id": group.group_id,
+                "reason": "already_skipped",
+                "spot_exit_status": group.spot_exit_status,
+                "spot_exit_order_id": group.spot_exit_order_id or None,
+            }
 
         from ..spot_exit_ops import apply_spot_exit_quote_proceeds, spot_exit_filled_native
 

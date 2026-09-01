@@ -202,6 +202,24 @@ class EntryMixin:
                     quantity=remaining,
                     summary_equity=summ.equity,
                 )
+            elif (candidate.strategy or "") == "cash_secured":
+                im_by = self._naked_im_by_expiry(
+                    context.state,
+                    candidate.collateral_currency,
+                    orderbook_cache=context.orderbook_cache,
+                )
+                exp_im = im_by.get(inst.expiration_timestamp_ms, Decimal("0"))
+                refreshed, refresh_fail = self.strategy.refresh_cash_secured_put_candidate(
+                    instrument=inst,
+                    book=book,
+                    regime=context.regime_by_currency.get(candidate.currency, RiskRegime.CRISIS),
+                    summary_equity=summ.equity,
+                    summary_maintenance_margin=summ.maintenance_margin,
+                    collateral_currency=candidate.collateral_currency,
+                    currency=candidate.currency,
+                    quantity=remaining,
+                    existing_im_for_expiry=exp_im,
+                )
             else:
                 im_by = self._naked_im_by_expiry(
                     context.state,
@@ -221,7 +239,8 @@ class EntryMixin:
                     quantity=remaining,
                     existing_im_for_expiry=exp_im,
                 )
-            if refreshed is None or refreshed.net_apr < self.config.min_net_apr:
+            apr_gate = (candidate.strategy or "") != "cash_secured"
+            if refreshed is None or (apr_gate and refreshed.net_apr < self.config.min_net_apr):
                 reason = "candidate_failed_recheck"
                 if refresh_fail:
                     reason = f"candidate_failed_recheck:{refresh_fail}"
@@ -278,6 +297,8 @@ class EntryMixin:
         group_id: str,
     ) -> dict[str, Any]:
         labels = self._spread_labels(candidate.currency, group_id)
+        if (candidate.strategy or "") == "cash_secured":
+            labels = self._cash_secured_labels(candidate.currency, group_id)
         execution = self._execute_repriced_naked_short(
             context,
             candidate,
@@ -359,6 +380,8 @@ class EntryMixin:
         action_name = f"{group.strategy}_entered"
         if group.strategy == "naked_short":
             action_name = f"naked_{final_c.option_type}_entered"
+        if group.strategy == "cash_secured":
+            action_name = "cash_secured_entered"
         return {
             "action": action_name,
             "candidate": final_c.to_dict(),
@@ -665,6 +688,8 @@ class EntryMixin:
             currency = group.currency
             regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
             if regime is RiskRegime.CRISIS:
+                continue
+            if self.config.option_strategy == "naked_short" and regime is not RiskRegime.NORMAL:
                 continue
             collateral_ccy = self._group_collateral_currency(group)
             collateral_summary = context.summaries.get(collateral_ccy)

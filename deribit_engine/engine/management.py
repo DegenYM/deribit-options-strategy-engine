@@ -41,6 +41,9 @@ class ManagementMixin(
         actions: list[dict[str, Any]] = []
 
         actions.extend(self._pending_covered_call_spot_exit_actions(context, live=live))
+        actions.extend(self._pending_itm_cash_secured_actions(context, live=live))
+        actions.extend(self._pending_cash_secured_cover_restore_actions(context, live=live))
+        actions.extend(self._pending_auto_spot_restore_actions(context, live=live))
         actions.extend(self._pending_profit_sweep_actions(context, live=live))
 
         if context.snapshot.hard_derisk:
@@ -171,7 +174,11 @@ class ManagementMixin(
                 else:
                     cycle_result["entry"] = {
                         "action": "entry_skipped",
-                        "reason": self._entry_skip_reason(portfolio, candidates=candidates),
+                        "reason": self._entry_skip_reason(
+                            portfolio,
+                            candidates=candidates,
+                            state=context.state,
+                        ),
                     }
 
                 entry_action = cycle_result["entry"].get("action", "")

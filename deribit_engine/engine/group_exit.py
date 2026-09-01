@@ -47,6 +47,9 @@ class GroupExitMixin:
         actions: list[dict[str, Any]] = []
         if self._is_covered_call_group(group):
             return self._manage_covered_call_group(context, group, live=live)
+        if group.is_cash_secured_group():
+            # Wheel: hold the put to expiry so ITM assignment can buy cover back.
+            return []
         soft_delta, hard_delta = self._defense_delta_thresholds(group)
         raw_soft, raw_hard = evaluate_defense_triggers(
             group,

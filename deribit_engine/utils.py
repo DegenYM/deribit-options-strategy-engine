@@ -118,6 +118,11 @@ def option_spread_min_valid_quantity(
     return ceil_to_step(need, step)
 
 
+def _order_amount_step(contract_size: Decimal, min_trade_amount: Decimal) -> Decimal:
+    step_candidates = [value for value in (contract_size, min_trade_amount) if value > 0]
+    return min(step_candidates) if step_candidates else Decimal("0")
+
+
 def align_option_order_amount(amount: Decimal, contract_size: Decimal, min_trade_amount: Decimal) -> Decimal:
     """
     Align Deribit order amount to the exchange grid and minimum size.
@@ -125,13 +130,33 @@ def align_option_order_amount(amount: Decimal, contract_size: Decimal, min_trade
     For linear options, `contract_size` can be larger than the tradable amount step, so use the
     smaller positive value between `contract_size` and `min_trade_amount` as the step.
     """
-    step_candidates = [value for value in (contract_size, min_trade_amount) if value > 0]
-    step = min(step_candidates) if step_candidates else Decimal("0")
+    step = _order_amount_step(contract_size, min_trade_amount)
     if step <= 0:
         return amount if amount > 0 else Decimal("0")
     aligned = floor_to_step(amount, step)
     if aligned <= 0:
         return Decimal("0")
+    if min_trade_amount > 0 and aligned < min_trade_amount:
+        return Decimal("0")
+    return aligned
+
+
+def ceil_option_order_amount(
+    amount: Decimal,
+    contract_size: Decimal,
+    min_trade_amount: Decimal,
+    *,
+    cap: Decimal | None = None,
+) -> Decimal:
+    """Ceil to the exchange grid. Dust below min is omitted; never exceed ``cap``."""
+    if amount <= 0:
+        return Decimal("0")
+    if min_trade_amount > 0 and amount < min_trade_amount:
+        return Decimal("0")
+    step = _order_amount_step(contract_size, min_trade_amount)
+    aligned = ceil_to_step(amount, step) if step > 0 else amount
+    if cap is not None and cap > 0 and aligned > cap:
+        aligned = floor_to_step(cap, step) if step > 0 else cap
     if min_trade_amount > 0 and aligned < min_trade_amount:
         return Decimal("0")
     return aligned

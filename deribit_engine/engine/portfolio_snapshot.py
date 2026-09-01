@@ -198,6 +198,11 @@ class PortfolioSnapshotMixin:
         book_hard_breaches: list[str] = []
 
         for book in per_book_equities:
+            if book == "USDT":
+                # Parking / sweep book. Manual USDT→USDC converts look like a
+                # wipeout when the transfer is not in day_net_flow; do not
+                # hard-derisk or halt the rest of the book set for that.
+                continue
             shielded = self._covered_call_book_fully_collateralized(state, summaries, book)
             dd = per_book_drawdown.get(book, Decimal("0"))
             if not shielded and dd >= self.config.hard_derisk_drawdown_pct:

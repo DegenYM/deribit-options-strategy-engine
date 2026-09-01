@@ -91,7 +91,25 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     scan_parser.add_argument("--currencies", help="Comma-separated currencies, e.g. BTC,ETH")
     scan_parser.add_argument(
         "--strategy",
-        help="Override OPTION_STRATEGY for this scan: naked_short, bull_put_spread, covered_call",
+        help=(
+            "Override OPTION_STRATEGY for this scan: naked_short, bull_put_spread, "
+            "covered_call. Use cash_secured / csp (or --cash-secured) to preview the "
+            "ITM → CSP put picker without changing the covered_call account profile."
+        ),
+    )
+    scan_parser.add_argument(
+        "--cash-secured",
+        action="store_true",
+        help="Preview cash-secured put targets (same picker as live manage; never places)",
+    )
+    scan_parser.add_argument(
+        "--from-group",
+        help="CSP scan: only this ITM parent or open CSP child (default: every ITM-sold CC)",
+    )
+    scan_parser.add_argument(
+        "--strike-floor-pct",
+        type=to_decimal,
+        help="CSP scan: strike window below the ITM strike (default: COVERED_CALL_CSP_STRIKE_FLOOR_PCT, 0.05)",
     )
     scan_parser.add_argument("--top-n", type=int, help="Number of candidates to return")
     scan_parser.add_argument(
@@ -512,7 +530,19 @@ def _dispatch_telegram_test(args: argparse.Namespace) -> int:
     return 0 if sent else 1
 
 
+def _is_cash_secured_scan(args: argparse.Namespace) -> bool:
+    if getattr(args, "command", None) != "scan":
+        return False
+    if getattr(args, "cash_secured", False):
+        return True
+    raw = str(getattr(args, "strategy", None) or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return raw in {"cash_secured", "cashsecured", "csp"}
+
+
 def _dispatch_bot_commands(args: argparse.Namespace) -> int:
+    cash_secured_scan = _is_cash_secured_scan(args)
+    if cash_secured_scan:
+        args.strategy = None
     bot = build_bot(args)
     if args.command == "run" and getattr(args, "live", False):
         from ..structured_log import configure_live_structured_logging
@@ -590,6 +620,16 @@ def _dispatch_bot_commands(args: argparse.Namespace) -> int:
             render(payload, args.json)
             return 0
         if args.command == "scan":
+            if cash_secured_scan:
+                render(
+                    bot.scan_cash_secured(
+                        from_group_id=getattr(args, "from_group", None),
+                        top_n=args.top_n,
+                        strike_floor_pct=getattr(args, "strike_floor_pct", None),
+                    ),
+                    args.json,
+                )
+                return 0
             render(
                 bot.scan(
                     currencies=parse_csv(args.currencies, upper=True) or None,

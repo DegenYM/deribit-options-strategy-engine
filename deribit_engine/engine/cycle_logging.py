@@ -71,7 +71,19 @@ class CycleLoggingMixin:
                 ",".join(a["action"] for a in topup_actions),
             )
 
-    def _entry_skip_reason(self, portfolio: dict[str, Any], *, candidates: list[Any]) -> str:
+    def _entry_skip_reason(
+        self,
+        portfolio: dict[str, Any],
+        *,
+        candidates: list[Any],
+        state: Any | None = None,
+    ) -> str:
+        if state is not None and getattr(self.config, "option_strategy", "") == "covered_call" and not candidates:
+            blocked = [
+                ccy for ccy in self.config.managed_currencies if self._covered_call_spot_exit_blocks_entry(state, ccy)
+            ]
+            if blocked:
+                return "spot_exit_pending:" + ",".join(blocked)
         if portfolio.get("portfolio_wide_entry_halt"):
             if portfolio.get("cooling_down"):
                 return "cooling_down"

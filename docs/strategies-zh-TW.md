@@ -21,7 +21,7 @@
 - 只做流動性足夠的 short leg：`OI`、`book notional`、`spread ratio` 都要過門檻
 - `MIN_LIQUID_EXPIRIES_REQUIRED` 可控制 DTE 視窗內至少需要幾個可交易 expiry 才允許開倉
 - regime 分為 `normal / elevated / crisis`
-- `crisis` 不開新倉；`hard stop` 直接平倉；`soft trigger` 優先 roll，不行就平倉；`TP` 與 `time exit` 都會主動退場
+- `crisis` 不開新倉；`elevated` 也不開新倉（含 24h 指數回撤與 DVOL 放大）。`naked_short`（short put）另外：連續兩個交易日各自下跌 ≥ `NAKED_ENTRY_DOWN_DAY_PCT`（骨架預設 1.5%）時升為 `elevated`，避免跌勢還沒打到 24h 門檻就繼續賣 put。`hard stop` 直接平倉；`soft trigger` 優先 roll，不行就平倉；`TP` 與 `time exit` 都會主動退場。naked short 防守需連續 **2** 個 manage cycle 確認（`DEFENSE_CONFIRM_CYCLES=2`）。
 
 ## 策略比較
 
@@ -33,7 +33,7 @@
 - `call`：只掃 short call，上漲尾端風險最大。
 - `both`：put 與 call 候選合併競爭 `TOP_N`；engine 不強制保留 call 名額。
 
-選約以 **delta 為硬門檻與排序主軸**（優先於 TARGET APR）；`*_PUT_OTM_MIN` 僅作安全地板（**無 OTM max**），同 delta 下偏好更深 OTM。骨架 IV 閘門較寬鬆，薄權利金仍由 `MIN_NET_APR` 過濾。
+選約以 **delta 為硬門檻與排序主軸**（優先於 TARGET APR）；`*_PUT_OTM_MIN` 僅作安全地板（**無 OTM max**），同 delta 下偏好更深 OTM。骨架 IV 閘門較寬鬆，薄權利金仍由 `MIN_NET_APR` 過濾。連續下跌時先停開新倉（見上方 regime）。
 
 ### `bull_put_spread`
 
@@ -47,7 +47,9 @@
 
 **ITM 退場（預設 tier 設定）**：
 
-- **Settlement spot exit**（`COVERED_CALL_SPOT_EXIT_ENABLED=true`）：僅在 short call **到期** ITM 結算後才標記 pending；下一輪 `manage` market 賣 **BTC_USDT / ETH_USDT**，數量為 **`cover − settlement_loss`**（僅 cover；權利金走 Profit swap）。到期前的 income exit（TP / time / early）或外部買回**不會**賣 cover（可另做 profit sweep）。若開啟 `COVERED_CALL_PROFIT_SWEEP_ENABLED`，ITM exit 完成後會另排程權利金 sweep。settlement 優先 Deribit transaction log，否則 intrinsic 估算。
+- **Settlement spot exit**（`COVERED_CALL_SPOT_EXIT_ENABLED=true`）：僅在 short call **到期** ITM 結算後才標記 pending；下一輪 `manage` market 賣 **BTC_USDT / ETH_USDT**，數量為 **`cover − settlement_loss`**（僅 cover；權利金走 Profit swap）。該幣別 **SPOT SELL 尚未賣完**（pending／partial）時不會再開新 covered call，待賣量也不計入 available cover。到期前的 income exit（TP / time / early）或外部買回**不會**賣 cover（可另做 profit sweep）。若開啟 `COVERED_CALL_PROFIT_SWEEP_ENABLED`，ITM exit 完成後會另排程權利金 sweep。settlement 優先 Deribit transaction log，否則 intrinsic 估算。
+- **ITM → cash-secured put**（`COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=false` 預設關閉）：ITM spot exit **賣成 USDC** 後，同一 covered_call 子帳賣短天期 USDC linear put，履約價貼近原 call 行權價。手續費／結算／進位若讓 USDC 剛好不夠鎖滿 cover，會在設定窗內往下抓 strike。開啟後舊的 USDT 賣出也當已換成 USDC 來掃 CSP；該 group 不再自動買回 cover。進場 **IOC 打 bid**（不成交下個 cycle 重試，不掛 GTC mid）。預覽挑選：`./bot --account covered_call scan --cash-secured [--from-group 0095]`（不下單；已開倉也可看排名）。OI／名目仍過 CSP 門檻。先前取消 mid 掛單的 `operator_cancelled` 會再掃一次。CSP **持有至到期**（不做 TP／time exit）。到期 **ITM** 後用剩餘 USDC 掛 mid 買 `BTC_USDC` / `ETH_USDC` 補回 cover；OTM 到期只留現金、不買現貨。
+- **自動買回 cover**（`COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=false` 預設關閉）：ITM spot exit **賣完**後，live `manage` 立刻掛 **GTC 限價**於買回上限（損益兩平 × `(1 − MIN_EDGE_PCT)`，預設 0.1%），數量為 native unrestored（進位到 **USDC linear 最小下單量**，BTC `0.01` / ETH `0.1`，不超過 cover）。成交前只對帳，**不再下市價單**。你在交易所或後台**取消未成交買單**後會記 `operator_cancelled`，**不會自動重掛**。`spot_exit_status=skipped`（例如手動提領）不會掛。手動仍可用 `./bot spot-restore`。已改走 cash-secured（USDC）的 group 不會掛買回。
 - **Robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=false` 為 tier 預設）：接近到期且 ITM 時**先買回** short call，再賣 spot cover（不扣 settlement；premium 已用於買回）。可設 `COVERED_CALL_ITM_CONFIRM_CYCLES` 避免 wick 假觸發。
 
 預設啟用 **槽位分配**（`COVERED_CALL_SLOT_SIZING=true`）：依合約最小單位（BTC 通常 0.1）把可填 cover 整數均分到剩餘 `MAX_GROUPS_PER_CURRENCY` 槽位（`ceil(units / slots)`），避免 `cover ÷ 槽位數` 再 floor 後留下無法再開的碎量。例如 0.5 BTC、3 槽、min 0.1 → 依序約 **0.2 / 0.2 / 0.1**（仍受盤口 `best_bid_amount` 上限）。

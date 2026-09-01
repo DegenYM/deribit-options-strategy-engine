@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -67,6 +68,41 @@ def index_chart_close_series(
         if close > 0:
             out.append((int(row[0]), close))
     return out
+
+
+def daily_closes_from_index_series(
+    series: Sequence[tuple[int, Decimal]],
+) -> list[Decimal]:
+    """One close per UTC day (last print of that day), oldest first."""
+    by_day: dict[int, Decimal] = {}
+    for ts, close in series:
+        price = to_decimal(close)
+        if price <= 0:
+            continue
+        day = datetime.fromtimestamp(int(ts) / 1000, tz=UTC).date().toordinal()
+        by_day[day] = price
+    return [by_day[key] for key in sorted(by_day)]
+
+
+def consecutive_down_day_count(
+    daily_closes: Sequence[Decimal],
+    *,
+    min_day_pct: Decimal,
+) -> int:
+    """Trailing streak of daily returns at or below ``-min_day_pct``."""
+    if len(daily_closes) < 2 or min_day_pct < 0:
+        return 0
+    streak = 0
+    for index in range(len(daily_closes) - 1, 0, -1):
+        prev = daily_closes[index - 1]
+        cur = daily_closes[index]
+        if prev <= 0:
+            break
+        if (cur / prev) - ONE <= -min_day_pct:
+            streak += 1
+            continue
+        break
+    return streak
 
 
 def realized_vol_annualized_from_index_series(

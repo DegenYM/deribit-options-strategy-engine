@@ -132,11 +132,22 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 
 **Covered call 獲利兌 USDT（可選）**：在 `.env.investor` 設 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`（預設 false）。啟用後，covered_call 子帳在 income exit（take profit / time exit / early exit）獲利平倉時，會將該筆 native premium profit 自動 market 賣成 **USDT**；僅賣該筆 realized PnL，不動約定備兌現貨。修改後需**重啟**該子帳 live bot。Dashboard 會唯讀顯示開關狀態與每筆 sweep 紀錄。季末付費時若 profit 已在 USDT，通常只需兌剩餘 BTC/ETH 獲利。
 
-**Covered call ITM spot exit**：tier profile 預設 `COVERED_CALL_SPOT_EXIT_ENABLED=true`。ITM **結算後** pending spot 會 market 賣 **BTC_USDT / ETH_USDT**，數量固定為 **`cover − settlement_loss`**（僅清算 cover）。權利金留在 native，顯示於 **Profit swap**；若 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`，exit 完成後會另排程 profit sweep 兌 USDT。
+**Covered call ITM spot exit**：tier profile 預設 `COVERED_CALL_SPOT_EXIT_ENABLED=true`。ITM **結算後** pending spot 會 market 賣 **BTC_USDT / ETH_USDT**（若開啟下方 cash-secured 則改賣 **BTC_USDC / ETH_USDC**），數量固定為 **`cover − settlement_loss`**（僅清算 cover）。該幣別 SPOT SELL 尚未賣完前不會再開新 covered call。權利金留在 native，顯示於 **Profit swap**；若 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`，exit 完成後會另排程 profit sweep 兌 USDT。
+
+**Covered call ITM → cash-secured put（可選）**：在 `.env.investor` 設 `COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=true`（**預設 false**）。啟用後：
+
+- ITM spot exit **改賣 USDC**（`BTC_USDC` / `ETH_USDC`）。舊的 USDT journal 在 CSP 開啟時也視為已換成 USDC（手動換匯後可掃 put）；進行中的買回單仍會擋住。
+- 賣完後 live `manage` 會掃 **短天期** USDC linear put，履約價在原 ITM 行權價或略低（`COVERED_CALL_CSP_STRIKE_FLOOR_PCT`，預設 5%），DTE 預設 **2–10 天**。合格後 **IOC 打 bid**（不成交下個 cycle 重試，不掛 GTC mid）。OI／名目仍用 CSP 門檻（6／3000）；**不**用價差當進場門、也不改裸賣門檻。先前取消 mid 掛單的 `operator_cancelled` 會再掃一次。
+- 張數以 unrestored cover **進位**到合約最小單位（目標補回 cover）。手續費／結算讓 USDC 在原履約價剛好不夠滿張時，會在 `COVERED_CALL_CSP_STRIKE_FLOOR_PCT` 窗內**往下抓 strike**，優先鎖滿張再選最接近原價的履約價。
+- CSP 開啟時，ITM cover 賣出（含舊 USDT journal）**不會**再走自動買回，改掃 cash-secured put。USDT 帳本回撤（例如手動換成 USDC）**不**觸發 hard derisk、也不擋 CSP。
+- CSP **持有至到期**。到期若 put **ITM**（現貨低於履約價），live `manage` 用剩餘 USDC 掛 **GTC mid** 買回 cover（`BTC_USDC` / `ETH_USDC`）。OTM 到期不買現貨。你取消買回單不會重掛。
+- 修改後需**重啟**該子帳 live bot。
+
+**Covered call 自動買回 cover（可選）**：在 `.env.investor` 或子帳 `.env` 設 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=true`（**預設 false**）。啟用後，ITM spot exit **賣完**就掛一張 **GTC 限價買單**，價位 = 損益兩平 × `(1 − COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT)`（預設 0.1%），數量是 **native unrestored**（進位到 **USDC linear 最小下單量**，BTC `0.01` / ETH `0.1`，不超過 cover）。之後 cycle 只對帳，**不會改下市價單、也不會在你取消後重掛**。`submitted` 或已有 restore `order_id` 且交易所單還在時，不會再下第二張；單被取消／已不在則記 `operator_cancelled` 並停止自動買回。現價若已低於上限，限價會立刻成交（仍是限價、固定數量）。`spot_exit_status=skipped` 不會掛。修改後需**重啟**該子帳 live bot。
 
 settlement 優先讀 Deribit **transaction log**，否則 intrinsic。若改走 **robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=true`），會先買回 short call 再賣 spot cover（不扣 settlement）。
 
-啟用 `COVERED_CALL_SPOT_EXIT_ENABLED` 或 `COVERED_CALL_PROFIT_SWEEP_ENABLED` 時，config 會**自動**把 **USDT** 加入 `TRADED_COLLATERALS`，無需手動改 strategy env。
+啟用 `COVERED_CALL_SPOT_EXIT_ENABLED`、`COVERED_CALL_PROFIT_SWEEP_ENABLED` 或 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED` 時，config 會**自動**把 **USDT** 加入 `TRADED_COLLATERALS`，無需手動改 strategy env。啟用 `COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED` 時會再把 **USDC** 加入 `TRADED_COLLATERALS`。
 
 **Spot 滑價保護**：策略 profile 可設 `COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT`（例如 `0.005` = 相對 mark 最多賣低 0.5%）。大於 0 時，market 賣出會改為 **limit IOC**，底價 = `mark × (1 − pct)`；若當下 best bid 低於底價則**跳過**並下個 cycle 重試（profit sweep / ITM spot exit 維持 pending）。
 
@@ -247,6 +258,9 @@ HALT_DRAWDOWN_PCT=0.025
 HARD_DERISK_DRAWDOWN_PCT=0.06
 HARD_DERISK_MAINTENANCE_MARGIN_RATIO=0.33
 HARD_DERISK_ON_CRISIS_OPEN_GROUP=false
+# naked_short put：連續 N 日各自跌超過門檻 → elevated、不開新倉（骨架預設 2 日 / 1.5%）。
+# NAKED_ENTRY_DOWN_STREAK_DAYS=2
+# NAKED_ENTRY_DOWN_DAY_PCT=0.015
 
 # --- Hedging / pacing ---
 ENABLE_PERP_HEDGE=false
@@ -317,7 +331,7 @@ bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json       
 
 | 策略 | 骨架檔 | 重點 |
 |------|--------|------|
-| `naked_short` | [`.env.naked_short`](../config/shared/strategies/.env.naked_short) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`） |
+| `naked_short` | [`.env.naked_short`](../config/shared/strategies/.env.naked_short) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`）；`DEFENSE_CONFIRM_CYCLES=2`；連續下跌停開（`NAKED_ENTRY_DOWN_STREAK_DAYS=2`） |
 | `bull_put_spread` | [`.env.bull_put_spread`](../config/shared/strategies/.env.bull_put_spread) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put` |
 | `covered_call` | [`.env.covered_call`](../config/shared/strategies/.env.covered_call) | `inverse_native`；`TRADED_COLLATERALS=BTC,ETH`；`SHORT_OPTION_SIDE=call`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`） |
 

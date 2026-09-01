@@ -29,7 +29,7 @@ deribit-options-strategy-engine/
 │   │   └── com.deribit.frontend.service.template
 │   └── handoff/
 │       └── handoff.template.toml
-├── frontend/                    # Dashboard 靜態頁（src/ ES modules → app.js bundle）
+├── frontend/                    # Dashboard 靜態頁（src/ ES modules → app.js bundle；admin.html 為本機管理者後台）
 ├── scripts/                     # live 監督、PDF 產生、fee 快照等
 ├── tests/
 ├── docs/                        # 操作手冊、披露、backtest 報告

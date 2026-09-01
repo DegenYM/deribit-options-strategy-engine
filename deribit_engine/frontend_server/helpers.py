@@ -293,6 +293,18 @@ def _configure_metrics_db(env_files: tuple[Path, ...]) -> Path:
     return path
 
 
+def _with_cash_secured_strategy(ordered: list[str]) -> list[str]:
+    """Show CSP as its own strategy card whenever covered call is on the dashboard."""
+    if "covered_call" not in ordered or "cash_secured" in ordered:
+        return ordered
+    out: list[str] = []
+    for item in ordered:
+        out.append(item)
+        if item == "covered_call":
+            out.append("cash_secured")
+    return out
+
+
 def _dashboard_strategies(
     *,
     investor_id: str | None,
@@ -311,7 +323,7 @@ def _dashboard_strategies(
                     continue
                 seen.add(strategy)
                 ordered.append(strategy)
-            return ordered
+            return _with_cash_secured_strategy(ordered)
         except ConfigurationError:
             pass
 
@@ -323,7 +335,7 @@ def _dashboard_strategies(
             continue
         seen.add(strategy)
         ordered.append(strategy)
-    return ordered
+    return _with_cash_secured_strategy(ordered)
 
 
 def _make_dashboard_accounts(

@@ -236,3 +236,51 @@ def test_merge_does_not_regress_memory_ahead_of_disk() -> None:
     assert merge_concurrent_group_updates(memory, disk) == []
     assert memory.groups[0].spot_restore_status == "filled"
     assert memory.groups[0].spot_restore_quote_spent_lifetime == Decimal("100")
+
+
+def test_merge_keeps_operator_spot_exit_skipped_over_live_pending() -> None:
+    """Live in-memory pending must not revive an operator skipped ITM spot-exit."""
+    from deribit_engine.state import merge_concurrent_group_updates
+
+    memory = _sample_state()
+    memory.groups[0].group_id = "0082"
+    memory.groups[0].spot_exit_status = "pending"
+    memory.groups[0].spot_exit_amount = Decimal("0.9845")
+    memory.groups[0].spot_exit_reason = "not_enough_funds_in_currency"
+
+    disk = _sample_state()
+    disk.groups[0].group_id = "0082"
+    disk.groups[0].spot_exit_status = "skipped"
+    disk.groups[0].spot_exit_amount = Decimal("0")
+    disk.groups[0].spot_exit_reason = "manual_withdrawal"
+
+    merged = merge_concurrent_group_updates(memory, disk)
+    assert merged == ["0082"]
+    assert memory.groups[0].spot_exit_status == "skipped"
+    assert memory.groups[0].spot_exit_amount == Decimal("0")
+    assert memory.groups[0].spot_exit_reason == "manual_withdrawal"
+
+
+def test_save_preserves_concurrent_spot_exit_skipped_from_disk(tmp_path: Path) -> None:
+    store = StrategyStateStore(tmp_path / "state.json")
+    base = _sample_state()
+    base.groups[0].group_id = "0082"
+    base.groups[0].status = "closed"
+    base.groups[0].spot_exit_status = "pending"
+    base.groups[0].spot_exit_amount = Decimal("0.9845")
+    store.save(base)
+
+    live_memory = store.load()
+    cli = store.load()
+    cli.groups[0].spot_exit_status = "skipped"
+    cli.groups[0].spot_exit_amount = Decimal("0")
+    cli.groups[0].spot_exit_reason = "manual_withdrawal"
+    store.save(cli)
+
+    live_memory.last_equity_usdc = Decimal("1")
+    store.save(live_memory)
+
+    reloaded = store.load()
+    assert reloaded.groups[0].spot_exit_status == "skipped"
+    assert reloaded.groups[0].spot_exit_amount == Decimal("0")
+    assert reloaded.groups[0].spot_exit_reason == "manual_withdrawal"

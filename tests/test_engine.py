@@ -1498,6 +1498,85 @@ def test_covered_call_spot_exit_partial_fill_stays_pending_and_retries_remainder
     assert group.spot_exit_amount == Decimal("0.0985")
 
 
+def _covered_call_scan_config(tmp_path, **overrides):
+    values = dict(
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        managed_currencies=("BTC", "ETH"),
+        max_concurrent_groups=3,
+        max_groups_per_currency=3,
+        min_net_apr=Decimal("0.05"),
+        covered_call_spot_exit_enabled=True,
+        btc_call_delta_min=Decimal("0.10"),
+        btc_call_delta_max=Decimal("0.12"),
+        btc_call_otm_min=Decimal("0.08"),
+        btc_call_otm_max=Decimal("0.12"),
+        eth_call_delta_min=Decimal("0.10"),
+        eth_call_delta_max=Decimal("0.12"),
+        eth_call_otm_min=Decimal("0.08"),
+        eth_call_otm_max=Decimal("0.12"),
+        enable_short_put=False,
+        enable_short_call=True,
+    )
+    values.update(overrides)
+    return make_config(tmp_path, **values)
+
+
+def test_covered_call_pending_spot_exit_blocks_same_currency_scan_and_run(tmp_path):
+    client = FakeClient(btc_book_equity="0.5", eth_book_equity="5")
+    engine = DeribitOptionTrialBot(_covered_call_scan_config(tmp_path), client)
+    state = StrategyState()
+    group = _covered_call_group()
+    group.status = "closed"
+    group.spot_exit_status = "pending"
+    group.spot_exit_reason = "covered_call_settlement_exit"
+    group.spot_exit_settlement_loss = Decimal("0.0034")
+    group.spot_exit_amount = Decimal("0.0617")
+    group.spot_exit_quote_proceeds = Decimal("4917.99")
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    scan = engine.scan(currencies=("BTC", "ETH"), top_n=5)
+    assert not any(row["currency"] == "BTC" for row in scan["candidates"])
+    assert any(row["currency"] == "ETH" for row in scan["candidates"])
+    assert any("ITM spot_exit pending" in line and line.startswith("BTC") for line in scan["entry_blockers"])
+
+    available = engine._available_covered_call_quantity_from_summaries(
+        engine.state_store.load(),
+        engine._account_summaries_by_currency(),
+        "BTC",
+    )
+    remaining = Decimal("0.1") - Decimal("0.0034") - Decimal("0.0617")
+    assert available == Decimal("0.5") - remaining
+
+    run_result = engine.run(live=False, cycles=1)
+    entry = run_result["results"][0]["entry"]
+    if entry.get("action") == "dry_run_enter_covered_call":
+        assert entry["candidate"]["currency"] == "ETH"
+    else:
+        assert entry["action"] == "entry_skipped"
+
+
+def test_covered_call_pending_spot_exit_skips_entry_when_only_blocked_book_has_cover(tmp_path):
+    client = FakeClient(btc_book_equity="0.5", eth_book_equity="0")
+    engine = DeribitOptionTrialBot(
+        _covered_call_scan_config(tmp_path, managed_currencies=("BTC",)),
+        client,
+    )
+    state = StrategyState()
+    group = _covered_call_group()
+    group.status = "closed"
+    group.spot_exit_status = "pending"
+    group.spot_exit_reason = "covered_call_settlement_exit"
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    run_result = engine.run(live=False, cycles=1)
+    entry = run_result["results"][0]["entry"]
+    assert entry["action"] == "entry_skipped"
+    assert str(entry["reason"]).startswith("spot_exit_pending")
+
+
 def test_dry_run_bull_put_spread_entry_includes_long_leg(tmp_path, fake_client):
     config = make_config(
         tmp_path,
@@ -2101,6 +2180,112 @@ def test_dvol_ratio_returns_none_when_client_errors(tmp_path):
 
     engine = DeribitOptionTrialBot(config, DeadFakeClient())
     assert engine._dvol_ratio("BTC") is None
+
+
+def test_consecutive_down_day_count_requires_trailing_streak():
+    from deribit_engine.vol_metrics import consecutive_down_day_count, daily_closes_from_index_series
+
+    day_ms = 86_400_000
+    base = 1_700_000_000_000
+    series = [
+        (base, Decimal("100")),
+        (base + day_ms, Decimal("98")),
+        (base + 2 * day_ms, Decimal("96")),
+        (base + 2 * day_ms + 3_600_000, Decimal("95.5")),
+    ]
+    daily = daily_closes_from_index_series(series)
+    assert daily == [Decimal("100"), Decimal("98"), Decimal("95.5")]
+    assert consecutive_down_day_count(daily, min_day_pct=Decimal("0.015")) == 2
+    assert consecutive_down_day_count(daily, min_day_pct=Decimal("0.03")) == 0
+
+
+def _daily_index_chart(closes: list[str]) -> list[list]:
+    day_ms = 86_400_000
+    base = 1_700_000_000_000
+    return [[base + index * day_ms, Decimal(close)] for index, close in enumerate(closes)]
+
+
+class _ConsecutiveDownClient(FakeClient):
+    """24h still mild; 1y prints two full down days so the streak gate can fire."""
+
+    def get_index_chart_data(self, index_name, *, range_name="1d"):
+        if range_name == "1y":
+            return _daily_index_chart(["100", "98", "96.04"])
+        return super().get_index_chart_data(index_name, range_name=range_name)
+
+
+def test_naked_short_elevates_on_consecutive_down_days(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        option_strategy="naked_short",
+        enable_short_put=True,
+        naked_entry_down_streak_days=2,
+        naked_entry_down_day_pct=Decimal("0.015"),
+    )
+    engine = DeribitOptionTrialBot(config, _ConsecutiveDownClient())
+    instruments = [
+        OptionInstrument.from_api(item) for item in engine.client.get_instruments("BTC", kind="option", expired=False)
+    ]
+
+    regime, detail = engine._determine_regime_with_detail(
+        "BTC",
+        markets=instruments,
+        orderbook_cache={},
+    )
+
+    assert regime is RiskRegime.ELEVATED
+    assert any("naked_consecutive_down_days" in note for note in detail)
+
+
+def test_naked_short_consecutive_down_does_not_fire_for_call_only(tmp_path):
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        option_strategy="naked_short",
+        enable_short_put=False,
+        enable_short_call=True,
+        naked_entry_down_streak_days=2,
+        naked_entry_down_day_pct=Decimal("0.015"),
+    )
+    engine = DeribitOptionTrialBot(config, _ConsecutiveDownClient())
+    instruments = [
+        OptionInstrument.from_api(item) for item in engine.client.get_instruments("BTC", kind="option", expired=False)
+    ]
+
+    regime, detail = engine._determine_regime_with_detail(
+        "BTC",
+        markets=instruments,
+        orderbook_cache={},
+    )
+
+    assert regime is RiskRegime.NORMAL
+    assert detail == ["market_conditions_normal"]
+
+
+def test_naked_short_single_down_day_does_not_elevate(tmp_path):
+    class OneDownDayClient(FakeClient):
+        def get_index_chart_data(self, index_name, *, range_name="1d"):
+            if range_name == "1y":
+                return _daily_index_chart(["100", "102", "99.9"])
+            return super().get_index_chart_data(index_name, range_name=range_name)
+
+    config = make_config(
+        tmp_path,
+        option_markets_profile="linear_usdc",
+        naked_entry_down_streak_days=2,
+        naked_entry_down_day_pct=Decimal("0.015"),
+    )
+    engine = DeribitOptionTrialBot(config, OneDownDayClient())
+    instruments = [
+        OptionInstrument.from_api(item) for item in engine.client.get_instruments("BTC", kind="option", expired=False)
+    ]
+    regime, _detail = engine._determine_regime_with_detail(
+        "BTC",
+        markets=instruments,
+        orderbook_cache={},
+    )
+    assert regime is RiskRegime.NORMAL
 
 
 def _tight_book(
@@ -4044,6 +4229,54 @@ def test_drawdown_ignores_usdt_to_btc_spot_swap(tmp_path, fake_client):
     assert snapshot.day_drawdown_pct_by_book.get("USDT", Decimal("0")) < Decimal("0.06")
     assert snapshot.hard_derisk_by_book.get("USDT") is not True
     assert snapshot.halt_entries_by_book.get("USDT") is not True
+
+
+def test_drawdown_ignores_usdt_to_usdc_convert_hard_derisk(tmp_path, fake_client):
+    """USDT parking-book convert to USDC must not trip global hard_derisk."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        halt_drawdown_pct=Decimal("0.03"),
+        hard_derisk_drawdown_pct=Decimal("0.06"),
+        min_book_equity_usdc=Decimal("50"),
+    )
+    engine = DeribitOptionTrialBot(config, fake_client)
+    state = StrategyState()
+    state.day_start_equity_by_book = {
+        "BTC": Decimal("8005.96"),
+        "ETH": Decimal("1098.12"),
+        "USDC": Decimal("57.39"),
+        "USDT": Decimal("7296.49"),
+    }
+    state.day_start_equity_native_by_book = {
+        "BTC": Decimal("0.1028634"),
+        "ETH": Decimal("0.449326"),
+        "USDC": Decimal("57.39"),
+        "USDT": Decimal("7296.49"),
+    }
+    summaries = {
+        "BTC": _make_summary("BTC", equity="0.10264805", initial_margin="0", maintenance_margin="0.01"),
+        "ETH": _make_summary("ETH", equity="0.448562", initial_margin="0", maintenance_margin="0.01"),
+        "USDC": _make_summary("USDC", equity="7353.39", initial_margin="20", maintenance_margin="5"),
+        "USDT": _make_summary("USDT", equity="0.76", initial_margin="0", maintenance_margin="0"),
+    }
+    snapshot = engine._build_portfolio_snapshot(
+        state=state,
+        summaries=summaries,
+        regime_by_currency={"BTC": RiskRegime.NORMAL, "ETH": RiskRegime.NORMAL},
+        regime_detail_by_currency={
+            "BTC": ("market_conditions_normal",),
+            "ETH": ("market_conditions_normal",),
+        },
+        future_positions=[],
+        orderbook_cache={},
+    )
+
+    assert snapshot.hard_derisk_by_book.get("USDT") is not True
+    assert snapshot.hard_derisk_by_book.get("USDC") is not True
+    assert snapshot.hard_derisk is False
+    assert engine._cash_secured_blocked_by_hard_derisk(SimpleNamespace(snapshot=snapshot)) is False
 
 
 def test_manage_clears_stale_usdt_cooldown_after_swap_fix(tmp_path, fake_client):

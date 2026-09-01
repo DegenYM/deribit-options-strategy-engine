@@ -318,6 +318,20 @@ class BotConfig:
     # Manual ``spot-restore`` CLI defaults (independent of automated spot exit).
     spot_restore_order_type: str = "limit"
     spot_restore_wait_seconds: int = 120
+    # Auto-buy cover after ITM spot exit when the ask is cheap enough that
+    # restore spend leaves USDT profit (exit proceeds − buy cost).
+    covered_call_auto_spot_restore_enabled: bool = False
+    covered_call_auto_spot_restore_min_edge_pct: Decimal = Decimal("0.001")
+    # After ITM cover is sold to USDC, sell a short-dated cash-secured put
+    # near the assigned strike instead of (or before) buying the coin back.
+    covered_call_itm_to_cash_secured_enabled: bool = False
+    covered_call_csp_dte_min: int = 2
+    covered_call_csp_dte_max: int = 10
+    covered_call_csp_strike_floor_pct: Decimal = Decimal("0.05")
+    # CSP-only liquidity; slightly looser than linear_* , not market-chasing.
+    covered_call_csp_min_open_interest: Decimal = Decimal("6")
+    covered_call_csp_max_spread_ratio: Decimal = Decimal("0.18")
+    covered_call_csp_min_book_notional_usdc: Decimal = Decimal("3000")
     covered_call_profit_sweep_enabled: bool = False
     covered_call_profit_sweep_dust_pool_enabled: bool = True
     # Agreed cover inventory. Profit sweep must not sell below this when flat.
@@ -334,6 +348,11 @@ class BotConfig:
     # rejected at best_bid<=0 regardless). Trades one batch call for many N+1
     # calls; most useful on large option chains prone to 429.
     scan_book_summary_prefilter: bool = False
+    # Naked short put: treat consecutive down days as elevated so we do not
+    # sell more puts into a grind. 0 or 1 = disabled. Only consulted when
+    # OPTION_STRATEGY=naked_short and ENABLE_SHORT_PUT is on.
+    naked_entry_down_streak_days: int = 0
+    naked_entry_down_day_pct: Decimal = Decimal("0.015")
 
     @property
     def is_fee_collection_account(self) -> bool:
@@ -354,6 +373,13 @@ class BotConfig:
     @property
     def uses_naked_short_options(self) -> bool:
         return self.option_strategy == "naked_short"
+
+    @property
+    def naked_put_blocks_on_down_streak(self) -> bool:
+        """True when consecutive index down-days should halt new naked put entries."""
+        return (
+            self.option_strategy == "naked_short" and self.enable_short_put and self.naked_entry_down_streak_days >= 2
+        )
 
     @property
     def naked_scan_put_and_call_compete(self) -> bool:
@@ -533,6 +559,19 @@ class BotConfig:
             self.min_open_interest(instrument_type, currency),
             self.inverse_max_spread_ratio,
             self.inverse_min_book_notional_usdc,
+        )
+
+    def cash_secured_liquidity_gates(self) -> tuple[Decimal, Decimal, Decimal]:
+        """Return ``(min_oi, max_spread_ratio, min_book_notional_usdc)`` for CSP.
+
+        OI and notional are slightly looser than generic linear gates. Spread is
+        unused: CSP takes the bid with IOC. Naked scans keep
+        ``liquidity_gates``.
+        """
+        return (
+            self.covered_call_csp_min_open_interest,
+            self.covered_call_csp_max_spread_ratio,
+            self.covered_call_csp_min_book_notional_usdc,
         )
 
 
@@ -772,11 +811,41 @@ def load_config(
     covered_call_spot_max_slippage_pct = to_decimal(_optional(values, "COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT", "0"))
     if covered_call_spot_max_slippage_pct < 0 or covered_call_spot_max_slippage_pct >= 1:
         raise ConfigurationError("COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT must be in [0, 1)")
+    naked_entry_down_day_pct = to_decimal(_optional(values, "NAKED_ENTRY_DOWN_DAY_PCT", "0.015"))
+    if naked_entry_down_day_pct < 0 or naked_entry_down_day_pct >= 1:
+        raise ConfigurationError("NAKED_ENTRY_DOWN_DAY_PCT must be in [0, 1)")
     spot_restore_order_type = _optional(values, "SPOT_RESTORE_ORDER_TYPE", "limit").lower()
     if spot_restore_order_type not in {"limit", "market"}:
         raise ConfigurationError("SPOT_RESTORE_ORDER_TYPE must be one of: limit, market")
     spot_restore_wait_seconds = max(1, int(_optional(values, "SPOT_RESTORE_WAIT_SECONDS", "120")))
     covered_call_spot_exit_enabled = _to_bool(_optional(values, "COVERED_CALL_SPOT_EXIT_ENABLED", "false"))
+    covered_call_auto_spot_restore_enabled = _to_bool(
+        _optional(values, "COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED", "false")
+    )
+    covered_call_auto_spot_restore_min_edge_pct = to_decimal(
+        _optional(values, "COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT", "0.001")
+    )
+    if covered_call_auto_spot_restore_min_edge_pct < 0 or covered_call_auto_spot_restore_min_edge_pct >= 1:
+        raise ConfigurationError("COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT must be in [0, 1)")
+    covered_call_itm_to_cash_secured_enabled = _to_bool(
+        _optional(values, "COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED", "false")
+    )
+    covered_call_csp_dte_min = max(1, int(_optional(values, "COVERED_CALL_CSP_DTE_MIN", "2")))
+    covered_call_csp_dte_max = max(covered_call_csp_dte_min, int(_optional(values, "COVERED_CALL_CSP_DTE_MAX", "10")))
+    covered_call_csp_strike_floor_pct = to_decimal(_optional(values, "COVERED_CALL_CSP_STRIKE_FLOOR_PCT", "0.05"))
+    if covered_call_csp_strike_floor_pct < 0 or covered_call_csp_strike_floor_pct >= 1:
+        raise ConfigurationError("COVERED_CALL_CSP_STRIKE_FLOOR_PCT must be in [0, 1)")
+    covered_call_csp_min_open_interest = to_decimal(_optional(values, "COVERED_CALL_CSP_MIN_OPEN_INTEREST", "6"))
+    covered_call_csp_max_spread_ratio = to_decimal(_optional(values, "COVERED_CALL_CSP_MAX_SPREAD_RATIO", "0.18"))
+    covered_call_csp_min_book_notional_usdc = to_decimal(
+        _optional(values, "COVERED_CALL_CSP_MIN_BOOK_NOTIONAL_USDC", "3000")
+    )
+    if covered_call_csp_min_open_interest < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_MIN_OPEN_INTEREST must be >= 0")
+    if covered_call_csp_max_spread_ratio < 0 or covered_call_csp_max_spread_ratio >= 1:
+        raise ConfigurationError("COVERED_CALL_CSP_MAX_SPREAD_RATIO must be in [0, 1)")
+    if covered_call_csp_min_book_notional_usdc < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_MIN_BOOK_NOTIONAL_USDC must be >= 0")
     covered_call_profit_sweep_enabled = _to_bool(_optional(values, "COVERED_CALL_PROFIT_SWEEP_ENABLED", "false"))
     covered_call_profit_sweep_dust_pool_enabled = _to_bool(
         _optional(values, "COVERED_CALL_PROFIT_SWEEP_DUST_POOL_ENABLED", "true"),
@@ -787,8 +856,12 @@ def load_config(
     if collateral_spot_btc < 0 or collateral_spot_eth < 0:
         raise ConfigurationError("COLLATERAL_SPOT_BTC / COLLATERAL_SPOT_ETH must be >= 0")
     covered_call_slot_sizing = _to_bool(_optional(values, "COVERED_CALL_SLOT_SIZING", "true"), default=True)
-    if (covered_call_profit_sweep_enabled or covered_call_spot_exit_enabled) and "USDT" not in traded_collaterals:
+    if (
+        covered_call_profit_sweep_enabled or covered_call_spot_exit_enabled or covered_call_auto_spot_restore_enabled
+    ) and "USDT" not in traded_collaterals:
         traded_collaterals = tuple(list(traded_collaterals) + ["USDT"])
+    if covered_call_itm_to_cash_secured_enabled and "USDC" not in traded_collaterals:
+        traded_collaterals = tuple(list(traded_collaterals) + ["USDC"])
 
     hedge_order_type = str(_optional(values, "HEDGE_ORDER_TYPE", "limit_maker")).strip().lower()
     if hedge_order_type not in {"market", "limit_ioc", "limit_maker"}:
@@ -1014,6 +1087,8 @@ def load_config(
             _optional(values, "HARD_DEFENSE_DELTA_CALL", _optional(values, "HARD_DEFENSE_DELTA", "0.24"))
         ),
         defense_confirm_cycles=max(1, int(_optional(values, "DEFENSE_CONFIRM_CYCLES", "1"))),
+        naked_entry_down_streak_days=max(0, int(_optional(values, "NAKED_ENTRY_DOWN_STREAK_DAYS", "0"))),
+        naked_entry_down_day_pct=naked_entry_down_day_pct,
         covered_call_itm_confirm_cycles=(
             max(1, int(values["COVERED_CALL_ITM_CONFIRM_CYCLES"]))
             if str(values.get("COVERED_CALL_ITM_CONFIRM_CYCLES") or "").strip()
@@ -1039,6 +1114,15 @@ def load_config(
         min_book_equity_usdc=min_book_equity_usdc,
         cash_flow_query_interval_seconds=cash_flow_query_interval_seconds,
         covered_call_spot_exit_enabled=covered_call_spot_exit_enabled,
+        covered_call_auto_spot_restore_enabled=covered_call_auto_spot_restore_enabled,
+        covered_call_auto_spot_restore_min_edge_pct=covered_call_auto_spot_restore_min_edge_pct,
+        covered_call_itm_to_cash_secured_enabled=covered_call_itm_to_cash_secured_enabled,
+        covered_call_csp_dte_min=covered_call_csp_dte_min,
+        covered_call_csp_dte_max=covered_call_csp_dte_max,
+        covered_call_csp_strike_floor_pct=covered_call_csp_strike_floor_pct,
+        covered_call_csp_min_open_interest=covered_call_csp_min_open_interest,
+        covered_call_csp_max_spread_ratio=covered_call_csp_max_spread_ratio,
+        covered_call_csp_min_book_notional_usdc=covered_call_csp_min_book_notional_usdc,
         covered_call_robust_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_ROBUST_EXIT_ENABLED", "false")),
         covered_call_robust_exit_dte=to_decimal(_optional(values, "COVERED_CALL_ROBUST_EXIT_DTE", "0.5")),
         covered_call_itm_buffer_pct=to_decimal(_optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")),

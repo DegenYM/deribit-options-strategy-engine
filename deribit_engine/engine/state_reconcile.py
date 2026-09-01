@@ -680,6 +680,17 @@ class StateReconcileMixin:
                 group.spot_exit_status = "pending"
                 group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
                 group.spot_exit_reason = "covered_call_settlement_exit"
+            if (
+                expired
+                and not income_exit
+                and self.config.covered_call_itm_to_cash_secured_enabled
+                and group.is_cash_secured_group()
+                and str(group.spot_restore_status or "").lower() not in {"submitted", "filled", "pending"}
+                and self._cash_secured_put_itm_from_cache(group, orderbook_cache, close_index_usd)
+            ):
+                group.spot_restore_status = "pending"
+                group.spot_restore_instrument_name = f"{group.currency.upper()}_USDC"
+                group.spot_restore_reason = "cash_secured_itm_assignment"
             group.backfill_realized_pnl_collateral_native(journal_executions=journal_rows or None)
             group.backfill_realized_pnl_usdc()
             close_reason = "reconciled_expiry" if expired else (inferred_reason or "reconciled_external")

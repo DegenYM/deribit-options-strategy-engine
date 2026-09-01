@@ -5,8 +5,10 @@ from deribit_engine.models import TradeGroup
 from deribit_engine.spot_exit_ops import (
     apply_spot_exit_quote_proceeds,
     filter_unlabeled_trades_excluding_spot_exits,
+    incomplete_spot_exit_remaining_native,
     reconcile_spot_exit_from_exchange,
     reschedule_incomplete_spot_exits,
+    spot_exit_blocks_new_covered_call,
     spot_exit_fill_stats_for_currency,
     spot_exit_filled_native,
     spot_exit_realized_usdt,
@@ -236,3 +238,51 @@ def test_spot_exit_filled_native_ignores_unfilled_pending_order() -> None:
         spot_exit_reason="not_enough_funds",
     )
     assert spot_exit_filled_native(group) == Decimal("0")
+
+
+def test_incomplete_spot_exit_remaining_blocks_same_currency_only() -> None:
+    group = _group(
+        spot_exit_status="pending",
+        covered_underlying_quantity="0.1",
+        quantity="0.1",
+        spot_exit_amount="0.0617",
+        spot_exit_quote_proceeds="4917.9874",
+        spot_exit_quote_proceeds_lifetime="4917.9874",
+        spot_exit_settlement_loss="0.00340308",
+    )
+    remaining = incomplete_spot_exit_remaining_native(group)
+    assert remaining == Decimal("0.1") - Decimal("0.00340308") - Decimal("0.0617")
+    assert spot_exit_blocks_new_covered_call([group], "BTC") is True
+    assert spot_exit_blocks_new_covered_call([group], "ETH") is False
+
+
+def test_incomplete_spot_exit_plan_amount_without_proceeds_reserves_full_cover() -> None:
+    group = _group(
+        spot_exit_status="pending",
+        covered_underlying_quantity="1",
+        quantity="1",
+        spot_exit_amount="0.9845",
+        spot_exit_quote_proceeds="0",
+        spot_exit_quote_proceeds_lifetime="0",
+        spot_exit_reason="not_enough_funds",
+    )
+    assert incomplete_spot_exit_remaining_native(group) == Decimal("1")
+    assert spot_exit_blocks_new_covered_call([group], "BTC") is True
+
+
+def test_filled_spot_exit_does_not_block_new_entry() -> None:
+    group = _group(spot_exit_status="filled", spot_exit_amount="0.0965")
+    assert incomplete_spot_exit_remaining_native(group) == Decimal("0")
+    assert spot_exit_blocks_new_covered_call([group], "BTC") is False
+
+
+def test_restore_in_progress_does_not_block_new_covered_call() -> None:
+    group = _group(
+        spot_exit_status="pending",
+        covered_underlying_quantity="0.1",
+        spot_exit_amount="0.05",
+        spot_exit_quote_proceeds="3500",
+        spot_restore_status="pending",
+    )
+    assert incomplete_spot_exit_remaining_native(group) == Decimal("0")
+    assert spot_exit_blocks_new_covered_call([group], "BTC") is False

@@ -6,11 +6,13 @@ from conftest import FakeClient, make_config
 from deribit_engine.models import TradeGroup
 from deribit_engine.spot_restore_ops import (
     SpotRestoreRunSummary,
+    align_spot_restore_buy_amount,
     apply_spot_restore_quote_spent,
     execute_spot_restore_for_group,
     format_spot_restore_human_report,
     itm_spot_round_trip_complete,
     list_spot_restore_candidates,
+    lookup_usdc_linear_option_lot,
     plan_spot_restore_to_cover,
     reconcile_spot_restore_from_exchange,
     resolve_spot_restore_order_size,
@@ -50,6 +52,40 @@ def _group(**overrides) -> TradeGroup:
     }
     payload.update(overrides)
     return TradeGroup.from_dict(payload)
+
+
+def test_align_spot_restore_buy_amount_ceils_full_restore_to_option_lot() -> None:
+    kwargs = dict(
+        spot_contract_size=Decimal("0.0001"),
+        spot_min_trade=Decimal("0.0001"),
+        option_lot=Decimal("0.01"),
+        cap=Decimal("0.1"),
+    )
+    assert align_spot_restore_buy_amount(
+        amount=Decimal("0.09978985"),
+        size_mode="full_unrestored",
+        **kwargs,
+    ) == Decimal("0.1")
+    assert align_spot_restore_buy_amount(
+        amount=Decimal("0.04"),
+        size_mode="full_unrestored",
+        **kwargs,
+    ) == Decimal("0.04")
+    assert align_spot_restore_buy_amount(
+        amount=Decimal("0.05"),
+        size_mode="usdt",
+        **kwargs,
+    ) == Decimal("0.05")
+    assert align_spot_restore_buy_amount(
+        amount=Decimal("0.00005"),
+        size_mode="full_unrestored",
+        **kwargs,
+    ) == Decimal("0")
+
+
+def test_lookup_usdc_linear_option_lot_uses_catalog_min() -> None:
+    assert lookup_usdc_linear_option_lot(FakeClient(), "BTC") == Decimal("0.01")
+    assert lookup_usdc_linear_option_lot(FakeClient(), "ETH") == Decimal("0.1")
 
 
 def test_spot_buy_quote_spent_from_trades_adds_fees() -> None:
@@ -230,7 +266,7 @@ def test_reconcile_spot_restore_from_exchange_by_order_id() -> None:
 def test_resolve_spot_restore_order_size_usdt_and_native() -> None:
     unrestored = Decimal("0.1")
     price = Decimal("70000")
-    quote_for_full = unrestored * price * Decimal("1.005")
+    quote_for_full = unrestored * price * Decimal("1.001")
 
     by_usdt = resolve_spot_restore_order_size(
         unrestored=unrestored,
@@ -333,34 +369,40 @@ def test_execute_spot_restore_default_targets_swap_settle_minus_premium(tmp_path
     assert preview["settlement_loss"] == "0.012"
     assert preview["premium_native"] == "0.0027"
     assert preview["restore_target"] == "0.0943"
-    assert preview["buy_amount"] == "0.0943"
+    assert preview["buy_amount"] == "0.1"
+    assert preview["option_lot"] == "0.01"
     assert preview["buy_currency"] == "BTC"
     assert preview["current_price"] == "70000"
     assert preview["order_type"] == "limit"
     assert preview["post_only"] is True
     assert preview["wait_seconds"] == 120
     assert preview["current_price_source"] == "best_bid"
-    assert preview["estimated_usdt"] == "6601"
-    assert preview["order_budget_usdt"] == "6601"
+    assert preview["estimated_usdt"] == "7000"
+    assert preview["order_budget_usdt"] == "7000"
     assert preview["limit_price"] == "70000"
     comp = preview["buy_amount_composition"]
     assert comp["swap_sold"] == "0.085"
     assert comp["settlement_loss"] == "0.012"
     assert comp["premium_native"] == "0.0027"
-    assert comp["this_order_buy_amount"] == "0.0943"
+    assert comp["this_order_buy_amount"] == "0.1"
     assert "premium" in comp["expression"]
-    assert preview["preview"]["buy_amount"] == "0.0943"
+    assert preview["preview"]["buy_amount"] == "0.1"
     assert preview["unrestored_amount"] == "0.0943"
 
     report = format_spot_restore_human_report(SpotRestoreRunSummary(live=False, actions=[preview]))
     text = "\n".join(report)
-    assert "預計買回: 0.0943 BTC" in text
+    assert "預計買回: 0.1 BTC" in text
     assert "組成:" in text
     assert "當前價格: 70000 USDT" in text
-    assert "預計花費: 6601 USDT" in text
+    assert "預計花費: 7000 USDT" in text
     assert "limit@bid GTC" in text
     assert "wait=120s" in text
     assert "spot_exit: status=filled  filled=0.085 BTC" in text
+    assert "自動買回:" in text
+    assert "買回上限:" in text
+    assert preview["auto_would_buy"] is True
+    assert Decimal(preview["auto_max_buy_price"]) > 0
+    assert Decimal(preview["auto_ask"]) == Decimal("70000")
 
 
 def test_execute_spot_restore_market_preview_uses_ask_buffer(tmp_path) -> None:
@@ -388,9 +430,11 @@ def test_execute_spot_restore_market_preview_uses_ask_buffer(tmp_path) -> None:
     preview = execute_spot_restore_for_group(bot, group, live=False, order_type="market")
     assert preview["order_type"] == "market"
     assert preview["current_price_source"] == "best_ask"
-    assert preview["estimated_usdt"] == "6601"
-    assert preview["order_budget_usdt"] == "6634.005"
-    assert "1.005" in preview["order_budget_usdt_meaning"]
+    assert preview["buy_amount"] == "0.1"
+    assert preview["estimated_usdt"] == "7000"
+    assert preview["order_budget_usdt"] == "7007"
+    assert "1.001" in preview["order_budget_usdt_meaning"]
+    assert "native buy_amount" in preview["order_budget_usdt_meaning"]
 
 
 def test_execute_spot_restore_live_limit_fills_and_records(tmp_path) -> None:
@@ -433,6 +477,36 @@ def test_execute_spot_restore_live_limit_fills_and_records(tmp_path) -> None:
     assert client.placed_orders[0]["order_type"] == "limit"
     assert client.placed_orders[0]["post_only"] is True
     assert client.placed_orders[0]["time_in_force"] == "good_til_cancelled"
+
+
+def test_execute_spot_restore_live_market_buys_native_target(tmp_path) -> None:
+    group = _group(
+        spot_exit_amount="0.1",
+        spot_exit_settlement_loss="0",
+        short_entry_average_price="0",
+        quantity="1",
+        covered_underlying_quantity="0.1",
+    )
+    client = FakeClient()
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_spot_exit_enabled=True,
+        order_label_prefix="covered_call",
+    )
+    bot = MagicMock()
+    bot.client = client
+    bot.config = config
+
+    result = execute_spot_restore_for_group(bot, group, live=True, order_type="market")
+    assert result["action"] == "spot_restore"
+    assert result["order_type"] == "market"
+    assert Decimal(result["filled_native"]) == Decimal("0.1")
+    assert group.spot_restore_amount == Decimal("0.1")
+    assert client.placed_orders
+    assert client.placed_orders[0]["order_type"] == "market"
+    assert Decimal(str(client.placed_orders[0]["amount"])) == Decimal("0.1")
 
 
 def test_execute_spot_restore_live_limit_times_out_unfilled(tmp_path) -> None:
@@ -503,7 +577,7 @@ def test_execute_spot_restore_preview_partial_pending_swap(tmp_path) -> None:
     preview = execute_spot_restore_for_group(bot, group, live=False)
     assert preview["action"] == "spot_restore_preview"
     assert preview["spot_exit_status"] == "pending"
-    assert preview["buy_amount"] == "0.04"  # 0.03 swap + 0.01 settle − 0 premium
+    assert preview["buy_amount"] == "0.04"  # 0.03 swap + 0.01 settle; already on 0.01 lot
     assert preview["estimated_usdt"] == "2800"
 
 
@@ -560,3 +634,36 @@ def test_execute_spot_restore_omits_dust_below_min_not_round_up(tmp_path) -> Non
     report = "\n".join(format_spot_restore_human_report(SpotRestoreRunSummary(live=True, actions=[live])))
     assert "dust_below_min" in report
     assert "omit" in report
+
+
+def test_execute_spot_restore_ceils_buy_amount_to_option_lot(tmp_path) -> None:
+    group = _group(
+        group_id="0095",
+        short_instrument_name="BTC-28AUG26-73000-C",
+        short_label="cc-btc-0095",
+        short_strike="73000",
+        spot_exit_amount="0.0915",
+        spot_exit_quote_proceeds="7294.5676",
+        spot_exit_quote_proceeds_lifetime="7294.5676",
+        spot_exit_settlement_loss="0.0084211",
+        short_entry_average_price="0.0015",
+        entry_fee_collateral="0.00001875",
+    )
+    # 0.0915 + 0.0084211 − 0.00013125 = 0.09978985 → ceil to BTC USDC linear 0.01 = 0.1
+    client = FakeClient()
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_spot_exit_enabled=True,
+        order_label_prefix="cc",
+    )
+    bot = MagicMock()
+    bot.client = client
+    bot.config = config
+
+    preview = execute_spot_restore_for_group(bot, group, live=False, park_resting=True)
+    assert preview["action"] == "spot_restore_preview"
+    assert Decimal(preview["buy_amount"]) == Decimal("0.1")
+    assert Decimal(preview["option_lot"]) == Decimal("0.01")
+    assert Decimal(preview["restore_target"]) == Decimal("0.09978985")

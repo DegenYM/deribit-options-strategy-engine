@@ -1,4 +1,4 @@
-import { INVESTOR, INVESTOR_ZH, i18n, resolveApiUrl } from "../shared/context.js";
+import { ADMIN_EMBED, INVESTOR, INVESTOR_ZH, i18n, resolveApiUrl } from "../shared/context.js";
 import {
   ACTIVITY_PAGE_SIZE,
   BOOK_COLORS,
@@ -911,6 +911,7 @@ export function overviewDesktopContentHtml(ctx) {
     ${overviewMetricsGridHtml(ctx)}
     ${overviewProfitSectionHtml(ctx)}
     ${overviewSpotExitSectionHtml(ctx)}
+    ${overviewCashSecuredSectionHtml(ctx)}
   </div>`;
 }
 
@@ -1131,6 +1132,7 @@ export function investorOverviewHtml(ctx) {
   const winSub = summary ? sinceLine : i18n("Loading…", "載入中…");
   const swapSection = overviewProfitSectionHtml(ctx);
   const spotExitSection = overviewSpotExitSectionHtml(ctx);
+  const cashSecuredSection = overviewCashSecuredSectionHtml(ctx);
   return `<div class="inv-dashboard">
     <section class="inv-panel inv-panel--hero" aria-label="${i18n("Portfolio summary", "投資組合摘要")}">
       <div class="inv-split">
@@ -1163,6 +1165,7 @@ export function investorOverviewHtml(ctx) {
 
     ${swapSection}
     ${spotExitSection}
+    ${cashSecuredSection}
   </div>`;
 }
 
@@ -2002,6 +2005,9 @@ export function openPositionTitle(g) {
   const id = strategyId(g);
   if (id === "bull_put_spread") {
     return INVESTOR_ZH ? `${ccy} 賣權價差` : `${ccy} put spread`;
+  }
+  if (id === "cash_secured") {
+    return INVESTOR_ZH ? `${ccy} 現金擔保賣權` : `${ccy} cash-secured put`;
   }
   const side = optionPutCallLabel(g);
   if (INVESTOR_ZH) {
@@ -3122,6 +3128,97 @@ export function overviewSpotExitSectionHtml(ctx) {
   </section>`;
 }
 
+function cashSecuredGroupRows(groups) {
+  return spotExitGroupRows(groups);
+}
+
+export function findTradeGroupById(groups, groupId) {
+  const wanted = String(groupId || "").trim();
+  if (!wanted) return null;
+  for (const g of cashSecuredGroupRows(groups)) {
+    if (String(g?.group_id || "").trim() === wanted) return g;
+  }
+  return null;
+}
+
+export function isCashSecuredGroup(g) {
+  return normalizeStrategyId(g?.strategy) === "cash_secured" || Boolean(String(g?.cash_secured_from_group_id || "").trim());
+}
+
+export function summarizeCashSecuredDisposition(groups) {
+  const rows = cashSecuredGroupRows(groups);
+  const children = rows.filter((g) => isCashSecuredGroup(g));
+  const parents = rows.filter(
+    (g) =>
+      Boolean(String(g?.cash_secured_status || "").trim()) ||
+      Boolean(String(g?.cash_secured_group_id || "").trim())
+  );
+  const open = children.filter((g) => String(g?.status || "").toLowerCase() === "open");
+  const closed = children.filter((g) => String(g?.status || "").toLowerCase() === "closed");
+  return { children, parents, open, closed };
+}
+
+export function fmtCashSecuredPanel(summary) {
+  if (!summary) return "";
+  const { open, closed, parents } = summary;
+  if (!open.length && !closed.length && !parents.length) return "";
+  const lines = [];
+  for (const g of open) {
+    const inst = String(g?.short_instrument_name || "—");
+    const qty = fmtProfitNative(g?.currency || "BTC", g?.quantity);
+    const fromId = String(g?.cash_secured_from_group_id || "").trim();
+    const from = fromId ? ` · #${fromId}` : "";
+    lines.push(
+      `<div class="profit-swap-book-slot"><div class="profit-swap-book-slot-main">${escapeHtml(inst)}</div><div class="profit-swap-book-slot-sub">${i18n("Open", "持倉中")} · ${qty}${from}</div></div>`
+    );
+  }
+  for (const g of closed) {
+    const inst = String(g?.short_instrument_name || "—");
+    const fromId = String(g?.cash_secured_from_group_id || "").trim();
+    const from = fromId ? ` · #${fromId}` : "";
+    lines.push(
+      `<div class="profit-swap-book-slot"><div class="profit-swap-book-slot-main">${escapeHtml(inst)}</div><div class="profit-swap-book-slot-sub">${i18n("Closed", "已平倉")}${from}</div></div>`
+    );
+  }
+  for (const g of parents) {
+    if (isCashSecuredGroup(g)) continue;
+    const status = String(g?.cash_secured_status || "").toLowerCase();
+    if (status === "entered" && open.some((c) => String(c.group_id) === String(g.cash_secured_group_id))) {
+      continue;
+    }
+    const childId = String(g?.cash_secured_group_id || "").trim();
+    const reason = String(g?.cash_secured_reason || "").trim();
+    const inst = String(g?.cash_secured_instrument_name || "").trim();
+    const limit = String(g?.cash_secured_limit_price || "").trim();
+    let detail = childId ? `#${childId}` : status || reason || i18n("pending", "待開倉");
+    if (status === "submitted") {
+      const mid = limit ? ` mid ${limit}` : "";
+      detail = inst ? `${inst}${mid}` : i18n("parked mid", "掛 mid 限價");
+    }
+    lines.push(
+      `<div class="profit-swap-book-slot"><div class="profit-swap-book-slot-main">${i18n("ITM", "ITM")} #${escapeHtml(String(g?.group_id || "—"))}</div><div class="profit-swap-book-slot-sub">${escapeHtml(status || "pending")} · ${escapeHtml(detail)}</div></div>`
+    );
+  }
+  if (!lines.length) return "";
+  return `<div class="profit-disposition-panel profit-swap-panel cash-secured-panel">
+    <div class="profit-swap-detail">${lines.join("")}</div>
+  </div>`;
+}
+
+export function overviewCashSecuredSectionHtml(ctx) {
+  const { cashSecuredSummary } = ctx;
+  if (!cashSecuredSummary) return "";
+  const body = fmtCashSecuredPanel(cashSecuredSummary);
+  if (!body) return "";
+  return `<section class="overview-composition-card overview-composition-card--swap overview-composition-card--csp" aria-label="${i18n("Cash-secured puts", "現金擔保賣權")}">
+    <header class="overview-composition-head">
+      <h3 class="overview-composition-title">${i18n("Cash-secured puts", "現金擔保賣權")}</h3>
+      <span class="overview-composition-sub">${i18n("ITM cover → USDC put", "ITM cover → USDC 賣權")}</span>
+    </header>
+    ${body}
+  </section>`;
+}
+
 /** Realized P&L meta: simple book chips, or full swap panel when profit sweep applies. */
 export function fmtRealizedProfitBreakdown(disposition, nativeByBookFallback) {
   if (!disposition) {
@@ -3416,6 +3513,14 @@ export function looksLikeCoveredCallRow(g) {
   return String(g.account_env_file || "").includes(".env.covered_call");
 }
 
+export function looksLikeCashSecuredRow(g) {
+  if (!g) return false;
+  if (normalizeStrategyId(g.strategy) === "cash_secured") return true;
+  if (String(g.cash_secured_from_group_id || "").trim()) return true;
+  const label = String(g.short_label || "");
+  return label.includes("-csp-") || label.startsWith("csp-");
+}
+
 export function normalizeStrategyId(raw) {
   const normalized = String(raw || "").trim().toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
   if (!normalized) return "";
@@ -3434,6 +3539,8 @@ export function normalizeStrategyId(raw) {
     bullputspread: "bull_put_spread",
     bull_put: "bull_put_spread",
     coveredcall: "covered_call",
+    cashsecured: "cash_secured",
+    csp: "cash_secured",
   };
   return aliases[normalized] || normalized;
 }
@@ -3449,7 +3556,17 @@ function parseDashboardStrategyList(raw) {
     seen.add(id);
     ids.push(id);
   }
-  return ids.length ? ids : null;
+  return ids.length ? withCashSecuredStrategy(ids) : null;
+}
+
+function withCashSecuredStrategy(ids) {
+  if (!ids.includes("covered_call") || ids.includes("cash_secured")) return ids;
+  const out = [];
+  for (const id of ids) {
+    out.push(id);
+    if (id === "covered_call") out.push("cash_secured");
+  }
+  return out;
 }
 
 export function dashboardStrategyIds() {
@@ -3466,10 +3583,14 @@ export function dashboardStrategyIds() {
 
 export function isDashboardStrategy(id) {
   const key = normalizeStrategyId(id);
+  if (key === "cash_secured") {
+    return dashboardStrategyIds().includes("covered_call") || dashboardStrategyIds().includes("cash_secured");
+  }
   return Boolean(key && STRATEGY_BY_ID[key] && dashboardStrategyIds().includes(key));
 }
 
 export function strategyId(g) {
+  if (looksLikeCashSecuredRow(g)) return "cash_secured";
   const raw = normalizeStrategyId(g?.strategy);
   const hasLongLeg = String(g?.long_instrument_name || "").trim();
   if ((raw === "" || raw === "naked_short") && hasLongLeg && optionPutCallLabel(g).toLowerCase() === "put") {
@@ -3515,6 +3636,7 @@ export function strategyChipClass(id) {
   if (key === "naked_short") return "chip-strategy-naked";
   if (key === "bull_put_spread") return "chip-strategy-spread";
   if (key === "covered_call") return "chip-strategy-covered";
+  if (key === "cash_secured") return "chip-strategy-csp";
   return "chip-strategy-unknown";
 }
 
@@ -3583,6 +3705,7 @@ export function riskTierForStrategy(strategyIdRaw, health, status) {
   ];
   if (tiers.length === 1) return tiers[0];
   if (tiers.length > 1) return "";
+  if (id === "cash_secured") return riskTierForStrategy("covered_call", health, status);
   if (!health?.multi_account && accounts.length === 1) {
     return normalizeRiskTier(accounts[0].risk_tier);
   }
@@ -3674,6 +3797,13 @@ const TRADE_GROUP_ENRICH_KEYS = [
   "spot_restore_reason",
   "spot_restore_quote_spent",
   "spot_restore_quote_spent_lifetime",
+  "cash_secured_status",
+  "cash_secured_group_id",
+  "cash_secured_reason",
+  "cash_secured_order_id",
+  "cash_secured_instrument_name",
+  "cash_secured_limit_price",
+  "cash_secured_from_group_id",
 ];
 
 export function hasTradeGroupValue(v) {
@@ -3905,6 +4035,12 @@ export function openRowLegPriceGap(g, status, fieldName) {
 export function strategyLegDetail(g) {
   const longLeg = String(g?.long_instrument_name || "").trim();
   if (longLeg) return i18n(`Long ${longLeg}`, `買腿 ${longLeg}`);
+  if (looksLikeCashSecuredRow(g)) {
+    const qty = num(g?.quantity);
+    const ccy = String(g?.currency || "").toUpperCase();
+    const sized = qty !== null && qty > 0 ? `${fmtNum(qty, 4)} ${ccy}` : ccy;
+    return i18n(`CSP ${sized}`, `CSP ${sized}`);
+  }
   const covered = num(g?.covered_underlying_quantity);
   if (covered !== null && covered > 0) {
     return i18n(
@@ -3918,6 +4054,74 @@ export function strategyLegDetail(g) {
 export function accountHint(g) {
   const account = String(g?.account_name || "").trim();
   return account ? `Account ${account}` : "";
+}
+
+export function adminGroupActionKind(g) {
+  if (!ADMIN_EMBED) return null;
+  if (!String(g?.group_id || "").trim()) return null;
+  if (!isClosedTradeGroup(g)) return "close";
+  if (unrestoredSpotExitNative(g) > 1e-8) return "recover";
+  return null;
+}
+
+export function findAdminPreviewGroup(groupId, status = STATE.status, groups = STATE.groups) {
+  const wanted = String(groupId || "").trim();
+  if (!wanted) return null;
+  const pools = [groups?.open, groups?.closed, status?.open_groups, status?.groups];
+  for (const pool of pools) {
+    if (!Array.isArray(pool)) continue;
+    const hit = pool.find((g) => {
+      const id = String(g?.group_id || "").trim();
+      if (!id) return false;
+      if (id === wanted) return true;
+      return /^\d+$/.test(id) && /^\d+$/.test(wanted) && Number(id) === Number(wanted);
+    });
+    if (hit) return hit;
+  }
+  return null;
+}
+
+export function adminGroupPreviewEstimates(g, status, groups) {
+  const book = openRowBookCollateralUpper(g) || String(g?.collateral_currency || g?.currency || "").toUpperCase();
+  return {
+    book,
+    instrument: String(g?.short_instrument_name || ""),
+    quantity: num(g?.quantity),
+    entry_price: num(openRowLegFieldValue(g, status, "short", "average_price")) ?? num(g?.short_entry_average_price),
+    mark_price: num(openRowLegFieldValue(g, status, "short", "mark_price")),
+    long_entry_price: num(openRowLegFieldValue(g, status, "long", "average_price")),
+    long_mark_price: num(openRowLegFieldValue(g, status, "long", "mark_price")),
+    est_close_fee_usd: groupCloseFeeUsd(g),
+    est_close_fee_native: groupCloseFeeNative(g, status),
+    est_pnl_usd: openRowDisplayUnrealizedUsd(g, status, groups),
+    est_pnl_native: openRowDisplayNativeUnrealizedValue(g, status, groups),
+    entry_credit_usd: openRowEntryCreditUsd(g, status, groups),
+  };
+}
+
+export function adminRecoverPreviewEstimates(g) {
+  const unrestored = unrestoredSpotExitNative(g);
+  const proceeds = spotExitRealizedQuoteUsdt(g) ?? 0;
+  const spent = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+  const remaining = proceeds - spent;
+  return {
+    book: String(g?.currency || g?.collateral_currency || "").toUpperCase(),
+    instrument: String(g?.short_instrument_name || ""),
+    unrestored,
+    remaining_proceeds_usdt: remaining,
+    breakeven_price: unrestored > 1e-8 && remaining > 0 ? remaining / unrestored : null,
+  };
+}
+
+export function adminGroupActionsHtml(g) {
+  const kind = adminGroupActionKind(g);
+  if (!kind) return "";
+  const groupId = String(g?.group_id || "").trim();
+  const account = String(g?.account_name || "").trim();
+  const label = kind === "recover" ? "Recover market" : "Close";
+  return `<div class="admin-group-actions">
+    <button type="button" class="ds-btn ds-btn-danger admin-group-action" data-admin-kind="${escapeHtml(kind)}" data-admin-group="${escapeHtml(groupId)}" data-admin-account="${escapeHtml(account)}">${label}</button>
+  </div>`;
 }
 
 export function groupHoldingDays(g) {
@@ -4750,6 +4954,56 @@ export function spotExitMetaLine(g) {
   return null;
 }
 
+function cashSecuredAssignmentRestoreLine(g) {
+  const restore = String(g?.spot_restore_status || "").toLowerCase();
+  const restoreReason = String(g?.spot_restore_reason || "");
+  if (!restoreReason.startsWith("cash_secured_itm_assignment")) return null;
+  if (restore === "filled") {
+    return [i18n("CSP", "CSP"), i18n("ITM → cover restored", "ITM → 已補回現貨")];
+  }
+  if (restore === "submitted" || restore === "pending") {
+    const inst = String(g?.spot_restore_instrument_name || "").trim();
+    return [i18n("CSP", "CSP"), inst ? `${i18n("buying cover", "補回現貨")} ${inst}` : i18n("buying cover", "補回現貨")];
+  }
+  return null;
+}
+
+export function cashSecuredMetaLine(g, groups) {
+  const assignment = cashSecuredAssignmentRestoreLine(g);
+  if (assignment) return assignment;
+  const fromId = String(g?.cash_secured_from_group_id || "").trim();
+  if (fromId || normalizeStrategyId(g?.strategy) === "cash_secured") {
+    return [i18n("From ITM", "來自 ITM"), fromId ? `#${fromId}` : i18n("wheel", "輪轉")];
+  }
+  const status = String(g?.cash_secured_status || "").toLowerCase();
+  const childId = String(g?.cash_secured_group_id || "").trim();
+  if (!status && !childId) return null;
+  const child = childId ? findTradeGroupById(groups, childId) : null;
+  const childAssignment = child ? cashSecuredAssignmentRestoreLine(child) : null;
+  if (childAssignment) return childAssignment;
+  const inst = String(child?.short_instrument_name || "").trim();
+  if (status === "entered" || childId) {
+    return [
+      i18n("CSP", "CSP"),
+      inst ? `#${childId} ${inst}` : childId ? `#${childId}` : i18n("entered", "已開倉"),
+    ];
+  }
+  if (status === "pending") {
+    return [i18n("CSP", "CSP"), i18n("opening put", "開倉中")];
+  }
+  if (status === "submitted") {
+    const parked = String(g?.cash_secured_instrument_name || "").trim();
+    const limit = String(g?.cash_secured_limit_price || "").trim();
+    const mid = [parked, limit ? `mid ${limit}` : i18n("parked mid", "掛 mid 限價")].filter(Boolean).join(" ");
+    return [i18n("CSP", "CSP"), mid];
+  }
+  if (status === "skipped") {
+    const reason = String(g?.cash_secured_reason || "").trim();
+    return [i18n("CSP", "CSP"), reason || i18n("skipped", "已略過")];
+  }
+  return [i18n("CSP", "CSP"), status];
+}
+
 export function activityClosedRows(status, report, groups) {
   return mergedClosedRows(report, groups, 500, status).filter((g) =>
     isDashboardStrategy(strategyId(g))
@@ -4880,6 +5134,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
         : null,
       profitSweepMetaLine(g),
       spotExitMetaLine(g),
+      cashSecuredMetaLine(g, groups),
     ].filter(Boolean);
     const pnlValue =
       pnl !== null
@@ -4904,6 +5159,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
     )}</div>`;
   } else {
     const exitMeta = [
+      cashSecuredMetaLine(g, groups),
       closeFee !== null
         ? [i18n("Est. close fee", "預估平倉費"), fmtUsdWithNativeBookAmount(closeFee, closeFeeNative, book)]
         : null,
@@ -4934,6 +5190,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
         <span class="activity-card-title">${escapeHtml(title)}</span>
         <span class="text-[11px] text-slate-500">${escapeHtml(book)}</span>
         ${acct ? `<span class="text-[11px] text-slate-500">${escapeHtml(acct)}</span>` : ""}
+        ${adminGroupActionsHtml(g)}
       </div>
       <div class="activity-card-instrument">${instrumentBlock}${groupIdSuffix}</div>
       <div class="activity-lifecycle">

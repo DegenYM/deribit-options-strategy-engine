@@ -29,7 +29,11 @@ _JOURNAL_STATUS_RANK = {
     "pending": 1,
     "submitted": 2,
     "failed": 2,
+    "entered": 3,
     "filled": 3,
+    # Operator terminal skip must outrank in-flight pending/failed so a live
+    # cycle cannot merge the old sell back (Youming #0082 manual withdrawal).
+    "skipped": 4,
 }
 
 _SPOT_EXIT_FIELDS = (
@@ -63,6 +67,15 @@ _PROFIT_SWEEP_FIELDS = (
     "profit_sweep_exchange_quote_proceeds",
     "profit_sweep_reason",
 )
+_CASH_SECURED_FIELDS = (
+    "cash_secured_status",
+    "cash_secured_group_id",
+    "cash_secured_reason",
+    "cash_secured_order_id",
+    "cash_secured_instrument_name",
+    "cash_secured_limit_price",
+    "cash_secured_from_group_id",
+)
 
 
 def performance_exclusions_path(state_path: Path) -> Path:
@@ -88,8 +101,20 @@ def load_performance_exclusion_group_ids(state_path: Path) -> set[str]:
     return {str(item) for item in raw_ids if str(item)}
 
 
-def _status_rank(status: str | None) -> int:
-    return _JOURNAL_STATUS_RANK.get(str(status or "").strip().lower(), 0)
+# CSP ``skipped`` (operator cancel of an old mid park) is retryable; ``entered``
+# must outrank it so a live fill is not merged back to skipped on save.
+_CASH_SECURED_STATUS_RANK = {
+    "": 0,
+    "pending": 1,
+    "submitted": 2,
+    "skipped": 2,
+    "entered": 3,
+}
+
+
+def _status_rank(status: str | None, ranks: dict[str, int] | None = None) -> int:
+    table = ranks if ranks is not None else _JOURNAL_STATUS_RANK
+    return table.get(str(status or "").strip().lower(), 0)
 
 
 def _copy_group_fields(dst: TradeGroup, src: TradeGroup, fields: tuple[str, ...]) -> None:
@@ -104,10 +129,11 @@ def _merge_journal_cluster(
     status_attr: str,
     fields: tuple[str, ...],
     amount_attrs: tuple[str, ...],
+    ranks: dict[str, int] | None = None,
 ) -> bool:
     """Prefer disk when it is ahead on status, or richer on amounts at same status."""
-    mem_rank = _status_rank(getattr(memory, status_attr))
-    disk_rank = _status_rank(getattr(disk, status_attr))
+    mem_rank = _status_rank(getattr(memory, status_attr), ranks)
+    disk_rank = _status_rank(getattr(disk, status_attr), ranks)
     if disk_rank > mem_rank:
         _copy_group_fields(memory, disk, fields)
         return True
@@ -183,6 +209,14 @@ def merge_concurrent_group_updates(memory: StrategyState, disk: StrategyState) -
                 "spot_exit_quote_proceeds_lifetime",
                 "spot_exit_settlement_loss",
             ),
+        )
+        touched |= _merge_journal_cluster(
+            group,
+            other,
+            status_attr="cash_secured_status",
+            fields=_CASH_SECURED_FIELDS,
+            amount_attrs=(),
+            ranks=_CASH_SECURED_STATUS_RANK,
         )
         if touched:
             merged_ids.append(gid)

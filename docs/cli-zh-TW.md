@@ -32,6 +32,7 @@ ACCT=naked   # 或 bull_put、covered_call，見 accounts.toml
 ./bot --investor $INVESTOR --account $ACCT ping --json
 ./bot --investor $INVESTOR --account $ACCT status --json
 ./bot --investor $INVESTOR --account $ACCT scan --currencies BTC,ETH --json
+./bot --investor $INVESTOR --account $ACCT scan --cash-secured --from-group 0095
 ./bot --investor $INVESTOR --account $ACCT manage --json
 
 # 下單與持續迴圈（--live 才實單）
@@ -63,6 +64,10 @@ export INVESTOR=youming
 ./bot --investor $INVESTOR frontend
 ./bot --investor $INVESTOR frontend --port 9000
 ./bot frontend --account-env-files config/investors/$INVESTOR/accounts/.env.naked,config/investors/$INVESTOR/accounts/.env.bull_put
+
+# 管理者後台（所有投資人 frontend；只綁 127.0.0.1，預設 :8750）
+# Recover market / Close / Panic close 只在此頁，先 Preview 再輸入 LIVE
+./bot admin
 
 # macOS launchd 常駐（依 registry.toml）
 ./bot investor frontend start    # dashboard
@@ -105,6 +110,16 @@ Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。Tunnel 手動
 （也可用為除錯路徑單獨指定：`./bot --env-file ./.env scan --json`。）
 
 `scan --strategy` 可在不修改 `.env` 的情況下覆蓋本次掃描策略，並會套用同目錄對應的 `.env.<strategy>` profile。可用值為 `naked_short`、`bull_put_spread`、`covered_call`（舊名 `naked_short_put` / `naked_short_call` 仍會被接受並對應到 `naked_short`）。
+
+CSP 挑選標的（不下單）：在 **covered_call** 子帳跑
+
+```bash
+./bot --investor $INVESTOR --account covered_call scan --cash-secured
+./bot --investor $INVESTOR --account covered_call scan --strategy csp --from-group 0095 --top-n 8
+./bot --investor $INVESTOR --account covered_call scan --cash-secured --strike-floor-pct 0.05
+```
+
+會用和 live `manage` 同一套排序（滿張 → 最接近原履約價 → 較短 DTE / APR）。不帶 `--from-group` 時，**每一筆 ITM 已賣 cover 的備兌**各出一組 `groups[]`（含 BTC / ETH）；`--from-group` 才只看單一母單或 CSP 子單。不必先開 CSP，也不必先開旗標（`csp_enabled=false` 時 `would_place` 仍是 false）。沒有已賣 cover 時才退回開著的備兌（假設賣出所得，`hypothetical_usdc`）。`manage` 不帶 `--live` 只在尚未開倉時回一筆 `cash_secured_preview`。
 
 ## 歷史回測（research only）
 
@@ -220,14 +235,14 @@ ACCT=covered_call
 
 ## Covered call ITM spot restore（手動買回 cover）
 
-ITM / settlement spot exit 賣掉 cover（`cover − settle`；權利金另走 Profit swap）後，若要用 USDT 買回現貨並正確記帳，請用 `spot-restore`（**不要**用裸 `trade-spot`，也**不要**用 `profit-sweep-buyback` label）。
+ITM / settlement spot exit 賣掉 cover（`cover − settle`；權利金另走 Profit swap）後，若要用 USDT 買回現貨並正確記帳，請用 `spot-restore`（**不要**用裸 `trade-spot`，也**不要**用 `profit-sweep-buyback` label）。若要在現貨價格有利時由 live `manage` 自動買回，設 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=true`（見 [`configuration-zh-TW.md`](configuration-zh-TW.md#績效費-nav-快照performance-fee)）；預設仍是手動。若改走 ITM → cash-secured（`COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED`），cover 會賣成 USDC 再開短 put，該 covered call **不會**走 USDT 自動買回。CSP 持有至到期；put **ITM** 到期後 live `manage` 用剩餘 USDC 掛 mid 買回 cover。
 
 ```bash
 export INVESTOR=youming
 ACCT=covered_call
 
-# 預覽（預設人讀格式：預計買回 / 當前價格 / 預計花費 USDT）
-./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017
+# 預覽（預設人讀格式：預計買回 / 當前價格 / 預計花費 USDT；含自動買回上限）
+./bot --investor $INVESTOR --account $ACCT spot-restore
 
 # 同上，輸出完整 JSON（含 preview.buy_amount / current_price_usdt / estimated_usdt）
 ./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --json
@@ -268,9 +283,10 @@ ACCT=covered_call
 - **premium_native** = 淨進場權利金（fill − entry fee）。若 ITM 沒把 premium 賣進 spot exit，現貨會多這筆 → restore **要減掉**，否則會買成 cover+premium
 - **buy_amount** = `min(cover, swap + settle − premium) − already_restored`
 - **estimated_usdt** = `buy_amount × current_price`（limit 用 best bid；market 用 best ask）
-- **order_budget_usdt** = limit 時同 estimated；market 時 `buy × ask × 1.005`（緩衝）
+- **自動買回預覽**（即使 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=false` 也會顯示）：損益兩平 = 剩餘 exit USDT / 尚未買回數量；買回上限 = 損益兩平 × `(1 − MIN_EDGE_PCT)`。啟用自動時會掛此價 GTC，成交前不會再下市價單。
+- **order_budget_usdt** = limit 時同 estimated；market 時 `buy × ask × 1.001`（僅 USDT 夠不夠的檢查）。實際市價單按下單 **native 數量**，不再用多出的 USDT 超買
 - **limit 預設**：post-only buy@bid GTC，等待 `--wait-seconds`／`SPOT_RESTORE_WAIT_SECONDS` 後取消未成交；可 `--order-type market` 改市價
-- **低於交易所最小下單量**（例如 ETH_USDT min `0.001`）：**省略**（`dust_below_min`），**不進位**；`--live` 會標記 restore 完成，避免為塵埃多買超過 cover
+- **買回數量對齊**：預設買回會進位到 **USDC linear 最小下單量**（BTC `0.01`、ETH `0.1`），再對齊 spot grid，且**不超過 cover**（例如 `0.09978985` → `0.1`）。`--amount` / `--usdt` 只對齊 spot step。低於 spot 最小下單量（例如 ETH_USDT min `0.001`）仍**省略**（`dust_below_min`），不為塵埃進位到一整手；`--live` 會標記 restore 完成
 
 ITM + `COVERED_CALL_PROFIT_SWEEP_ENABLED` 卻只賣出 cover−settle 時：restore 回到 **cover**，錢包留下的 premium 是 spot profit（之後可再 `profit-sweep` 兌 USDT）。
 

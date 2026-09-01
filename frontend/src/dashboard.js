@@ -99,6 +99,35 @@ function attachControls() {
     const btn = e.target.closest("button[data-book]");
     if (btn) setBookFilter(btn.dataset.book);
   });
+  document.addEventListener("click", (e) => {
+    const action = e.target.closest?.("button.admin-group-action");
+    if (!action || window.parent === window) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const groupId = action.dataset.adminGroup || "";
+    const kind = action.dataset.adminKind || "";
+    const group = domain.findAdminPreviewGroup(groupId);
+    const estimates = !group
+      ? null
+      : kind === "recover"
+        ? domain.adminRecoverPreviewEstimates(group)
+        : domain.adminGroupPreviewEstimates(group, STATE.status, STATE.groups);
+    try {
+      window.parent.postMessage(
+        {
+          source: "deribit-dashboard",
+          type: "admin-group-action",
+          kind,
+          group_id: groupId,
+          account: action.dataset.adminAccount || "",
+          estimates,
+        },
+        "*"
+      );
+    } catch (_err) {
+      /* ignore */
+    }
+  });
   document.getElementById("activity-section")?.addEventListener("click", (e) => {
     const btn = e.target.closest("button.activity-page-btn");
     if (!btn || btn.disabled) return;

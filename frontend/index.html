@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Deribit Strategy Dashboard</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app.js?v=0830ea30df" as="script" />
+    <link rel="preload" href="/app.js?v=e7fd6dbf47" as="script" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -14,7 +14,7 @@
     />
     <link rel="stylesheet" href="/tailwind.css?v=c6fde4d604" />
     <link rel="stylesheet" href="/tokens.css?v=ds003" />
-    <link rel="stylesheet" href="/styles.css?v=b2bc59b6d9" />
+    <link rel="stylesheet" href="/styles.css?v=f4b972995b" />
   </head>
   <body class="app-body">
     <a class="skip-link" href="#dashboard-main">Skip to content</a>
@@ -319,6 +319,27 @@
       class="hidden"
     ></div>
 
-    <script defer src="/app.js?v=0830ea30df"></script>
+    <script defer src="/app.js?v=e7fd6dbf47"></script>
+    <script>
+      (function () {
+        var embedded =
+          window.self !== window.top || /(?:\?|&)embed=1(?:&|$)/.test(location.search);
+        if (!embedded) return;
+        document.documentElement.classList.add("is-embedded");
+        if (document.body) document.body.classList.add("is-embedded");
+        function report() {
+          var root = document.documentElement;
+          var height = Math.max(root ? root.scrollHeight : 0, document.body ? document.body.scrollHeight : 0);
+          try {
+            parent.postMessage({ source: "deribit-dashboard", type: "embed-height", height: height }, "*");
+          } catch (_err) {}
+        }
+        report();
+        window.addEventListener("load", report);
+        if (window.ResizeObserver && document.documentElement) {
+          new ResizeObserver(report).observe(document.documentElement);
+        }
+      })();
+    </script>
   </body>
 </html>

@@ -74,6 +74,9 @@ def normalize_strategy_name(raw: str | None, *, default: str = "naked_short") ->
         "bullputspread": "bull_put_spread",
         "bull_put": "bull_put_spread",
         "coveredcall": "covered_call",
+        "cash_secured": "cash_secured",
+        "cashsecured": "cash_secured",
+        "csp": "cash_secured",
     }
     return aliases.get(normalized, normalized)
 
@@ -698,6 +701,15 @@ class TradeGroup:
     profit_sweep_exchange_native: Decimal = Decimal("0")
     profit_sweep_exchange_quote_proceeds: Decimal = Decimal("0")
     profit_sweep_reason: str = ""
+    #: Parent covered-call group after ITM spot exit sold to USDC.
+    cash_secured_status: str = ""
+    cash_secured_group_id: str = ""
+    cash_secured_reason: str = ""
+    cash_secured_order_id: str = ""
+    cash_secured_instrument_name: str = ""
+    cash_secured_limit_price: Decimal = Decimal("0")
+    #: Child cash-secured put: id of the ITM-sold covered call that funded it.
+    cash_secured_from_group_id: str = ""
 
     @property
     def dte_days(self) -> Decimal:
@@ -755,6 +767,9 @@ class TradeGroup:
             or self.covered_underlying_quantity > 0
             or str(self.short_label or "").startswith("covered_call-")
         )
+
+    def is_cash_secured_group(self) -> bool:
+        return (self.strategy or "") == "cash_secured" or bool(str(self.cash_secured_from_group_id or "").strip())
 
     def underlying_index_usd_for_apr(self) -> Decimal:
         """Underlying BTC/ETH spot for USDC linear call APR denominators."""
@@ -1507,6 +1522,20 @@ class TradeGroup:
             payload["profit_sweep_exchange_quote_proceeds"] = self.profit_sweep_exchange_quote_proceeds
         if self.profit_sweep_reason:
             payload["profit_sweep_reason"] = self.profit_sweep_reason
+        if self.cash_secured_status:
+            payload["cash_secured_status"] = self.cash_secured_status
+        if self.cash_secured_group_id:
+            payload["cash_secured_group_id"] = self.cash_secured_group_id
+        if self.cash_secured_reason:
+            payload["cash_secured_reason"] = self.cash_secured_reason
+        if self.cash_secured_order_id:
+            payload["cash_secured_order_id"] = self.cash_secured_order_id
+        if self.cash_secured_instrument_name:
+            payload["cash_secured_instrument_name"] = self.cash_secured_instrument_name
+        if self.cash_secured_limit_price > 0:
+            payload["cash_secured_limit_price"] = self.cash_secured_limit_price
+        if self.cash_secured_from_group_id:
+            payload["cash_secured_from_group_id"] = self.cash_secured_from_group_id
         return payload
 
     @classmethod
@@ -1646,6 +1675,13 @@ class TradeGroup:
             profit_sweep_exchange_native=to_decimal(payload.get("profit_sweep_exchange_native")),
             profit_sweep_exchange_quote_proceeds=to_decimal(payload.get("profit_sweep_exchange_quote_proceeds")),
             profit_sweep_reason=str(payload.get("profit_sweep_reason") or ""),
+            cash_secured_status=str(payload.get("cash_secured_status") or ""),
+            cash_secured_group_id=str(payload.get("cash_secured_group_id") or ""),
+            cash_secured_reason=str(payload.get("cash_secured_reason") or ""),
+            cash_secured_order_id=str(payload.get("cash_secured_order_id") or ""),
+            cash_secured_instrument_name=str(payload.get("cash_secured_instrument_name") or ""),
+            cash_secured_limit_price=to_decimal(payload.get("cash_secured_limit_price")),
+            cash_secured_from_group_id=str(payload.get("cash_secured_from_group_id") or ""),
         )
 
 

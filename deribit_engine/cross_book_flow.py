@@ -76,6 +76,19 @@ def cross_book_flow_adjustments_native(
     ]
     _match_cross_book_flows(crypto_out, stable_in, adjustments, _spot, min_match_usdc)
 
+    # Manual USDT ↔ USDC converts are also spot trades, not transfers.
+    leftover_stable_out = [
+        (book, -(delta + adjustments[book]))
+        for book in per_book_native_equities
+        if book in STABLE_BOOKS and (delta := _native_delta(book)) + adjustments[book] < 0
+    ]
+    leftover_stable_in = [
+        (book, delta + adjustments[book])
+        for book in per_book_native_equities
+        if book in STABLE_BOOKS and (delta := _native_delta(book)) + adjustments[book] > 0
+    ]
+    _match_cross_book_flows(leftover_stable_out, leftover_stable_in, adjustments, _spot, min_match_usdc)
+
     return {book: amount for book, amount in adjustments.items() if amount != 0}
 
 
