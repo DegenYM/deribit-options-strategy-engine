@@ -141,6 +141,7 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 - 張數以 unrestored cover **進位**到合約最小單位（目標補回 cover）。手續費／結算讓 USDC 在原履約價剛好不夠滿張時，會在 `COVERED_CALL_CSP_STRIKE_FLOOR_PCT` 窗內**往下抓 strike**，優先鎖滿張再選最接近原價的履約價。
 - CSP 開啟時，ITM cover 賣出（含舊 USDT journal）**不會**再走自動買回，改掃 cash-secured put。USDT 帳本回撤（例如手動換成 USDC）**不**觸發 hard derisk、也不擋 CSP。
 - CSP **持有至到期**。到期若 put **ITM**（現貨低於履約價），live `manage` 用剩餘 USDC 掛 **GTC mid** 買回 cover（`BTC_USDC` / `ETH_USDC`）。OTM 到期不買現貨。你取消買回單不會重掛。
+- **CSP 權利金去向**（`COVERED_CALL_CSP_PREMIUM_TARGET`，預設 `usdc`）：`usdc` 讓權利金留在 USDC；`spot` 在 CSP 成交後，把**淨權利金**（成交 credit 扣進場費，USDC 計價）market 換成 native 現貨（`BTC_USDC` / `ETH_USDC` 買單）。只換權利金——履約所需的 `strike × qty` 保證金完整保留（Deribit 已把短 put 的 IM 排除在可用資金外）。可用 USDC 不足時保持 pending，下個 cycle 重試。狀態顯示於 group 的 `csp_premium_swap_*` 欄位。
 - 修改後需**重啟**該子帳 live bot。
 
 **Covered call 自動買回 cover（可選）**：在 `.env.investor` 或子帳 `.env` 設 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=true`（**預設 false**）。啟用後，ITM spot exit **賣完**就掛一張 **GTC 限價買單**，價位 = 損益兩平 × `(1 − COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT)`（預設 0.1%），數量是 **native unrestored**（進位到 **USDC linear 最小下單量**，BTC `0.01` / ETH `0.1`，不超過 cover）。之後 cycle 只對帳，**不會改下市價單、也不會在你取消後重掛**。`submitted` 或已有 restore `order_id` 且交易所單還在時，不會再下第二張；單被取消／已不在則記 `operator_cancelled` 並停止自動買回。現價若已低於上限，限價會立刻成交（仍是限價、固定數量）。`spot_exit_status=skipped` 不會掛。修改後需**重啟**該子帳 live bot。

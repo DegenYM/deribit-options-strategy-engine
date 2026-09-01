@@ -1658,6 +1658,159 @@ class CoveredCallMixin:
         payload["response"] = result.get("response")
         return payload
 
+    @staticmethod
+    def _csp_premium_swap_instrument(currency: str) -> str:
+        return f"{currency.upper()}_USDC"
+
+    def _pending_csp_premium_swap_actions(
+        self,
+        context: RuntimeContext,
+        *,
+        live: bool,
+    ) -> list[dict[str, Any]]:
+        """Swap each entered CSP's net premium into native spot when target=spot."""
+        if not self._is_covered_call_strategy():
+            return []
+        if not self.config.covered_call_itm_to_cash_secured_enabled:
+            return []
+        from ..csp_premium_swap_ops import (
+            csp_premium_swap_ready,
+            csp_premium_swap_target_is_spot,
+            schedule_csp_premium_swap,
+        )
+
+        if not csp_premium_swap_target_is_spot(self.config.covered_call_csp_premium_target):
+            return []
+
+        actions: list[dict[str, Any]] = []
+        for group in context.state.groups:
+            if not group.is_cash_secured_group():
+                continue
+            status = str(group.csp_premium_swap_status or "").lower()
+            if status in {"filled", "skipped"}:
+                continue
+            ready, reason = csp_premium_swap_ready(group)
+            if not ready:
+                if not live and reason == "no_premium":
+                    actions.append(
+                        {
+                            "action": "csp_premium_swap_skipped",
+                            "group_id": group.group_id,
+                            "reason": reason,
+                        }
+                    )
+                continue
+            if live and status not in {"pending", "submitted"}:
+                schedule_csp_premium_swap(group, reason="csp_premium_to_spot")
+            actions.append(self._execute_csp_premium_swap(context, group, live=live))
+        return actions
+
+    def _execute_csp_premium_swap(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        live: bool,
+    ) -> dict[str, Any]:
+        from ..csp_premium_swap_ops import (
+            csp_premium_net_usdc,
+            csp_premium_swap_base_filled_from_trades,
+            csp_premium_swap_order_label,
+        )
+        from ..wallet_ops import spot_buy_quote_spent_from_trades
+
+        premium_usdc = csp_premium_net_usdc(group)
+        instrument_name = self._csp_premium_swap_instrument(group.currency)
+        payload: dict[str, Any] = {
+            "action": "csp_premium_swap" if live else "csp_premium_swap_preview",
+            "group_id": group.group_id,
+            "reason": group.csp_premium_swap_reason or "csp_premium_to_spot",
+            "instrument_name": instrument_name,
+            "amount_usdc": format_decimal(premium_usdc, 4),
+            "order_type": self.config.covered_call_spot_order_type,
+            "live": live,
+        }
+        if premium_usdc <= 0:
+            payload["action"] = "csp_premium_swap_skipped"
+            payload["reason"] = "no_premium"
+            return payload
+        if not live:
+            return payload
+
+        # Never dip into the put's reserved assignment margin: cap the spend to the
+        # USDC book's free funds (Deribit already excludes the short put's IM).
+        usdc = context.summaries.get("USDC") or self._account_summaries_by_currency().get("USDC")
+        usdc_free = Decimal("0")
+        if usdc is not None:
+            usdc_free = max(usdc.available_funds, usdc.available_withdrawal_funds, Decimal("0"))
+        spend = min(premium_usdc, usdc_free)
+        if spend <= 0:
+            # Keep pending so a later cycle retries when USDC frees up.
+            if str(group.csp_premium_swap_status or "").lower() != "pending":
+                group.csp_premium_swap_status = "pending"
+            payload["action"] = "csp_premium_swap_skipped"
+            payload["reason"] = "usdc_unavailable"
+            payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+            return payload
+
+        group.csp_premium_swap_status = "submitted"
+        group.csp_premium_swap_amount = spend
+        group.csp_premium_swap_instrument_name = instrument_name
+        label = csp_premium_swap_order_label(self.config.order_label_prefix, group)
+        try:
+            from ..wallet_ops import trade_spot
+
+            result = trade_spot(
+                self.config,
+                self.client,
+                from_currency="USDC",
+                to_currency=group.currency,
+                amount=format_decimal(spend, 4),
+                instrument_name=instrument_name,
+                order_type=self.config.covered_call_spot_order_type,
+                live=True,
+                label=label,
+            )
+        except Exception as exc:
+            group.csp_premium_swap_status = "failed"
+            group.csp_premium_swap_reason = f"csp_premium_to_spot: {exc}"
+            LOGGER.exception("csp_premium_swap failed group=%s", group.group_id)
+            payload["action"] = "csp_premium_swap_failed"
+            payload["reason"] = str(exc)
+            payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+            return payload
+
+        if result.get("action") == "trade_spot_skipped":
+            skip_reason = result.get("reason") or "skipped"
+            group.csp_premium_swap_status = "pending"
+            payload["action"] = "csp_premium_swap_skipped"
+            payload["reason"] = skip_reason
+            payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+            return payload
+
+        response = result.get("response")
+        trades = response.get("trades") if isinstance(response, dict) else []
+        order_id = result.get("order_id")
+        if order_id:
+            group.csp_premium_swap_order_id = str(order_id)
+        order_state = str(result.get("order_state") or "").lower()
+        native = csp_premium_swap_base_filled_from_trades(trades)
+        spent = spot_buy_quote_spent_from_trades(trades or [], quote_currency="USDC")
+        if native > 0:
+            group.csp_premium_swap_native = native
+        if order_state in {"cancelled", "rejected"} and native <= 0:
+            group.csp_premium_swap_status = "failed"
+        else:
+            group.csp_premium_swap_status = "filled"
+        if spent > 0:
+            group.csp_premium_swap_amount = spent
+        payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+        payload["csp_premium_swap_order_id"] = group.csp_premium_swap_order_id or None
+        payload["native_bought"] = format_decimal(native, 8)
+        payload["usdc_spent"] = format_decimal(spent, 4)
+        payload["response"] = response
+        return payload
+
     def _is_covered_call_strategy(self) -> bool:
         return self.config.option_strategy == "covered_call"
 

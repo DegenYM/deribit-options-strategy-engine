@@ -45,6 +45,7 @@ class ManagementMixin(
         actions.extend(self._pending_cash_secured_cover_restore_actions(context, live=live))
         actions.extend(self._pending_auto_spot_restore_actions(context, live=live))
         actions.extend(self._pending_profit_sweep_actions(context, live=live))
+        actions.extend(self._pending_csp_premium_swap_actions(context, live=live))
 
         if context.snapshot.hard_derisk:
             cooldown_until = utc_now_ms() + (self.config.cooldown_hours * 3600 * 1000)

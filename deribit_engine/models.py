@@ -710,6 +710,13 @@ class TradeGroup:
     cash_secured_limit_price: Decimal = Decimal("0")
     #: Child cash-secured put: id of the ITM-sold covered call that funded it.
     cash_secured_from_group_id: str = ""
+    #: Cash-secured put premium → native spot swap (COVERED_CALL_CSP_PREMIUM_TARGET=spot).
+    csp_premium_swap_status: str = ""
+    csp_premium_swap_amount: Decimal = Decimal("0")
+    csp_premium_swap_instrument_name: str = ""
+    csp_premium_swap_order_id: str = ""
+    csp_premium_swap_native: Decimal = Decimal("0")
+    csp_premium_swap_reason: str = ""
 
     @property
     def dte_days(self) -> Decimal:
@@ -1536,6 +1543,18 @@ class TradeGroup:
             payload["cash_secured_limit_price"] = self.cash_secured_limit_price
         if self.cash_secured_from_group_id:
             payload["cash_secured_from_group_id"] = self.cash_secured_from_group_id
+        if self.csp_premium_swap_status:
+            payload["csp_premium_swap_status"] = self.csp_premium_swap_status
+        if self.csp_premium_swap_amount > 0:
+            payload["csp_premium_swap_amount"] = self.csp_premium_swap_amount
+        if self.csp_premium_swap_instrument_name:
+            payload["csp_premium_swap_instrument_name"] = self.csp_premium_swap_instrument_name
+        if self.csp_premium_swap_order_id:
+            payload["csp_premium_swap_order_id"] = self.csp_premium_swap_order_id
+        if self.csp_premium_swap_native > 0:
+            payload["csp_premium_swap_native"] = self.csp_premium_swap_native
+        if self.csp_premium_swap_reason:
+            payload["csp_premium_swap_reason"] = self.csp_premium_swap_reason
         return payload
 
     @classmethod
@@ -1682,6 +1701,12 @@ class TradeGroup:
             cash_secured_instrument_name=str(payload.get("cash_secured_instrument_name") or ""),
             cash_secured_limit_price=to_decimal(payload.get("cash_secured_limit_price")),
             cash_secured_from_group_id=str(payload.get("cash_secured_from_group_id") or ""),
+            csp_premium_swap_status=str(payload.get("csp_premium_swap_status") or ""),
+            csp_premium_swap_amount=to_decimal(payload.get("csp_premium_swap_amount")),
+            csp_premium_swap_instrument_name=str(payload.get("csp_premium_swap_instrument_name") or ""),
+            csp_premium_swap_order_id=str(payload.get("csp_premium_swap_order_id") or ""),
+            csp_premium_swap_native=to_decimal(payload.get("csp_premium_swap_native")),
+            csp_premium_swap_reason=str(payload.get("csp_premium_swap_reason") or ""),
         )
 
 

@@ -385,6 +385,46 @@ def test_covered_call_profit_sweep_appends_usdt_collateral(tmp_path: Path):
     assert "USDT" in config.traded_collaterals
 
 
+def test_covered_call_csp_premium_target_defaults_usdc(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPTION_STRATEGY=covered_call\n")
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.covered_call_csp_premium_target == "usdc"
+
+
+def test_covered_call_csp_premium_target_parses_spot(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "COVERED_CALL_CSP_PREMIUM_TARGET=SPOT",
+            ]
+        )
+    )
+
+    config = load_config(env_file, require_private=False)
+
+    assert config.covered_call_csp_premium_target == "spot"
+
+
+def test_covered_call_csp_premium_target_rejects_unknown(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "COVERED_CALL_CSP_PREMIUM_TARGET=btc",
+            ]
+        )
+    )
+
+    with pytest.raises(ConfigurationError, match="COVERED_CALL_CSP_PREMIUM_TARGET"):
+        load_config(env_file, require_private=False)
+
+
 def test_strategy_profile_mismatch_raises(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text("OPTION_STRATEGY=bull_put_spread\n")
