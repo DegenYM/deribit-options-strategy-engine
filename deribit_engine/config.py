@@ -332,6 +332,9 @@ class BotConfig:
     covered_call_csp_min_open_interest: Decimal = Decimal("6")
     covered_call_csp_max_spread_ratio: Decimal = Decimal("0.18")
     covered_call_csp_min_book_notional_usdc: Decimal = Decimal("3000")
+    # Where the CSP premium lands: "usdc" keeps it as stablecoin, "spot" swaps the
+    # net premium (not the reserved assignment cash) into native coin after entry.
+    covered_call_csp_premium_target: str = "usdc"
     covered_call_profit_sweep_enabled: bool = False
     covered_call_profit_sweep_dust_pool_enabled: bool = True
     # Agreed cover inventory. Profit sweep must not sell below this when flat.
@@ -846,6 +849,9 @@ def load_config(
         raise ConfigurationError("COVERED_CALL_CSP_MAX_SPREAD_RATIO must be in [0, 1)")
     if covered_call_csp_min_book_notional_usdc < 0:
         raise ConfigurationError("COVERED_CALL_CSP_MIN_BOOK_NOTIONAL_USDC must be >= 0")
+    covered_call_csp_premium_target = str(_optional(values, "COVERED_CALL_CSP_PREMIUM_TARGET", "usdc")).strip().lower()
+    if covered_call_csp_premium_target not in {"usdc", "spot"}:
+        raise ConfigurationError("COVERED_CALL_CSP_PREMIUM_TARGET must be one of: usdc, spot")
     covered_call_profit_sweep_enabled = _to_bool(_optional(values, "COVERED_CALL_PROFIT_SWEEP_ENABLED", "false"))
     covered_call_profit_sweep_dust_pool_enabled = _to_bool(
         _optional(values, "COVERED_CALL_PROFIT_SWEEP_DUST_POOL_ENABLED", "true"),
@@ -1123,6 +1129,7 @@ def load_config(
         covered_call_csp_min_open_interest=covered_call_csp_min_open_interest,
         covered_call_csp_max_spread_ratio=covered_call_csp_max_spread_ratio,
         covered_call_csp_min_book_notional_usdc=covered_call_csp_min_book_notional_usdc,
+        covered_call_csp_premium_target=covered_call_csp_premium_target,
         covered_call_robust_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_ROBUST_EXIT_ENABLED", "false")),
         covered_call_robust_exit_dte=to_decimal(_optional(values, "COVERED_CALL_ROBUST_EXIT_DTE", "0.5")),
         covered_call_itm_buffer_pct=to_decimal(_optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")),
