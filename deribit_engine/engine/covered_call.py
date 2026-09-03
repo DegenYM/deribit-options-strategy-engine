@@ -1883,7 +1883,11 @@ class CoveredCallMixin:
             if not self._covered_call_book_fully_collateralized(state, summaries, ccy):
                 continue
             state.cooldown_until_ms_by_book.pop(ccy.upper(), None)
-        if not any(not self._is_covered_call_group(group) for group in self._open_groups(state)):
+        # CSP is held to assignment and must not pin portfolio cooldown.
+        if not any(
+            not self._is_covered_call_group(group) and not group.is_cash_secured_group()
+            for group in self._open_groups(state)
+        ):
             state.cooldown_until_ms = None
 
     def _clear_stale_drawdown_cooldowns(

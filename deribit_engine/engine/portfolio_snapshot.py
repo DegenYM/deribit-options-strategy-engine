@@ -179,11 +179,15 @@ class PortfolioSnapshotMixin:
         }
         crisis_open_group = bool(crisis_currencies_with_open_groups)
         crisis_derisk = self.config.hard_derisk_on_crisis_open_group and crisis_open_group
-        hard_stop_groups = (
-            [group for group in open_groups if not self._is_covered_call_group(group)]
-            if self._is_covered_call_strategy()
-            else open_groups
-        )
+        # Covered-call wheel: hold cash-secured puts to expiry for intentional
+        # assignment — do not let CSP delta/mark-loss trip portfolio hard_derisk.
+        # Covered-call groups are already managed on their own exit path.
+        hard_stop_groups = [
+            group
+            for group in open_groups
+            if not group.is_cash_secured_group()
+            and not (self._is_covered_call_strategy() and self._is_covered_call_group(group))
+        ]
         hard_stop_open_group = any(
             group.short_delta >= self._defense_delta_thresholds(group)[1]
             or group.loss_pct_of_max_loss >= self.config.hard_stop_loss_pct

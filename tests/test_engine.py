@@ -588,6 +588,55 @@ def test_covered_call_high_delta_skips_hard_derisk_and_cooldown(tmp_path):
     assert not any(action.get("action") == "cooldown_started" for action in result["actions"])
 
 
+def test_cash_secured_high_delta_skips_hard_derisk_and_cooldown(tmp_path):
+    """Wheel CSP: high put delta is intentional (assignment), not portfolio derisk."""
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="linear_usdc",
+        hard_defense_delta=Decimal("0.35"),
+        hard_stop_loss_pct=Decimal("0.45"),
+        cooldown_hours=12,
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient())
+    group = TradeGroup.from_dict(
+        {
+            "group_id": "csp-1",
+            "currency": "ETH",
+            "collateral_currency": "USDC",
+            "status": "open",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "quantity": "1",
+            "short_strike": "2400",
+            "short_instrument_name": "ETH_USDC-4SEP26-2400-P",
+            "short_label": "trial-csp-eth-1-short",
+            "short_delta": "0.48",
+            "entry_credit": "20",
+            "original_entry_credit": "20",
+            "current_debit": "18",
+            "max_loss": "300",
+            "entry_timestamp_ms": 1,
+            "expiration_timestamp_ms": 10**13,
+            "cash_secured_from_group_id": "cc-1",
+        }
+    )
+    state = StrategyState()
+    state.cooldown_until_ms = 10**15  # stale portfolio cooldown from prior CSP delta trip
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    context = engine._load_runtime()
+
+    assert context.snapshot.hard_derisk is False
+    assert not any(
+        "open_group_hard_defense_or_stop_trigger" in reason for reason in context.snapshot.halt_entry_reasons
+    )
+    result = engine.manage(live=True)
+    assert not any(action.get("action") == "cooldown_started" for action in result["actions"])
+    assert engine.state_store.load().cooldown_until_ms is None
+
+
 def test_covered_call_otm_take_profit_when_capture_exceeds_threshold(tmp_path):
     config = make_config(
         tmp_path,
