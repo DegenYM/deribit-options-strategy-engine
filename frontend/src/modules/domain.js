@@ -8,6 +8,7 @@ import {
   FETCH_JSON_NETWORK_RETRY_BASE_MS,
   FETCH_JSON_RETRYABLE_STATUS,
   FETCH_JSON_RETRY_BASE_MS,
+  FETCH_JSON_TIMEOUT_MS,
   FRONTEND_API_CONCURRENCY,
   FRONTEND_REFRESH_INTERVAL_MS,
   INVESTOR_OVERLAY_MAX_MS,
@@ -5253,8 +5254,13 @@ export async function promisePool(factories, limit) {
   await Promise.all(Array.from({ length: cap }, () => worker()));
 }
 
+export function isFetchTimeoutError(err) {
+  return Boolean(err?.isTimeout) || err?.name === "TimeoutError";
+}
+
 export function isFetchNetworkError(err) {
   if (!err) return false;
+  if (isFetchTimeoutError(err)) return false;
   if (err.name === "AbortError") return true;
   const msg = String(err.message || err).toLowerCase();
   return (
@@ -5274,6 +5280,12 @@ function isInternalServerFetchMessage(raw) {
 }
 
 export function formatFetchError(err, fallback = "Request failed") {
+  if (isFetchTimeoutError(err)) {
+    return i18n(
+      "Request timed out — try again in a moment.",
+      "請求逾時，請稍後再試。"
+    );
+  }
   if (isFetchNetworkError(err)) {
     return i18n(
       "Cannot reach dashboard server — check that the service is running.",
@@ -5305,15 +5317,55 @@ export function formatFetchError(err, fallback = "Request failed") {
   return raw;
 }
 
+function timeoutError(ms) {
+  const err = new Error(`request timed out after ${Math.round(ms / 1000)}s`);
+  err.isTimeout = true;
+  return err;
+}
+
+const CAN_TIMEOUT_SIGNAL =
+  typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function";
+
+/** Fresh timeout signal per attempt so a retry is not born already aborted. */
+function attemptTimeoutSignal(timeoutMs) {
+  if (!CAN_TIMEOUT_SIGNAL || !(timeoutMs > 0)) return null;
+  return AbortSignal.timeout(timeoutMs);
+}
+
+function mergeAbortSignals(callerSignal, timeoutSignal) {
+  if (!callerSignal) return timeoutSignal ?? undefined;
+  if (!timeoutSignal) return callerSignal;
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([callerSignal, timeoutSignal]);
+  }
+  // No AbortSignal.any: honour whichever signal is already live.
+  return callerSignal.aborted ? callerSignal : timeoutSignal;
+}
+
+/**
+ * `timeoutMs` caps each attempt and actually aborts the request (pass 0 to
+ * disable, e.g. for a deliberate background refresh). Callers may still supply
+ * their own `signal`; both are honoured.
+ */
 export async function fetchJson(url, options = {}) {
+  const { timeoutMs = FETCH_JSON_TIMEOUT_MS, ...fetchOptions } = options;
   const targetUrl = resolveApiUrl(url);
+  const callerSignal = fetchOptions.signal ?? null;
   let httpAttempt = 0;
   let networkAttempt = 0;
   while (true) {
+    const timeoutSignal = attemptTimeoutSignal(timeoutMs);
     let res;
     try {
-      res = await fetch(targetUrl, options);
+      res = await fetch(targetUrl, {
+        ...fetchOptions,
+        signal: mergeAbortSignals(callerSignal, timeoutSignal),
+      });
     } catch (err) {
+      // A timeout means the endpoint is slow, not flaky — retrying just
+      // multiplies the wait, so surface it and let the caller degrade.
+      if (timeoutSignal?.aborted) throw timeoutError(timeoutMs);
+      if (callerSignal?.aborted) throw new Error(formatFetchError(err));
       if (networkAttempt < FETCH_JSON_NETWORK_MAX_RETRIES) {
         networkAttempt += 1;
         await delay(FETCH_JSON_NETWORK_RETRY_BASE_MS * networkAttempt);
@@ -5321,7 +5373,14 @@ export async function fetchJson(url, options = {}) {
       }
       throw new Error(formatFetchError(err));
     }
-    if (res.ok) return res.json();
+    if (res.ok) {
+      try {
+        return await res.json();
+      } catch (err) {
+        if (timeoutSignal?.aborted) throw timeoutError(timeoutMs);
+        throw err;
+      }
+    }
     let detail = `${res.status} ${res.statusText}`;
     try {
       const body = await res.json();

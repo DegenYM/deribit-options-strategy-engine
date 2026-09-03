@@ -5,7 +5,7 @@ import * as domain from "./modules/domain.js";
 import * as charts from "./modules/charts.js";
 import * as render from "./modules/render.js";
 import * as refresh from "./modules/refresh.js";
-import * as investorCache from "./modules/investor-cache.js";
+import * as viewCache from "./modules/view-cache.js";
 import { initDashboardWebSocket } from "./modules/dashboard-ws.js";
 import { loadChartJs } from "./modules/chart-vendor.js";
 import { aggregateSkeletonHtml } from "./modules/domain.js";
@@ -274,10 +274,14 @@ export function initDashboard() {
     attachAutoRefresh();
     refresh.startLastRefreshTicker();
     initDashboardWebSocket({ renderDashboard });
-    if (INVESTOR) {
-      const cached = investorCache.loadInvestorCache();
-      if (cached) {
-        investorCache.hydrateFromInvestorCache(cached);
+    // Paint last session's data immediately; the freshness badge marks it as
+    // cached and refreshAll overwrites it as soon as the live data lands.
+    const cached = viewCache.loadViewCache();
+    if (cached && viewCache.hydrateFromViewCache(cached) && !INVESTOR) {
+      try {
+        renderDashboard();
+      } catch (err) {
+        console.error("cached render failed", err);
       }
     }
     refresh.refreshAll({ force: true, renderDashboard });

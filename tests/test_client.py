@@ -682,10 +682,6 @@ def test_get_user_trades_by_instrument_jsonrpc_params(tmp_path):
 
 
 def test_get_instruments_uses_process_cache(tmp_path, monkeypatch):
-    from deribit_engine.client import _INSTRUMENTS_CACHE, _INSTRUMENTS_CACHE_LOCK
-
-    with _INSTRUMENTS_CACHE_LOCK:
-        _INSTRUMENTS_CACHE.clear()
     monkeypatch.setenv("DERIBIT_INSTRUMENTS_CACHE_TTL_SEC", "300")
     rows = [{"instrument_name": "BTC-1"}]
     session = FakeSession([FakeResponse(_ok_body(rows)), FakeResponse(_ok_body([{"instrument_name": "BTC-2"}]))])

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -307,6 +308,7 @@ def _aggregate_status(
 ) -> dict[str, Any]:
     import deribit_engine.frontend_server as pkg
 
+    prefetch_started = time.monotonic()
     try:
         prefetches = pkg._prefetch_all_accounts(accounts, cache=exchange_prefetch_cache)
     except Exception as exc:  # noqa: BLE001 — local state status should still load.
@@ -318,20 +320,33 @@ def _aggregate_status(
             key = _live_api_identity(account)
             if key not in prefetches:
                 prefetches[key] = None
+    prefetch_sec = time.monotonic() - prefetch_started
     work = [account for account in accounts if _has_private_creds(account.config)]
+    per_account: dict[str, float] = {}
 
     def _fetch(account: DashboardAccount) -> tuple[DashboardAccount, dict[str, Any]]:
-        return account, _status_payload_for_account(
+        started = time.monotonic()
+        payload = _status_payload_for_account(
             account,
             exchange_prefetch_cache=exchange_prefetch_cache,
             prefetches=prefetches,
         )
+        per_account[account.name] = time.monotonic() - started
+        return account, payload
 
+    fanout_started = time.monotonic()
     if len(work) <= 1:
         pairs = [_fetch(account) for account in work]
     else:
         with ThreadPoolExecutor(max_workers=min(len(work), 4)) as pool:
             pairs = list(pool.map(_fetch, work))
+    LOGGER.info(
+        "status aggregate prefetch=%.1fs fanout=%.1fs accounts=%d [%s]",
+        prefetch_sec,
+        time.monotonic() - fanout_started,
+        len(work),
+        " ".join(f"{name}={sec:.1f}s" for name, sec in sorted(per_account.items())),
+    )
 
     payload_by_name = {account.name: payload for account, payload in pairs}
     statuses: list[dict[str, Any]] = []

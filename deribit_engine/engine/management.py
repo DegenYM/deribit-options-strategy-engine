@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from ..exceptions import TransientExchangeError
@@ -255,9 +256,20 @@ class ManagementMixin(
         dashboard_display: bool = False,
         live: bool = False,
     ) -> tuple[RuntimeContext, bool]:
+        _phase_started = time.monotonic()
+        _phases: dict[str, float] = {}
+
+        def _mark(name: str) -> None:
+            nonlocal _phase_started
+            now = time.monotonic()
+            _phases[name] = now - _phase_started
+            _phase_started = now
+
         state = self.state_store.load()
+        _mark("state_load")
         if self._repair_reconciled_bot_income_exits_in_state(state) and not dashboard_display:
             self.state_store.save(state)
+        _mark("state_repair")
         if prefetch is not None:
             summaries = prefetch.summaries
             open_orders = prefetch.open_orders
@@ -276,6 +288,7 @@ class ManagementMixin(
             markets_by_currency = {currency: [] for currency in self.config.managed_currencies}
         orderbook_cache: dict[str, OrderBookSnapshot] = {}
         state = self._reset_daily_state(state, summaries)
+        _mark("daily_reset")
         if not dashboard_display:
             # Refresh external cash-flow (deposit / withdrawal / transfer) tallies
             # from Deribit's transaction log so drawdown is measured against
@@ -288,6 +301,17 @@ class ManagementMixin(
             markets_by_currency=markets_by_currency,
             live=live,
         )
+        _mark("reconcile")
+        # The regime liquidity probe walks every strike in the entry DTE window
+        # and used to pay one order-book call each (~216 sequential calls for
+        # BTC+ETH), which dominated status rebuilds. Seed a *private* cache from
+        # one batch book summary per currency so no-bid strikes resolve without
+        # a round trip. The cache is private on purpose: a bid=0 summary
+        # snapshot is behavior-preserving for the `best_bid<=0` liquidity gate,
+        # but must not become the mark for an open position in _refresh_group.
+        regime_orderbook_cache: dict[str, OrderBookSnapshot] = dict(orderbook_cache)
+        self._prefetch_scan_book_summaries(markets_by_currency, regime_orderbook_cache, force=dashboard_display)
+        _mark("regime_book_summaries")
         regime_by_currency: dict[str, RiskRegime] = {}
         regime_detail_by_currency: dict[str, tuple[str, ...]] = {}
         for currency in self.config.managed_currencies:
@@ -298,7 +322,8 @@ class ManagementMixin(
                 regime, detail = self._determine_regime_with_detail(
                     currency,
                     markets=markets,
-                    orderbook_cache=orderbook_cache,
+                    orderbook_cache=regime_orderbook_cache,
+                    cache_liquidity=True,
                 )
             elif dashboard_display:
                 regime, detail = self._determine_regime_for_dashboard(currency)
@@ -306,11 +331,14 @@ class ManagementMixin(
                 regime, detail = self._determine_regime_with_detail(
                     currency,
                     markets=markets,
-                    orderbook_cache=orderbook_cache,
+                    orderbook_cache=regime_orderbook_cache,
+                    cache_liquidity=True,
                 )
             regime_by_currency[currency] = regime
             regime_detail_by_currency[currency] = tuple(detail)
+        _mark("regime")
         self._refresh_vol_entry_context()
+        _mark("vol_context")
         self._update_recovery_counts(state, regime_by_currency)
         for group in self._open_groups(state):
             try:
@@ -323,6 +351,7 @@ class ManagementMixin(
                     exc,
                 )
                 group.last_action = "refresh_failed"
+        _mark("refresh_groups")
         if self._is_covered_call_strategy():
             self._clear_covered_call_book_cooldowns(state, summaries)
         snapshot = self._build_portfolio_snapshot(
@@ -334,8 +363,18 @@ class ManagementMixin(
             orderbook_cache=orderbook_cache,
             markets_by_currency=markets_by_currency,
         )
+        _mark("portfolio_snapshot")
         if not dashboard_display:
             self._prefetch_scan_book_summaries(markets_by_currency, orderbook_cache)
+            _mark("scan_book_summaries")
+        _total = sum(_phases.values())
+        if _total > 5.0:
+            LOGGER.info(
+                "runtime load slow strategy=%s total=%.1fs %s",
+                getattr(self.config, "option_strategy", "?"),
+                _total,
+                " ".join(f"{k}={v:.1f}s" for k, v in _phases.items() if v >= 0.1),
+            )
         return (
             RuntimeContext(
                 state=state,

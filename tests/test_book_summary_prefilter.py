@@ -52,6 +52,8 @@ def test_prefetch_seeds_no_bid_strikes_only(tmp_path):
 
 
 def test_prefetch_disabled_by_default(tmp_path):
+    """Opt-in: the whole-chain summary is a heavy endpoint, and every investor
+    on this host shares one IP for public rate limits."""
     client = _SummaryClient({"BTC": [_NOBID_ROW]})
     engine = DeribitOptionTrialBot(make_config(tmp_path), client)
     cache = {}
@@ -59,6 +61,18 @@ def test_prefetch_disabled_by_default(tmp_path):
     engine._prefetch_scan_book_summaries({"BTC": [object()]}, cache)
 
     assert cache == {}
+
+
+def test_prefetch_force_overrides_the_flag(tmp_path):
+    """force=True is for callers where the batch summary *replaces*
+    per-instrument fetches (the dashboard regime probe)."""
+    client = _SummaryClient({"BTC": [_NOBID_ROW]})
+    engine = DeribitOptionTrialBot(make_config(tmp_path), client)
+    cache = {}
+
+    engine._prefetch_scan_book_summaries({"BTC": [object()]}, cache, force=True)
+
+    assert "BTC-NOBID" in cache
 
 
 def test_prefetch_skips_currency_without_markets(tmp_path):
@@ -81,3 +95,51 @@ def test_seeded_no_bid_skips_order_book_fetch(tmp_path):
 
     assert book.best_bid_price == Decimal("0")
     assert client.order_book_calls == []
+
+
+def _closed_covered_call_group(index: int):
+    from deribit_engine.models import TradeGroup
+
+    return TradeGroup.from_dict(
+        {
+            "group_id": f"g{index}",
+            "currency": "BTC",
+            "short_instrument_name": "BTC-28MAR25-90000-C",
+            "short_label": f"cc-{index}",
+            "status": "closed",
+            "strategy": "covered_call",
+            "option_type": "call",
+            "collateral_currency": "BTC",
+            "quantity": "0.1",
+            "entry_timestamp_ms": 1,
+            "expiration_timestamp_ms": 2,
+            "short_strike": "90000",
+            "entry_credit": "30",
+            "original_entry_credit": "30",
+            "max_loss": "1000",
+            "regime_at_entry": "normal",
+        }
+    )
+
+
+def test_state_repair_batches_currency_trade_lookups(tmp_path):
+    """The closed-group repair pass must batch its exchange lookups: one fetch
+    per currency, not one per closed group."""
+    client = _SummaryClient({})
+    calls: list[str] = []
+
+    def fake_user_trades(currency, *, kind="spot", count=100, historical=True):
+        calls.append(currency)
+        return {"trades": []}
+
+    client.get_user_trades_by_currency = fake_user_trades
+    engine = DeribitOptionTrialBot(
+        make_config(tmp_path, option_strategy="covered_call", order_label_prefix="cc"),
+        client,
+    )
+    state = engine.state_store.load()
+    state.groups = [_closed_covered_call_group(i) for i in range(8)]
+
+    engine._repair_reconciled_bot_income_exits_in_state(state)
+
+    assert calls.count("BTC") <= 1, f"expected one batched fetch, got {len(calls)}"

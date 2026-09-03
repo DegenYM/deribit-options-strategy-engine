@@ -12,6 +12,7 @@ from typing import Any
 
 import requests
 
+from . import public_cache
 from .config import BotConfig
 from .exceptions import AuthenticationError, ExchangeError, TransientExchangeError
 from .exchange_throttle import note_rate_limited, note_success, pace_exchange_request
@@ -27,11 +28,6 @@ class _CachedAuthTokens:
 
 _AUTH_TOKEN_CACHE: dict[str, _CachedAuthTokens] = {}
 _AUTH_CACHE_LOCK = threading.Lock()
-_INSTRUMENTS_CACHE: dict[tuple[str, str, bool], tuple[float, list[dict[str, Any]]]] = {}
-_INSTRUMENTS_CACHE_LOCK = threading.Lock()
-_ORDER_BOOK_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
-_ORDER_BOOK_CACHE_LOCK = threading.Lock()
-
 # Short-TTL cache for public, read-only macro feeds (index price / chart / DVOL).
 # These are queried many times per cycle (e.g. ``_currency_index_price`` is hit
 # 20+ times) and are identical for all clients, so a process-global TTL cache
@@ -68,13 +64,23 @@ def _index_price_cache_ttl_seconds() -> float:
     return _env_float("DERIBIT_INDEX_PRICE_CACHE_TTL_SEC", 5.0)
 
 
+def _book_summary_cache_ttl_seconds() -> float:
+    # Whole-chain quote summary: one heavy response shared by every investor.
+    return _env_float("DERIBIT_BOOK_SUMMARY_CACHE_TTL_SEC", 15.0)
+
+
 def _macro_cache_ttl_seconds() -> float:
     # Index chart / DVOL are daily-resolution series; a longer window is safe.
     return _env_float("DERIBIT_MACRO_CACHE_TTL_SEC", 60.0)
 
 
 def _cached_public_read(key: str, ttl: float, loader: Callable[[], Any]) -> Any:
-    """Return a TTL-cached public read, deep-ish copying mutable payloads."""
+    """TTL-cached public read: per-process dict in front, shared store behind.
+
+    Deribit meters public reads per IP and every investor process on this host
+    asks for identical data, so the shared tier turns N duplicate fetches into
+    one. Both tiers are skipped when ``ttl <= 0``.
+    """
     if ttl <= 0:
         return loader()
     now = time.monotonic()
@@ -82,9 +88,15 @@ def _cached_public_read(key: str, ttl: float, loader: Callable[[], Any]) -> Any:
         cached = _PUBLIC_READ_CACHE.get(key)
         if cached is not None and (now - cached[0]) < ttl:
             return _copy_cached(cached[1])
+    hit, shared = public_cache.read(key, ttl)
+    if hit:
+        with _PUBLIC_READ_CACHE_LOCK:
+            _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(shared))
+        return _copy_cached(shared)
     value = loader()
     with _PUBLIC_READ_CACHE_LOCK:
         _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(value))
+    public_cache.write(key, value)
     return value
 
 
@@ -100,8 +112,6 @@ def reset_public_read_cache() -> None:
     """Clear process-global read caches (intended for tests)."""
     with _PUBLIC_READ_CACHE_LOCK:
         _PUBLIC_READ_CACHE.clear()
-    with _ORDER_BOOK_CACHE_LOCK:
-        _ORDER_BOOK_CACHE.clear()
 
 
 class DeribitClient:
@@ -634,23 +644,15 @@ class DeribitClient:
         return self._request("public/test")
 
     def get_instruments(self, currency: str, *, kind: str = "option", expired: bool = False) -> list[dict[str, Any]]:
-        key = (currency.upper(), str(kind), bool(expired))
-        ttl = _instruments_cache_ttl_seconds()
-        if ttl > 0:
-            now = time.monotonic()
-            with _INSTRUMENTS_CACHE_LOCK:
-                cached = _INSTRUMENTS_CACHE.get(key)
-                if cached is not None and (now - cached[0]) < ttl:
-                    return list(cached[1])
-        result = self._request(
-            "public/get_instruments",
-            params={"currency": currency.upper(), "kind": kind, "expired": expired},
-        )
-        rows = result or []
-        if ttl > 0:
-            with _INSTRUMENTS_CACHE_LOCK:
-                _INSTRUMENTS_CACHE[key] = (time.monotonic(), list(rows))
-        return rows
+        def _load() -> list[dict[str, Any]]:
+            result = self._request(
+                "public/get_instruments",
+                params={"currency": currency.upper(), "kind": kind, "expired": expired},
+            )
+            return result or []
+
+        key = f"instruments:{currency.upper()}:{kind}:{int(bool(expired))}"
+        return _cached_public_read(key, _instruments_cache_ttl_seconds(), _load)
 
     def get_instrument(self, instrument_name: str) -> dict[str, Any]:
         return (
@@ -686,25 +688,17 @@ class DeribitClient:
         return result or {}
 
     def get_order_book(self, instrument_name: str, *, depth: int = 1) -> dict[str, Any]:
-        key = (instrument_name, int(depth))
-        ttl = _order_book_cache_ttl_seconds()
-        if ttl > 0:
-            now = time.monotonic()
-            with _ORDER_BOOK_CACHE_LOCK:
-                cached = _ORDER_BOOK_CACHE.get(key)
-                if cached is not None and (now - cached[0]) < ttl:
-                    return dict(cached[1])
-        result = (
-            self._request(
-                "public/get_order_book",
-                params={"instrument_name": instrument_name, "depth": depth},
+        def _load() -> dict[str, Any]:
+            return (
+                self._request(
+                    "public/get_order_book",
+                    params={"instrument_name": instrument_name, "depth": depth},
+                )
+                or {}
             )
-            or {}
-        )
-        if ttl > 0 and result:
-            with _ORDER_BOOK_CACHE_LOCK:
-                _ORDER_BOOK_CACHE[key] = (time.monotonic(), dict(result))
-        return result
+
+        key = f"order_book:{instrument_name}:{int(depth)}"
+        return _cached_public_read(key, _order_book_cache_ttl_seconds(), _load)
 
     def get_book_summary_by_currency(self, currency: str, *, kind: str = "option") -> list[dict[str, Any]]:
         """Per-instrument quote summary (bid/ask/mark/underlying/OI) for a whole currency in one call.
@@ -712,13 +706,18 @@ class DeribitClient:
         Lacks order-book depth amounts and greeks, so it is only a liquidity
         prefilter, not a replacement for ``get_order_book``.
         """
-        return (
-            self._request(
-                "public/get_book_summary_by_currency",
-                params={"currency": currency.upper(), "kind": kind},
+
+        def _load() -> list[dict[str, Any]]:
+            return (
+                self._request(
+                    "public/get_book_summary_by_currency",
+                    params={"currency": currency.upper(), "kind": kind},
+                )
+                or []
             )
-            or []
-        )
+
+        key = f"book_summary:{currency.upper()}:{kind}"
+        return _cached_public_read(key, _book_summary_cache_ttl_seconds(), _load)
 
     def get_index_price(self, index_name: str) -> dict[str, Any]:
         def _load() -> dict[str, Any]:

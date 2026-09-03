@@ -4,6 +4,7 @@ import copy
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
@@ -387,18 +388,26 @@ def build_runtime_setup(
         need_groups = "groups" in selected
         need_summary = "realized_summary" in selected
         payload: dict[str, Any] = {}
+        timings: dict[str, float] = {}
+        wait_started = time.monotonic()
 
         with heavy_portfolio_lock:
+            timings["lock_wait"] = time.monotonic() - wait_started
             status: dict[str, Any] | None = None
             if need_status:
+                phase = time.monotonic()
                 status = attach_cached_premium_sweep_fill_stats(
                     pkg._aggregate_status(accounts, exchange_prefetch_cache=exchange_prefetch_cache),
                     fill_stats_cache,
                 )
                 payload["status"] = status
+                timings["status"] = time.monotonic() - phase
             if need_groups:
+                phase = time.monotonic()
                 payload["groups"] = pkg._aggregate_groups(accounts, exchange_prefetch_cache=exchange_prefetch_cache)
+                timings["groups"] = time.monotonic() - phase
             if need_summary:
+                phase = time.monotonic()
                 status_for_summary = status if status is not None else status_cache.try_get("status")
                 spot_idx: dict[str, Decimal] = {}
                 try:
@@ -412,6 +421,13 @@ def build_runtime_setup(
                     status_payload=status_for_summary,
                     effective_capital_override=override,
                 )
+                timings["realized_summary"] = time.monotonic() - phase
+        LOGGER.info(
+            "dashboard bundle compute sections=%s %s total=%.1fs",
+            ",".join(sorted(selected)),
+            " ".join(f"{k}={v:.1f}s" for k, v in timings.items()),
+            time.monotonic() - wait_started,
+        )
         return payload
 
     ws_hub: DashboardWsHub | None = None
@@ -452,18 +468,31 @@ def build_runtime_setup(
 
         if not _has_any_private_creds():
             return
+        warm_started = time.monotonic()
+        prefetch_started = warm_started
         try:
             pkg._force_refresh_prefetch_all(accounts, cache=exchange_prefetch_cache)
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("bundle warm prefetch refresh failed: %s", exc)
+        prefetch_sec = time.monotonic() - prefetch_started
         days = 30
         override: Decimal | None = None
         ledger_key = _ledger_equity_cache_key(accounts)
         closed_key = _closed_groups_cache_key(accounts)
-        for sections in (
-            frozenset({"status", "groups"}),
-            frozenset({"status", "groups", "realized_summary"}),
-        ):
+        # Compute the superset once. The two warmed cache keys differ only by
+        # whether realized_summary is included, and a subset compute produces
+        # byte-identical status/groups — so warming them separately paid for a
+        # second full _aggregate_status (the dominant cost) for nothing.
+        full_sections = frozenset({"status", "groups", "realized_summary"})
+        payload = _locked_compute_dashboard_bundle(days=days, override=override, sections=full_sections)
+        _seed_bundle_component_caches(
+            status=payload.get("status"),
+            groups=payload.get("groups"),
+            summary=payload.get("realized_summary"),
+            days=days,
+            override=override,
+        )
+        for sections in (frozenset({"status", "groups"}), full_sections):
             cache_key = (
                 "dashboard_bundle",
                 days,
@@ -472,35 +501,31 @@ def build_runtime_setup(
                 closed_key,
                 ",".join(sorted(sections)),
             )
-            payload = _locked_compute_dashboard_bundle(days=days, override=override, sections=sections)
-            _seed_bundle_component_caches(
+            bundle_cache.seed(
+                cache_key,
+                {key: value for key, value in payload.items() if key in sections},
+            )
+        if ws_hub is not None:
+            ws_hub.notify_live_warm(
                 status=payload.get("status"),
                 groups=payload.get("groups"),
-                summary=payload.get("realized_summary"),
-                days=days,
-                override=override,
             )
-            bundle_cache.seed(cache_key, payload)
-            if ws_hub is not None:
-                ws_hub.notify_live_warm(
-                    status=payload.get("status"),
-                    groups=payload.get("groups"),
+        if portal_service is not None and investor_portal and payload.get("status") and payload.get("groups"):
+            try:
+                _capture_portal_live_snapshot(
+                    status=payload["status"],
+                    groups=payload["groups"],
+                    realized_summary=payload.get("realized_summary") or {},
                 )
-            if (
-                portal_service is not None
-                and investor_portal
-                and "realized_summary" in sections
-                and payload.get("status")
-                and payload.get("groups")
-            ):
-                try:
-                    _capture_portal_live_snapshot(
-                        status=payload["status"],
-                        groups=payload["groups"],
-                        realized_summary=payload.get("realized_summary") or {},
-                    )
-                except Exception as exc:  # noqa: BLE001 — live snapshot capture is best-effort.
-                    LOGGER.debug("portal live snapshot skipped: %s", exc)
+            except Exception as exc:  # noqa: BLE001 — live snapshot capture is best-effort.
+                LOGGER.debug("portal live snapshot skipped: %s", exc)
+        # A cycle longer than the scheduler interval means the heavy portfolio
+        # lock is held almost continuously and on-demand requests will starve.
+        LOGGER.info(
+            "bundle warm cycle done prefetch=%.1fs total=%.1fs",
+            prefetch_sec,
+            time.monotonic() - warm_started,
+        )
 
     def _finalize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         out = copy.deepcopy(payload)

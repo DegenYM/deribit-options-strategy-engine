@@ -15,6 +15,25 @@ from deribit_engine.book import Book
 from deribit_engine.config import BotConfig
 
 
+@pytest.fixture(autouse=True)
+def _isolate_public_read_cache(tmp_path, monkeypatch):
+    """Keep tests off the host-wide public-read store.
+
+    That store is shared by every investor process on the machine, so a test
+    must neither read production entries (which would satisfy calls the test
+    expects to hit the network) nor write into it.
+    """
+    import deribit_engine.client as client_module
+    from deribit_engine import public_cache
+
+    monkeypatch.setenv("DERIBIT_PUBLIC_CACHE_PATH", str(tmp_path / "public_read_cache.db"))
+    public_cache.reset_for_tests()
+    client_module.reset_public_read_cache()
+    yield
+    public_cache.reset_for_tests()
+    client_module.reset_public_read_cache()
+
+
 def future_expiry(days: int) -> int:
     return int((datetime.now(tz=UTC) + timedelta(days=days)).timestamp() * 1000)
 

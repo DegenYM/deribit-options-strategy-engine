@@ -10,6 +10,8 @@ import {
   FRONTEND_REFRESH_INTERVAL_MS,
   INVESTOR_OVERLAY_MAX_MS,
   INVESTOR_STATUS_TIMEOUT_MS,
+  CHART_SERIES_TIMEOUT_MS,
+  DASHBOARD_BUNDLE_TIMEOUT_MS,
   USE_DASHBOARD_BUNDLE,
   DASHBOARD_WS_MARKET_SKIP_REST_MS,
   DASHBOARD_WS_PORTFOLIO_SKIP_REST_MS,
@@ -17,8 +19,8 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { applyDashboardBundlePayload, clearDeribitMaintenance, dashboardBundleUrl, delay, fetchJson, formatFetchError, isInvestorOverviewDisplayReady, mergeStatusPayload, noteDeribitMaintenance, num, premiumSweepFillStatsByBook, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, transfersUrl, updateUnderlyingIndexCache, applyDiskGroupsPayload } from "./domain.js";
-import { saveInvestorCache } from "./investor-cache.js";
+import { applyDashboardBundlePayload, clearDeribitMaintenance, dashboardBundleUrl, delay, fetchJson, formatFetchError, isFetchTimeoutError, isInvestorOverviewDisplayReady, mergeStatusPayload, noteDeribitMaintenance, num, premiumSweepFillStatsByBook, promisePool, realizedSummaryUrl, setRefreshControlsDisabled, setRefreshProgressBar, setText, showToast, transfersUrl, updateUnderlyingIndexCache, applyDiskGroupsPayload } from "./domain.js";
+import { saveViewCache } from "./view-cache.js";
 import { loadChartJs } from "./chart-vendor.js";
 import { formatDateTimeHmsLocal } from "./date-time.js";
 import { aprSeriesUrl, renderAprChart, renderCumulativeSpotPnlChart, renderCumulativePnlChart, renderDailyPnlChart, scheduleChartResizeAll } from "./charts.js";
@@ -591,14 +593,9 @@ export async function fetchPortfolioSnapshot() {
 }
 
 export async function fetchStatusWithTimeout() {
-  const timeoutMs = INVESTOR_STATUS_TIMEOUT_MS;
   let timedOut = false;
-  const timeoutPromise = delay(timeoutMs).then(() => {
-    timedOut = true;
-    throw new Error("status timeout");
-  });
   try {
-    const d = await Promise.race([fetchJson("/api/status"), timeoutPromise]);
+    const d = await fetchJson("/api/status", { timeoutMs: INVESTOR_STATUS_TIMEOUT_MS });
     STATE.status = mergeStatusPayload(STATE.status, d);
     STATE.statusErrorOnce = false;
     clearDeribitMaintenance();
@@ -607,6 +604,7 @@ export async function fetchStatusWithTimeout() {
     STATE.dataFreshness.statusMs = 0;
     return d;
   } catch (err) {
+    timedOut = isFetchTimeoutError(err);
     if (noteDeribitMaintenance(err)) {
       if (INVESTOR && !STATE.investorReady) {
         setInvestorPageReady(true);
@@ -630,7 +628,7 @@ export async function fetchStatusWithTimeout() {
         );
         STATE.statusErrorOnce = true;
       }
-      fetchJson("/api/status")
+      fetchJson("/api/status", { timeoutMs: 0 })
         .then((d) => {
           STATE.status = mergeStatusPayload(STATE.status, d);
           clearDeribitMaintenance();
@@ -657,23 +655,22 @@ export async function fetchStatusWithTimeout() {
   }
 }
 
+/** @returns {Promise<"ok" | "timeout" | "error">} */
 export async function fetchDashboardBundle({ backgroundOnTimeout = false, sections = null } = {}) {
-  const timeoutMs = INVESTOR_STATUS_TIMEOUT_MS;
-  let timedOut = false;
-  const bundleRequest = fetchJson(dashboardBundleUrl(30, { sections }));
-  const raced = INVESTOR
-    ? Promise.race([
-        bundleRequest,
-        delay(timeoutMs).then(() => {
-          timedOut = true;
-          throw new Error("dashboard bundle timeout");
-        }),
-      ])
-    : bundleRequest;
+  const url = dashboardBundleUrl(30, { sections });
   try {
-    applyDashboardBundlePayload(await raced);
-    return true;
+    applyDashboardBundlePayload(
+      await fetchJson(url, { timeoutMs: DASHBOARD_BUNDLE_TIMEOUT_MS })
+    );
+    return "ok";
   } catch (err) {
+    const timedOut = isFetchTimeoutError(err);
+    if (!INVESTOR && timedOut) {
+      // The per-endpoint fallback (/api/status + /api/groups) is far cheaper
+      // than the bundle, so degrade quietly instead of alarming the operator.
+      console.warn("[dashboard] bundle timed out; falling back to per-endpoint fetches");
+      return "timeout";
+    }
     if (INVESTOR && timedOut && STATE.portfolioSnapshot?.portfolio) {
       if (!STATE.statusErrorOnce) {
         showToast(
@@ -685,29 +682,26 @@ export async function fetchDashboardBundle({ backgroundOnTimeout = false, sectio
         STATE.statusErrorOnce = true;
       }
       if (backgroundOnTimeout) {
-        fetchJson(dashboardBundleUrl(30, { sections }))
+        fetchJson(url, { timeoutMs: 0 })
           .then((d) => {
             applyDashboardBundlePayload(d);
             invokeRenderDashboard();
           })
           .catch(() => {});
       }
-      return false;
+      return "timeout";
     }
     if (!INVESTOR || !timedOut) {
       showRefreshFetchToast(i18n("dashboard bundle", "Dashboard 資料"), err, {
         hasCachedData: Boolean(STATE.status || STATE.groups?.open?.length || STATE.groups?.closed?.length),
       });
     }
-    return false;
+    return timedOut ? "timeout" : "error";
   }
 }
 
 async function fetchChartSeries(investorFetchWrap = null) {
-  const chartFetchOpts =
-    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-      ? { signal: AbortSignal.timeout(INVESTOR_STATUS_TIMEOUT_MS) }
-      : {};
+  const chartFetchOpts = { timeoutMs: CHART_SERIES_TIMEOUT_MS };
 
   const fetchCumulative = () =>
     fetchJson("/api/cumulative_pnl_series", chartFetchOpts)
@@ -1070,6 +1064,12 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
           STATE.status = mergeStatusPayload(STATE.status, d);
           STATE.statusErrorOnce = false;
           clearDeribitMaintenance();
+          // Without this the freshness badge stays on "last visit" after a
+          // cache-hydrated boot falls back to the per-endpoint path.
+          STATE.dataFreshness.source = "live";
+          STATE.dataFreshness.live = true;
+          STATE.dataFreshness.statusMs = 0;
+          STATE.groupsLivePending = false;
           scheduleRender();
         })
         .catch((err) => {
@@ -1084,7 +1084,9 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
             }
             return;
           }
-          STATE.status = null;
+          // Blanking a rendered dashboard because one slow poll timed out is
+          // worse than leaving the previous marks up behind a stale badge.
+          if (!isFetchTimeoutError(err) || !STATE.status) STATE.status = null;
           if (!STATE.statusErrorOnce) {
             showToast(`${i18n("status", "即時狀態")}: ${formatFetchError(err)}`, {
               retry: () => refreshAll({ force: true, renderDashboard: persistentRenderDashboard }),
@@ -1150,7 +1152,7 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
           if (INVESTOR && investorFirstLoad) {
             fetchDashboardBundle({ sections: "status,groups", backgroundOnTimeout: true })
               .then((liveOk) => {
-                if (liveOk) {
+                if (liveOk === "ok") {
                   advanceInvestorLoad("groups");
                   advanceInvestorLoad("status");
                 }
@@ -1159,8 +1161,8 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
               .catch(() => {});
             return;
           }
-          const liveOk = await fetchDashboardBundle({ sections: "status,groups" });
-          if (liveOk) {
+          const staged = await fetchDashboardBundle({ sections: "status,groups" });
+          if (staged === "ok") {
             if (investorFirstLoad) {
               advanceInvestorLoad("groups");
               advanceInvestorLoad("status");
@@ -1168,9 +1170,15 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
             scheduleRender();
             return;
           }
+          if (staged === "timeout") {
+            // The full bundle takes the same lock and does strictly more work,
+            // so a second attempt only doubles the wait before we degrade.
+            await fetchPortfolioDataIndividual();
+            return;
+          }
         }
         const ok = await fetchDashboardBundle({ backgroundOnTimeout: INVESTOR });
-        if (ok) {
+        if (ok === "ok") {
           if (investorFirstLoad) {
             advanceInvestorLoad("groups");
             advanceInvestorLoad("status");
@@ -1242,8 +1250,10 @@ export async function refreshAll({ force = false, silentIfLimited = false, rende
           if (!STATE.investorReady) setInvestorPageReady(true);
         });
       }
-      saveInvestorCache();
+      saveViewCache();
       invokeRenderDashboard();
+    } else {
+      saveViewCache();
     }
   }
 }

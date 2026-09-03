@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from ..engine import DeribitOptionTrialBot, ExchangePrefetch
 from .helpers import _has_private_creds, _live_api_identity
 from .types import DashboardAccount, _TtlCache
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _bot_for_account(account: DashboardAccount, *, require_private: bool) -> DeribitOptionTrialBot:
@@ -81,11 +85,25 @@ def _status_payload_for_account(
 ) -> dict[str, Any]:
     import deribit_engine.frontend_server as pkg
 
+    started = time.monotonic()
     bot = pkg._bot_for_account(account, require_private=True)
+    bot_sec = time.monotonic() - started
     if prefetches is not None:
         prefetch = prefetches.get(_live_api_identity(account))
     else:
         prefetch = _exchange_prefetch_for_account(account, cache=exchange_prefetch_cache)
+    status_started = time.monotonic()
     if prefetch is not None:
-        return bot.status_with_exchange_prefetch(prefetch, dashboard_display=True)
-    return bot.status()
+        payload = bot.status_with_exchange_prefetch(prefetch, dashboard_display=True)
+    else:
+        payload = bot.status()
+    total = time.monotonic() - started
+    if total > 5.0:
+        LOGGER.info(
+            "account status slow account=%s total=%.1fs bot_init=%.1fs status=%.1fs",
+            account.name,
+            total,
+            bot_sec,
+            time.monotonic() - status_started,
+        )
+    return payload

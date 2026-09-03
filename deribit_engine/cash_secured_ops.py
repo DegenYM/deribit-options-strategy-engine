@@ -125,7 +125,8 @@ def itm_sold_ready_for_cash_secured(group: TradeGroup) -> tuple[bool, str]:
     if status_csp == "entered":
         return False, "already_entered"
     if status_csp == "skipped":
-        if str(group.cash_secured_reason or "").lower() != "operator_cancelled":
+        reason = str(group.cash_secured_reason or "").lower()
+        if reason not in {"operator_cancelled", "ioc_unfilled"}:
             return False, "already_skipped"
     if status_csp == "submitted":
         return False, "already_submitted"

@@ -1,4 +1,5 @@
 import { INVESTOR, INVESTOR_LOCALE, resolveApiUrl } from "../shared/context.js";
+import { DASHBOARD_CACHE_MAX_AGE_MS } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
 import { isPortfolioBreakdownConsistent, applyDiskGroupsPayload } from "./domain.js";
 
@@ -32,10 +33,22 @@ function storageKey() {
   const base =
     resolveApiUrl("/").replace(/\/$/, "") ||
     (typeof location !== "undefined" ? location.origin : "");
-  return `inv-dash:v${CACHE_VERSION}:${base}:${INVESTOR_LOCALE}`;
+  const scope = INVESTOR ? "inv-dash" : "ops-dash";
+  return `${scope}:v${CACHE_VERSION}:${base}:${INVESTOR_LOCALE}`;
 }
 
-export function isInvestorCacheComplete(payload) {
+/**
+ * The operator dashboard paints from status + groups, and unlike the investor
+ * portal it has no blocking overlay to protect — so it only needs those two to
+ * be worth hydrating. Staleness is surfaced by the freshness badge.
+ */
+function isDashboardCacheComplete(payload) {
+  if (!payload) return false;
+  const hasGroups = Array.isArray(payload.groups?.closed) && Array.isArray(payload.groups?.open);
+  return Boolean(payload.status && hasGroups);
+}
+
+function isInvestorCacheComplete(payload) {
   if (!payload) return false;
   const hasPortfolio =
     (payload.portfolioSnapshot?.source === "ledger" ||
@@ -64,36 +77,42 @@ function pickCacheFields(state) {
   };
 }
 
-export function loadInvestorCache() {
-  if (!INVESTOR) return null;
+export function isViewCacheComplete(payload) {
+  return INVESTOR ? isInvestorCacheComplete(payload) : isDashboardCacheComplete(payload);
+}
+
+export function loadViewCache() {
   try {
     const raw = window.localStorage.getItem(storageKey());
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed.savedAt !== "number") return null;
-    if (!isInvestorCacheComplete(parsed)) return null;
+    // Beyond the max age a hydrated view is more misleading than useful.
+    if (!INVESTOR && Date.now() - parsed.savedAt > DASHBOARD_CACHE_MAX_AGE_MS) return null;
+    if (!isViewCacheComplete(parsed)) return null;
     return parsed;
   } catch {
     return null;
   }
 }
 
-export function saveInvestorCache(state = STATE) {
-  if (!INVESTOR || !isInvestorCacheComplete({ portfolioSnapshot: state.portfolioSnapshot, report: state.report })) {
-    return;
-  }
+export function saveViewCache(state = STATE) {
+  // Check the payload we are about to store, not a partial probe of it — the
+  // completeness rules inspect `groups`, which a probe used to omit.
+  const payload = pickCacheFields(state);
+  if (!isViewCacheComplete(payload)) return;
   try {
-    window.localStorage.setItem(storageKey(), JSON.stringify(pickCacheFields(state)));
+    window.localStorage.setItem(storageKey(), JSON.stringify(payload));
   } catch {
     /* quota / private mode */
   }
 }
 
-export function hydrateFromInvestorCache(cached) {
-  if (!cached || !isInvestorCacheComplete(cached)) return false;
+export function hydrateFromViewCache(cached) {
+  if (!cached || !isViewCacheComplete(cached)) return false;
 
-  STATE.portfolioSnapshot = cached.portfolioSnapshot;
-  STATE.report = cached.report;
+  if (cached.portfolioSnapshot) STATE.portfolioSnapshot = cached.portfolioSnapshot;
+  if (cached.report) STATE.report = cached.report;
   STATE.status = cached.status;
   STATE.groups = cached.groups;
   if (cached.health) STATE.health = cached.health;
@@ -132,8 +151,7 @@ export function hydrateFromInvestorCache(cached) {
   return true;
 }
 
-export function clearInvestorCache() {
-  if (!INVESTOR) return;
+export function clearViewCache() {
   try {
     window.localStorage.removeItem(storageKey());
   } catch {

@@ -15,6 +15,17 @@ def register_static_routes(
     from fastapi.responses import FileResponse, RedirectResponse, Response
     from fastapi.staticfiles import StaticFiles
 
+    def _bundle_cache_headers(version: str | None) -> dict[str, str]:
+        """Long-cache hash-stamped bundle URLs; revalidate unversioned ones.
+
+        build.mjs stamps every ``<script src>`` with a hash of the file, so a
+        ``?v=`` request can never go stale — serving it ``no-cache`` only buys a
+        wasted revalidation round-trip on every page load.
+        """
+        if version:
+            return {"Cache-Control": "public, max-age=31536000, immutable"}
+        return {"Cache-Control": "no-cache, must-revalidate"}
+
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon_ico() -> Any:
         """Serve SVG at /favicon.ico so tab requests stop logging 404."""
@@ -32,26 +43,25 @@ def register_static_routes(
     if frontend_dir.is_dir():
 
         @app.get("/app.js", include_in_schema=False)
-        def app_js() -> Any:
-            """Always serve fresh app.js (investor portal caches aggressively via CDN)."""
+        def app_js(v: str | None = None) -> Any:
             path = frontend_dir / "app.js"
             if not path.is_file():
                 raise HTTPException(status_code=404, detail="app.js not found")
             return FileResponse(
                 path,
                 media_type="application/javascript",
-                headers={"Cache-Control": "no-cache, must-revalidate"},
+                headers=_bundle_cache_headers(v),
             )
 
         @app.get("/app-investor.js", include_in_schema=False)
-        def app_investor_js() -> Any:
+        def app_investor_js(v: str | None = None) -> Any:
             path = frontend_dir / "app-investor.js"
             if not path.is_file():
                 raise HTTPException(status_code=404, detail="app-investor.js not found")
             return FileResponse(
                 path,
                 media_type="application/javascript",
-                headers={"Cache-Control": "no-cache, must-revalidate"},
+                headers=_bundle_cache_headers(v),
             )
 
         for html_name in ("index.html", "investor.html", "investor.zh.html"):

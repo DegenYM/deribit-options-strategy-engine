@@ -113,6 +113,17 @@ def test_app_js_stays_no_cache(dashboard_client: TestClient) -> None:
         assert "no-cache" in response.headers.get("cache-control", "")
 
 
+def test_hash_stamped_app_js_is_immutable(dashboard_client: TestClient) -> None:
+    """build.mjs stamps ?v=<content hash>, so that URL can be cached forever."""
+    for path in ("/app.js", "/app-investor.js"):
+        response = dashboard_client.get(path, params={"v": "deadbeef01"})
+        assert response.status_code == 200
+        cache_control = response.headers.get("cache-control", "")
+        assert "immutable" in cache_control
+        assert "max-age=" in cache_control
+        assert "no-cache" not in cache_control
+
+
 def test_app_js_supports_gzip(dashboard_client: TestClient) -> None:
     response = dashboard_client.get("/app.js", headers={"Accept-Encoding": "gzip"})
     assert response.status_code == 200

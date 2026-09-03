@@ -173,6 +173,7 @@ class EngineBase:
 
     def _repair_reconciled_bot_income_exits_in_state(self, state: StrategyState) -> bool:
         """Re-tag bot take-profit fills that were saved as reconciled_external after a close crash."""
+        from ..profit_sweep_ops import ProfitSweepTradeCache
         from ..trade_journal_backfill import (
             reconcile_profit_sweep_from_exchange,
             repair_reconciled_bot_income_exit_group,
@@ -184,6 +185,12 @@ class EngineBase:
             scope = self._journal_scope_key()
         except Exception:  # noqa: BLE001
             return False
+        # Without a shared cache this pass costs one get_user_trades_by_currency
+        # per closed group and grows with trade history (~130s at 84 groups).
+        # The cache fetches once per currency and indexes by sweep label.
+        trade_cache = ProfitSweepTradeCache(self.client) if self.config.has_private_credentials else None
+        lookback_days = int(self.config.covered_call_repair_lookback_days or 0)
+        cutoff_ms = utc_now_ms() - lookback_days * 86_400_000 if lookback_days > 0 else None
         for group in state.groups:
             if group.status != "closed" or not group.group_id:
                 continue
@@ -191,6 +198,8 @@ class EngineBase:
                 executions = journal.list_executions(scope, group_id=group.group_id, limit=50)
             except Exception:  # noqa: BLE001
                 continue
+            # The journal-backed repair is local and costs ~0.2ms, so it keeps
+            # full history coverage.
             if repair_reconciled_bot_income_exit_group(
                 group,
                 executions,
@@ -198,10 +207,17 @@ class EngineBase:
                 profit_sweep_enabled=self.config.covered_call_profit_sweep_enabled,
             ):
                 changed = True
+            # The exchange-backed reconciles cost a request per group, and an
+            # unmatched sweep falls through to a per-group label lookup. Bound
+            # them to recently closed groups: an older one has already been
+            # offered this repair on every cycle since it closed.
+            if not self._repair_window_includes(group, cutoff_ms):
+                continue
             if self.config.has_private_credentials and reconcile_profit_sweep_from_exchange(
                 group,
                 client=self.client,
                 order_label_prefix=self.config.order_label_prefix,
+                trade_cache=trade_cache,
             ):
                 changed = True
             if self.config.has_private_credentials:
@@ -210,6 +226,16 @@ class EngineBase:
                 if reconcile_spot_exit_from_exchange(group, client=self.client):
                     changed = True
         return changed
+
+    @staticmethod
+    def _repair_window_includes(group: TradeGroup, cutoff_ms: int | None) -> bool:
+        """Unbounded when no cutoff, and a group of unknown age is always kept."""
+        if cutoff_ms is None:
+            return True
+        closed_ms = group.closed_timestamp_ms
+        if not closed_ms:
+            return True
+        return int(closed_ms) >= cutoff_ms
 
     def _book_equity_native(
         self,
@@ -860,6 +886,16 @@ class EngineBase:
             "open_orders": [self._order_payload(order) for order in context.open_orders],
             "positions": [self._position_payload(position) for position in context.positions],
         }
+        _t: dict[str, float] = {}
+        _at = time.monotonic()
+
+        def _mark(name: str) -> None:
+            nonlocal _at
+            now = time.monotonic()
+            _t[name] = now - _at
+            _at = now
+
+        _mark("payload_base")
         if self.config.option_strategy == "covered_call" and self.config.has_private_credentials:
             try:
                 from ..profit_sweep_repair import premium_sweep_fill_stats_by_book
@@ -873,6 +909,7 @@ class EngineBase:
                     payload["premium_sweep_fill_stats_by_book"] = fill_stats
             except Exception:  # noqa: BLE001
                 LOGGER.debug("premium_sweep_fill_stats_by_book failed", exc_info=True)
+            _mark("premium_sweep_fill_stats")
             try:
                 from ..spot_exit_ops import spot_exit_fill_stats_by_book
 
@@ -881,6 +918,7 @@ class EngineBase:
                     payload["spot_exit_fill_stats_by_book"] = spot_exit_stats
             except Exception:  # noqa: BLE001
                 LOGGER.debug("spot_exit_fill_stats_by_book failed", exc_info=True)
+            _mark("spot_exit_fill_stats")
             try:
                 from ..spot_restore_ops import spot_restore_fill_stats_by_book
 
@@ -889,6 +927,7 @@ class EngineBase:
                     payload["spot_restore_fill_stats_by_book"] = spot_restore_stats
             except Exception:  # noqa: BLE001
                 LOGGER.debug("spot_restore_fill_stats_by_book failed", exc_info=True)
+            _mark("spot_restore_fill_stats")
         try:
             from ..hedge_pnl import attach_hedge_performance_windows, summarize_hedge_pnl_for_scope
 
@@ -900,6 +939,15 @@ class EngineBase:
                 )
         except Exception:  # noqa: BLE001
             LOGGER.debug("hedge_pnl_summary failed", exc_info=True)
+        _mark("hedge_summary")
+        _total = sum(_t.values())
+        if _total > 5.0:
+            LOGGER.info(
+                "status payload slow strategy=%s total=%.1fs %s",
+                self.config.option_strategy,
+                _total,
+                " ".join(f"{k}={v:.1f}s" for k, v in _t.items() if v >= 0.1),
+            )
         return payload
 
     def _filled_amounts_by_instrument(self, responses: list[dict[str, Any]]) -> dict[str, Decimal]:
@@ -933,15 +981,18 @@ class EngineBase:
                     markets_usdc[market.base_currency].append(market)
             return markets_usdc
 
-        linear_markets = [
-            OptionInstrument.from_api(row) for row in self.client.get_instruments("USDC", kind="option", expired=False)
-        ]
         linear_by_currency: dict[str, list[OptionInstrument]] = {
             currency: [] for currency in self.config.managed_currencies
         }
-        for market in linear_markets:
-            if market.base_currency in managed and self._supports_option_market(market):
-                linear_by_currency[market.base_currency].append(market)
+        # ``get_instruments("USDC", kind="option")`` returns only USDC-quoted,
+        # USDC-settled markets, and ``inverse_native`` rejects every one of them.
+        # Fetching that ~3k-row chain just to discard all of it costs a public
+        # (per-IP) request plus a full parse on every runtime load.
+        if self.config.option_markets_profile != "inverse_native":
+            for row in self.client.get_instruments("USDC", kind="option", expired=False):
+                market = OptionInstrument.from_api(row)
+                if market.base_currency in managed and self._supports_option_market(market):
+                    linear_by_currency[market.base_currency].append(market)
 
         markets_by_currency: dict[str, list[OptionInstrument]] = {}
         for currency in self.config.managed_currencies:
@@ -989,6 +1040,8 @@ class EngineBase:
         self,
         markets_by_currency: dict[str, list[OptionInstrument]],
         orderbook_cache: dict[str, OrderBookSnapshot],
+        *,
+        force: bool = False,
     ) -> None:
         """Pre-seed no-bid strikes from one batch summary per currency to avoid N+1 order-book calls.
 
@@ -997,7 +1050,11 @@ class EngineBase:
         behavior-preserving for both candidate scanning and rejection
         diagnostics, while skipping a per-instrument ``get_order_book`` call.
         """
-        if not self.config.scan_book_summary_prefilter:
+        # ``force`` is for callers where this *replaces* per-instrument fetches
+        # rather than adding to them (the dashboard regime probe). Everywhere
+        # else it stays opt-in: the whole-chain summary is a heavy endpoint and
+        # enabling it fleet-wide measurably worsened Deribit throttling.
+        if not force and not self.config.scan_book_summary_prefilter:
             return
         for currency in sorted(markets_by_currency):
             if not markets_by_currency.get(currency):

@@ -1442,3 +1442,59 @@ def test_inverse_covered_call_apr_uses_round_trip_fee_over_contract_notional():
     assert apr == expected
     assert apr > Decimal("0.15")
     assert apr < Decimal("0.18")
+
+
+def test_core_regime_liquidity_stops_probing_once_requirement_met(tmp_path):
+    """The probe pays one order-book call per strike, so it must stop as soon as
+    the answer is fixed rather than walking the rest of the option chain."""
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        enable_short_put=True,
+        enable_short_call=False,
+        min_liquid_expiries_required=1,
+        entry_dte_min=7,
+        entry_dte_max=24,
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC")
+    puts = [item for item in instruments if item.option_type == "put"]
+    assert len({item.expiration_timestamp_ms for item in puts}) > 1, "fixture needs 2+ expiries"
+
+    probed: list[str] = []
+
+    def counting_loader(name: str) -> OrderBookSnapshot:
+        probed.append(name)
+        return loader(name)
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, counting_loader)
+
+    assert ok is True
+    assert notes == []
+    probed_expiries = {item.expiration_timestamp_ms for item in puts if item.instrument_name in probed}
+    assert len(probed_expiries) == 1
+
+
+def test_core_regime_liquidity_still_probes_every_expiry_when_dry(tmp_path):
+    """No early exit when the requirement is never met — the failure notes must
+    still name each dry expiry."""
+    config = make_config(
+        tmp_path,
+        option_strategy="naked_short",
+        enable_short_put=True,
+        enable_short_call=False,
+        min_liquid_expiries_required=1,
+        entry_dte_min=7,
+        entry_dte_max=24,
+    )
+    selector = StrategySelector(config)
+    client = FakeClient()
+    instruments, loader = _markets_and_loader(client, "BTC", put_open_interest="0")
+    puts = [item for item in instruments if item.option_type == "put"]
+
+    ok, notes = selector.core_regime_liquidity_detail("BTC", instruments, loader)
+
+    assert ok is False
+    for expiry in {item.expiration_timestamp_ms for item in puts}:
+        assert any(f"expiry={expiry}" in note for note in notes)

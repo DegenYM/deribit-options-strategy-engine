@@ -336,6 +336,11 @@ class BotConfig:
     # net premium (not the reserved assignment cash) into native coin after entry.
     covered_call_csp_premium_target: str = "usdc"
     covered_call_profit_sweep_enabled: bool = False
+    # Crash-recovery repair re-queries the exchange for every closed group, one
+    # request each, so its cost grows without bound as history accumulates. A
+    # group closed this long ago has already survived thousands of repair passes;
+    # 0 restores the unbounded scan.
+    covered_call_repair_lookback_days: int = 30
     covered_call_profit_sweep_dust_pool_enabled: bool = True
     # Agreed cover inventory. Profit sweep must not sell below this when flat.
     collateral_spot_btc: Decimal = Decimal("0")
@@ -350,6 +355,10 @@ class BotConfig:
     # per-instrument order-book fetches for strikes with no bid (which are
     # rejected at best_bid<=0 regardless). Trades one batch call for many N+1
     # calls; most useful on large option chains prone to 429.
+    # Default off: get_book_summary_by_currency returns the whole option chain
+    # and is heavy enough that enabling it fleet-wide measurably worsened
+    # Deribit throttling. The dashboard regime probe opts in explicitly instead
+    # (there it *replaces* ~216 per-instrument calls rather than adding to them).
     scan_book_summary_prefilter: bool = False
     # Naked short put: treat consecutive down days as elevated so we do not
     # sell more puts into a grind. 0 or 1 = disabled. Only consulted when
@@ -833,6 +842,7 @@ def load_config(
     covered_call_itm_to_cash_secured_enabled = _to_bool(
         _optional(values, "COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED", "false")
     )
+    covered_call_repair_lookback_days = max(0, int(_optional(values, "COVERED_CALL_REPAIR_LOOKBACK_DAYS", "30")))
     covered_call_csp_dte_min = max(1, int(_optional(values, "COVERED_CALL_CSP_DTE_MIN", "2")))
     covered_call_csp_dte_max = max(covered_call_csp_dte_min, int(_optional(values, "COVERED_CALL_CSP_DTE_MAX", "10")))
     covered_call_csp_strike_floor_pct = to_decimal(_optional(values, "COVERED_CALL_CSP_STRIKE_FLOOR_PCT", "0.05"))
@@ -1138,6 +1148,7 @@ def load_config(
         spot_restore_order_type=spot_restore_order_type,
         spot_restore_wait_seconds=spot_restore_wait_seconds,
         covered_call_profit_sweep_enabled=covered_call_profit_sweep_enabled,
+        covered_call_repair_lookback_days=covered_call_repair_lookback_days,
         covered_call_profit_sweep_dust_pool_enabled=covered_call_profit_sweep_dust_pool_enabled,
         collateral_spot_btc=collateral_spot_btc,
         collateral_spot_eth=collateral_spot_eth,

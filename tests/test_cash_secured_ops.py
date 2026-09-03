@@ -730,6 +730,70 @@ def test_manage_takes_cash_secured_bid_ioc(tmp_path) -> None:
     assert child.cash_secured_from_group_id == "0095"
 
 
+def test_manage_cash_secured_ioc_lock_blocks_duplicate_entry(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    engine = _csp_engine(tmp_path, client)
+    state = StrategyState()
+    state.groups.append(
+        _itm_sold_group(
+            cash_secured_status="submitted",
+            cash_secured_reason="ioc_pending",
+            cash_secured_instrument_name="BTC_USDC-14APR30-63000-P",
+            cash_secured_limit_price=Decimal("610"),
+        )
+    )
+    engine.state_store.save(state)
+
+    result = engine.manage(live=True)
+    assert any(a.get("action") == "cash_secured_submitted" for a in result["actions"])
+    assert client.placed_orders == []
+    assert not any(a.get("action") == "cash_secured_entered" for a in result["actions"])
+
+
+def test_manage_reconciles_filled_cash_secured_ioc(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    engine = _csp_engine(tmp_path, client)
+    state = StrategyState()
+    state.groups.append(
+        _itm_sold_group(
+            cash_secured_status="submitted",
+            cash_secured_reason="ioc_pending",
+            cash_secured_order_id="csp-ioc-1",
+            cash_secured_instrument_name="BTC_USDC-14APR30-63000-P",
+            cash_secured_limit_price=Decimal("610"),
+        )
+    )
+    engine.state_store.save(state)
+    client.order_states["csp-ioc-1"] = {
+        "order": {
+            "order_id": "csp-ioc-1",
+            "order_state": "filled",
+            "filled_amount": "0.01",
+            "average_price": "610",
+            "price": "610",
+        },
+        "trades": [
+            {
+                "order_id": "csp-ioc-1",
+                "trade_id": "t1",
+                "instrument_name": "BTC_USDC-14APR30-63000-P",
+                "amount": "0.01",
+                "price": "610",
+                "fee": "0.5",
+                "fee_currency": "USDC",
+                "direction": "sell",
+            }
+        ],
+    }
+
+    result = engine.manage(live=True)
+    assert client.placed_orders == []
+    entered = [a for a in result["actions"] if a.get("action") == "cash_secured_entered"]
+    assert len(entered) == 1
+    parent = next(g for g in engine.state_store.load().groups if g.group_id == "0095")
+    assert parent.cash_secured_status == "entered"
+
+
 def test_manage_retries_unfilled_cash_secured_ioc(tmp_path) -> None:
     client = FakeClient(btc_book_equity="0.2")
     client.order_scripts_by_label["trial-csp-btc-0095-short"] = [
@@ -744,7 +808,8 @@ def test_manage_retries_unfilled_cash_secured_ioc(tmp_path) -> None:
     first = engine.manage(live=True)
     assert any(a.get("action") == "cash_secured_unfilled" for a in first["actions"])
     parent = engine.state_store.load().groups[0]
-    assert parent.cash_secured_status == ""
+    assert parent.cash_secured_status == "skipped"
+    assert parent.cash_secured_reason == "ioc_unfilled"
     assert parent.cash_secured_group_id == ""
 
     second = engine.manage(live=True)

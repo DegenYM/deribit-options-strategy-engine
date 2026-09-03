@@ -805,6 +805,40 @@ class CoveredCallMixin:
             "reason": "operator_cancelled",
         }
 
+    def _cash_secured_submission_is_ioc(self, parent: TradeGroup) -> bool:
+        return str(parent.cash_secured_reason or "").lower() == "ioc_pending"
+
+    def _mark_cash_secured_ioc_submitted(
+        self,
+        parent: TradeGroup,
+        candidate,
+        preview: dict[str, Any],
+    ) -> None:
+        parent.cash_secured_status = "submitted"
+        parent.cash_secured_reason = "ioc_pending"
+        parent.cash_secured_instrument_name = candidate.short_leg.instrument_name
+        limit = preview.get("limit_price")
+        parent.cash_secured_limit_price = to_decimal(limit) if limit else Decimal("0")
+        parent.cash_secured_order_id = ""
+
+    def _clear_cash_secured_ioc_submitted(
+        self,
+        parent: TradeGroup,
+        *,
+        order_id: str | None = None,
+    ) -> dict[str, Any]:
+        parent.cash_secured_status = "skipped"
+        parent.cash_secured_reason = "ioc_unfilled"
+        parent.cash_secured_order_id = ""
+        parent.cash_secured_instrument_name = ""
+        parent.cash_secured_limit_price = Decimal("0")
+        return {
+            "action": "cash_secured_unfilled",
+            "group_id": parent.group_id,
+            "reason": "ioc_unfilled",
+            "order_id": order_id or None,
+        }
+
     def _reconcile_parked_cash_secured(
         self,
         context: RuntimeContext,
@@ -823,19 +857,31 @@ class CoveredCallMixin:
         }
         if not live:
             return resting
+        is_ioc = self._cash_secured_submission_is_ioc(parent)
         order_id = str(parent.cash_secured_order_id or "").strip()
         if not order_id:
+            if is_ioc:
+                return {
+                    "action": "cash_secured_submitted",
+                    "group_id": parent.group_id,
+                    "reason": "ioc_in_flight",
+                    "instrument_name": parent.cash_secured_instrument_name or None,
+                }
             return self._mark_cash_secured_operator_cancelled(parent)
         try:
             state = self.client.get_order_state(order_id)
         except Exception:
             LOGGER.info("cash_secured park missing order=%s group=%s", order_id, parent.group_id)
+            if is_ioc:
+                return self._clear_cash_secured_ioc_submitted(parent, order_id=order_id or None)
             return self._mark_cash_secured_operator_cancelled(parent)
         filled = self._response_filled_amount(state)
         order_state = str(self._response_order(state).get("order_state") or "").lower()
         if filled <= 0 and order_state in {"open", "untriggered", "new", ""}:
             return resting
         if filled <= 0:
+            if is_ioc:
+                return self._clear_cash_secured_ioc_submitted(parent, order_id=order_id or None)
             return self._mark_cash_secured_operator_cancelled(parent)
         trades = self._order_trades(state)
         candidate = self._cash_secured_candidate_for_parked(context, parent, filled)
@@ -929,11 +975,14 @@ class CoveredCallMixin:
             quantity=candidate.quantity,
             aggressive=True,
         )
+        self._mark_cash_secured_ioc_submitted(parent, candidate, preview)
+        self.state_store.save(context.state)
         response = self._place_entry_order(context, "sell", request)
         filled = self._response_filled_amount(response)
         trades = self._order_trades(response)
         order = self._response_order(response)
         order_id = str(order.get("order_id") or "").strip()
+        parent.cash_secured_order_id = order_id
         if filled > 0:
             group = self._open_cash_secured_group_from_fill(
                 context,
@@ -950,9 +999,9 @@ class CoveredCallMixin:
             payload["filled_amount"] = format_decimal(filled, 8)
             return payload
 
-        payload["action"] = "cash_secured_unfilled"
-        payload["reason"] = "ioc_unfilled"
-        payload["order_id"] = order_id or None
+        unfilled = self._clear_cash_secured_ioc_submitted(parent, order_id=order_id or None)
+        self.state_store.save(context.state)
+        payload.update(unfilled)
         LOGGER.info(
             "cash_secured IOC bid unfilled group=%s instrument=%s price=%s",
             parent.group_id,

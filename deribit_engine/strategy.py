@@ -755,6 +755,12 @@ class StrategySelector:
                 if item.expiration_timestamp_ms == expiry
             ):
                 liquid_expiries += 1
+                # Once the requirement is met the outcome is fixed: the return
+                # below is `True, []` and dry_notes are only read on failure.
+                # Probing the remaining expiries costs an order-book call per
+                # strike and cannot change the answer.
+                if liquid_expiries >= required:
+                    return True, []
             else:
                 dry_notes.append(f"expiry={expiry}: no_valid_{side}")
         if liquid_expiries < required:
@@ -811,6 +817,11 @@ class StrategySelector:
                     break
             if spread_ok:
                 liquid_expiries += 1
+                # Same short-circuit as the single-leg probe: the answer is
+                # already `True, []` and further expiries only cost order-book
+                # calls per strike.
+                if liquid_expiries >= required:
+                    return True, []
             else:
                 dry_notes.append(f"expiry={expiry}: no_valid_bull_put_spread_pair")
         if liquid_expiries < required:

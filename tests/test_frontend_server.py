@@ -1330,3 +1330,57 @@ def test_aggregate_stress_reuses_prefetch_without_account_refetch(tmp_path, monk
     assert stress_calls == {"prefetch": 2, "live": 0}
     assert payload["option_strategy"] == "multi_account"
     assert len(payload["strategy_stresses"]) == 2
+
+
+def test_bundle_warm_cycle_computes_status_once(tmp_path, monkeypatch) -> None:
+    """The warmer seeds two bundle cache keys that differ only by
+    realized_summary. Computing them separately paid for a second full
+    _aggregate_status — the dominant cost of a warm pass."""
+    from deribit_engine.frontend_server.runtime_setup import build_runtime_setup
+    from deribit_engine.frontend_server.types import BundleWarmScheduler
+
+    env_file = tmp_path / ".env.test"
+    env_file.write_text("DERIBIT_ENV=mainnet\n", encoding="utf-8")
+    cfg = make_config(tmp_path, state_file=tmp_path / "bot.json", client_id="cid", client_secret="sec")
+    calls = {"status": 0, "groups": 0, "summary": 0}
+
+    def _fake_status(*_args, **_kwargs):
+        calls["status"] += 1
+        return {"portfolio": {"total_equity_usdc": "1000"}, "trade_groups": []}
+
+    def _fake_groups(*_args, **_kwargs):
+        calls["groups"] += 1
+        return {"open": [], "closed": [], "underlying_index_usd": {}}
+
+    def _fake_summary(*_args, **_kwargs):
+        calls["summary"] += 1
+        return {"summary": {"realized_pnl_usdc": "50"}, "recent_closed_trades": []}
+
+    monkeypatch.setattr(frontend_server, "load_config", lambda _path, require_private=False: cfg)
+    monkeypatch.setattr(frontend_server, "_aggregate_status", _fake_status)
+    monkeypatch.setattr(frontend_server, "_aggregate_groups", _fake_groups)
+    monkeypatch.setattr(frontend_server, "_aggregate_realized_summary", _fake_summary)
+    monkeypatch.setattr(frontend_server, "_force_refresh_prefetch_all", lambda *_a, **_kw: {})
+
+    runtime = build_runtime_setup(
+        env_file=env_file,
+        account_env_files=(env_file,),
+        enable_scheduler=False,
+        snapshot_interval_sec=None,
+        investor_portal=True,
+        skipped_accounts=None,
+    )
+    warmers = [s for s in runtime.background_schedulers if isinstance(s, BundleWarmScheduler)]
+    assert warmers, "investor portal runtime should register a bundle warm scheduler"
+
+    warmers[0]._warm_fn()
+
+    assert calls == {"status": 1, "groups": 1, "summary": 1}
+    # Deduping the compute must still leave both bundle variants warm.
+    warmed = list(runtime.route_ctx.bundle_cache._store.values())
+    assert len(warmed) == 2
+    section_sets = {tuple(sorted(payload)) for _ts, payload in warmed}
+    assert section_sets == {
+        ("groups", "status"),
+        ("groups", "realized_summary", "status"),
+    }

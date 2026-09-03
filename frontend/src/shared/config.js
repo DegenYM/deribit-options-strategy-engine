@@ -52,6 +52,23 @@ export const FRONTEND_API_CONCURRENCY = INVESTOR ? 6 : 3;
 export const USE_DASHBOARD_BUNDLE = !INVESTOR;
 export const INVESTOR_STATUS_TIMEOUT_MS = 45_000;
 export const INVESTOR_OVERLAY_MAX_MS = 6_000;
+/**
+ * Default ceiling for a single fetchJson attempt. Its job is to stop a stalled
+ * endpoint from hanging the refresh forever with the controls disabled — not to
+ * enforce a tight SLA, since a cold backend legitimately takes tens of seconds.
+ * Endpoints with a cheap fallback get a much tighter budget of their own.
+ */
+export const FETCH_JSON_TIMEOUT_MS = 45_000;
+/**
+ * The bundle is the slowest endpoint, but its per-endpoint fallback
+ * (/api/status + /api/groups) is cheap, so give up early and degrade rather
+ * than make the first paint wait on it.
+ */
+export const DASHBOARD_BUNDLE_TIMEOUT_MS = INVESTOR ? INVESTOR_STATUS_TIMEOUT_MS : 12_000;
+/** Series endpoints aggregate history and are legitimately slower. */
+export const CHART_SERIES_TIMEOUT_MS = 45_000;
+/** Beyond this a hydrated dashboard cache is more confusing than helpful. */
+export const DASHBOARD_CACHE_MAX_AGE_MS = 30 * 60_000;
 export const FETCH_JSON_RETRYABLE_STATUS = new Set([502, 503, 504, 522, 524]);
 export const FETCH_JSON_MAX_RETRIES = 2;
 export const FETCH_JSON_RETRY_BASE_MS = 450;

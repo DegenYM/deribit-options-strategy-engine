@@ -7,8 +7,13 @@ scanner does not sell more puts into a grind.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import threading
+import time
 from decimal import Decimal
 
+from .. import public_cache
 from ..models import OptionInstrument, OrderBookSnapshot, RiskRegime
 from ..utils import format_decimal, utc_now_ms
 from ..vol_metrics import (
@@ -16,6 +21,27 @@ from ..vol_metrics import (
     daily_closes_from_index_series,
     index_chart_close_series,
 )
+
+
+# The liquidity probe walks every strike in the entry DTE window at one
+# order-book call each, and is the dominant cost of a runtime load. Cache the
+# verdict per (currency, full-config digest) — 45 of 213 config fields differ
+# between investors here, several of them gates the probe reads, so the digest
+# must stay config-exact and verdicts are never shared across configs.
+#
+# The store is shared across processes so an investor's frontend and live bot
+# reuse each other's work. The default TTL sits under the ~157s live cycle
+# period, so a bot never acts on a verdict older than one of its own cycles.
+def regime_liquidity_ttl_seconds() -> float:
+    raw = os.environ.get("DERIBIT_REGIME_LIQUIDITY_CACHE_TTL_SEC", "120")
+    try:
+        return max(float(raw), 0.0)
+    except (TypeError, ValueError):
+        return 120.0
+
+
+_REGIME_LIQUIDITY_CACHE: dict[tuple[str, str], tuple[float, tuple[bool, tuple[str, ...]]]] = {}
+_REGIME_LIQUIDITY_LOCK = threading.Lock()
 
 
 class RegimeMixin:
@@ -126,17 +152,57 @@ class RegimeMixin:
         self._last_regime_cache[currency] = (elevated, utc_now_ms())
         return elevated, [note]
 
+    def _liquidity_cache_key(self, currency: str) -> tuple[str, str]:
+        """Config-exact key: any differing setting yields a different probe."""
+        digest = hashlib.sha256(repr(self.config).encode("utf-8")).hexdigest()
+        return (currency, digest)
+
+    def _core_regime_liquidity_cached(
+        self,
+        currency: str,
+        markets: list[OptionInstrument],
+        loader,
+    ) -> tuple[bool, list[str]]:
+        key = self._liquidity_cache_key(currency)
+        ttl = regime_liquidity_ttl_seconds()
+        if ttl <= 0:
+            return self.strategy.core_regime_liquidity_detail(currency, markets, loader)
+        now = time.monotonic()
+        with _REGIME_LIQUIDITY_LOCK:
+            entry = _REGIME_LIQUIDITY_CACHE.get(key)
+            if entry is not None and now - entry[0] < ttl:
+                ok, notes = entry[1]
+                return ok, list(notes)
+        shared_key = f"regime_liquidity:{key[1]}:{key[0]}"
+        hit, shared = public_cache.read(shared_key, ttl)
+        if hit and isinstance(shared, list) and len(shared) == 2:
+            ok, notes = bool(shared[0]), [str(n) for n in (shared[1] or [])]
+            with _REGIME_LIQUIDITY_LOCK:
+                _REGIME_LIQUIDITY_CACHE[key] = (time.monotonic(), (ok, tuple(notes)))
+            return ok, list(notes)
+        ok, notes = self.strategy.core_regime_liquidity_detail(currency, markets, loader)
+        with _REGIME_LIQUIDITY_LOCK:
+            _REGIME_LIQUIDITY_CACHE[key] = (time.monotonic(), (ok, tuple(notes)))
+        public_cache.write(shared_key, [ok, list(notes)])
+        return ok, notes
+
     def _determine_regime_with_detail(
         self,
         currency: str,
         *,
         markets: list[OptionInstrument],
         orderbook_cache: dict[str, OrderBookSnapshot],
+        cache_liquidity: bool = False,
     ) -> tuple[RiskRegime, list[str]]:
         if not markets:
             return RiskRegime.CRISIS, ["no_option_markets_loaded_for_currency"]
         loader = lambda instrument_name: self._get_orderbook(instrument_name, orderbook_cache)
-        ok, liq_notes = self.strategy.core_regime_liquidity_detail(currency, markets, loader)
+        # ``cache_liquidity`` is set only on the dashboard read path. Live entry
+        # gates always re-probe, so trading never acts on a stale liquidity read.
+        if cache_liquidity:
+            ok, liq_notes = self._core_regime_liquidity_cached(currency, markets, loader)
+        else:
+            ok, liq_notes = self.strategy.core_regime_liquidity_detail(currency, markets, loader)
         if not ok:
             return RiskRegime.CRISIS, ["core_entry_liquidity_check_failed", *liq_notes]
 

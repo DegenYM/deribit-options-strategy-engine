@@ -14,7 +14,7 @@ import {
 } from "./domain.js";
 import { applySpotPayload, updateHeaderSpotDom } from "./refresh.js";
 import { renderRegime, renderTopBar, renderAggregate, renderStrategyGroups, renderRecentActivity, renderAccountCards, renderBookCards } from "./render.js";
-import { saveInvestorCache } from "./investor-cache.js";
+import { saveViewCache } from "./view-cache.js";
 
 let ws = null;
 let reconnectAttempt = 0;
@@ -70,8 +70,8 @@ function partialRender(channel) {
       renderAccountCards(STATE.health, STATE.status);
       renderBookCards(STATE.status);
     }
-    if (INVESTOR && STATE.investorReady) {
-      saveInvestorCache();
+    if (!INVESTOR || STATE.investorReady) {
+      saveViewCache();
     }
     return;
   }
@@ -108,9 +108,12 @@ function handleMessage(msg) {
     STATE.status = mergeStatusPayload(STATE.status, data);
     STATE.dataFreshness.source = "live";
     STATE.dataFreshness.live = true;
-    STATE.dataFreshness.statusMs = tsMs;
     STATE.groupsLivePending = false;
     STATE.statusErrorOnce = false;
+    // statusMs is an *age*, not a timestamp — every other writer sets 0 on
+    // arrival. Storing tsMs here made the freshness badge read the epoch as a
+    // multi-decade age and fall through to "—" instead of "Live".
+    STATE.dataFreshness.statusMs = 0;
     STATE.wsLastPortfolioMs = tsMs;
     partialRender("portfolio");
     return;
