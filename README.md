@@ -90,3 +90,16 @@ python scripts/run_live_profiles.py --investor $INVESTOR --restart-failed
 ```
 
 Most subcommands require `--account <slug>` (`frontend` is the exception—it aggregates all enabled sub-accounts for that investor). Load order and env examples: [`docs/configuration-zh-TW.md`](docs/configuration-zh-TW.md)
+
+## Covered Call SaaS (separate product)
+
+A BYOK hosted Covered Call product lives under [`saas/`](saas/). It does **not** use the investor registry, AUM fees, or one-frontend-per-investor ops model. Start with [`saas/README.md`](saas/README.md).
+
+Install that product **from the `saas/` directory**, not this repo root:
+
+```bash
+git checkout cursor/covered-call-saas-1fce
+cd saas
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
