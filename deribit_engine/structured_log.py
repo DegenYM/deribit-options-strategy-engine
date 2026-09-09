@@ -30,15 +30,28 @@ _REDACT_KEY_SUBSTRINGS = (
     "access_token",
     "refresh_token",
     "private_key",
+    # Explicit names (already covered by the substrings above; listed so a grep
+    # for the env var finds the scrub rule): Deribit / Telegram / dashboard / admin.
+    "client_secret",
+    "telegram_bot_token",
+    "dashboard_api_token",
+    "admin_console_token",
 )
 
 # Patterns that scrub secrets embedded inside free-form strings (e.g. exception
-# text that includes a Telegram bot-token URL or a Deribit auth URL with creds).
+# text that includes a Telegram bot-token URL or a Deribit auth URL with creds,
+# or an env dump such as ``DASHBOARD_API_TOKEN=...``).
 _VALUE_SCRUBBERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"/bot\d+:[A-Za-z0-9_-]+"), "/bot" + REDACTED),
-    (re.compile(r"(client_secret=)[^&\s\"']+"), r"\1" + REDACTED),
-    (re.compile(r"(access_token=)[^&\s\"']+"), r"\1" + REDACTED),
-    (re.compile(r"(refresh_token=)[^&\s\"']+"), r"\1" + REDACTED),
+    (re.compile(r"(client_secret\s*[=:]\s*)[^&\s\"']+", re.IGNORECASE), r"\1" + REDACTED),
+    (re.compile(r"(access_token\s*[=:]\s*)[^&\s\"']+", re.IGNORECASE), r"\1" + REDACTED),
+    (re.compile(r"(refresh_token\s*[=:]\s*)[^&\s\"']+", re.IGNORECASE), r"\1" + REDACTED),
+    (
+        re.compile(r"((?:telegram_bot|dashboard_api|admin_console)_token\s*[=:]\s*)[^&\s\"']+", re.IGNORECASE),
+        r"\1" + REDACTED,
+    ),
+    (re.compile(r"(authorization\s*[:=]\s*bearer\s+)[^\s\"']+", re.IGNORECASE), r"\1" + REDACTED),
+    (re.compile(r"(x-api-token\s*[:=]\s*)[^\s\"']+", re.IGNORECASE), r"\1" + REDACTED),
 )
 
 

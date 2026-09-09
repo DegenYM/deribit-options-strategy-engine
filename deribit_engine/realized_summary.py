@@ -154,6 +154,27 @@ def _profit_disposition_for_row(row: dict[str, Any]) -> dict[str, Any] | None:
     group = TradeGroup.from_dict(row)
     book = group.collateral_book()
     if book == "USDC":
+        if group.is_cash_secured_group():
+            from .csp_premium_swap_ops import csp_premium_disposition_split
+
+            split = csp_premium_disposition_split(group)
+            if split is not None:
+                remaining = to_decimal(split["remaining_usdc"])
+                spot_native = to_decimal(split["spot_native"])
+                if remaining == 0 and spot_native <= 0:
+                    return None
+                payload = {
+                    "book": "USDC",
+                    "held": remaining,
+                    "pending": Decimal("0"),
+                    "swept_native": Decimal("0"),
+                    "swept_usdt": Decimal("0"),
+                }
+                spot_book = str(split.get("spot_book") or "").upper()
+                if spot_book in {"BTC", "ETH"} and spot_native > 0:
+                    payload["csp_spot_book"] = spot_book
+                    payload["csp_spot_native"] = spot_native
+                return payload
         pnl = group.realized_pnl
         if pnl is None:
             return None
@@ -298,6 +319,10 @@ def _aggregate_profit_disposition(rows: list[dict[str, Any]]) -> dict[str, Any] 
         any_row = True
         if book == "USDC":
             held_native["USDC"] += disp["held"]
+            spot_book = str(disp.get("csp_spot_book") or "").upper()
+            spot_native = to_decimal(disp.get("csp_spot_native"))
+            if spot_book in {"BTC", "ETH"} and spot_native > 0:
+                held_native[spot_book] += spot_native
             continue
         if disp["held"] < 0:
             loss_native[book] += disp["held"]

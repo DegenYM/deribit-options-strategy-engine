@@ -5,6 +5,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
+from ..entry_gates import regime_blocks_new_entries
 from ..models import (
     NakedPutCandidate,
     OptionInstrument,
@@ -283,19 +284,23 @@ class ScannerMixin:
                 context,
                 selected_currencies=selected_currencies,
             )
-        threshold = self.config.min_net_apr
         orderbook_cache = context.orderbook_cache
         for currency in selected_currencies:
+            threshold = self.strategy.effective_min_net_apr(currency)
             if self.config.option_strategy == "bull_put_spread":
                 open_for_currency = self._open_group_count_for_currency(
                     context.state,
                     currency,
                     strategy="bull_put_spread",
                 )
-                if self.config.max_groups_per_currency > 0 and open_for_currency >= self.config.max_groups_per_currency:
+                regime_for_cap = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
+                group_cap = self.config.effective_max_groups_per_currency(
+                    elevated=regime_for_cap is RiskRegime.ELEVATED
+                )
+                if group_cap > 0 and open_for_currency >= group_cap:
                     blockers.append(
                         f"{currency} [bull_put_spread]: max_groups_per_currency "
-                        f"(open_for_strategy_currency={open_for_currency} >= {self.config.max_groups_per_currency})"
+                        f"(open_for_strategy_currency={open_for_currency} >= {group_cap})"
                     )
                     continue
             regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
@@ -452,11 +457,11 @@ class ScannerMixin:
     ) -> list[str]:
         blockers: list[str] = []
         snap = context.snapshot
-        threshold = self.config.min_net_apr
         orderbook_cache = context.orderbook_cache
         loader = lambda instrument_name: self._get_orderbook(instrument_name, orderbook_cache)
         for currency in selected_currencies:
             ccy = currency.upper()
+            threshold = self.strategy.effective_min_net_apr(ccy)
             open_for_strategy = self._open_group_count_for_strategy(context.state, "covered_call")
             if self.config.max_concurrent_groups > 0 and open_for_strategy >= self.config.max_concurrent_groups:
                 blockers.append(
@@ -469,17 +474,15 @@ class ScannerMixin:
                 ccy,
                 strategy="covered_call",
             )
-            if (
-                self.config.max_groups_per_currency > 0
-                and open_for_strategy_currency >= self.config.max_groups_per_currency
-            ):
+            regime = context.regime_by_currency.get(ccy, RiskRegime.CRISIS)
+            group_cap = self.config.effective_max_groups_per_currency(elevated=regime is RiskRegime.ELEVATED)
+            if group_cap > 0 and open_for_strategy_currency >= group_cap:
                 blockers.append(
                     f"{ccy} [covered_call]: max_groups_per_currency "
                     f"(open_for_strategy_currency={open_for_strategy_currency} >= "
-                    f"{self.config.max_groups_per_currency})"
+                    f"{group_cap})"
                 )
                 continue
-            regime = context.regime_by_currency.get(ccy, RiskRegime.CRISIS)
             if regime is RiskRegime.CRISIS:
                 detail = snap.regime_detail_by_currency.get(ccy, ())
                 blockers.append(f"{ccy}: regime=crisis — {'; '.join(detail)}")
@@ -671,22 +674,25 @@ class ScannerMixin:
         loader = lambda instrument_name: self._get_orderbook(instrument_name, orderbook_cache)
 
         candidates_n: list[NakedPutCandidate] = []
-        threshold = self.config.min_net_apr
         for currency in selected:
+            regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
+            currency_detail = snapshot.regime_detail_by_currency.get(currency, ())
+            if regime_blocks_new_entries(
+                regime,
+                regime_detail=currency_detail,
+                allow_elevated_entry=self.config.allows_elevated_entry(),
+            ):
+                continue
+            elevated = regime is RiskRegime.ELEVATED
+            threshold = self.strategy.effective_min_net_apr(currency)
             if self.config.option_strategy == "bull_put_spread":
-                if self._strategy_at_currency_limit(context.state, "bull_put_spread", currency):
+                if self._strategy_at_currency_limit(context.state, "bull_put_spread", currency, elevated=elevated):
                     continue
             elif self.config.option_strategy == "covered_call":
-                if self._strategy_at_currency_limit(context.state, "covered_call", currency):
+                if self._strategy_at_currency_limit(context.state, "covered_call", currency, elevated=elevated):
                     continue
                 if self._covered_call_spot_exit_blocks_entry(context.state, currency):
                     continue
-            regime = context.regime_by_currency.get(currency, RiskRegime.CRISIS)
-            if regime is not RiskRegime.NORMAL:
-                continue
-            currency_detail = snapshot.regime_detail_by_currency.get(currency, ())
-            if any(note.startswith("data_unavailable") for note in currency_detail):
-                continue
             index_price = self._currency_index_price(currency, orderbook_cache)
             markets_by_collateral: dict[str, list[OptionInstrument]] = {}
             for market in context.markets_by_currency.get(currency, []):
@@ -770,7 +776,7 @@ class ScannerMixin:
                 if (
                     self.config.enable_short_put
                     and not self._strategy_at_concurrent_limit(context.state, "naked_short")
-                    and not self._strategy_at_currency_limit(context.state, "naked_short", currency)
+                    and not self._strategy_at_currency_limit(context.state, "naked_short", currency, elevated=elevated)
                 ):
                     for candidate in self.strategy.build_naked_short_put_candidates(
                         collateral_markets,
@@ -796,7 +802,7 @@ class ScannerMixin:
                 if (
                     scan_calls
                     and not self._strategy_at_concurrent_limit(context.state, "naked_short")
-                    and not self._strategy_at_currency_limit(context.state, "naked_short", currency)
+                    and not self._strategy_at_currency_limit(context.state, "naked_short", currency, elevated=elevated)
                 ):
                     for candidate in self.strategy.build_naked_short_call_candidates(
                         collateral_markets,

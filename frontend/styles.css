@@ -858,6 +858,144 @@ html.is-embedded .app-header {
   color: var(--color-text-muted);
 }
 
+.cash-secured-panel .csp-wheel-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.7rem;
+  width: 100%;
+}
+
+@media (min-width: 720px) {
+  .cash-secured-panel .csp-wheel-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem 0.85rem;
+    align-items: stretch;
+  }
+}
+
+.csp-wheel {
+  min-width: 0;
+  height: 100%;
+  padding: 0.7rem 0.8rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--color-semantic-info) 22%, var(--color-border-default));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--color-bg-surface) 55%, transparent);
+}
+
+.csp-wheel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 0.75rem;
+}
+
+.csp-wheel-id {
+  font-size: 0.9375rem;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
+}
+
+.csp-wheel-pnl {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.05rem;
+}
+
+.csp-wheel-pnl-label {
+  font-size: 0.625rem;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  line-height: 1.2;
+}
+
+.csp-wheel-pnl-value {
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.csp-wheel-split {
+  margin: 0.2rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+
+.csp-wheel-legs {
+  list-style: none;
+  margin: 0.55rem 0 0;
+  padding: 0.5rem 0 0;
+  border-top: 1px solid color-mix(in srgb, var(--color-border-default) 42%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 0.42rem;
+}
+
+.csp-leg {
+  display: grid;
+  grid-template-columns: 2.75rem minmax(0, 1fr) auto;
+  gap: 0.2rem 0.5rem;
+  align-items: baseline;
+}
+
+.csp-leg-status {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.csp-leg.is-open .csp-leg-status {
+  color: var(--color-semantic-info, var(--color-accent-teal));
+}
+
+.csp-leg.is-closed {
+  color: var(--color-text-muted);
+}
+
+.csp-leg-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.12rem 0.4rem;
+  min-width: 0;
+}
+
+.csp-leg-id {
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+.csp-leg-name {
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--color-text-primary);
+}
+
+.csp-leg.is-closed .csp-leg-name {
+  color: var(--color-text-secondary);
+}
+
+.csp-leg-meta {
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  justify-self: end;
+}
+
+.investor-portal .cash-secured-panel .csp-wheel {
+  background: color-mix(in srgb, var(--color-bg-surface) 40%, transparent);
+}
+
 .profit-swap-book-slot-sub--empty {
   visibility: hidden;
 }
@@ -1842,6 +1980,13 @@ table tbody tr:hover {
 .activity-closed-pnl-value-missing {
   color: var(--color-text-muted);
   font-weight: 600;
+}
+
+.activity-closed-pnl-sub {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
 }
 
 .activity-phase-meta-secondary {
@@ -3140,6 +3285,10 @@ table tbody tr:hover {
 
 .overview-composition-card--profit {
   border-color: color-mix(in srgb, var(--color-investor-accent, var(--color-semantic-warning)) 24%, transparent);
+}
+
+.overview-composition-card--csp {
+  border-color: color-mix(in srgb, var(--color-semantic-info) 24%, transparent);
 }
 
 .overview-composition-card--swap {

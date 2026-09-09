@@ -62,6 +62,7 @@ def _bootstrap_repo(tmp_path: Path) -> Path:
 def test_spot_instrument_name() -> None:
     assert spot_instrument_name("btc", "usdc") == "BTC_USDC"
     assert spot_instrument_name("ETH", "USDT") == "ETH_USDT"
+    assert spot_instrument_name("USDC", "USDT") == "USDC_USDT"
 
 
 def test_resolve_spot_trade_side() -> None:
@@ -69,8 +70,91 @@ def test_resolve_spot_trade_side() -> None:
 
     assert resolve_spot_trade_side("BTC", "USDC") == ("sell", "BTC", "USDC")
     assert resolve_spot_trade_side("USDC", "BTC") == ("buy", "BTC", "USDC")
+    assert resolve_spot_trade_side("USDT", "USDC") == ("buy", "USDC", "USDT")
+    assert resolve_spot_trade_side("USDC", "USDT") == ("sell", "USDC", "USDT")
     with pytest.raises(ConfigurationError):
-        resolve_spot_trade_side("USDC", "USDT")
+        resolve_spot_trade_side("USDT", "USDE")
+
+
+def test_trade_spot_usdt_to_usdc_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from deribit_engine.config import load_config
+
+    repo = _bootstrap_repo(tmp_path)
+    investor_init("alice", strategies=("covered_call",), repo_root=repo)
+    env = repo / "config/investors/alice/accounts/.env.covered_call"
+    env.write_text(
+        env.read_text(encoding="utf-8") + "\nDERIBIT_CLIENT_ID=cid\nDERIBIT_CLIENT_SECRET=sec\n",
+        encoding="utf-8",
+    )
+    config = load_config(env, require_private=True)
+    client = DeribitClient(config)
+    spot_row = {
+        "instrument_name": "USDC_USDT",
+        "base_currency": "USDC",
+        "quote_currency": "USDT",
+        "settlement_currency": "USDT",
+        "instrument_type": "linear",
+        "contract_size": 0.01,
+        "min_trade_amount": 0.01,
+        "tick_size": 0.0001,
+        "tick_size_steps": [],
+    }
+    monkeypatch.setattr(
+        client, "get_instruments", lambda currency, kind="option", expired=False: [spot_row] if kind == "spot" else []
+    )
+    monkeypatch.setattr(
+        client,
+        "get_account_summaries",
+        lambda *, extended=False: [
+            {
+                "currency": "USDT",
+                "balance": 2394.43326,
+                "equity": 2394.43326,
+                "available_funds": 2394.43326,
+                "available_withdrawal_funds": 2394.43326,
+                "initial_margin": 0,
+                "maintenance_margin": 0,
+                "delta_total": 0,
+                "options_delta": 0,
+                "options_gamma": 0,
+                "options_theta": 0,
+                "total_equity_usd": 2394,
+                "total_initial_margin_usd": 0,
+                "total_maintenance_margin_usd": 0,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        client,
+        "get_order_book",
+        lambda instrument_name, depth=1: {
+            "instrument_name": instrument_name,
+            "best_bid_price": 0.9999,
+            "best_bid_amount": 10000,
+            "best_ask_price": 1.0001,
+            "best_ask_amount": 10000,
+            "mark_price": 1.0,
+            "index_price": 1.0,
+        },
+    )
+
+    out = trade_spot(
+        config,
+        client,
+        from_currency="USDT",
+        amount=None,
+        to_currency="USDC",
+        sell_all=True,
+        live=False,
+    )
+    assert out["action"] == "trade_spot_preview"
+    assert out["direction"] == "buy"
+    assert out["instrument_name"] == "USDC_USDT"
+    assert out["from_currency"] == "USDT"
+    assert out["to_currency"] == "USDC"
+    assert out["live"] is False
+    limit_px = Decimal(out.get("slippage_limit_price") or out["trade_price"])
+    assert Decimal(out["amount"]) * limit_px <= Decimal(out["available"])
 
 
 def test_resolve_fee_subaccount_id_from_config() -> None:

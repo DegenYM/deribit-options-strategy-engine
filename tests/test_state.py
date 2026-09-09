@@ -136,7 +136,7 @@ def test_load_quarantines_non_object_payload(tmp_path: Path) -> None:
 
 
 def test_save_persists_sorted_keys_for_deterministic_diffs(tmp_path: Path) -> None:
-    store = StrategyStateStore(tmp_path / "state.json")
+    store = StrategyStateStore(tmp_path / "state.json", pretty=True)
     store.save(_sample_state())
     raw = store.path.read_text()
 

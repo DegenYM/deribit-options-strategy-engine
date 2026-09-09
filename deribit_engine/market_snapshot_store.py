@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-import threading
 from dataclasses import dataclass
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
+from .sqlite_store_base import SqliteStoreBase
 from .utils import to_decimal, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
@@ -130,30 +129,15 @@ def _row_get(row: sqlite3.Row, key: str) -> Any:
         return None
 
 
-class MarketSnapshotStore:
-    def __init__(self, db_path: Path) -> None:
-        self._path = db_path
-        self._lock = threading.Lock()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+class MarketSnapshotStore(SqliteStoreBase):
+    _schema = _SCHEMA
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _init_db(self) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                cols = {row[1] for row in conn.execute("PRAGMA table_info(market_snapshots)")}
-                if "iv_percentile_btc_pct" not in cols:
-                    conn.execute("ALTER TABLE market_snapshots ADD COLUMN iv_percentile_btc_pct TEXT")
-                if "iv_percentile_eth_pct" not in cols:
-                    conn.execute("ALTER TABLE market_snapshots ADD COLUMN iv_percentile_eth_pct TEXT")
-                conn.commit()
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        self._ensure_columns(
+            "market_snapshots",
+            {"iv_percentile_btc_pct": "TEXT", "iv_percentile_eth_pct": "TEXT"},
+            conn=conn,
+        )
 
     def append_from_spot_payload(self, spot_payload: dict[str, Any], *, source: str = "deribit_public") -> int:
         btc = to_decimal(spot_payload.get("BTC"))

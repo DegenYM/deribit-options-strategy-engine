@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import threading
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
+from .sqlite_store_base import SqliteStoreBase
 from .utils import json_default, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
@@ -44,25 +43,8 @@ class PortalSnapshotRow:
     content_fingerprint: str
 
 
-class PortalSnapshotStore:
-    def __init__(self, db_path: Path) -> None:
-        self._path = db_path
-        self._lock = threading.Lock()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _init_db(self) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                conn.commit()
+class PortalSnapshotStore(SqliteStoreBase):
+    _schema = _SCHEMA
 
     def append(
         self,

@@ -33,7 +33,7 @@ pip install -r requirements.txt
 - **只綁 127.0.0.1**。不要把這個埠寫進 Cloudflare Tunnel / Access；投資人頁維持各自 hostname。
 - 非 loopback bind 必須加 `--allow-public`（仍不該對外）。
 - 可從後台 **啟動 / 停止 / 重啟** 該投資人 frontend（走既有 launchd：`./bot investor frontend …`）。
-- 交易鈕只在嵌入的 ops 卡片上：**Close**（開倉 group）與 **Recover market**（ITM 未買回）。頂列另有 **Panic close**。都是先 Preview，再輸入 `LIVE` 才實單。Recover 會先取消該 group 已掛的自動限價單再市價。**不會**出現在 `investor.html`。
+- 交易鈕只在嵌入的 ops 卡片上：**Close**（開倉 group）、**CSP關倉補現貨**（開倉 CSP：市價平 put 後用出場報價幣補 cover，通常是 `BTC_USDC` / `ETH_USDC`）、與 **Recover market**（ITM 未買回、且沒有開倉 CSP）。頂列另有 **Panic close**。都是先 Preview，再輸入 `LIVE` 才實單。Recover / CSP 一鍵會先取消該 group 已掛的自動限價單再市價。CSP 一鍵會先把 wheel 標成 `operator_csp_abort_restore`，避免 live `manage` 在平倉後立刻再賣 put。**不會**出現在 `investor.html`。
 
 左側選投資人後，右側 iframe 開的是本機 `http://127.0.0.1:<frontend_port>/index.html`；該 frontend 沒起來時會顯示啟動提示。
 
@@ -59,6 +59,34 @@ pip install -r requirements.txt
 投資人 portal（`investor.html`）優先讀 `portal_snapshots.db` 的預組 bundle（`source=portal_cache`），並以 `FRONTEND_INVESTOR_STATUS_CACHE_TTL_SEC`（預設 180s）作為 live 快照有效期限；背景 warm 週期由 `FRONTEND_BUNDLE_WARM_INTERVAL_SEC`（預設 90s）控制，避免每次刷新都打 Deribit。組裝 portal payload 時會遞迴截斷超過 2KB 的字串（例如膨脹的 `spot_exit_reason`），不改交易 state。
 
 Ledger 每列可含 `equity_native_by_book`（原幣 equity）；舊列若只有 USDC 等價 `equity_by_book`，可用 `scripts/backfill_ledger_equity_native.py` 回填（詳見 [`scripts/README.md`](../scripts/README.md)）。
+
+## API 存取控制（選用）
+
+Dashboard 預設**沒有**自己的認證，對外時依賴 Cloudflare Access 擋在前面；本機使用維持原行為。若要加一層縫隙防護（例如 Access 設錯路徑、或本機埠不慎暴露），可設定共用 token：
+
+| 環境變數 | 預設 | 說明 |
+|----------|------|------|
+| `DASHBOARD_API_TOKEN` | 空（停用） | 設定後，所有 `/api/*` 與 `/ws/*` 都要帶 `Authorization: Bearer <token>` 或 `X-Dashboard-Token: <token>`；WebSocket 另可用 `?token=`。靜態 HTML/JS/CSS 仍公開。缺 token 回 `401`。 |
+| `DASHBOARD_API_TOKEN_EMBED` | `false` | `true` 時 server 會把 token 寫進 `index.html` / `investor*.html` 的 `<meta name="dashboard-api-token">`，前端 JS 自動帶上。**只在 Cloudflare Access 後面才有意義**（能載入 HTML 的人就能拿到 token）；主要用於只有營運者看的 ops dashboard。 |
+| `DASHBOARD_CORS_ORIGINS` | 空（不掛 CORS） | 逗號分隔的允許 origin。同源部署不需要；只有把 HTML 放到別的網域（`dashboard-api-base` meta）時才設。允許 `GET,POST` 與 `Authorization` / `X-Dashboard-Token` header。 |
+
+前端 JS 取 token 的順序：`<meta name="dashboard-api-token">` → `window.__DASHBOARD_TOKEN__` → `localStorage.dashboard_api_token`（未 embed 時可在瀏覽器 console 手動 `localStorage.setItem("dashboard_api_token", "...")`）。
+
+其他相關行為：
+
+- `/api/trade_journal/sync`（手動觸發 journal 同步，會寫 DB 並打 Deribit）只接受 **POST**；GET 回 `405`。
+- `/api/health` 只回 `state_file` / `ledger_dir` / `metrics_db` 的**檔名**與 `*_present` 布林，不再回絕對路徑。
+- 靜態檔採白名單：只服務 `index.html` / `investor.html` / `investor.zh.html` / `admin.html`、`app.js` / `app-investor.js`、`styles.css` / `tailwind.css` / `tokens.css`、`favicon.svg` 與 `/vendor/*`；`frontend/` 下其他檔案（`src/`、`node_modules/`、`package-lock.json`…）一律 `404`。
+- `/api/dashboard_bundle` 回 weak `ETag`，帶 `If-None-Match` 命中時回 `304`。
+
+管理者後台（`./bot admin`）對應的 knob：
+
+| 環境變數 | 預設 | 說明 |
+|----------|------|------|
+| `ADMIN_CONSOLE_TOKEN` | 空（停用） | 設定後所有 `/api/admin/*` 需 `X-Admin-Token: <token>` 或 `Authorization: Bearer`。`admin.html` 遇到 `401` 會跳出一次輸入框並存進 `localStorage.admin_console_token`。 |
+| `ADMIN_CONSOLE_TOKEN_EMBED` | `false` | `true` 時把 token 寫進 `admin.html` 的 `<meta name="admin-console-token">`。 |
+
+後台除了檢查 `Host` header，也會檢查 **實際連線來源位址** 必須是 loopback（`127.0.0.1` / `::1`），除非啟動時加 `--allow-public`。交易動作（panic-close / close-position / spot-restore / csp-abort-restore / frontend start|stop|restart）只接受 POST。若投資人 frontend 設了 `DASHBOARD_API_TOKEN`，請在跑 `./bot admin` 的環境也設同一個值，探活（`/api/health`）才會帶 token；嵌入的 ops iframe 則需該 frontend 開 `DASHBOARD_API_TOKEN_EMBED=true` 或在該 origin 的 `localStorage` 放 token。
 
 ## 多名投資人與對外存取
 

@@ -10,14 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import sqlite3
-import threading
 from collections import defaultdict
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from pathlib import Path
 from typing import Any
 
+from .sqlite_store_base import SqliteStoreBase
 from .utils import to_decimal
 
 LOGGER = logging.getLogger(__name__)
@@ -54,24 +52,10 @@ def fingerprint_from_cache_key(cache_key: tuple[Any, ...]) -> str:
     return json.dumps(cache_key, sort_keys=True, default=str)
 
 
-class MetricsStore:
-    def __init__(self, db_path: Path) -> None:
-        self._path = db_path
-        self._lock = threading.Lock()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
-
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
-
-    def _init_db(self) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                conn.commit()
+class MetricsStore(SqliteStoreBase):
+    _schema = _SCHEMA
+    # Rows are unpacked positionally (``for day_str, pnl_str in rows``); keep tuples.
+    row_factory = None
 
     def is_synced(self, scope_key: str, source_fingerprint: str) -> bool:
         with self._connect() as conn:

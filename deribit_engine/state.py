@@ -9,6 +9,8 @@ from collections.abc import Iterator
 from decimal import Decimal
 from pathlib import Path
 
+from .atomic_io import atomic_write_text, durable_append_text
+from .env_parse import parse_env_bool
 from .models import StrategyState, TradeGroup
 from .utils import json_default, utc_now_ms
 
@@ -19,6 +21,36 @@ except ImportError:  # pragma: no cover — POSIX only; Windows not supported by
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Closed-group archival defaults (see ``StrategyStateStore.archive_closed_groups``).
+DEFAULT_CLOSED_ARCHIVE_KEEP_DAYS = 90
+DEFAULT_CLOSED_ARCHIVE_KEEP_MIN = 20
+_MS_PER_DAY = 86_400_000
+
+
+def state_json_pretty_from_environ() -> bool:
+    """``STATE_JSON_PRETTY=true`` restores indented state files (default compact)."""
+    return bool(parse_env_bool(os.environ.get("STATE_JSON_PRETTY"), default=False, strict=False))
+
+
+def serialize_state(state: StrategyState, *, pretty: bool = False) -> str:
+    """Deterministic JSON for a state file.
+
+    Compact by default: the file is rewritten every live cycle and closed groups
+    accumulate, so indentation roughly doubles the bytes written per save.
+    ``sort_keys`` is kept in both modes so diffs / fingerprints stay stable.
+    """
+    if pretty:
+        return json.dumps(state.to_dict(), default=json_default, ensure_ascii=False, indent=2, sort_keys=True)
+    return json.dumps(
+        state.to_dict(),
+        default=json_default,
+        ensure_ascii=False,
+        indent=None,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
 
 # Live manage cycles load state at start and save at end. Concurrent CLI tools
 # (spot-restore / profit-sweep / …) may update the same file mid-cycle; a naive
@@ -70,6 +102,7 @@ _PROFIT_SWEEP_FIELDS = (
 _CASH_SECURED_FIELDS = (
     "cash_secured_status",
     "cash_secured_group_id",
+    "cash_secured_group_ids",
     "cash_secured_reason",
     "cash_secured_order_id",
     "cash_secured_instrument_name",
@@ -99,6 +132,184 @@ def load_performance_exclusion_group_ids(state_path: Path) -> set[str]:
     else:
         raw_ids = []
     return {str(item) for item in raw_ids if str(item)}
+
+
+_CLOSED_ARCHIVE_SUFFIX = ".closed_archive.jsonl"
+
+
+def closed_archive_path(state_path: Path) -> Path:
+    """``<state stem>.closed_archive.jsonl`` next to the state file."""
+    if state_path.name.endswith(_CLOSED_ARCHIVE_SUFFIX):
+        return state_path
+    return state_path.with_name(f"{state_path.stem}{_CLOSED_ARCHIVE_SUFFIX}")
+
+
+def load_archived_groups(path: Path) -> list[TradeGroup]:
+    """Read every archived closed group (append-only JSONL, one ``TradeGroup`` per line).
+
+    ``path`` may be the state file or the archive file itself. Corrupt lines
+    (e.g. a torn write from a crash mid-append) are skipped with a warning so
+    one bad record never hides the rest of the history.
+    """
+    archive = closed_archive_path(Path(path))
+    if not archive.is_file():
+        return []
+    groups: list[TradeGroup] = []
+    seen: set[str] = set()
+    try:
+        raw = archive.read_text(encoding="utf-8")
+    except OSError as exc:
+        LOGGER.warning("failed to read closed-group archive %s: %s", archive, exc)
+        return []
+    for line_no, line in enumerate(raw.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+            group = TradeGroup.from_dict(payload)
+        except Exception as exc:  # noqa: BLE001 — one bad line must not hide the archive.
+            LOGGER.warning("skipping corrupt archive line %s in %s: %s", line_no, archive, exc)
+            continue
+        gid = str(group.group_id or "")
+        if gid and gid in seen:
+            continue
+        if gid:
+            seen.add(gid)
+        groups.append(group)
+    return groups
+
+
+def iter_all_groups(state: StrategyState, path: Path) -> Iterator[TradeGroup]:
+    """Yield live groups followed by archived closed groups (deduped by ``group_id``).
+
+    Readers that need full history (fee reports, realized summaries, dashboard
+    closed tables) must use this instead of ``state.groups`` once archival is
+    enabled. Live copies win over archived copies with the same id.
+    """
+    seen: set[str] = set()
+    for group in state.groups:
+        gid = str(group.group_id or "")
+        if gid:
+            seen.add(gid)
+        yield group
+    for group in load_archived_groups(path):
+        gid = str(group.group_id or "")
+        if gid and gid in seen:
+            continue
+        yield group
+
+
+# Follow-up journals a *closed* group may still be driving. A status outside the
+# terminal set means the live cycle / an operator CLI still has work to do on the
+# group (queue, poll or retry an order), so it must stay in ``state.groups``:
+# archived groups are invisible to those loops and the operation would be
+# orphaned. Unknown values are treated as non-terminal (conservative).
+#
+# Terminal sets are derived from the writers:
+# - profit sweep: ``filled`` / ``skipped`` are done; ``pending`` / ``submitted``
+#   are in flight and ``failed`` is re-queued by
+#   ``profit_sweep_ops.reschedule_failed_profit_sweeps`` (so it is *not* terminal).
+# - spot restore: ``filled`` / ``skipped`` (``spot_restore_ops.mark_spot_restore_
+#   operator_cancelled`` also accepts ``cancelled`` / ``canceled``); ``pending`` /
+#   ``submitted`` are in flight.
+# - CSP premium swap: ``csp_premium_swap_ops.CSP_PREMIUM_SWAP_TERMINAL``
+#   (``filled`` / ``skipped``); ``pending`` / ``submitted`` are in flight.
+# - ITM spot exit: ``filled`` / ``skipped`` are done; ``pending`` / ``submitted``
+#   are in flight and ``failed`` is re-queued (``engine/execution.py``).
+# - cash-secured wheel (parent side): ``entered`` / ``skipped`` are done;
+#   ``pending`` / ``submitted`` mean the child put is still being opened.
+_FOLLOW_UP_TERMINAL_STATUSES: dict[str, frozenset[str]] = {
+    "profit_sweep_status": frozenset({"", "filled", "skipped"}),
+    "spot_restore_status": frozenset({"", "filled", "skipped", "cancelled", "canceled"}),
+    "csp_premium_swap_status": frozenset({"", "filled", "skipped"}),
+    "spot_exit_status": frozenset({"", "filled", "skipped"}),
+    "cash_secured_status": frozenset({"", "entered", "skipped"}),
+}
+
+
+def group_has_pending_follow_up(group: TradeGroup) -> bool:
+    """True when any follow-up journal on ``group`` is not in a terminal status."""
+    for attr, terminal in _FOLLOW_UP_TERMINAL_STATUSES.items():
+        status = str(getattr(group, attr, "") or "").strip().lower()
+        if status not in terminal:
+            return True
+    return False
+
+
+def referenced_parent_group_ids(groups: list[TradeGroup]) -> set[str]:
+    """Ids of wheel parents that some group still in ``groups`` points at.
+
+    A cash-secured child links to the covered call that funded it through
+    ``cash_secured_from_group_id``; wheel helpers (``cash_secured_ops``) resolve
+    that link against the live group list, so the parent must stay until every
+    child has left ``state.groups`` (archived or removed).
+    """
+    return {
+        str(g.cash_secured_from_group_id or "").strip()
+        for g in groups
+        if str(g.cash_secured_from_group_id or "").strip()
+    }
+
+
+def closed_group_is_archivable(
+    group: TradeGroup,
+    *,
+    groups: list[TradeGroup],
+    referenced_parent_ids: set[str] | None = None,
+) -> bool:
+    """Pure eligibility check for moving a closed group into the archive.
+
+    A closed group is archivable only when it has no pending follow-up work
+    (see ``group_has_pending_follow_up``) and no other group in ``groups``
+    references it as its wheel parent. Only parents are protected: a child
+    whose parent is retained may be archived on its own.
+
+    Performance-exclusion ids (``load_performance_exclusion_group_ids``) are
+    deliberately *not* consulted: every reader simply skips those ids, and the
+    archive keeps the group readable via ``iter_all_groups``, so archiving an
+    excluded group changes nothing for reports.
+    """
+    if str(group.status or "").lower() != "closed":
+        return False
+    if group_has_pending_follow_up(group):
+        return False
+    referenced = referenced_parent_ids if referenced_parent_ids is not None else referenced_parent_group_ids(groups)
+    gid = str(group.group_id or "").strip()
+    if gid and gid in referenced:
+        return False
+    return True
+
+
+def select_archivable_closed_groups(
+    groups: list[TradeGroup],
+    *,
+    keep_recent_days: int,
+    keep_min: int,
+    now_ms: int | None = None,
+) -> list[TradeGroup]:
+    """Closed groups older than ``keep_recent_days`` AND beyond the newest ``keep_min``.
+
+    Groups without a ``closed_timestamp_ms`` are never selected (we cannot
+    reason about their age). Groups with pending follow-up work, or referenced
+    as wheel parent by a group still in ``groups``, are retained (see
+    ``closed_group_is_archivable``). Returned oldest-first for a stable archive
+    order.
+    """
+    now = now_ms if now_ms is not None else utc_now_ms()
+    cutoff = now - max(int(keep_recent_days), 0) * _MS_PER_DAY
+    closed = [g for g in groups if str(g.status or "").lower() == "closed" and g.closed_timestamp_ms is not None]
+    closed.sort(key=lambda g: (int(g.closed_timestamp_ms or 0), str(g.group_id or "")), reverse=True)
+    candidates = closed[max(int(keep_min), 0) :]
+    referenced = referenced_parent_group_ids(groups)
+    picked = [
+        g
+        for g in candidates
+        if int(g.closed_timestamp_ms or 0) < cutoff
+        and closed_group_is_archivable(g, groups=groups, referenced_parent_ids=referenced)
+    ]
+    picked.reverse()
+    return picked
 
 
 # CSP ``skipped`` (operator cancel of an old mid park) is retryable; ``entered``
@@ -236,10 +447,19 @@ class StrategyStateStore:
       profit_sweep / spot_exit) so a long-lived live cycle cannot clobber mid-cycle CLI updates.
     - load: same lock while reading; if the JSON is corrupt the current file is moved to
       `<path>.corrupt.<ts>` and a fresh empty state is returned (with a warning logged).
+    - durability: the tmp file is fsync'ed before the rename and the directory after it
+      (see :mod:`deribit_engine.atomic_io`), so a power loss cannot leave an empty state.
+    - format: compact JSON by default; ``pretty=True`` (or ``STATE_JSON_PRETTY=true``)
+      restores the indented layout. ``load`` accepts either.
     """
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, pretty: bool | None = None):
         self.path = path
+        self._pretty = state_json_pretty_from_environ() if pretty is None else bool(pretty)
+
+    @property
+    def pretty(self) -> bool:
+        return self._pretty
 
     @property
     def lock_path(self) -> Path:
@@ -248,6 +468,10 @@ class StrategyStateStore:
     @property
     def tmp_path(self) -> Path:
         return self.path.with_suffix(self.path.suffix + ".tmp")
+
+    @property
+    def archive_path(self) -> Path:
+        return closed_archive_path(self.path)
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
@@ -348,24 +572,72 @@ class StrategyStateStore:
                         ",".join(merged),
                         self.path,
                     )
-            serialized = json.dumps(
-                state.to_dict(),
-                default=json_default,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-            )
-            tmp_path = self.tmp_path
-            try:
-                tmp_path.write_text(serialized, encoding="utf-8")
-                os.replace(tmp_path, self.path)
-            except Exception:
-                try:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
-                except OSError:
-                    pass
-                raise
+            serialized = serialize_state(state, pretty=self._pretty)
+            atomic_write_text(self.path, serialized, tmp_path=self.tmp_path)
+
+    # ---- closed-group archival -------------------------------------------------
+
+    def load_archived_groups(self) -> list[TradeGroup]:
+        return load_archived_groups(self.archive_path)
+
+    def iter_all_groups(self, state: StrategyState) -> Iterator[TradeGroup]:
+        return iter_all_groups(state, self.path)
+
+    def archive_closed_groups(
+        self,
+        state: StrategyState,
+        *,
+        keep_recent_days: int = DEFAULT_CLOSED_ARCHIVE_KEEP_DAYS,
+        keep_min: int = DEFAULT_CLOSED_ARCHIVE_KEEP_MIN,
+        now_ms: int | None = None,
+    ) -> int:
+        """Move old closed groups out of ``state.groups`` into the JSONL archive.
+
+        A closed group is archived when its ``closed_timestamp_ms`` is older than
+        ``keep_recent_days`` *and* it is not among the newest ``keep_min`` closed
+        groups. The archive is appended (durably) *before* the groups are removed
+        from ``state``; ids already present in the archive are not re-appended,
+        so a crash between append and the caller's ``save`` is self-healing and a
+        repeated run is idempotent. The caller must ``save(state)`` afterwards.
+
+        Returns the number of groups removed from ``state.groups``.
+        """
+        picked = select_archivable_closed_groups(
+            state.groups,
+            keep_recent_days=keep_recent_days,
+            keep_min=keep_min,
+            now_ms=now_ms,
+        )
+        if not picked:
+            return 0
+        with self._locked():
+            already = {str(g.group_id or "") for g in load_archived_groups(self.archive_path)}
+            lines: list[str] = []
+            for group in picked:
+                gid = str(group.group_id or "")
+                if gid and gid in already:
+                    continue
+                lines.append(
+                    json.dumps(
+                        group.to_dict(),
+                        default=json_default,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                )
+            if lines:
+                durable_append_text(self.archive_path, "".join(line + "\n" for line in lines))
+        picked_ids = {id(group) for group in picked}
+        state.groups = [g for g in state.groups if id(g) not in picked_ids]
+        LOGGER.info(
+            "archived %s closed groups (appended %s new) to %s; %s groups remain in state",
+            len(picked),
+            len(lines),
+            self.archive_path,
+            len(state.groups),
+        )
+        return len(picked)
 
     def _quarantine_corrupt_file(self, *, reason: str) -> Path:
         backup = self.path.with_suffix(self.path.suffix + f".corrupt.{utc_now_ms()}")
@@ -374,3 +646,35 @@ class StrategyStateStore:
         except OSError as exc:  # pragma: no cover — best-effort.
             LOGGER.warning("unable to quarantine %s (%s): %s", self.path, reason, exc)
         return backup
+
+
+def archive_closed_groups_for_state_file(
+    path: Path,
+    *,
+    keep_recent_days: int = DEFAULT_CLOSED_ARCHIVE_KEEP_DAYS,
+    keep_min: int = DEFAULT_CLOSED_ARCHIVE_KEEP_MIN,
+    pretty: bool | None = None,
+    now_ms: int | None = None,
+) -> int:
+    """Load ``path``, archive eligible closed groups, save. Returns archived count.
+
+    Intended for an operator/maintenance run while the live bot for that state
+    file is *stopped*: a running bot holds its own in-memory copy of ``groups``
+    and would write the archived groups back on its next save (harmless — the
+    next archive run removes them again without duplicating archive lines — but
+    noisy). Wire ``StrategyStateStore.archive_closed_groups`` into the live
+    cycle (after reconcile, before save) to avoid that window entirely.
+    """
+    store = StrategyStateStore(Path(path), pretty=pretty)
+    if not store.path.exists():
+        return 0
+    state = store.load()
+    archived = store.archive_closed_groups(
+        state,
+        keep_recent_days=keep_recent_days,
+        keep_min=keep_min,
+        now_ms=now_ms,
+    )
+    if archived:
+        store.save(state)
+    return archived

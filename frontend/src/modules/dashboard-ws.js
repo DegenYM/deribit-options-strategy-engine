@@ -1,5 +1,5 @@
 import { INVESTOR } from "../shared/context.js";
-import { resolveApiUrl } from "../shared/context.js";
+import { resolveApiUrl, withWsToken } from "../shared/context.js";
 import {
   DASHBOARD_WS_CHANNELS,
   DASHBOARD_WS_ENABLED,
@@ -21,8 +21,9 @@ let reconnectAttempt = 0;
 let reconnectTimer = null;
 let renderDashboardFn = null;
 
-function buildWsUrl() {
-  const path = `/ws/dashboard?channels=${encodeURIComponent(DASHBOARD_WS_CHANNELS)}`;
+export function buildWsUrl() {
+  // The handshake cannot carry headers, so a token-gated server reads `?token=`.
+  const path = withWsToken(`/ws/dashboard?channels=${encodeURIComponent(DASHBOARD_WS_CHANNELS)}`);
   const httpUrl = resolveApiUrl(path);
   if (/^https?:\/\//i.test(httpUrl)) {
     const u = new URL(httpUrl);

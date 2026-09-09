@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -28,6 +29,60 @@ from .context import (
     LOGGER,
     RuntimeContext,
 )
+
+# Deribit JSON-RPC error codes for which escalating a rejected reduce_only *limit*
+# close to a reduce_only *market* close is the right response: the rejection is
+# purely about the limit price / post-only flag, so a market order fixes it.
+# Anything else (not_enough_funds, invalid_amount, reduce_only violations,
+# maintenance, permission_denied, ...) would fail again at market — or worse,
+# fill something we did not intend — so the leg is reported unfilled instead.
+_MARKET_FALLBACK_ERROR_CODES: frozenset[int] = frozenset(
+    {
+        10005,  # price_too_low
+        10006,  # price_too_low4idx
+        10007,  # price_too_high
+        10011,  # price_not_allowed
+        10023,  # invalid_price
+        10026,  # price_precision_exceeded
+        10043,  # price_wrong_tick
+        11054,  # post_only_reject
+        11055,  # post_only_not_allowed
+    }
+)
+_MARKET_FALLBACK_ERROR_TOKENS: tuple[str, ...] = (
+    "price_too_high",
+    "price_too_low",
+    "price_not_allowed",
+    "price_out_of_range",
+    "invalid_price",
+    "price_precision_exceeded",
+    "price_wrong_tick",
+    "post_only_reject",
+    "post_only_not_allowed",
+)
+_ERROR_CODE_RE = re.compile(r"(?:\bcode=|\"code\"\s*:\s*)(-?\d+)")
+
+
+def is_market_fallback_eligible(exc: BaseException) -> bool:
+    """True when a rejected reduce_only limit close may be retried as a market close.
+
+    Matches Deribit's price-band / post-only rejections by JSON-RPC error code
+    (``code=10007`` or ``"code": 10007`` in the message) or by message token
+    (``price_too_high 2180.0``). Everything else is *not* eligible.
+    """
+    text = str(exc or "")
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(token in lowered for token in _MARKET_FALLBACK_ERROR_TOKENS):
+        return True
+    for match in _ERROR_CODE_RE.finditer(text):
+        try:
+            if int(match.group(1)) in _MARKET_FALLBACK_ERROR_CODES:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 class ExecutionMixin:
@@ -628,22 +683,34 @@ class ExecutionMixin:
         if group.long_instrument_name:
             long_book = self._get_orderbook(group.long_instrument_name, context.orderbook_cache)
             long_inst = self._find_instrument(context, group.long_instrument_name)
-            long_result = self._close_leg_with_retry(
-                context,
-                instrument_name=group.long_instrument_name,
-                quantity=group.quantity,
-                direction="sell",
-                label=f"{group.long_label or self._spread_labels(group.currency, group.group_id)['long']}-close",
-                initial_price=self.strategy.close_sell_price(
-                    long_inst,
-                    long_book,
-                    max_spread_ratio=self.config.income_exit_max_spread_ratio
-                    if reason in INCOME_EXIT_REASONS
-                    else None,
-                ),
-                reason=reason,
-                incomplete_streak=group.close_incomplete_streak,
-            )
+            try:
+                long_result = self._close_leg_with_retry(
+                    context,
+                    instrument_name=group.long_instrument_name,
+                    quantity=group.quantity,
+                    direction="sell",
+                    label=f"{group.long_label or self._spread_labels(group.currency, group.group_id)['long']}-close",
+                    initial_price=self.strategy.close_sell_price(
+                        long_inst,
+                        long_book,
+                        max_spread_ratio=self.config.income_exit_max_spread_ratio
+                        if reason in INCOME_EXIT_REASONS
+                        else None,
+                    ),
+                    reason=reason,
+                    incomplete_streak=group.close_incomplete_streak,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Short already bought back; the long is now unpaired and this
+                # cycle's state will not record the short fill. Page first.
+                self._alert_close_leg_risk(
+                    group,
+                    reason=reason,
+                    unfilled=group.quantity,
+                    detail=f"long leg close raised after short filled: {exc}",
+                    level="critical",
+                )
+                raise
             long_response = long_result["last_response"]
             if long_result["unfilled"] > 0:
                 LOGGER.warning("close_group %s: long leg unfilled=%s", group.group_id, long_result["unfilled"])
@@ -654,11 +721,26 @@ class ExecutionMixin:
                     if long_result.get("streak_bump") or not self._income_exit_uses_resting_limit(reason):
                         group.close_incomplete_streak += 1
                 action_type = "close_group_pending" if long_result.get("resting_pending") else "close_group_incomplete"
+                # The short is closed but the protective long is still (partly) open:
+                # the group is no longer a spread. Make that explicit for the caller
+                # and the operator.
+                self._alert_close_leg_risk(
+                    group,
+                    reason=reason,
+                    unfilled=long_result["unfilled"],
+                    detail=(
+                        f"short filled {short_result['filled']}, long unfilled {long_result['unfilled']} "
+                        f"({'resting' if long_result.get('resting_pending') else 'incomplete'})"
+                    ),
+                    level="warning" if long_result.get("resting_pending") else "critical",
+                )
                 return [
                     {
                         "action": action_type,
                         "reason": reason,
                         "group_id": group.group_id,
+                        "leg_risk": "close_incomplete_long",
+                        "leg_risk_quantity": long_result["unfilled"],
                         "short_filled": short_result["filled"],
                         "short_unfilled": short_result["unfilled"],
                         "long_filled": long_result["filled"],
@@ -772,6 +854,38 @@ class ExecutionMixin:
                 },
             )
         return [close_action]
+
+    def _alert_close_leg_risk(
+        self,
+        group: TradeGroup,
+        *,
+        reason: str,
+        unfilled: Decimal,
+        detail: str,
+        level: str,
+    ) -> None:
+        """WARNING + Telegram page when a spread close leaves the long leg behind."""
+        LOGGER.warning(
+            "LEG RISK close_incomplete_long: group=%s long=%s unfilled=%s reason=%s — %s",
+            group.group_id,
+            group.long_instrument_name,
+            unfilled,
+            reason,
+            detail,
+        )
+        try:
+            self._telegram_alert(
+                "Spread leg risk: close_incomplete_long",
+                body=(
+                    f"group={group.group_id} short={group.short_instrument_name} closed, "
+                    f"long={group.long_instrument_name} unfilled={format_decimal(unfilled, 8)} — {detail}"
+                ),
+                event_key=f"leg_risk:close_incomplete_long:{group.group_id}",
+                level=level,
+                extra={"leg_risk": "close_incomplete_long", "reason": reason, "currency": group.currency},
+            )
+        except Exception as alert_exc:  # noqa: BLE001
+            LOGGER.warning("leg risk alert delivery failed (close_incomplete_long): %s", alert_exc)
 
     def _collect_close_trades(
         self,
@@ -1140,6 +1254,17 @@ class ExecutionMixin:
         try:
             return place_fn(**order_kwargs)
         except ExchangeError as exc:
+            if not is_market_fallback_eligible(exc):
+                # Not a price-band / post-only rejection: a market order would not
+                # fix it (and might fill something unintended). Report the leg
+                # unfilled so the manage loop retries next cycle.
+                return self._rejected_option_close_response(
+                    instrument_name=instrument_name,
+                    direction=direction,
+                    amount=amount,
+                    label=label,
+                    error=exc,
+                )
             limit = parse_exchange_price_band_limit(str(exc))
             if limit is None:
                 return self._fallback_close_position_market(
@@ -1176,6 +1301,14 @@ class ExecutionMixin:
             try:
                 return place_fn(**{**order_kwargs, "price": clamped})
             except ExchangeError as retry_exc:
+                if not is_market_fallback_eligible(retry_exc):
+                    return self._rejected_option_close_response(
+                        instrument_name=instrument_name,
+                        direction=direction,
+                        amount=amount,
+                        label=label,
+                        error=retry_exc,
+                    )
                 return self._fallback_close_position_market(
                     instrument=instrument,
                     instrument_name=instrument_name,
@@ -1185,6 +1318,46 @@ class ExecutionMixin:
                     original_error=retry_exc,
                     option_positions=option_positions,
                 )
+
+    def _rejected_option_close_response(
+        self,
+        *,
+        instrument_name: str,
+        direction: str,
+        amount: Decimal,
+        label: str,
+        error: Exception,
+    ) -> dict[str, Any]:
+        """Zero-fill response for a limit close the exchange rejected for a non-price reason.
+
+        Shape matches ``_noop_option_order_response`` (``filled_amount=0``) so
+        ``_close_leg_with_retry`` / ``_close_group`` report the leg ``unfilled``
+        and the caller retries next cycle instead of crashing or escalating to a
+        market order. ``order_state=rejected`` keeps it out of the resting-order
+        path.
+        """
+        LOGGER.warning(
+            "option close %s on %s (label=%s amount=%s) rejected by exchange; "
+            "not eligible for market fallback, leaving leg unfilled: %s",
+            direction,
+            instrument_name,
+            label,
+            amount,
+            error,
+        )
+        return {
+            "order": {
+                "filled_amount": "0",
+                "average_price": "0",
+                "order_state": "rejected",
+                "instrument_name": instrument_name,
+                "direction": direction,
+                "label": label,
+            },
+            "trades": [],
+            "rejected": True,
+            "error": str(error),
+        }
 
     def _fallback_close_position_market(
         self,

@@ -10,6 +10,7 @@ from deribit_engine.spot_restore_ops import (
     apply_spot_restore_quote_spent,
     execute_spot_restore_for_group,
     format_spot_restore_human_report,
+    itm_spot_exit_net_usdt_for_total_profit,
     itm_spot_round_trip_complete,
     list_spot_restore_candidates,
     lookup_usdc_linear_option_lot,
@@ -119,6 +120,70 @@ def test_unrestored_and_candidates() -> None:
     assert unrestored_spot_exit_native(restored) == Decimal("0.06")
 
 
+def test_csp_child_assignment_restore_counts_toward_parent_cover() -> None:
+    parent = _group(
+        group_id="0021",
+        currency="ETH",
+        short_instrument_name="ETH-28AUG26-2400-C",
+        short_label="cc-eth-0021",
+        quantity="1",
+        covered_underlying_quantity="1",
+        short_strike="2400",
+        spot_exit_amount="0.9608",
+        spot_exit_quote_proceeds="2399.43",
+        spot_exit_quote_proceeds_lifetime="2399.43",
+        spot_exit_settlement_loss="0.0392",
+        short_entry_average_price="0.00253",
+        entry_fee_collateral="0.00027",
+        collateral_currency="ETH",
+        spot_restore_status="skipped",
+        cash_secured_group_id="0026",
+        cash_secured_group_ids=["0026"],
+    )
+    child = TradeGroup.from_dict(
+        {
+            "group_id": "0026",
+            "currency": "ETH",
+            "short_instrument_name": "ETH_USDC-11SEP26-2400-P",
+            "short_label": "csp-eth-0026",
+            "status": "closed",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "collateral_currency": "USDC",
+            "quantity": "1",
+            "entry_timestamp_ms": 1,
+            "expiration_timestamp_ms": 2,
+            "closed_timestamp_ms": 1_746_000_000_000,
+            "short_strike": "2400",
+            "entry_credit": "4.69",
+            "original_entry_credit": "4.69",
+            "max_loss": "2400",
+            "regime_at_entry": "normal",
+            "cash_secured_from_group_id": "0021",
+            "spot_restore_status": "filled",
+            "spot_restore_reason": "cash_secured_itm_assignment",
+            "spot_restore_amount": "1",
+            "spot_restore_quote_spent": "2405.859",
+            "spot_restore_quote_spent_lifetime": "2405.859",
+        }
+    )
+    groups = [parent, child]
+    assert unrestored_spot_exit_native(parent) > Decimal("0.9")
+    assert unrestored_spot_exit_native(parent, groups=groups) == Decimal("0")
+    assert itm_spot_round_trip_complete(parent) is False
+    assert itm_spot_round_trip_complete(parent, groups) is True
+    net = itm_spot_exit_net_usdt_for_total_profit(parent, groups)
+    assert net is not None
+    assert abs(net - (Decimal("2399.43") - Decimal("2405.859"))) < Decimal("0.01")
+    rows = list_spot_restore_candidates(groups)
+    parent_row = next(row for row in rows if row.group_id == "0021")
+    assert parent_row.unrestored_amount == Decimal("0")
+    assert parent_row.restored_amount == Decimal("1")
+    from deribit_engine.cash_secured_ops import cash_secured_target_native
+
+    assert cash_secured_target_native(parent, groups) == Decimal("0")
+
+
 def test_plan_spot_restore_is_swap_plus_settle_minus_premium() -> None:
     group = _group(
         spot_exit_amount="0.085",
@@ -205,6 +270,52 @@ def test_apply_spot_restore_quote_spent_records_lifetime() -> None:
     assert spent == Decimal("9101")
     assert group.spot_restore_quote_spent == Decimal("9101")
     assert group.spot_restore_quote_spent_lifetime == Decimal("9101")
+
+
+def test_spot_restore_follows_usdc_exit_pair() -> None:
+    from deribit_engine.spot_restore_ops import spot_restore_spot_instrument_name
+
+    parked = _group(
+        spot_exit_instrument_name="BTC_USDC",
+        spot_restore_instrument_name="BTC_USDT",
+    )
+    assert spot_restore_spot_instrument_name(parked) == "BTC_USDC"
+    usdc_group = _group(
+        spot_exit_instrument_name="BTC_USDC",
+        spot_restore_instrument_name="BTC_USDC",
+    )
+    trades = [
+        {
+            "direction": "buy",
+            "instrument_name": "BTC_USDC",
+            "amount": "0.1",
+            "price": "91000",
+            "fee": "1",
+            "fee_currency": "USDC",
+        }
+    ]
+    spent = apply_spot_restore_quote_spent(usdc_group, trades)
+    assert spent == Decimal("9101")
+
+
+def test_execute_spot_restore_instrument_override_buys_usdc(tmp_path) -> None:
+    group = _group(spot_exit_instrument_name="BTC_USDT")
+    client = FakeClient()
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_spot_exit_enabled=True,
+        order_label_prefix="covered_call",
+    )
+    bot = MagicMock()
+    bot.client = client
+    bot.config = config
+    preview = execute_spot_restore_for_group(bot, group, live=False, instrument_name="BTC_USDC")
+    assert preview["action"] == "spot_restore_preview"
+    assert preview["instrument_name"] == "BTC_USDC"
+    skipped = execute_spot_restore_for_group(bot, group, live=False, instrument_name="BTC_USD")
+    assert skipped["reason"] == "invalid_spot_instrument"
 
 
 def test_spot_restore_fill_stats_only_restore_buys() -> None:

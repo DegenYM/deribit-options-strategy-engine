@@ -157,18 +157,43 @@ done
 | 停止 | `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.deribit.live.jack.plist` |
 | 停止（舊版） | `launchctl unload ~/Library/LaunchAgents/com.deribit.live.jack.plist` |
 
+## `run_live_profiles.py` 參數
+
+| 參數 | 預設 | 說明 |
+|------|------|------|
+| `--investor ID` | `youming` | 讀 `config/investors/<ID>/accounts.toml` 內 `enabled` + `live_enabled` 且有 API 的子帳 |
+| `--restart-failed` | off | 子帳非 0 退出時自動重啟（隱含 `--keep-going`） |
+| `--keep-going` | off | 某子帳退出時其他子帳繼續跑 |
+| `--restart-delay-seconds` | `15` | 重啟退避**基準**：第 n 次連續失敗等 `min(base × 2^(n-1), max)` 秒 |
+| `--restart-max-delay-seconds` | `600` | 退避上限 |
+| `--restart-stable-seconds` | `900` | 子程序持續存活這麼久後，連續失敗計數歸零（下次失敗又從 base 開始） |
+| `--log-max-bytes` | `52428800`（50MB） | 子帳 log 超過此大小時輪替為 `<slug>.log.1..N`；`0` 停用 |
+| `--log-backups` | `5` | 保留幾份輪替檔 |
+| `--heartbeat-stale-seconds` | `LIVE_HEARTBEAT_STALE_SECONDS` 或 `600` | heartbeat 比這更舊（且子程序已跑滿此秒數）→ 視為卡住 |
+| `--heartbeat-kill-grace-seconds` | `30` | 卡住時先 SIGTERM，等這麼久仍活著再 SIGKILL |
+| `--no-heartbeat-restart` | off | 關閉 heartbeat 自動重啟（仍可用 `check_live_heartbeat.py` 純告警） |
+| `--grace-seconds` | `10` | 監督腳本收到 SIGINT/SIGTERM 時，等子程序多久再 SIGKILL |
+
+重啟排程為**非阻塞**：某子帳在等退避時，其他子帳仍每秒被輪詢，heartbeat 檢查也不會停。Telegram 告警（`bot_exit` / `bot_restart` / `live_heartbeat_stale_restart`）內含 `attempt=<第幾次連續失敗>` 與 `next_restart_in=<秒>`。
+
+**Log 輪替限制**：子程序的 stdout 直接指向 log 檔（監督腳本不經手輸出，避免監督腳本掛掉時子程序寫入斷管），因此只能在**啟動 / 重啟的當下**依大小輪替；長時間不重啟的子帳 log 會超過 `--log-max-bytes`，直到下次重啟（或 `launchctl kickstart -k`）才輪替。不會遺失任何輸出。
+
 ## Log 路徑
 
 | 檔案 | 內容 |
 |------|------|
-| `logs/live/<id>/supervisor.log` | 監督腳本 stdout（started / exited / restarted） |
+| `logs/live/<id>/supervisor.log` | 監督腳本 stdout（started / exited / restarting in Ns / restarted / heartbeat stale） |
 | `logs/live/<id>/supervisor.err.log` | 監督腳本 stderr / traceback |
-| `logs/live/<id>/<slug>.log` | 各子帳 bot 的 cycle log |
+| `logs/live/<id>/<slug>.log` | 各子帳 bot 的 cycle log（輪替檔為 `<slug>.log.1..N`） |
 | `.state/investors/<id>/<slug>.heartbeat.json` | live cycle 心跳（`ts_ms`、`regime`、`last_error`） |
 
 ## Heartbeat watchdog
 
-Live bot 每完成一個 cycle（或 API 退避重試時）會更新 heartbeat。外部腳本可偵測 bot 卡住：
+Live bot 每完成一個 cycle（或 API 退避重試時）會更新 heartbeat。
+
+**監督腳本內建自動重啟**（`--restart-failed` 時預設開啟）：每秒檢查各子帳的 heartbeat；若子程序已跑滿 `--heartbeat-stale-seconds` 且 heartbeat 的 `ts_ms` 比門檻更舊，就 SIGTERM → 等 `--heartbeat-kill-grace-seconds` → SIGKILL，然後依退避排程重啟，並發 Telegram（`event_key=live_heartbeat_stale_restart:<env>`）。heartbeat 檔**不存在**只會在 supervisor.log 警告一次、不會殺程序（可能是 `STATE_FILE` 覆寫導致路徑不符，寧可不殺）。用 `--no-heartbeat-restart` 關閉。
+
+外部純告警腳本（不重啟）仍可搭配使用：
 
 ```bash
 # 預設 10 分鐘無更新 → Telegram 告警（需 `config/shared/.env.defaults` 內 Telegram 設定）
@@ -178,7 +203,7 @@ python scripts/check_live_heartbeat.py
 python scripts/check_live_heartbeat.py --dry-run
 ```
 
-建議用 **cron** 或 **launchd StartInterval** 每 5 分鐘跑一次。環境變數 `LIVE_HEARTBEAT_STALE_SECONDS=600` 可調門檻。故障處理見 [`docs/runbooks/README-zh-TW.md`](runbooks/README-zh-TW.md)。
+建議用 **cron** 或 **launchd StartInterval** 每 5 分鐘跑一次。環境變數 `LIVE_HEARTBEAT_STALE_SECONDS=600` 可調門檻（監督腳本與此腳本共用）。故障處理見 [`docs/runbooks/README-zh-TW.md`](runbooks/README-zh-TW.md)。
 
 ## 注意事項
 

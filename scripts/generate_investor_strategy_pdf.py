@@ -7,7 +7,12 @@ import os
 from io import BytesIO
 from pathlib import Path
 
-import matplotlib
+# matplotlib / numpy / reportlab / pillow are optional deps (``pip install -e '.[pdf]'``);
+# all imports are lazy so the module can be imported without them.
+_PDF_DEPS_MISSING_MSG = (
+    "This script needs the optional PDF dependencies (reportlab, matplotlib, numpy, pillow). "
+    "Install them with: pip install -e '.[pdf]'  (or pip install -r requirements-pdf.txt)"
+)
 
 # --- Visual theme (single source of truth) ------------------------------------
 _PALETTE = {
@@ -103,6 +108,8 @@ def _configure_matplotlib(repo_root: Path) -> None:
     mpl_dir = repo_root / ".mplconfig"
     mpl_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(mpl_dir))
+    import matplotlib
+
     matplotlib.use("Agg")
 
 
@@ -1041,7 +1048,10 @@ def build_pdf(out_path: Path, repo_root: Path) -> None:
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     out = repo_root / "output" / "pdf" / "Deribit_Strategies_Investor_Brief.pdf"
-    build_pdf(out, repo_root)
+    try:
+        build_pdf(out, repo_root)
+    except ImportError as exc:
+        raise SystemExit(f"{_PDF_DEPS_MISSING_MSG}\n({exc})") from exc
     print(f"Wrote {out}")
 
 

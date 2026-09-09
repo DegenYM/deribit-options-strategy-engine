@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlNativeForProfitSwap, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, sumItmSpotExitNetUsdtByBook, sumItmSpotExitNetUsdtForTotalProfit, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, groupHasItmSpotExitFills, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isCashSecuredGroup, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlNativeForProfitSwap, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, sumItmSpotExitNetUsdtByBook, sumItmSpotExitNetUsdtForTotalProfit, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -94,6 +94,44 @@ export function chartCanvasContext(canvasId) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
   return canvas.getContext("2d");
+}
+
+/**
+ * Reuse the existing Chart.js instance when it is bound to the same canvas and
+ * has the same `type`; otherwise destroy and recreate. Every refresh used to
+ * tear down all four charts and rebuild them (canvas reset, plugin re-init,
+ * time-scale re-parse); swapping `data` + `options` and calling
+ * `update('none')` keeps the instance and skips animation.
+ *
+ * Placeholder charts from `mountEmptyTimeSeriesChart` are always replaced so
+ * an "empty → has data" transition does not inherit skeleton styling.
+ */
+export function mountOrUpdateChart(key, canvasId, ctx, config) {
+  const ChartApi = globalThis.Chart;
+  const existing = STATE.charts[key];
+  const canvas = ctx?.canvas || document.getElementById(canvasId) || null;
+  const reusable =
+    existing &&
+    !existing.__placeholder &&
+    canvas &&
+    existing.canvas === canvas &&
+    existing.config?.type === config.type &&
+    typeof existing.update === "function";
+  if (reusable) {
+    try {
+      existing.data.labels = config.data?.labels ?? [];
+      existing.data.datasets = config.data?.datasets ?? [];
+      if (config.options) existing.options = config.options;
+      existing.update("none");
+      return existing;
+    } catch (err) {
+      console.warn("chart in-place update failed; recreating", err);
+    }
+  }
+  destroyChart(key, canvasId);
+  const chart = new ChartApi(ctx, config);
+  STATE.charts[key] = chart;
+  return chart;
 }
 
 export function resizeAllCharts() {
@@ -240,7 +278,7 @@ export function mountEmptyTimeSeriesChart(
     { x: xBounds.max, y: 0 },
   ];
   // Skeleton uses a line at y=0 so axes/grid render reliably (bar placeholders are invisible).
-  STATE.charts[key] = new globalThis.Chart(ctx, {
+  const chart = new globalThis.Chart(ctx, {
     type: "line",
     data: {
       datasets: [
@@ -256,6 +294,8 @@ export function mountEmptyTimeSeriesChart(
     },
     options: emptyChartScaleOptions({ yPercent, chartType }),
   });
+  chart.__placeholder = true;
+  STATE.charts[key] = chart;
 }
 
 export function visibleBooks() {
@@ -323,7 +363,7 @@ function sumRealizedPnlUsdcFromRows(rows, status) {
   let sum = 0;
   let any = false;
   for (const g of rows) {
-    const pnl = realizedPnlDisplayUsdc(g, status);
+    const pnl = realizedPnlDisplayUsdc(g, status, rows);
     if (pnl === null) continue;
     sum += pnl;
     any = true;
@@ -354,50 +394,104 @@ export function sumStrategyRealizedPnlUsdcAtSpot(report, groups, status, stratId
   return sumRealizedPnlUsdcFromRows(rows, status);
 }
 
-function _mergeItmNetIntoUsdByBook(usdByBook, rows) {
+function _emptyUsdByBook() {
+  return { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
+}
+
+/** Recognized ITM exit−restore nets belong on the USDT book, not coin premium / leftover USDC. */
+function _itmSpotExitNetUsdtTotal(rows) {
   const itmByBook = sumItmSpotExitNetUsdtByBook(rows);
-  if (!itmByBook) return usdByBook;
-  const out = usdByBook ? { ...usdByBook } : { BTC: 0, ETH: 0, USDC: 0 };
-  for (const book of ["BTC", "ETH"]) {
-    const net = num(itmByBook[book]) ?? 0;
-    if (Math.abs(net) < 0.005) continue;
-    out[book] = (num(out[book]) ?? 0) + net;
-  }
+  if (!itmByBook) return 0;
+  return (num(itmByBook.BTC) ?? 0) + (num(itmByBook.ETH) ?? 0);
+}
+
+function _mergeItmNetIntoUsdByBook(usdByBook, rows) {
+  const itmTotal = _itmSpotExitNetUsdtTotal(rows);
+  if (Math.abs(itmTotal) < 0.005) return usdByBook;
+  const out = usdByBook ? { ..._emptyUsdByBook(), ...usdByBook } : _emptyUsdByBook();
+  out.USDT = (num(out.USDT) ?? 0) + itmTotal;
   return out;
 }
 
-/** Per-book lifetime realized USD (premium swap + unswept × spot + ITM exit−restore net). */
+/** Folded / swept ITM option premium stays on the coin book; cover round-trip does not. */
+function _itmFoldedPremiumUsdForBook(g, status, book) {
+  if (book !== "BTC" && book !== "ETH") return 0;
+  const disp = profitDispositionForGroup(g, status);
+  if (!disp) return 0;
+  const sweptUsdt = num(disp.sweptUsdt) ?? 0;
+  const unswept = (num(disp.held) ?? 0) + (num(disp.pending) ?? 0);
+  const spot = spotUsdForBook(status, book);
+  let prem = sweptUsdt;
+  if (unswept !== 0 && spot !== null && spot > 0) prem += unswept * spot;
+  return prem;
+}
+
+/** Per-book lifetime realized USD (premium swap + unswept × spot + ITM exit−restore on USDT). */
 export function sumLifetimeRealizedPnlUsdcByBook(report, groups, status) {
   const rows = lifetimeRealizedClosedRows(report, groups, status);
   const disposition = aggregateProfitDisposition(report, groups, status);
   const fromDisposition = realizedUsdByBookFromProfitDisposition(disposition, status);
   if (fromDisposition) return _mergeItmNetIntoUsdByBook(fromDisposition, rows);
-  const out = { BTC: 0, ETH: 0, USDC: 0 };
+  const out = _emptyUsdByBook();
   let any = false;
   for (const g of rows) {
+    if (groupHasItmSpotExitFills(g)) continue;
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
-    const pnl = realizedPnlDisplayUsdc(g, status);
+    const pnl = realizedPnlDisplayUsdc(g, status, rows);
     if (pnl === null) continue;
     out[book] += pnl;
     any = true;
   }
-  return any ? out : null;
+  const merged = _mergeItmNetIntoUsdByBook(any ? out : null, rows);
+  return merged;
 }
 
 /**
- * Per-book lifetime earned USD for Profit composition — same coin set as Profit swap Earned,
- * plus recognized ITM exit−restore net USDT.
+ * Per-book lifetime earned USD for Profit composition — same coin set as Profit swap Earned.
+ * Recognized ITM exit−restore net is the USDT book (not coin premium or leftover USDC).
  */
 export function sumLifetimeEarnedUsdByBook(report, groups, status) {
-  const out = { BTC: 0, ETH: 0, USDC: 0 };
+  const out = _emptyUsdByBook();
   let any = false;
-  for (const g of lifetimeRealizedClosedRows(report, groups, status)) {
+  const rows = lifetimeRealizedClosedRows(report, groups, status);
+  for (const g of rows) {
+    if (isCashSecuredGroup(g) && tradeGroupAprBook(g) === "USDC") {
+      const disp = profitDispositionForGroup(g, status);
+      if (disp) {
+        const remaining = num(disp.held) ?? 0;
+        if (remaining !== 0) {
+          out.USDC += remaining;
+          any = true;
+        }
+        const spotNative = num(disp.cspSpotNative) ?? 0;
+        const spotBook = String(disp.cspSpotBook || "").toUpperCase();
+        const spot = spotUsdForBook(status, spotBook);
+        if ((spotBook === "BTC" || spotBook === "ETH") && spotNative > 0 && spot !== null && spot > 0) {
+          out[spotBook] += spotNative * spot;
+          any = true;
+        }
+        continue;
+      }
+    }
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH" && book !== "USDC") continue;
-    const usd = realizedPnlDisplayUsdc(g, status);
+    if (groupHasItmSpotExitFills(g)) {
+      const prem = _itmFoldedPremiumUsdForBook(g, status, book);
+      if (Math.abs(prem) >= 0.005) {
+        out[book] += prem;
+        any = true;
+      }
+      continue;
+    }
+    const usd = realizedPnlDisplayUsdc(g, status, rows);
     if (usd === null) continue;
     out[book] += usd;
+    any = true;
+  }
+  const itmTotal = _itmSpotExitNetUsdtTotal(rows);
+  if (Math.abs(itmTotal) >= 0.005) {
+    out.USDT += itmTotal;
     any = true;
   }
   return any ? out : out;
@@ -408,7 +502,7 @@ export function profitCompositionByBook(report, groups, status) {
   const disposition = aggregateProfitDisposition(report, groups, status);
   const summary = disposition ? summarizeProfitDisposition(disposition, { status }) : null;
   // Earned native MUST match Profit swap 「兌換前」 (summary.spotEarned).
-  const earnedNativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
+  const earnedNativeByBook = { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
   if (summary?.spotEarned) {
     for (const book of ["BTC", "ETH"]) {
       earnedNativeByBook[book] = num(summary.spotEarned[book]) ?? 0;
@@ -419,9 +513,15 @@ export function profitCompositionByBook(report, groups, status) {
   }
   const earnedUsdByBook = sumLifetimeEarnedUsdByBook(report, groups, status);
   const usdByBook = sumLifetimeRealizedPnlUsdcByBook(report, groups, status);
-  const swappedUsdtByBook = { BTC: 0, ETH: 0, USDC: 0 };
-  const swappedNativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
-  const nativeByBook = { BTC: 0, ETH: 0, USDC: 0 };
+  const swappedUsdtByBook = { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
+  const swappedNativeByBook = { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
+  const nativeByBook = { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
+  const rows = lifetimeRealizedClosedRows(report, groups, status);
+  const itmTotal = _itmSpotExitNetUsdtTotal(rows);
+  if (Math.abs(itmTotal) >= 0.005) {
+    nativeByBook.USDT = itmTotal;
+    earnedNativeByBook.USDT = itmTotal;
+  }
   if (summary) {
     for (const book of ["BTC", "ETH"]) {
       const held = num(summary.spotHeld?.[book]) ?? 0;
@@ -468,6 +568,11 @@ function _aggregateProfitDispositionRows(rows, status) {
     if (!disp) continue;
     if (disp.book === "USDC") {
       out.heldNative.USDC += disp.held;
+      const spotBook = String(disp.cspSpotBook || "").toUpperCase();
+      const spotNative = num(disp.cspSpotNative) ?? 0;
+      if ((spotBook === "BTC" || spotBook === "ETH") && spotNative > 0) {
+        out.heldNative[spotBook] += spotNative;
+      }
     } else {
       if (disp.held < 0) {
         out.lossNative[disp.book] += disp.held;
@@ -738,7 +843,6 @@ function spotPnlChartScales(base, { datasets, xBounds }) {
 export function renderCumulativeSpotPnlChart() {
   const ctx = chartCanvasContext("chart-risk-capital");
   if (!ctx) return;
-  destroyChart("riskCapital", "chart-risk-capital");
 
   const series = STATE.cumulativeSpotPnl;
   const closedMeta = series?.realized_count
@@ -803,7 +907,7 @@ export function renderCumulativeSpotPnlChart() {
   const xBounds = suggestTimeScaleMinMax(flatPoints);
   setChartPanelEmpty("chart-risk-capital", { empty: false });
   try {
-    STATE.charts.riskCapital = new globalThis.Chart(ctx, {
+    mountOrUpdateChart("riskCapital", "chart-risk-capital", ctx, {
       type: "line",
       data: { datasets },
       options: {
@@ -894,7 +998,6 @@ export function suggestTimeScaleMinMax(flatPoints) {
 export function renderCumulativePnlChart() {
   const ctx = chartCanvasContext("chart-cum-pnl");
   if (!ctx) return;
-  destroyChart("cumPnl", "chart-cum-pnl");
   const series = STATE.cumulativePnl;
   const closedMeta = series?.realized_count
     ? `${series.realized_count} closed groups`
@@ -950,7 +1053,7 @@ export function renderCumulativePnlChart() {
     return;
   }
   setChartPanelEmpty("chart-cum-pnl", { empty: false });
-  STATE.charts.cumPnl = new globalThis.Chart(ctx, {
+  mountOrUpdateChart("cumPnl", "chart-cum-pnl", ctx, {
     type: "line",
     data: { datasets },
     options: chartCommonOptions(),
@@ -988,7 +1091,6 @@ export function dailyPnlBarBorderColors(points) {
 export function renderDailyPnlChart() {
   const ctx = chartCanvasContext("chart-daily-pnl");
   if (!ctx) return;
-  destroyChart("dailyPnl", "chart-daily-pnl");
   const MA_WINDOW = 30;
   const series = STATE.cumulativePnl;
   if (!series) {
@@ -1073,7 +1175,7 @@ export function renderDailyPnlChart() {
   const flatPoints = datasets.flatMap((d) => d.data || []);
   const xBounds = suggestTimeScaleMinMax(flatPoints);
   const base = chartCommonOptions();
-  STATE.charts.dailyPnl = new globalThis.Chart(ctx, {
+  mountOrUpdateChart("dailyPnl", "chart-daily-pnl", ctx, {
     type: "bar",
     data: { datasets },
     options: {
@@ -1100,7 +1202,6 @@ export function renderDailyPnlChart() {
 export function renderAprChart() {
   const ctx = chartCanvasContext("chart-apr");
   if (!ctx) return;
-  destroyChart("apr", "chart-apr");
   const rows = STATE.aprSeries?.rows || [];
   const data = finalizeSimpleLineData(
     filterValidTimePoints(rows.map((r) => ({ x: dateToMs(r.date), y: num(r.apr) })))
@@ -1112,7 +1213,7 @@ export function renderAprChart() {
   setChartPanelEmpty("chart-apr", { empty: false });
   const xBounds = suggestTimeScaleMinMax(data);
   const base = chartCommonOptions();
-  STATE.charts.apr = new globalThis.Chart(ctx, {
+  mountOrUpdateChart("apr", "chart-apr", ctx, {
     type: "line",
     data: {
       datasets: [

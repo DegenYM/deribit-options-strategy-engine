@@ -271,6 +271,7 @@ class PortfolioSnapshotMixin:
             crisis_currencies_with_open_groups=crisis_currencies_with_open_groups,
             hard_derisk_on_crisis_open_group=self.config.hard_derisk_on_crisis_open_group,
             portfolio_blocks_all=portfolio_wide_entry_halt,
+            allow_elevated_entry=self.config.allows_elevated_entry(),
         )
         halt_new_entries = portfolio_wide_entry_halt or not any(
             not halted for halted in halt_new_entries_by_currency.values()

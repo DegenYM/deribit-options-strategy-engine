@@ -1,26 +1,68 @@
+# --- VCS / tooling caches ---------------------------------------------------
 .git
 .gitignore
+.github
+.pre-commit-config.yaml
 .venv
+.venv311
+.pip_packages
+.preview_tmp
 .pytest_cache
 .ruff_cache
 .mypy_cache
+.mplconfig
 .coverage
 htmlcov
-node_modules
-__pycache__
-*.py[cod]
-*.egg-info
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.DS_Store
 
-.env
-.env.*
+# --- Secrets / local env (templates re-included below) ---------------------
+**/.env
+**/.env.*
 .envrc
+!.env.example
+!**/.env.*.example
+!config/shared/strategies/**/.env.*
+config/platform/registry.toml
+config/platform/fee-payout-addresses.toml
+config/platform/generated
+config/handoff/*
+!config/handoff/handoff.template.toml
 
+# --- Runtime data (mounted as volumes by docker-compose) -------------------
 .state
 data
 logs
 
-.DS_Store
+# --- Not needed at runtime -------------------------------------------------
+tests
+docs
+output
+**/*.md
+scripts/generate_*.py
+scripts/dev
+scripts/*.sh
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# --- Frontend: only built assets are served ---------------------------------
+# frontend_server mounts frontend/ (html, css, app.js, app-investor.js, vendor/,
+# favicon.svg). The admin console additionally serves frontend/src/admin.js.
 frontend/node_modules
 frontend/dist
+frontend/test-results
+frontend/playwright-report
+frontend/e2e
+frontend/src/**
+!frontend/src/admin.js
+frontend/build.mjs
+frontend/package.json
+frontend/package-lock.json
+frontend/playwright.config.js
+frontend/tailwind.config.js
 playwright-report
 test-results
+node_modules

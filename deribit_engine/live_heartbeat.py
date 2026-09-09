@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .atomic_io import atomic_write_text
 from .env_layout import CONFIG_INVESTORS, default_state_file, load_investor_manifest
 from .utils import json_default, ms_to_datetime, utc_now_ms
 
@@ -59,11 +60,8 @@ class LiveHeartbeatRecord:
 
 
 def write_live_heartbeat(path: Path, record: LiveHeartbeatRecord) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     serialized = json.dumps(record.to_dict(), default=json_default, ensure_ascii=False, indent=2, sort_keys=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(serialized, encoding="utf-8")
-    os.replace(tmp_path, path)
+    atomic_write_text(path, serialized)
 
 
 def read_live_heartbeat(path: Path) -> LiveHeartbeatRecord | None:

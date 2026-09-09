@@ -5,25 +5,34 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from ..cash_secured_ops import (
+    CSP_ABORT_RESTORE_REASON,
+    cash_secured_children,
+    resolve_csp_abort_restore_pair,
+)
 from ..config import assert_trading_account, has_private_creds_for_env, load_config
 from ..env_layout import InvestorAccountSpec, InvestorManifest, load_investor_manifest
 from ..exceptions import ConfigurationError
 from ..investor_registry import validate_investor_id
 from ..models import StrategyState, TradeGroup
-from ..spot_exit_ops import spot_exit_realized_usdt
+from ..spot_exit_ops import spot_exit_quote_currency, spot_exit_realized_usdt
 from ..spot_restore_ops import (
     _spot_restore_order_is_open,
     execute_spot_restore_for_group,
+    itm_spot_round_trip_complete,
     list_spot_restore_candidates,
     mark_spot_restore_operator_cancelled,
-    spot_restore_realized_usdt,
+    spot_restore_lot_threshold,
+    spot_restore_spot_instrument_name,
     unrestored_spot_exit_native,
+    wheel_spot_restore_realized_usdt,
 )
 from ..state import StrategyStateStore
 from ..utils import format_decimal, to_decimal
 
 LIVE_CONFIRM = "LIVE"
 RESTORE_REASON = "emergency_spot_restore"
+CSP_ABORT_RESTORE_LIVE_REASON = "emergency_csp_abort_restore"
 
 
 def _same_group_id(left: str, right: str) -> bool:
@@ -85,23 +94,73 @@ def _open_group_row(account: InvestorAccountSpec, group: TradeGroup) -> dict[str
     }
 
 
+def _spot_restore_already_complete(group: TradeGroup, groups: list[TradeGroup]) -> bool:
+    unrestored = unrestored_spot_exit_native(group, groups=groups)
+    if unrestored <= 0:
+        return True
+    dust = unrestored < spot_restore_lot_threshold(group.currency)
+    restore_status = str(group.spot_restore_status or "").lower()
+    amount = to_decimal(group.spot_restore_amount)
+    spent = wheel_spot_restore_realized_usdt(group, groups)
+    filled = restore_status == "filled" and (amount > 0 or spent > 0)
+    if dust and (itm_spot_round_trip_complete(group, groups) or filled):
+        return True
+    return False
+
+
 def list_investor_targets(investor_id: str, *, repo_root: Path) -> dict[str, Any]:
     manifest = load_manifest(investor_id, repo_root=repo_root)
     accounts = [_account_row(account) for account in manifest.operational_accounts()]
     open_groups: list[dict[str, Any]] = []
     restore_candidates: list[dict[str, Any]] = []
+    csp_abort_candidates: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    loaded: list[tuple[InvestorAccountSpec, StrategyState]] = []
+    all_groups: list[TradeGroup] = []
     for account in manifest.operational_accounts():
         try:
             state = _load_state(account)
         except Exception as exc:  # noqa: BLE001
             errors.append({"account": account.slug, "error": str(exc)})
             continue
+        loaded.append((account, state))
+        all_groups.extend(state.groups)
+    for account, state in loaded:
+        seen_abort: set[str] = set()
         for group in state.groups:
             if str(group.status or "") != "closed":
                 open_groups.append(_open_group_row(account, group))
-        for row in list_spot_restore_candidates(state.groups):
+            parent, child = resolve_csp_abort_restore_pair(all_groups, group.group_id)
+            if child is None or str(child.status or "").lower() != "open":
+                continue
+            key = parent.group_id if parent is not None else child.group_id
+            if key in seen_abort:
+                continue
+            seen_abort.add(key)
+            unrestored = unrestored_spot_exit_native(parent, groups=all_groups) if parent is not None else to_decimal(0)
+            csp_abort_candidates.append(
+                {
+                    "account": account.slug,
+                    "strategy": account.strategy,
+                    "group_id": child.group_id,
+                    "parent_group_id": parent.group_id if parent is not None else None,
+                    "csp_group_id": child.group_id,
+                    "currency": child.currency,
+                    "quantity": format_decimal(to_decimal(child.quantity), 8),
+                    "short_instrument_name": child.short_instrument_name,
+                    "unrestored_amount": format_decimal(unrestored, 8),
+                    "spot_instrument_name": (spot_restore_spot_instrument_name(parent) if parent is not None else None),
+                }
+            )
+        for row in list_spot_restore_candidates(state.groups, plan_groups=all_groups):
             if to_decimal(row.unrestored_amount) <= 0:
+                continue
+            group = next((g for g in state.groups if str(g.group_id) == str(row.group_id)), None)
+            if group is None:
+                continue
+            if _spot_restore_already_complete(group, all_groups):
+                continue
+            if any(str(child.status or "").lower() == "open" for child in cash_secured_children(all_groups, group)):
                 continue
             payload = row.to_dict()
             payload["account"] = account.slug
@@ -112,6 +171,7 @@ def list_investor_targets(investor_id: str, *, repo_root: Path) -> dict[str, Any
         "accounts": accounts,
         "open_groups": open_groups,
         "restore_candidates": restore_candidates,
+        "csp_abort_candidates": csp_abort_candidates,
         "errors": errors,
     }
 
@@ -216,12 +276,13 @@ def _close_plan(group: TradeGroup) -> dict[str, Any]:
     }
 
 
-def _restore_plan(group: TradeGroup) -> dict[str, Any]:
-    unrestored = unrestored_spot_exit_native(group)
+def _restore_plan(group: TradeGroup, groups: list[TradeGroup] | None = None) -> dict[str, Any]:
+    unrestored = unrestored_spot_exit_native(group, groups=groups)
     proceeds = spot_exit_realized_usdt(group)
-    spent = spot_restore_realized_usdt(group)
+    spent = wheel_spot_restore_realized_usdt(group, groups)
     remaining = proceeds - spent
     breakeven = remaining / unrestored if unrestored > 0 and remaining > 0 else None
+    spot_name = spot_restore_spot_instrument_name(group)
     return {
         "action": "spot-restore",
         "order_type": "market",
@@ -229,6 +290,8 @@ def _restore_plan(group: TradeGroup) -> dict[str, Any]:
         "currency": group.currency,
         "unrestored_amount": format_decimal(unrestored, 8),
         "instrument_name": group.short_instrument_name,
+        "spot_instrument_name": spot_name,
+        "quote_currency": spot_exit_quote_currency(group, spot_name),
         "spot_restore_status": group.spot_restore_status or None,
         "will_cancel_resting_order_id": group.spot_restore_order_id or None,
         "remaining_proceeds_usdt": format_decimal(remaining, 4),
@@ -236,6 +299,43 @@ def _restore_plan(group: TradeGroup) -> dict[str, Any]:
         "est_close_price": None,
         "est_pnl_usdc": None,
     }
+
+
+def _csp_abort_plan(
+    parent: TradeGroup | None,
+    child: TradeGroup | None,
+    groups: list[TradeGroup] | None = None,
+) -> dict[str, Any]:
+    restore = _restore_plan(parent, groups=groups) if parent is not None else None
+    if restore is not None:
+        restore["restore_reason"] = CSP_ABORT_RESTORE_LIVE_REASON
+    close = None
+    if child is not None and str(child.status or "").lower() != "closed":
+        close = {"group_id": child.group_id, **_close_plan(child)}
+    will = [f"skip cash-secured wheel ({CSP_ABORT_RESTORE_REASON})"]
+    if close is not None:
+        will.append(f"market-close CSP #{child.group_id}")
+    else:
+        will.append("no open CSP")
+    unrestored = unrestored_spot_exit_native(parent, groups=groups) if parent is not None else to_decimal(0)
+    if restore is not None and unrestored > 0:
+        will.append(f"market-buy cover {restore.get('spot_instrument_name')}")
+    else:
+        will.append("no unrestored cover")
+    return {
+        "action": "csp-abort-restore",
+        "order_type": "market",
+        "will": will,
+        "parent_group_id": parent.group_id if parent is not None else None,
+        "csp_group_id": child.group_id if child is not None else None,
+        "close": close,
+        "restore": restore,
+    }
+
+
+def _mark_csp_wheel_skipped(parent: TradeGroup) -> None:
+    parent.cash_secured_status = "skipped"
+    parent.cash_secured_reason = CSP_ABORT_RESTORE_REASON
 
 
 def run_close_position(
@@ -360,7 +460,12 @@ def run_spot_restore(
     _require_live_confirm(live=live, confirm=confirm)
     manifest = load_manifest(investor_id, repo_root=repo_root)
     spec, listed = _find_group(manifest, group_id=group_id, account_slug=account)
-    if unrestored_spot_exit_native(listed) <= 0:
+    state = _load_state(spec)
+    group = next(
+        (item for item in state.groups if _same_group_id(item.group_id, listed.group_id)),
+        listed,
+    )
+    if unrestored_spot_exit_native(group, groups=state.groups) <= 0:
         return {
             "ok": True,
             "live": live,
@@ -376,13 +481,13 @@ def run_spot_restore(
             "kind": "spot_restore",
             "account": spec.slug,
             "group_id": listed.group_id,
-            "plan": _restore_plan(listed),
+            "plan": _restore_plan(group, groups=state.groups),
         }
     bot = _build_bot(spec)
     context = bot._load_runtime(live=live)
     group = next(
         (item for item in context.state.groups if _same_group_id(item.group_id, listed.group_id)),
-        listed,
+        group,
     )
     cancelled = None
     if live:
@@ -394,6 +499,7 @@ def run_spot_restore(
         order_type="market",
         restore_reason=RESTORE_REASON,
         park_resting=False,
+        groups=context.state.groups,
     )
     if live:
         if str(result.get("action") or "").startswith("spot_restore") and "skipped" not in str(
@@ -409,4 +515,116 @@ def run_spot_restore(
         "group_id": group.group_id,
         "cancelled_resting": cancelled,
         "result": result,
+    }
+
+
+def run_csp_abort_restore(
+    investor_id: str,
+    *,
+    repo_root: Path,
+    account: str | None,
+    group_id: str,
+    live: bool,
+    confirm: str | None,
+) -> dict[str, Any]:
+    """Market-close an open CSP then market-buy cover on the ITM exit pair (USDC/USDT).
+
+    Skips the cash-secured wheel first so live ``manage`` cannot sell another put
+    after the close and before cover is restored.
+    """
+    _require_live_confirm(live=live, confirm=confirm)
+    manifest = load_manifest(investor_id, repo_root=repo_root)
+    spec, listed = _find_group(manifest, group_id=group_id, account_slug=account)
+    state = _load_state(spec)
+    parent, child = resolve_csp_abort_restore_pair(state.groups, listed.group_id)
+    if parent is None and child is None:
+        raise ConfigurationError(f"group {listed.group_id!r} is not an open CSP or its ITM parent")
+    unrestored = unrestored_spot_exit_native(parent, groups=state.groups) if parent is not None else to_decimal(0)
+    child_open = child is not None and str(child.status or "").lower() == "open"
+    if not child_open and unrestored <= 0:
+        return {
+            "ok": True,
+            "live": live,
+            "kind": "csp_abort_restore",
+            "account": spec.slug,
+            "group_id": listed.group_id,
+            "result": {"action": "csp_abort_restore_skipped", "reason": "nothing_to_abort"},
+        }
+    if not live:
+        return {
+            "ok": True,
+            "live": False,
+            "kind": "csp_abort_restore",
+            "account": spec.slug,
+            "group_id": listed.group_id,
+            "plan": _csp_abort_plan(parent, child, groups=state.groups),
+        }
+
+    bot = _build_bot(spec)
+    context = bot._load_runtime(live=True)
+    parent, child = resolve_csp_abort_restore_pair(context.state.groups, listed.group_id)
+    parent_group_id = parent.group_id if parent is not None else None
+    csp_group_id = child.group_id if child is not None else None
+    if parent is not None:
+        _mark_csp_wheel_skipped(parent)
+        bot.state_store.save(context.state)
+
+    close_result = None
+    if child is not None and str(child.status or "").lower() == "open":
+        close_result = bot.close_positions(group_ids=[child.group_id], live=True, order_type="market")
+        context = bot._load_runtime(live=True)
+        parent, child = resolve_csp_abort_restore_pair(context.state.groups, listed.group_id)
+        if parent is not None:
+            _mark_csp_wheel_skipped(parent)
+        if child is not None and str(child.status or "").lower() == "open":
+            bot.state_store.save(context.state)
+            return {
+                "ok": True,
+                "live": True,
+                "kind": "csp_abort_restore",
+                "account": spec.slug,
+                "group_id": listed.group_id,
+                "parent_group_id": parent_group_id,
+                "csp_group_id": csp_group_id,
+                "result": {
+                    "action": "csp_abort_restore_partial",
+                    "reason": "csp_close_failed",
+                    "close": close_result,
+                },
+            }
+
+    cancelled = None
+    restore_result = None
+    if parent is not None:
+        cancelled = _cancel_resting_restore(bot, parent)
+        if unrestored_spot_exit_native(parent, groups=context.state.groups) > 0:
+            restore_result = execute_spot_restore_for_group(
+                bot,
+                parent,
+                live=True,
+                order_type="market",
+                restore_reason=CSP_ABORT_RESTORE_LIVE_REASON,
+                park_resting=False,
+                groups=context.state.groups,
+            )
+            if str(restore_result.get("action") or "").startswith("spot_restore") and "skipped" not in str(
+                restore_result.get("action") or ""
+            ):
+                bot._persist_trade_journal_actions([restore_result])
+        bot.state_store.save(context.state)
+
+    return {
+        "ok": True,
+        "live": True,
+        "kind": "csp_abort_restore",
+        "account": spec.slug,
+        "group_id": listed.group_id,
+        "parent_group_id": parent_group_id,
+        "csp_group_id": csp_group_id,
+        "cancelled_resting": cancelled,
+        "result": {
+            "action": "csp_abort_restore",
+            "close": close_result,
+            "restore": restore_result,
+        },
     }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import sqlite3
 import threading
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -118,6 +119,32 @@ def _journal_executions_for_group(state_path: Path, group_id: str) -> list[dict[
     return store.list_executions(scope, group_id=group_id, limit=50)
 
 
+_JOURNAL_ROWS_PER_GROUP = 50
+
+
+def _journal_executions_by_group(state_path: Path, group_ids: list[str]) -> dict[str, list[dict[str, Any]]]:
+    """Bulk variant of ``_journal_executions_for_group``: one store open, ``IN (...)`` queries, bucketed.
+
+    Delegates to ``TradeJournalStore.list_executions_by_groups`` so the per-group
+    contract (newest ``_JOURNAL_ROWS_PER_GROUP`` rows, ``ORDER BY ts_ms DESC, id
+    DESC``) stays identical to ``list_executions``; a read failure degrades to
+    empty buckets instead of failing the whole closed-groups payload.
+    """
+    out: dict[str, list[dict[str, Any]]] = {gid: [] for gid in group_ids}
+    if not any(group_ids):
+        return out
+    journal_path = journal_db_path_for_state(state_path)
+    if not journal_path.is_file():
+        return out
+    scope = scope_key_for_state(state_path)
+    try:
+        store = TradeJournalStore(journal_path)
+        return store.list_executions_by_groups(scope, group_ids, per_group_limit=_JOURNAL_ROWS_PER_GROUP)
+    except sqlite3.Error as exc:
+        LOGGER.warning("journal bulk read failed for %s: %s", journal_path.name, exc)
+        return out
+
+
 def _load_closed_groups_payload(
     state_path: Path,
     *,
@@ -155,14 +182,17 @@ def _load_closed_groups_payload(
     open_groups = [g.to_dict() for g in state.groups if g.status != "closed"]
     all_closed_groups = [g for g in state.groups if g.status == "closed"]
     closed_groups = []
-    for g in all_closed_groups:
-        if g.group_id in excluded_group_ids:
-            continue
-        if is_phantom_reconcile_close(g, open_short_names=open_short_names):
-            continue
+    eligible_closed = [
+        g
+        for g in all_closed_groups
+        if g.group_id not in excluded_group_ids and not is_phantom_reconcile_close(g, open_short_names=open_short_names)
+    ]
+    # One journal read for every closed group instead of a store open + query per group.
+    journal_rows_by_group = _journal_executions_by_group(state_path, [g.group_id for g in eligible_closed])
+    for g in eligible_closed:
         book = (g.collateral_currency or g.currency or "").upper()
         spot = settlement_index_usd_for_group(g, spot_by_book=spot_index)
-        journal_rows = _journal_executions_for_group(state_path, g.group_id)
+        journal_rows = journal_rows_by_group.get(g.group_id, [])
         if spot is not None:
             before_pnl = g.realized_pnl
             restore_long_leg_from_journal_executions(g, journal_rows)
@@ -506,7 +536,7 @@ def _aggregate_groups_disk_only(
         "performance_excluded_closed_group_count": excluded_closed_count,
         "next_group_id": next_group_id if len(accounts) > 1 else (next(iter(next_group_id.values()), None)),
         "underlying_index_usd": underlying_index_usd,
-        "accounts": [{"name": account.name, "state_file": str(account.state_path)} for account in accounts],
+        "accounts": [{"name": account.name, "state_file": Path(account.state_path).name} for account in accounts],
         "source": "disk",
     }
 
@@ -568,5 +598,5 @@ def _aggregate_groups(
         "performance_excluded_closed_group_count": excluded_closed_count,
         "next_group_id": next_group_id if len(accounts) > 1 else (next(iter(next_group_id.values()), None)),
         "underlying_index_usd": underlying_index_usd,
-        "accounts": [{"name": account.name, "state_file": str(account.state_path)} for account in accounts],
+        "accounts": [{"name": account.name, "state_file": Path(account.state_path).name} for account in accounts],
     }

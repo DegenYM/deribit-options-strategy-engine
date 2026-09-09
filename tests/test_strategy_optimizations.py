@@ -333,6 +333,7 @@ def test_dynamic_target_delta_shifts_with_vrp(tmp_path):
 
     config = make_config(
         tmp_path,
+        option_strategy="covered_call",
         enable_dynamic_target_delta=True,
         dynamic_target_delta_vrp_ref=Decimal("0.05"),
         dynamic_target_delta_strength=Decimal("1"),

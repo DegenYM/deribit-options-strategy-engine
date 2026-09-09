@@ -8,7 +8,7 @@
 - `DERIBIT_CLIENT_ID`
 - `DERIBIT_CLIENT_SECRET`
 - `OPTION_STRATEGY` 選擇 `naked_short`、`bull_put_spread` 或 `covered_call`（舊名 `naked_short_put` / `naked_short_call` 會被解析為 `naked_short`）— **投資人 layout 下由 `accounts.toml` 的 `strategy` 注入，子帳 env 不必填**
-- 其餘共用參數可直接從 [`.env.example`](../.env.example) 複製
+- 其餘共用參數可直接從 [`.env.example`](../.env.example) 複製。注意：`.env.example` 僅為參數參考範本，引擎**不會載入**它；實際生效的是 `config/investors/<id>/` 子帳 env 與 `config/shared/.env.defaults`
 
 ## 相關文件
 
@@ -137,11 +137,13 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 **Covered call ITM → cash-secured put（可選）**：在 `.env.investor` 設 `COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=true`（**預設 false**）。啟用後：
 
 - ITM spot exit **改賣 USDC**（`BTC_USDC` / `ETH_USDC`）。舊的 USDT journal 在 CSP 開啟時也視為已換成 USDC（手動換匯後可掃 put）；進行中的買回單仍會擋住。
-- 賣完後 live `manage` 會掃 **短天期** USDC linear put，履約價在原 ITM 行權價或略低（`COVERED_CALL_CSP_STRIKE_FLOOR_PCT`，預設 5%），DTE 預設 **2–10 天**。合格後 **IOC 打 bid**（不成交下個 cycle 重試，不掛 GTC mid）。OI／名目仍用 CSP 門檻（6／3000）；**不**用價差當進場門、也不改裸賣門檻。先前取消 mid 掛單的 `operator_cancelled` 會再掃一次。
+- 賣完後 live `manage` 會掃 **短天期** USDC linear put，履約價在原 ITM 行權價或略低（`COVERED_CALL_CSP_STRIKE_FLOOR_PCT`，預設 5%），DTE 預設 **2–10 天**。合格後 **IOC 打 bid**（不成交下個 cycle 重試，不掛 GTC mid）。OI／名目仍用 CSP 門檻（BTC 0.5／ETH 5／名目 3000）；**不**用價差當進場門、也不改裸賣門檻。先前取消 mid 掛單的 `operator_cancelled` 會再掃一次。
 - 張數以 unrestored cover **進位**到合約最小單位（目標補回 cover）。手續費／結算讓 USDC 在原履約價剛好不夠滿張時，會在 `COVERED_CALL_CSP_STRIKE_FLOOR_PCT` 窗內**往下抓 strike**，優先鎖滿張再選最接近原價的履約價。
 - CSP 開啟時，ITM cover 賣出（含舊 USDT journal）**不會**再走自動買回，改掃 cash-secured put。USDT 帳本回撤（例如手動換成 USDC）**不**觸發 hard derisk、也不擋 CSP。
-- CSP **持有至到期**。到期若 put **ITM**（現貨低於履約價），live `manage` 用剩餘 USDC 掛 **GTC mid** 買回 cover（`BTC_USDC` / `ETH_USDC`）。OTM 到期不買現貨。你取消買回單不會重掛。
-- **CSP 權利金去向**（`COVERED_CALL_CSP_PREMIUM_TARGET`，預設 `usdc`）：`usdc` 讓權利金留在 USDC；`spot` 在 CSP 成交後，把**淨權利金**（成交 credit 扣進場費，USDC 計價）market 換成 native 現貨（`BTC_USDC` / `ETH_USDC` 買單）。只換權利金——履約所需的 `strike × qty` 保證金完整保留（Deribit 已把短 put 的 IM 排除在可用資金外）。可用 USDC 不足時保持 pending，下個 cycle 重試。狀態顯示於 group 的 `csp_premium_swap_*` 欄位。
+- CSP **預設持有至到期**。put **OTM** 到期後，同一 ITM 母倉會再用剩餘 USDC 掃下一輪短天期 put（輪轉）；put **ITM** 或已補回 cover 則停止。母倉累計 call 權利金＋各輪 CSP realized PnL。到期若 put **ITM**（現貨低於履約價），live `manage` 用剩餘 USDC 掛 **GTC mid** 買回 cover（`BTC_USDC` / `ETH_USDC`）。OTM 到期不買現貨。你取消買回單不會重掛。
+- **CSP self-assign**（`COVERED_CALL_CSP_SELF_ASSIGN_ENABLED`，wheel 開啟時預設 **true**）：歐式 put 不會在盤中跌破就指派。當 put **確認 ITM**（`COVERED_CALL_CSP_SELF_ASSIGN_CONFIRM_CYCLES`，未設則跟 ITM／defense confirm），且 **DTE ≤ `COVERED_CALL_CSP_SELF_ASSIGN_MAX_DTE`（預設 2）** 或 **時間價值 ≤ 內在價值 × `COVERED_CALL_CSP_SELF_ASSIGN_MAX_TV_PCT`（預設 12%）**，**並且** order book 流動性過關（雙邊報價、`spread_ratio ≤ COVERED_CALL_CSP_SELF_ASSIGN_MAX_SPREAD_RATIO` 預設 **0.25**、ask size ≥ 平倉數量）時，live `manage` 會 **買回 put（taker）並排程買 spot 補 cover**。短 DTE 價差常極寬：流動性不過關就**等到期指派**，不硬抬 ask。時間價值仍肥且離到期遠時也不動作。
+- **CSP 主動 roll**（`COVERED_CALL_CSP_ACTIVE_ROLL_ENABLED`，**預設 false**）：OTM 未到期可買回再賣窗內**日收益更高**的 put（同一張或更早到期也可以，只要換算日收益嚴格比較高）。DTE 窗 `MIN_DTE=2` / `MAX_DTE=10`；`MIN_TV_RATIO=0.25`（剩餘 TV／`max(原權利金, 內在+TV)`）；平倉流動性重用 self-assign 價差上限；替換約走既有 CSP picker。比較式是 `(新 bid − 換倉手續費) / 新 DTE > 平倉 ask / 剩餘 DTE`。日收益沒有更高就持有。ITM 不走這條路。
+- **CSP 權利金去向**（`COVERED_CALL_CSP_PREMIUM_TARGET`，預設 `usdc`）：`usdc` 讓權利金留在 USDC；`spot` 在 CSP **平倉／到期後**（不是進場當下），依**實收權利金** `max(0, entry_credit − close_debit − close_fee)` market 換成 native 現貨（`BTC_USDC` / `ETH_USDC`）。OTM 到期通常 close_debit≈0，換整筆淨 credit；若曾買回 put 則只換剩餘。若同時有 ITM **補 cover**（`spot_restore` pending／submitted），會先等補完再 swap，避免搶 USDC。可用資金不足時保持 pending，下個 cycle **只補剩餘未換額度**。狀態顯示於 group 的 `csp_premium_swap_*` 欄位。
 - 修改後需**重啟**該子帳 live bot。
 
 **Covered call 自動買回 cover（可選）**：在 `.env.investor` 或子帳 `.env` 設 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=true`（**預設 false**）。啟用後，ITM spot exit **賣完**就掛一張 **GTC 限價買單**，價位 = 損益兩平 × `(1 − COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT)`（預設 0.1%），數量是 **native unrestored**（進位到 **USDC linear 最小下單量**，BTC `0.01` / ETH `0.1`，不超過 cover）。之後 cycle 只對帳，**不會改下市價單、也不會在你取消後重掛**。`submitted` 或已有 restore `order_id` 且交易所單還在時，不會再下第二張；單被取消／已不在則記 `operator_cancelled` 並停止自動買回。現價若已低於上限，限價會立刻成交（仍是限價、固定數量）。`spot_exit_status=skipped` 不會掛。修改後需**重啟**該子帳 live bot。

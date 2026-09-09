@@ -57,7 +57,8 @@ def test_submit_option_close_limit_fallback_uses_reduce_only_market_quantity(tmp
     class LimitRejectClient(FakeClient):
         def place_buy_order(self, **kwargs):
             if kwargs.get("order_type") == "limit":
-                raise ExchangeError("private/buy failed: HTTP 400")
+                # Price-class rejection without a parseable band limit → market fallback.
+                raise ExchangeError('private/buy failed: HTTP 400 {"error":{"code":10023,"message":"invalid_price"}}')
             return super().place_buy_order(**kwargs)
 
     client = LimitRejectClient()

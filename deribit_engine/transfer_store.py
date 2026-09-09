@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
-import threading
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from .models import TransactionEntry
+from .sqlite_store_base import SqliteStoreBase
 from .utils import utc_now_ms
 
 _SCHEMA = """
@@ -54,29 +53,30 @@ def transfers_db_path_for_accounts(accounts: list[Any]) -> Path:
     return LEDGER_DIR / "transfers.db"
 
 
-class TransferStore:
-    def __init__(self, db_path: Path) -> None:
-        self._path = db_path
-        self._lock = threading.Lock()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+class TransferStore(SqliteStoreBase):
+    _schema = _SCHEMA
 
     @property
     def path(self) -> Path:
         return self._path
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.row_factory = sqlite3.Row
-        return conn
+    def purge_older_than(self, *, cutoff_ms: int, scope_key: str | None = None, book: str | None = None) -> int:
+        """Delete ``transfer_rows`` with ``timestamp_ms < cutoff_ms``. Returns rows deleted.
 
-    def _init_db(self) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                conn.commit()
+        ``transfer_sync_meta`` is left alone so incremental sync does not
+        re-fetch the purged window. Not called automatically anywhere: transfer
+        history feeds fee / NAV flow reconciliation, so retention is an operator
+        decision.
+        """
+        clauses = ["timestamp_ms < ?"]
+        params: list[Any] = [int(cutoff_ms)]
+        if scope_key is not None:
+            clauses.append("scope_key = ?")
+            params.append(scope_key)
+        if book is not None:
+            clauses.append("book = ?")
+            params.append(book.upper())
+        return self._delete_where("transfer_rows", " AND ".join(clauses), tuple(params))
 
     def max_timestamp_ms(self, scope_key: str, book: str) -> int | None:
         with self._connect() as conn:

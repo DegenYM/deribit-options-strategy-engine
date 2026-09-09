@@ -1,29 +1,48 @@
+# pyproject.toml is the single source of truth for dependency pins.
+# requirements.txt / requirements-pdf.txt / requirements-dev.txt mirror the
+# `dependencies`, `pdf`, and `dev` lists below — keep them in sync when editing.
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "deribit-options-strategy-engine"
 version = "0.1.0"
 description = "Deribit BTC/ETH options strategy engine with multi-investor ops"
 readme = "README.md"
 requires-python = ">=3.11"
+# Core runtime: engine CLI + FastAPI dashboard. Keep this list lean — the Docker
+# image installs only requirements.txt (this list).
 dependencies = [
     "requests>=2.31,<3",
     "python-dotenv>=1.0,<2",
     "fastapi>=0.115,<1",
     "uvicorn[standard]>=0.30,<1",
-    "reportlab>=4.0,<5",
-    "matplotlib>=3.8,<4",
-    "numpy>=1.26,<3",
-    "pillow>=10.0,<12",
 ]
 
 [project.optional-dependencies]
+# PDF rendering: investor fee reports (deribit_engine/investor_fee_report_pdf.py)
+# and scripts/generate_investor_*_pdf.py. Imported lazily; install with
+#   pip install -e '.[pdf]'
+pdf = [
+    "reportlab>=4.0,<5",
+    "matplotlib>=3.8,<4",
+    "numpy>=1.26,<3",
+    "pillow>=12.3,<13",
+]
 dev = [
     "pytest>=8,<10",
-    "pytest-cov>=6,<7",
+    "pytest-cov>=6,<8",
     "pytest-socket>=0.7,<1",
-    "ruff>=0.9,<1",
+    "ruff>=0.15.16,<0.16",
     "pre-commit>=4,<5",
     "httpx>=0.27,<1",
+    "pip-audit>=2.7,<3",
 ]
+
+[tool.setuptools.packages.find]
+include = ["deribit_engine", "deribit_engine.*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

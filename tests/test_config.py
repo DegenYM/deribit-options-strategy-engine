@@ -464,6 +464,63 @@ def test_assert_trading_account_rejects_fee_wallet(tmp_path: Path):
         assert_trading_account(config)
 
 
+def test_load_config_parses_dynamic_entry_scalers(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "ENABLE_DYNAMIC_TARGET_DELTA=true",
+                "DYNAMIC_TARGET_DELTA_STRENGTH=0.3",
+                "ELEVATED_DELTA_MAX_TIGHTEN=0.02",
+                "ELEVATED_MAX_GROUPS_TIGHTEN=0",
+                "NAKED_ALLOW_ELEVATED_ENTRY=false",
+                "NAKED_ELEVATED_DELTA_MAX_TIGHTEN=0.04",
+                "NAKED_DYNAMIC_DELTA_ALLOW_CLOSER=false",
+                "NAKED_DYNAMIC_MIN_NET_APR_ALLOW_LOOSEN=false",
+                "ENABLE_DYNAMIC_MIN_NET_APR=true",
+                "DYNAMIC_MIN_NET_APR_MAX_SHIFT=0.005",
+                "DYNAMIC_MIN_NET_APR_FLOOR=0.07",
+                "DYNAMIC_MIN_NET_APR_IVR_REF=0.50",
+            ]
+        )
+    )
+    config = load_config(env_file, require_private=False)
+    assert config.enable_dynamic_target_delta is True
+    assert config.dynamic_target_delta_strength == Decimal("0.3")
+    assert config.elevated_delta_max_tighten == Decimal("0.02")
+    assert config.elevated_max_groups_tighten == 0
+    assert config.naked_allow_elevated_entry is False
+    assert config.naked_elevated_delta_max_tighten == Decimal("0.04")
+    assert config.naked_dynamic_delta_allow_closer is False
+    assert config.naked_dynamic_min_net_apr_allow_loosen is False
+    assert config.enable_dynamic_min_net_apr is True
+    assert config.dynamic_min_net_apr_max_shift == Decimal("0.005")
+    assert config.dynamic_min_net_apr_floor == Decimal("0.07")
+    assert config.dynamic_min_net_apr_ivr_ref == Decimal("0.50")
+    assert config.allows_elevated_entry() is True
+
+
+def test_load_config_dynamic_scaler_defaults(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPTION_STRATEGY=naked_short\n")
+    config = load_config(env_file, require_private=False)
+    assert config.enable_dynamic_target_delta is False
+    assert config.dynamic_target_delta_strength == Decimal("0.5")
+    assert config.elevated_delta_max_tighten == Decimal("0.02")
+    assert config.elevated_max_groups_tighten == 0
+    assert config.naked_allow_elevated_entry is False
+    assert config.naked_elevated_delta_max_tighten == Decimal("0.04")
+    assert config.naked_dynamic_delta_allow_closer is False
+    assert config.naked_dynamic_min_net_apr_allow_loosen is False
+    assert config.enable_dynamic_min_net_apr is False
+    assert config.allows_elevated_entry() is False
+    assert config.elevated_delta_tighten_amount() == Decimal("0.04")
+    assert config.dynamic_target_delta_allow_closer() is False
+    assert config.dynamic_min_net_apr_allow_loosen() is False
+    assert config.dynamic_min_net_apr_bound() == config.min_net_apr * Decimal("0.7")
+
+
 def test_load_config_rejects_testnet(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text("DERIBIT_ENV=testnet\n")

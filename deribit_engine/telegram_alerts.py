@@ -13,6 +13,7 @@ from typing import Any
 import requests
 
 from .env_layout import CONFIG_SHARED, find_repo_root
+from .env_parse import parse_env_bool
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,10 +23,9 @@ _lock = threading.Lock()
 _shared_env_loaded = False
 
 
-def _truthy(raw: str | None, *, default: bool = False) -> bool:
-    if raw is None:
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+def _truthy(raw: str | None, *, default: bool = False, name: str | None = None) -> bool:
+    """Lenient env boolean: invalid text logs a WARNING and yields ``default`` (never raises)."""
+    return bool(parse_env_bool(raw, default=default, strict=False, name=name))
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ class TelegramAlertConfig:
     def from_environ(cls) -> TelegramAlertConfig:
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-        enabled = _truthy(os.environ.get("TELEGRAM_ALERTS_ENABLED"), default=False)
+        enabled = _truthy(os.environ.get("TELEGRAM_ALERTS_ENABLED"), default=False, name="TELEGRAM_ALERTS_ENABLED")
         if enabled and (not token or not chat_id):
             LOGGER.warning("TELEGRAM_ALERTS_ENABLED=true but token/chat_id missing; alerts disabled")
             enabled = False

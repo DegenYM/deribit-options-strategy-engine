@@ -65,7 +65,7 @@ cp config/platform/fee-payout-addresses.toml.example config/platform/fee-payout-
 
 複製 [`config/handoff/handoff.template.toml`](../config/handoff/handoff.template.toml) 給投資人填寫（經安全管道交回，勿用聊天明文 Secret）。
 
-簽約或 onboarding 時，一併提供 [`fee-payout-addresses.toml`](../config/platform/fee-payout-addresses.toml) 中地址的正式清單（PDF／加密信均可）。
+簽約或 onboarding 時，一併提供 `config/platform/fee-payout-addresses.toml` 中地址的正式清單（PDF／加密信均可）。該檔不納版（`.gitignore`），需自 [`fee-payout-addresses.toml.example`](../config/platform/fee-payout-addresses.toml.example) 複製到本機後填入實際地址（見上方「0. 一次性準備」）。
 
 ```bash
 ./bot investor import-handoff /secure/path/alice-handoff.toml

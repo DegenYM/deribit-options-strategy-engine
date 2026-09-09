@@ -127,7 +127,11 @@ def test_transfer_store_incremental_sync_uses_last_timestamp(tmp_path: Path) -> 
 def test_build_transfers_payload_from_store_without_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     account = _account(tmp_path, name="cc", traded=("USDC",))
     store = TransferStore(tmp_path / "ledger" / "transfers.db")
-    scope = "cid-cc\0sec-cc"
+    from deribit_engine.frontend_server.helpers import _live_api_identity
+
+    # Derive the scope the way the service does, so the test is independent of
+    # the identity encoding (raw ``cid\0secret`` vs. digest).
+    scope = _live_api_identity(account)
     store.upsert_row(
         scope,
         "USDC",

@@ -74,12 +74,24 @@ def test_dashboard_app_js_is_monolithic_bundle(dashboard_client: TestClient) -> 
 
 
 def test_investor_app_js_uses_investor_mode(dashboard_client: TestClient) -> None:
+    """The two bundles are distinct builds of the same entry, tagged by build.mjs.
+
+    ``build.mjs`` appends ``//# dashboardBuildMode=<ops|investor>`` as an esbuild
+    ``footer`` because the ``__BUILD_INVESTOR__`` define is constant-folded by
+    newer esbuild releases, so the ``"ops"`` / ``"investor"`` literals are not a
+    stable signal in minified output.
+    """
     ops = dashboard_client.get("/app.js").text
     investor = dashboard_client.get("/app-investor.js").text
     assert investor.lstrip().startswith("(()=>{")
-    assert '="investor"' in investor
-    assert '="ops"' in ops
+    assert ops.lstrip().startswith("(()=>{")
     assert investor != ops
+    assert "//# dashboardBuildMode=investor" in investor
+    assert "//# dashboardBuildMode=investor" not in ops
+    assert "//# dashboardBuildMode=ops" in ops
+    assert "//# dashboardBuildMode=ops" not in investor
+    # Both stay full bundles of the same entry point (mode is the only knob).
+    assert abs(len(investor) - len(ops)) < max(len(ops), 1) * 0.25
 
 
 def test_dashboard_bundle_returns_sections(dashboard_client: TestClient) -> None:

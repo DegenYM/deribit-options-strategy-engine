@@ -212,7 +212,7 @@ class CoveredCallMixin:
                 client=self.client,
                 order_label_prefix=prefix,
             )
-            unrestored = unrestored_spot_exit_native(group)
+            unrestored = unrestored_spot_exit_native(group, groups=context.state.groups)
             if unrestored <= 0:
                 continue
             if spot_restore_operator_cancelled(group):
@@ -235,9 +235,11 @@ class CoveredCallMixin:
                                 "group_id": group.group_id,
                                 "reason": "restore_in_flight",
                                 "spot_restore_order_id": group.spot_restore_order_id or None,
-                                "max_buy_price": evaluate_auto_spot_restore_park(group, min_edge_pct=min_edge).get(
-                                    "max_buy_price"
-                                ),
+                                "max_buy_price": evaluate_auto_spot_restore_park(
+                                    group,
+                                    min_edge_pct=min_edge,
+                                    groups=context.state.groups,
+                                ).get("max_buy_price"),
                             }
                         )
                     continue
@@ -252,7 +254,11 @@ class CoveredCallMixin:
                         }
                     )
                     continue
-            decision = evaluate_auto_spot_restore_park(group, min_edge_pct=min_edge)
+            decision = evaluate_auto_spot_restore_park(
+                group,
+                min_edge_pct=min_edge,
+                groups=context.state.groups,
+            )
             if not decision.get("ok"):
                 if not live:
                     actions.append(
@@ -271,6 +277,7 @@ class CoveredCallMixin:
                 live=live,
                 park_resting=True,
                 restore_reason="auto_spot_restore_park",
+                groups=context.state.groups,
             )
             action["auto"] = True
             action["park_resting"] = True
@@ -307,6 +314,8 @@ class CoveredCallMixin:
 
         from ..cash_secured_ops import (
             cash_secured_child_is_open,
+            cash_secured_hold_credit_dte_from_closed_roll,
+            cash_secured_last_active_roll_child,
             cash_secured_quantity,
             cash_secured_strike_bounds,
             cash_secured_target_native,
@@ -325,7 +334,7 @@ class CoveredCallMixin:
             actions.append(self._reconcile_parked_cash_secured(context, group, live=live))
 
         for group in context.state.groups:
-            ready, reason = itm_sold_ready_for_cash_secured(group)
+            ready, reason = itm_sold_ready_for_cash_secured(group, context.state.groups)
             if not ready:
                 if not live and reason in {"spot_exit_not_usdc", "spot_exit_not_filled"}:
                     actions.append(
@@ -362,23 +371,81 @@ class CoveredCallMixin:
                     )
                 continue
             usdc_free = max(usdc.available_funds, usdc.available_withdrawal_funds, Decimal("0"))
-            sold = cash_secured_target_native(group)
+            sold = cash_secured_target_native(group, context.state.groups)
+            if sold <= 0:
+                LOGGER.info(
+                    "cash_secured: skip entry, cover already restored group=%s",
+                    group.group_id,
+                )
+                if not live:
+                    actions.append(
+                        {
+                            "action": "cash_secured_skipped",
+                            "group_id": group.group_id,
+                            "reason": "cover_restored",
+                        }
+                    )
+                continue
             cover = covered_call_cover_native(group)
             min_strike, max_strike = cash_secured_strike_bounds(
                 group.short_strike,
                 self.config.covered_call_csp_strike_floor_pct,
             )
-            candidate = self._scan_itm_cash_secured_candidate(
-                context,
-                group,
-                sold_native=sold,
-                usdc_available=usdc_free,
-                quantity_cap=cover if cover > 0 else sold,
-                min_strike=min_strike,
-                max_strike=max_strike,
-                summary_equity=usdc.equity,
-                summary_maintenance_margin=usdc.maintenance_margin,
-            )
+            qty_cap = cover if cover > 0 else sold
+            roll_child = cash_secured_last_active_roll_child(group, context.state.groups)
+            if roll_child is not None:
+                hold_credit, hold_dte = cash_secured_hold_credit_dte_from_closed_roll(roll_child)
+                freed = max(roll_child.short_strike * roll_child.quantity, Decimal("0"))
+                retry_qty_cap = qty_cap
+                if roll_child.quantity > 0:
+                    retry_qty_cap = min(qty_cap, roll_child.quantity) if qty_cap > 0 else roll_child.quantity
+                ranked = self._rank_itm_cash_secured_candidates(
+                    context,
+                    group,
+                    sold_native=sold,
+                    usdc_available=usdc_free + freed,
+                    min_strike=min_strike,
+                    max_strike=max_strike,
+                    summary_equity=max(usdc.equity, usdc_free + freed),
+                    summary_maintenance_margin=usdc.maintenance_margin,
+                    quantity_cap=retry_qty_cap,
+                )
+                picked = self._pick_csp_daily_yield_candidate(
+                    context,
+                    ranked,
+                    hold_credit=hold_credit,
+                    hold_dte=hold_dte,
+                    close_fee=Decimal("0"),
+                    index_price=self._currency_index_price(group.currency, context.orderbook_cache),
+                    amortize_close_fee=False,
+                )
+                if picked is None:
+                    LOGGER.info(
+                        "cash_secured: skip retry after active roll, daily yield not higher group=%s",
+                        group.group_id,
+                    )
+                    if not live:
+                        actions.append(
+                            {
+                                "action": "cash_secured_skipped",
+                                "group_id": group.group_id,
+                                "reason": "daily_yield_not_higher",
+                            }
+                        )
+                    continue
+                candidate = picked[0]
+            else:
+                candidate = self._scan_itm_cash_secured_candidate(
+                    context,
+                    group,
+                    sold_native=sold,
+                    usdc_available=usdc_free,
+                    quantity_cap=qty_cap,
+                    min_strike=min_strike,
+                    max_strike=max_strike,
+                    summary_equity=usdc.equity,
+                    summary_maintenance_margin=usdc.maintenance_margin,
+                )
             if candidate is None:
                 if not live:
                     actions.append(
@@ -442,6 +509,8 @@ class CoveredCallMixin:
         summary_equity: Decimal,
         summary_maintenance_margin: Decimal,
         quantity_cap: Decimal | None = None,
+        expiry_after_ms: int | None = None,
+        exclude_instrument: str | None = None,
     ) -> list[Any]:
         from ..cash_secured_ops import cash_secured_quantity, cash_secured_scan_rank
 
@@ -457,8 +526,13 @@ class CoveredCallMixin:
                     context.markets_by_currency[group.currency].append(instrument)
                     known.add(instrument.instrument_name)
 
+        skip = str(exclude_instrument or "").strip()
         ranked: list[tuple[tuple[Decimal, Decimal, Decimal, Decimal], Any]] = []
         for instrument in markets:
+            if skip and instrument.instrument_name == skip:
+                continue
+            if expiry_after_ms is not None and instrument.expiration_timestamp_ms <= expiry_after_ms:
+                continue
             dte = instrument.dte_days()
             if dte < dte_min or dte > dte_max:
                 continue
@@ -476,7 +550,8 @@ class CoveredCallMixin:
                 continue
             try:
                 book = self._get_orderbook(instrument.instrument_name, context.orderbook_cache)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("cash_secured: skip candidate %s (orderbook): %s", instrument.instrument_name, exc)
                 continue
             candidate, _fail = self.strategy.refresh_cash_secured_put_candidate(
                 instrument=instrument,
@@ -501,6 +576,94 @@ class CoveredCallMixin:
         ranked.sort(key=lambda item: item[0])
         return [candidate for _key, candidate in ranked]
 
+    def _csp_linear_option_fee(
+        self,
+        *,
+        index_price: Decimal,
+        premium: Decimal,
+        quantity: Decimal,
+        currency: str,
+    ) -> Decimal:
+        from ..fees import option_trade_fee_usdc
+
+        return option_trade_fee_usdc(
+            index_price=index_price,
+            premium=premium,
+            quantity=quantity,
+            fee_rate=self.config.option_fee_rate,
+            fee_cap_rate=self.config.option_fee_cap_rate,
+            base_currency=currency,
+            quote_currency="USDC",
+            settlement_currency="USDC",
+            fee_discount_rate=self._option_fee_discount_rate_at(),
+        )
+
+    def _pick_csp_daily_yield_candidate(
+        self,
+        context: RuntimeContext,
+        ranked: list[Any],
+        *,
+        hold_credit: Decimal,
+        hold_dte: Decimal,
+        close_fee: Decimal,
+        index_price: Decimal,
+        amortize_close_fee: bool,
+    ) -> tuple[Any, dict[str, str]] | None:
+        """Best window candidate whose daily yield beats holding remaining TV."""
+        from ..cash_secured_ops import (
+            cash_secured_active_roll_daily_beats_hold,
+            cash_secured_self_assign_liquidity_ok,
+        )
+
+        best: tuple[Any, dict[str, str], Decimal] | None = None
+        for candidate in ranked:
+            try:
+                repl_book = self._get_orderbook(candidate.short_leg.instrument_name, context.orderbook_cache)
+            except Exception:  # noqa: BLE001
+                continue
+            repl_liquid, _why = cash_secured_self_assign_liquidity_ok(
+                spread_ratio=repl_book.spread_ratio,
+                best_bid_price=repl_book.best_bid_price,
+                best_ask_price=repl_book.best_ask_price,
+                best_ask_amount=repl_book.best_bid_amount,
+                quantity=candidate.quantity,
+                max_spread_ratio=self.config.covered_call_csp_self_assign_max_spread_ratio,
+            )
+            if not repl_liquid:
+                continue
+            new_credit = max(candidate.short_leg.best_bid_price, Decimal("0")) * candidate.quantity
+            open_fee = self._csp_linear_option_fee(
+                index_price=repl_book.index_price if repl_book.index_price > 0 else index_price,
+                premium=candidate.short_leg.best_bid_price,
+                quantity=candidate.quantity,
+                currency=str(candidate.currency or "BTC"),
+            )
+            switch_fees = open_fee + (close_fee if amortize_close_fee else Decimal("0"))
+            hold_daily, roll_daily, beats = cash_secured_active_roll_daily_beats_hold(
+                hold_credit=hold_credit,
+                hold_dte=hold_dte,
+                new_credit=new_credit,
+                new_dte=candidate.dte_days,
+                switch_fees=switch_fees,
+            )
+            if not beats:
+                continue
+            numbers = {
+                "replacement_instrument": candidate.short_leg.instrument_name,
+                "close_debit": format_decimal(hold_credit, 8),
+                "new_credit": format_decimal(new_credit, 8),
+                "close_fee": format_decimal(close_fee, 8),
+                "open_fee": format_decimal(open_fee, 8),
+                "hold_daily": format_decimal(hold_daily, 8),
+                "roll_daily": format_decimal(roll_daily, 8),
+                "quantity": format_decimal(candidate.quantity, 8),
+            }
+            if best is None or roll_daily > best[2]:
+                best = (candidate, numbers, roll_daily)
+        if best is None:
+            return None
+        return best[0], best[1]
+
     def _scan_itm_cash_secured_candidate(
         self,
         context: RuntimeContext,
@@ -513,6 +676,8 @@ class CoveredCallMixin:
         summary_equity: Decimal,
         summary_maintenance_margin: Decimal,
         quantity_cap: Decimal | None = None,
+        expiry_after_ms: int | None = None,
+        exclude_instrument: str | None = None,
     ):
         ranked = self._rank_itm_cash_secured_candidates(
             context,
@@ -524,6 +689,8 @@ class CoveredCallMixin:
             summary_equity=summary_equity,
             summary_maintenance_margin=summary_maintenance_margin,
             quantity_cap=quantity_cap,
+            expiry_after_ms=expiry_after_ms,
+            exclude_instrument=exclude_instrument,
         )
         return ranked[0] if ranked else None
 
@@ -544,10 +711,10 @@ class CoveredCallMixin:
         )
         from ..spot_restore_ops import covered_call_cover_native
 
-        ready, ready_reason = itm_sold_ready_for_cash_secured(parent)
-        sold = cash_secured_target_native(parent)
+        ready, ready_reason = itm_sold_ready_for_cash_secured(parent, context.state.groups)
+        sold = cash_secured_target_native(parent, context.state.groups)
         cover = covered_call_cover_native(parent)
-        if sold <= 0 and cover > 0:
+        if sold <= 0 and cover > 0 and ready_reason in {"not_closed", "spot_exit_not_filled"}:
             sold = cover
         floor = strike_floor_pct if strike_floor_pct is not None else self.config.covered_call_csp_strike_floor_pct
         min_strike, max_strike = cash_secured_strike_bounds(
@@ -719,19 +886,30 @@ class CoveredCallMixin:
         *,
         reason: str,
     ) -> None:
+        from ..cash_secured_ops import cash_secured_children
+
         group.cash_secured_from_group_id = parent.group_id
         group.strategy = "cash_secured"
         context.state.groups.append(group)
+        ids = [str(item).strip() for item in (parent.cash_secured_group_ids or []) if str(item).strip()]
+        prior = str(parent.cash_secured_group_id or "").strip()
+        if prior and prior not in ids:
+            ids.append(prior)
+        if group.group_id not in ids:
+            ids.append(group.group_id)
+        parent.cash_secured_group_ids = ids
         parent.cash_secured_status = "entered"
         parent.cash_secured_group_id = group.group_id
         parent.cash_secured_reason = reason
         parent.cash_secured_order_id = ""
+        roll = len(cash_secured_children(context.state.groups, parent)) > 1
+        title = "CSP roll" if roll else "ITM sold → cash secured"
         self._telegram_alert(
-            "ITM sold → cash secured",
+            title,
             body=(
                 f"source={parent.group_id} child={group.group_id} {group.short_instrument_name} qty={group.quantity}"
             ),
-            event_key=f"cash_secured:{self._journal_scope_key()}:{parent.group_id}",
+            event_key=f"cash_secured:{self._journal_scope_key()}:{parent.group_id}:{group.group_id}",
             level="info",
         )
 
@@ -744,9 +922,10 @@ class CoveredCallMixin:
         filled_amount: Decimal,
         responses: list[dict[str, Any]],
         trades: list[dict[str, Any]],
+        group_id: str | None = None,
     ) -> TradeGroup:
-        labels = self._cash_secured_labels(parent.currency, parent.group_id)
-        group_id = self._next_group_id(context.state)
+        child_id = str(group_id or "").strip() or self._next_group_id(context.state)
+        labels = self._cash_secured_labels(parent.currency, child_id)
         primary_short_average_price = self._filled_average_price(responses)
         short_instrument = self._find_instrument(context, candidate.short_leg.instrument_name)
         short_book = self._get_orderbook(candidate.short_leg.instrument_name, context.orderbook_cache)
@@ -767,7 +946,7 @@ class CoveredCallMixin:
         else:
             max_loss_usdc = estimated_im_collateral * idx if idx > 0 else candidate.estimated_im_total
         group = TradeGroup(
-            group_id=group_id,
+            group_id=child_id,
             currency=candidate.currency,
             collateral_currency=candidate.collateral_currency,
             quantity=filled_amount,
@@ -827,7 +1006,10 @@ class CoveredCallMixin:
         *,
         order_id: str | None = None,
     ) -> dict[str, Any]:
-        parent.cash_secured_status = "skipped"
+        if parent.cash_secured_group_id:
+            parent.cash_secured_status = "entered"
+        else:
+            parent.cash_secured_status = "skipped"
         parent.cash_secured_reason = "ioc_unfilled"
         parent.cash_secured_order_id = ""
         parent.cash_secured_instrument_name = ""
@@ -930,7 +1112,8 @@ class CoveredCallMixin:
                 return None
         try:
             book = self._get_orderbook(name, context.orderbook_cache)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("cash_secured: orderbook unavailable for %s (group=%s): %s", name, parent.group_id, exc)
             return None
         usdc = context.summaries.get("USDC")
         if usdc is None:
@@ -968,7 +1151,10 @@ class CoveredCallMixin:
         if not live:
             return payload
 
-        labels = self._cash_secured_labels(candidate.currency, parent.group_id)
+        child_id = self._next_group_id(context.state)
+        # First put keeps the parent label (existing fills / tests). Rolls use the new child id.
+        label_id = child_id if str(parent.cash_secured_group_id or "").strip() else parent.group_id
+        labels = self._cash_secured_labels(candidate.currency, label_id)
         request = self._entry_naked_short_request(
             candidate,
             labels["short"],
@@ -991,8 +1177,14 @@ class CoveredCallMixin:
                 filled_amount=filled,
                 responses=[response],
                 trades=trades,
+                group_id=child_id,
             )
-            self._link_cash_secured_child(context, parent, group, reason="itm_sold_to_usdc")
+            self._link_cash_secured_child(
+                context,
+                parent,
+                group,
+                reason="csp_otm_roll" if parent.cash_secured_group_id else "itm_sold_to_usdc",
+            )
             payload["action"] = "cash_secured_entered"
             payload["group_id"] = group.group_id
             payload["order_id"] = order_id or None
@@ -1035,14 +1227,37 @@ class CoveredCallMixin:
         from ..wallet_ops import _align_spot_limit_price, _lookup_spot_instrument, spot_buy_quote_spent_from_trades
 
         actions: list[dict[str, Any]] = []
-        summaries = self._account_summaries_by_currency() if live else context.summaries
+        # Refresh account summaries at most once per cycle. The cycle-start
+        # snapshot can be stale after an ITM self-assign buy-to-close spent USDC
+        # earlier in this same manage pass, so live mode re-reads once here; the
+        # per-group loop then tracks USDC it commits itself instead of re-fetching.
+        summaries: dict[str, AccountSummary] = {}
+        summaries_fresh = not live
+        if live:
+            try:
+                summaries = self._account_summaries_by_currency()
+                summaries_fresh = True
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "csp cover restore: account summaries refresh failed; "
+                    "no new restore orders will be placed this cycle: %s",
+                    exc,
+                )
+        else:
+            summaries = context.summaries
         if summaries:
             context.summaries.update(summaries)
+        # USDC already committed by restore orders placed earlier in this loop.
+        usdc_committed = Decimal("0")
 
         for group in context.state.groups:
             if not group.is_cash_secured_group() or str(group.status or "").lower() != "closed":
                 continue
-            if not str(group.spot_restore_reason or "").startswith("cash_secured_itm_assignment"):
+            restore_reason = str(group.spot_restore_reason or "")
+            if not (
+                restore_reason.startswith("cash_secured_itm_assignment")
+                or restore_reason.startswith("cash_secured_self_assign")
+            ):
                 continue
             if spot_restore_operator_cancelled(group):
                 if not live:
@@ -1109,9 +1324,16 @@ class CoveredCallMixin:
             usdc_free = Decimal("0")
             if usdc is not None:
                 usdc_free = max(usdc.available_funds, usdc.available_withdrawal_funds, Decimal("0"))
+            usdc_free = max(usdc_free - usdc_committed, Decimal("0"))
             try:
                 book = self._get_orderbook(instrument_name, context.orderbook_cache)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "csp cover restore: orderbook unavailable for %s (group=%s): %s",
+                    instrument_name,
+                    group.group_id,
+                    exc,
+                )
                 book = None
             mid = Decimal("0")
             if book is not None:
@@ -1136,37 +1358,63 @@ class CoveredCallMixin:
                         }
                     )
                 continue
+            if live and not summaries_fresh:
+                # A restore buy sizes itself from free USDC; without a fresh
+                # balance we must not place one. Stay pending, retry next cycle.
+                group.spot_restore_status = "pending"
+                actions.append(
+                    {
+                        "action": "cash_secured_cover_restore_skipped",
+                        "group_id": group.group_id,
+                        "reason": "usdc_balance_unavailable",
+                        "unrestored": format_decimal(unrestored, 8),
+                    }
+                )
+                continue
             if mid <= 0 or usdc_free <= 0:
-                if not live:
-                    actions.append(
-                        {
-                            "action": "cash_secured_cover_restore_skipped",
-                            "group_id": group.group_id,
-                            "reason": "usdc_or_price_unavailable",
-                            "unrestored": format_decimal(unrestored, 8),
-                        }
-                    )
+                group.spot_restore_status = "pending"
+                actions.append(
+                    {
+                        "action": "cash_secured_cover_restore_skipped",
+                        "group_id": group.group_id,
+                        "reason": "usdc_or_price_unavailable",
+                        "unrestored": format_decimal(unrestored, 8),
+                        "usdc_free": format_decimal(usdc_free, 4),
+                    }
+                )
                 continue
             try:
                 spot = _lookup_spot_instrument(self.client, instrument_name, group.currency.upper())
                 limit_px = _align_spot_limit_price(mid, spot)
+                # Leave a small buffer for fees / mark moves so Deribit does not
+                # reject with not_enough_funds_in_currency.
+                affordable = (usdc_free * Decimal("0.995")) / limit_px if limit_px > 0 else Decimal("0")
                 qty = align_option_order_amount(
-                    min(unrestored, usdc_free / limit_px if limit_px > 0 else unrestored),
+                    min(unrestored, affordable),
                     spot.contract_size,
                     spot.min_trade_amount,
                 )
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "csp cover restore: spot instrument lookup/alignment failed for %s (group=%s); "
+                    "using mid price and unaligned qty: %s",
+                    instrument_name,
+                    group.group_id,
+                    exc,
+                )
                 limit_px = mid
                 qty = unrestored
             if qty <= 0:
-                if not live:
-                    actions.append(
-                        {
-                            "action": "cash_secured_cover_restore_skipped",
-                            "group_id": group.group_id,
-                            "reason": "amount_below_min",
-                        }
-                    )
+                group.spot_restore_status = "pending"
+                actions.append(
+                    {
+                        "action": "cash_secured_cover_restore_skipped",
+                        "group_id": group.group_id,
+                        "reason": "usdc_short_for_min_size",
+                        "unrestored": format_decimal(unrestored, 8),
+                        "usdc_free": format_decimal(usdc_free, 4),
+                    }
+                )
                 continue
             preview = {
                 "action": "cash_secured_cover_restore_preview" if not live else "cash_secured_cover_restore_submitted",
@@ -1180,17 +1428,52 @@ class CoveredCallMixin:
                 actions.append(preview)
                 continue
             label = cash_secured_cover_restore_order_label(group, self.config.order_label_prefix)
-            result = place_spot_restore_resting_limit_buy(
-                self.client,
-                instrument_name=instrument_name,
-                amount=qty,
-                price=limit_px,
-                label=label,
-            )
+            try:
+                result = place_spot_restore_resting_limit_buy(
+                    self.client,
+                    instrument_name=instrument_name,
+                    amount=qty,
+                    price=limit_px,
+                    label=label,
+                )
+            except Exception as exc:
+                # Keep pending and retry next cycle — never crash the run loop on
+                # transient USDC shortfalls after CSP self-assign / assignment.
+                from ..exceptions import ExchangeError
+
+                group.spot_restore_status = "pending"
+                reason = "exchange_error"
+                msg = str(exc)
+                if isinstance(exc, ExchangeError) and "not_enough_funds" in msg:
+                    reason = "not_enough_funds"
+                else:
+                    LOGGER.exception("csp cover restore place failed group=%s", group.group_id)
+                actions.append(
+                    {
+                        "action": "cash_secured_cover_restore_skipped",
+                        "group_id": group.group_id,
+                        "reason": reason,
+                        "detail": msg[:240],
+                        "usdc_free": format_decimal(usdc_free, 4),
+                        "quantity": format_decimal(qty, 8),
+                    }
+                )
+                if reason == "not_enough_funds":
+                    self._telegram_alert(
+                        "CSP cover restore waiting on USDC",
+                        body=(
+                            f"group={group.group_id} {instrument_name} "
+                            f"need≈{format_decimal(qty * limit_px, 2)} free={format_decimal(usdc_free, 2)}"
+                        ),
+                        event_key=f"csp_restore_usdc:{self._journal_scope_key()}:{group.group_id}",
+                        level="warning",
+                    )
+                continue
             filled_native = to_decimal(result.get("filled_native"))
             trades = list(result.get("trades") or [])
             if filled_native > 0:
                 spent = spot_buy_quote_spent_from_trades(trades, quote_currency="USDC")
+                usdc_committed += spent if spent > 0 else filled_native * limit_px
                 group.spot_restore_status = "filled"
                 group.spot_restore_amount = (group.spot_restore_amount or Decimal("0")) + filled_native
                 group.spot_restore_instrument_name = instrument_name
@@ -1213,6 +1496,7 @@ class CoveredCallMixin:
                 actions.append(preview)
                 continue
             if result.get("parked"):
+                usdc_committed += qty * limit_px
                 group.spot_restore_status = "submitted"
                 group.spot_restore_instrument_name = instrument_name
                 group.spot_restore_order_id = str(result.get("order_id") or "")
@@ -1244,7 +1528,13 @@ class CoveredCallMixin:
             return Decimal("0")
         try:
             state = self.client.get_order_state(order_id)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "csp cover restore: order state unavailable order=%s group=%s; treating as unfilled this cycle: %s",
+                order_id,
+                group.group_id,
+                exc,
+            )
             return Decimal("0")
         filled = self._response_filled_amount(state)
         if filled <= 0:
@@ -1316,6 +1606,9 @@ class CoveredCallMixin:
     ) -> list[dict[str, Any]]:
         if not self.config.covered_call_profit_sweep_enabled:
             return []
+        from ..profit_sweep_ops import ProfitSweepTradesUnavailable
+
+        trade_cache = None
         if live:
             from ..profit_sweep_ops import (
                 ProfitSweepTradeCache,
@@ -1337,8 +1630,8 @@ class CoveredCallMixin:
                 self.config.order_label_prefix,
             )
             self._reconcile_profit_sweeps_from_exchange(context, trade_cache=trade_cache)
-            reschedule_ledger_only_profit_sweeps(self, context.state.groups)
-            reschedule_failed_profit_sweeps(self, context.state.groups)
+            reschedule_ledger_only_profit_sweeps(self, context.state.groups, trade_cache=trade_cache)
+            reschedule_failed_profit_sweeps(self, context.state.groups, trade_cache=trade_cache)
             schedule_remaining_closed_profit_sweeps(self, context.state.groups, trade_cache=trade_cache)
             # ITM cover−settle exits: queue remaining premium for Profit swap.
             from ..spot_exit_ops import spot_exit_realized_usdt
@@ -1361,23 +1654,53 @@ class CoveredCallMixin:
                     live=True,
                 )
         actions: list[dict[str, Any]] = []
+        unavailable = trade_cache.unavailable_currencies() if trade_cache is not None else {}
         for group in context.state.groups:
             if (
                 group.status == "closed"
                 and self._is_covered_call_group(group)
                 and group.profit_sweep_status == "pending"
             ):
+                if group.currency.upper() in unavailable:
+                    # Exchange fills for this currency could not be loaded, so the
+                    # pending status could not be reconciled against a real fill.
+                    # Placing a sweep now risks selling premium twice.
+                    LOGGER.warning(
+                        "profit_sweep: group=%s stays pending; %s fills unavailable this cycle: %s",
+                        group.group_id,
+                        group.currency.upper(),
+                        unavailable[group.currency.upper()],
+                    )
+                    actions.append(
+                        {
+                            "action": "covered_call_profit_sweep_skipped",
+                            "group_id": group.group_id,
+                            "reason": "exchange_trades_unavailable",
+                            "profit_sweep_status": group.profit_sweep_status or None,
+                            "live": live,
+                        }
+                    )
+                    continue
                 actions.append(self._execute_covered_call_profit_sweep(context, group, live=live))
-        from ..profit_sweep_dust import run_dust_pool_profit_sweeps
+        from ..profit_sweep_ops import _run_dust_pool_sweeps_guarded
 
-        actions.extend(run_dust_pool_profit_sweeps(self, context, live=live))
+        actions.extend(_run_dust_pool_sweeps_guarded(self, context, live=live, trade_cache=trade_cache))
         if live:
             from ..profit_sweep_dust import reconcile_dust_sweep_from_exchange
             from ..profit_sweep_ops import heal_reconciled_proceeds_drift
 
             heal_reconciled_proceeds_drift(self, context.state.groups)
             self._reconcile_profit_sweep_quote_proceeds(context)
-            reconcile_dust_sweep_from_exchange(self, context.state.groups, trade_cache=trade_cache)
+            if unavailable:
+                LOGGER.warning(
+                    "profit_sweep: dust reconcile skipped; exchange fills unavailable for %s",
+                    ", ".join(sorted(unavailable)),
+                )
+            else:
+                try:
+                    reconcile_dust_sweep_from_exchange(self, context.state.groups, trade_cache=trade_cache)
+                except ProfitSweepTradesUnavailable as exc:
+                    LOGGER.warning("profit_sweep: dust reconcile aborted (exchange fills unavailable): %s", exc)
         return actions
 
     def _reconcile_profit_sweeps_from_exchange(
@@ -1740,7 +2063,18 @@ class CoveredCallMixin:
                 continue
             ready, reason = csp_premium_swap_ready(group)
             if not ready:
-                if not live and reason == "no_premium":
+                if live and reason == "no_realized_premium":
+                    group.csp_premium_swap_status = "skipped"
+                    group.csp_premium_swap_reason = "no_realized_premium"
+                    actions.append(
+                        {
+                            "action": "csp_premium_swap_skipped",
+                            "group_id": group.group_id,
+                            "reason": reason,
+                            "csp_premium_swap_status": "skipped",
+                        }
+                    )
+                elif not live and reason in {"no_premium", "no_realized_premium", "not_closed_yet"}:
                     actions.append(
                         {
                             "action": "csp_premium_swap_skipped",
@@ -1750,7 +2084,7 @@ class CoveredCallMixin:
                     )
                 continue
             if live and status not in {"pending", "submitted"}:
-                schedule_csp_premium_swap(group, reason="csp_premium_to_spot")
+                schedule_csp_premium_swap(group, reason="csp_premium_to_spot_after_close")
             actions.append(self._execute_csp_premium_swap(context, group, live=live))
         return actions
 
@@ -1762,20 +2096,29 @@ class CoveredCallMixin:
         live: bool,
     ) -> dict[str, Any]:
         from ..csp_premium_swap_ops import (
+            apply_csp_premium_swap_fill,
             csp_premium_net_usdc,
             csp_premium_swap_base_filled_from_trades,
             csp_premium_swap_order_label,
+            csp_premium_swap_remaining_usdc,
+            csp_premium_swap_spent_usdc,
+            is_csp_premium_swap_below_min_notional,
+            mark_csp_premium_swap_dust_complete,
         )
         from ..wallet_ops import spot_buy_quote_spent_from_trades
 
         premium_usdc = csp_premium_net_usdc(group)
+        remaining_usdc = csp_premium_swap_remaining_usdc(group)
         instrument_name = self._csp_premium_swap_instrument(group.currency)
         payload: dict[str, Any] = {
             "action": "csp_premium_swap" if live else "csp_premium_swap_preview",
             "group_id": group.group_id,
-            "reason": group.csp_premium_swap_reason or "csp_premium_to_spot",
+            "reason": group.csp_premium_swap_reason or "csp_premium_to_spot_after_close",
             "instrument_name": instrument_name,
-            "amount_usdc": format_decimal(premium_usdc, 4),
+            "amount_usdc": format_decimal(remaining_usdc, 4),
+            "premium_usdc": format_decimal(premium_usdc, 4),
+            "realized_usdc": format_decimal(premium_usdc, 4),
+            "already_spent_usdc": format_decimal(csp_premium_swap_spent_usdc(group), 4),
             "order_type": self.config.covered_call_spot_order_type,
             "live": live,
         }
@@ -1783,8 +2126,40 @@ class CoveredCallMixin:
             payload["action"] = "csp_premium_swap_skipped"
             payload["reason"] = "no_premium"
             return payload
+        if remaining_usdc <= 0:
+            group.csp_premium_swap_status = "filled"
+            payload["action"] = "csp_premium_swap_skipped"
+            payload["reason"] = "premium_already_swapped"
+            payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+            return payload
         if not live:
             return payload
+
+        # If a prior attempt left an order id, credit any exchange fills first so a
+        # timed-out-but-filled buy cannot be retried for the full premium again.
+        prior_order_id = str(group.csp_premium_swap_order_id or "").strip()
+        if prior_order_id and csp_premium_swap_spent_usdc(group) <= 0:
+            try:
+                prior_trades = list(self.client.get_user_trades_by_order(prior_order_id) or [])
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "csp premium swap: prior order %s trades unavailable (group=%s); prior fills not credited: %s",
+                    prior_order_id,
+                    group.group_id,
+                    exc,
+                )
+                prior_trades = []
+            prior_native = csp_premium_swap_base_filled_from_trades(prior_trades)
+            prior_spent = spot_buy_quote_spent_from_trades(prior_trades, quote_currency="USDC")
+            if prior_spent > 0 or prior_native > 0:
+                remaining_usdc = apply_csp_premium_swap_fill(group, spent_usdc=prior_spent, native_bought=prior_native)
+                payload["already_spent_usdc"] = format_decimal(csp_premium_swap_spent_usdc(group), 4)
+                payload["amount_usdc"] = format_decimal(remaining_usdc, 4)
+                if remaining_usdc <= 0:
+                    payload["action"] = "csp_premium_swap_skipped"
+                    payload["reason"] = "reconciled_prior_order"
+                    payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+                    return payload
 
         # Never dip into the put's reserved assignment margin: cap the spend to the
         # USDC book's free funds (Deribit already excludes the short put's IM).
@@ -1792,7 +2167,7 @@ class CoveredCallMixin:
         usdc_free = Decimal("0")
         if usdc is not None:
             usdc_free = max(usdc.available_funds, usdc.available_withdrawal_funds, Decimal("0"))
-        spend = min(premium_usdc, usdc_free)
+        spend = min(remaining_usdc, usdc_free)
         if spend <= 0:
             # Keep pending so a later cycle retries when USDC frees up.
             if str(group.csp_premium_swap_status or "").lower() != "pending":
@@ -1803,7 +2178,6 @@ class CoveredCallMixin:
             return payload
 
         group.csp_premium_swap_status = "submitted"
-        group.csp_premium_swap_amount = spend
         group.csp_premium_swap_instrument_name = instrument_name
         label = csp_premium_swap_order_label(self.config.order_label_prefix, group)
         try:
@@ -1821,6 +2195,18 @@ class CoveredCallMixin:
                 label=label,
             )
         except Exception as exc:
+            if is_csp_premium_swap_below_min_notional(exc):
+                # Remainder cannot buy one min lot — keep leftover USDC, stop retrying.
+                mark_csp_premium_swap_dust_complete(group, reason=str(exc))
+                LOGGER.info(
+                    "csp_premium_swap dust_below_min group=%s remaining_usdc=%s",
+                    group.group_id,
+                    format_decimal(remaining_usdc, 4),
+                )
+                payload["action"] = "csp_premium_swap_dust_omitted"
+                payload["reason"] = str(exc)
+                payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+                return payload
             group.csp_premium_swap_status = "failed"
             group.csp_premium_swap_reason = f"csp_premium_to_spot: {exc}"
             LOGGER.exception("csp_premium_swap failed group=%s", group.group_id)
@@ -1831,6 +2217,12 @@ class CoveredCallMixin:
 
         if result.get("action") == "trade_spot_skipped":
             skip_reason = result.get("reason") or "skipped"
+            if is_csp_premium_swap_below_min_notional(skip_reason):
+                mark_csp_premium_swap_dust_complete(group, reason=str(skip_reason))
+                payload["action"] = "csp_premium_swap_dust_omitted"
+                payload["reason"] = skip_reason
+                payload["csp_premium_swap_status"] = group.csp_premium_swap_status
+                return payload
             group.csp_premium_swap_status = "pending"
             payload["action"] = "csp_premium_swap_skipped"
             payload["reason"] = skip_reason
@@ -1845,18 +2237,22 @@ class CoveredCallMixin:
         order_state = str(result.get("order_state") or "").lower()
         native = csp_premium_swap_base_filled_from_trades(trades)
         spent = spot_buy_quote_spent_from_trades(trades or [], quote_currency="USDC")
-        if native > 0:
-            group.csp_premium_swap_native = native
-        if order_state in {"cancelled", "rejected"} and native <= 0:
+        if order_state in {"cancelled", "rejected"} and native <= 0 and spent <= 0:
             group.csp_premium_swap_status = "failed"
+        elif spent > 0 or native > 0:
+            apply_csp_premium_swap_fill(group, spent_usdc=spent, native_bought=native)
+        elif order_state == "filled" or (bool(order_id) and order_state in {"", "open", "filled"}):
+            # Some responses omit trade legs; credit the requested quote spend once.
+            apply_csp_premium_swap_fill(group, spent_usdc=spend, native_bought=Decimal("0"))
         else:
-            group.csp_premium_swap_status = "filled"
-        if spent > 0:
-            group.csp_premium_swap_amount = spent
+            # Exchange accepted the order but returned no fills yet — keep pending
+            # and reconcile via order_id next cycle instead of re-buying premium.
+            group.csp_premium_swap_status = "pending"
         payload["csp_premium_swap_status"] = group.csp_premium_swap_status
         payload["csp_premium_swap_order_id"] = group.csp_premium_swap_order_id or None
         payload["native_bought"] = format_decimal(native, 8)
-        payload["usdc_spent"] = format_decimal(spent, 4)
+        payload["usdc_spent"] = format_decimal(spent if spent > 0 else spend, 4)
+        payload["remaining_usdc"] = format_decimal(csp_premium_swap_remaining_usdc(group), 4)
         payload["response"] = response
         return payload
 
@@ -1965,7 +2361,8 @@ class CoveredCallMixin:
         if index_price <= 0:
             try:
                 index_price = self._get_orderbook(group.short_instrument_name, context.orderbook_cache).index_price
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("covered_call itm: no index for %s: %s", group.short_instrument_name, exc)
                 index_price = Decimal("0")
         if index_price <= 0 or group.short_strike <= 0:
             return False
@@ -1982,6 +2379,368 @@ class CoveredCallMixin:
             return False
         trigger = group.short_strike * (Decimal("1") + self.config.covered_call_itm_buffer_pct)
         return index_price > trigger
+
+    def _cash_secured_put_itm(self, group: TradeGroup, context: RuntimeContext) -> bool:
+        return self._cash_secured_put_itm_from_cache(group, context.orderbook_cache)
+
+    def _manage_cash_secured_group(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        live: bool,
+    ) -> list[dict[str, Any]]:
+        """Wheel CSP: OTM may active-roll; ITM may self-assign. The two paths are exclusive."""
+        from ..cash_secured_ops import (
+            cash_secured_self_assign_liquidity_ok,
+            cash_secured_self_assign_ready,
+        )
+
+        itm = self._cash_secured_put_itm(group, context)
+        group.itm_defense_streak = group.itm_defense_streak + 1 if itm else 0
+        if not itm:
+            return self._maybe_cash_secured_active_roll(context, group, live=live)
+        if not self.config.covered_call_itm_to_cash_secured_enabled:
+            return []
+        if not self.config.covered_call_csp_self_assign_enabled:
+            return []
+
+        index_price = self._currency_index_price(group.currency, context.orderbook_cache)
+        if index_price <= 0:
+            try:
+                index_price = self._get_orderbook(group.short_instrument_name, context.orderbook_cache).index_price
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("cash_secured self-assign: no index for %s: %s", group.short_instrument_name, exc)
+                index_price = Decimal("0")
+        ready, gate_reason = cash_secured_self_assign_ready(
+            index_price=index_price,
+            strike=group.short_strike,
+            quantity=group.quantity,
+            current_debit=group.current_debit,
+            dte_days=group.dte_days,
+            itm_buffer_pct=self.config.covered_call_itm_buffer_pct,
+            max_dte=self.config.covered_call_csp_self_assign_max_dte,
+            max_tv_pct=self.config.covered_call_csp_self_assign_max_tv_pct,
+        )
+        if not ready:
+            return []
+
+        try:
+            book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug(
+                "cash_secured self-assign: orderbook unavailable for %s (group=%s): %s",
+                group.short_instrument_name,
+                group.group_id,
+                exc,
+            )
+            return []
+        liquid, liq_reason = cash_secured_self_assign_liquidity_ok(
+            spread_ratio=book.spread_ratio,
+            best_bid_price=book.best_bid_price,
+            best_ask_price=book.best_ask_price,
+            best_ask_amount=book.best_ask_amount,
+            quantity=group.quantity,
+            max_spread_ratio=self.config.covered_call_csp_self_assign_max_spread_ratio,
+        )
+        if not liquid:
+            return []
+
+        # Optimistic post-close USDC: free now + cash-secured notional − put buyback.
+        # Spot cover costs ~index×qty; if even this cannot fund it, hold to expiry.
+        usdc = context.summaries.get("USDC")
+        usdc_free = Decimal("0")
+        if usdc is not None:
+            usdc_free = max(usdc.available_funds, usdc.available_withdrawal_funds, Decimal("0"))
+        put_cost = max(group.current_debit, Decimal("0"))
+        freed = max(group.short_strike * group.quantity, Decimal("0"))
+        spot_need = index_price * group.quantity * Decimal("1.01")
+        if index_price > 0 and usdc_free + freed < put_cost + spot_need:
+            return []
+
+        confirm = self.config.covered_call_csp_self_assign_confirm_cycles
+        if confirm is None:
+            confirm = self.config.covered_call_itm_confirm_cycles
+        if confirm is None:
+            confirm = self.config.defense_confirm_cycles
+        if group.itm_defense_streak < max(int(confirm or 1), 1):
+            return []
+
+        actions = self._close_group(context, group, reason="csp_self_assign", live=live)
+        if not live:
+            actions.append(
+                {
+                    "action": "cash_secured_self_assign_preview",
+                    "group_id": group.group_id,
+                    "gate": gate_reason,
+                    "liquidity": liq_reason,
+                    "spread_ratio": format_decimal(book.spread_ratio, 4),
+                    "index_price": format_decimal(index_price, 4),
+                    "strike": format_decimal(group.short_strike, 4),
+                    "dte_days": format_decimal(group.dte_days, 4),
+                    "current_debit": format_decimal(group.current_debit, 8),
+                }
+            )
+            return actions
+        if group.status != "closed":
+            return actions
+
+        group.spot_restore_status = "pending"
+        group.spot_restore_instrument_name = f"{group.currency.upper()}_USDC"
+        group.spot_restore_reason = "cash_secured_self_assign"
+        self._telegram_alert(
+            "CSP self-assign → restoring cover",
+            body=(
+                f"group={group.group_id} {group.short_instrument_name} "
+                f"gate={gate_reason} spread={format_decimal(book.spread_ratio, 4)} "
+                f"index={format_decimal(index_price, 2)}"
+            ),
+            event_key=f"csp_self_assign:{self._journal_scope_key()}:{group.group_id}",
+            level="info",
+        )
+        actions.append(
+            {
+                "action": "cash_secured_self_assign",
+                "group_id": group.group_id,
+                "gate": gate_reason,
+                "liquidity": liq_reason,
+                "spot_restore_status": "pending",
+            }
+        )
+        return actions
+
+    def _maybe_cash_secured_active_roll(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        live: bool,
+    ) -> list[dict[str, Any]]:
+        """OTM CSP: buy back before expiry and sell a higher daily-yield put.
+
+        Same or earlier expiry is allowed. Gate order (first failure wins):
+        disabled → dte_too_short / dte_out_of_window → tv_too_thin →
+        illiquid_close → illiquid_replacement → daily_yield_not_higher.
+        ITM never enters this method.
+        """
+        from ..cash_secured_ops import (
+            cash_secured_active_roll_daily_usdc,
+            cash_secured_active_roll_dte_reason,
+            cash_secured_active_roll_fee_edge,
+            cash_secured_active_roll_tv_ratio,
+            cash_secured_roll_blocked,
+            cash_secured_self_assign_liquidity_ok,
+            cash_secured_strike_bounds,
+            cash_secured_target_native,
+        )
+        from ..fees import option_trade_fee_usdc
+        from ..spot_restore_ops import covered_call_cover_native
+
+        def _payload(**extra: Any) -> dict[str, Any]:
+            row: dict[str, Any] = {
+                "action": "cash_secured_active_roll",
+                "group_id": group.group_id,
+                "would_place": False,
+                "close_instrument": group.short_instrument_name,
+            }
+            row.update(extra)
+            return row
+
+        if not self.config.covered_call_itm_to_cash_secured_enabled:
+            return []
+        if not self.config.covered_call_csp_active_roll_enabled:
+            return []
+
+        dte_why = cash_secured_active_roll_dte_reason(
+            dte_days=group.dte_days,
+            min_dte=Decimal(self.config.covered_call_csp_active_roll_min_dte),
+            max_dte=Decimal(self.config.covered_call_csp_active_roll_max_dte),
+        )
+        if dte_why:
+            return [_payload(reason=dte_why)]
+
+        try:
+            close_book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug(
+                "cash_secured active roll: orderbook unavailable for %s (group=%s): %s",
+                group.short_instrument_name,
+                group.group_id,
+                exc,
+            )
+            return [_payload(reason="illiquid_close")]
+
+        index_price = self._currency_index_price(group.currency, context.orderbook_cache)
+        if index_price <= 0:
+            index_price = close_book.index_price
+        close_ask = close_book.best_ask_price
+        if close_ask <= 0 or group.quantity <= 0:
+            return [_payload(reason="illiquid_close")]
+        close_debit = close_ask * group.quantity
+        tv_ratio = cash_secured_active_roll_tv_ratio(
+            index_price=index_price,
+            strike=group.short_strike,
+            quantity=group.quantity,
+            current_debit=close_debit,
+            entry_credit=group.entry_credit,
+        )
+        if tv_ratio < self.config.covered_call_csp_active_roll_min_tv_ratio:
+            return [_payload(reason="tv_too_thin", tv_ratio=format_decimal(tv_ratio, 4))]
+
+        liquid, liq_why = cash_secured_self_assign_liquidity_ok(
+            spread_ratio=close_book.spread_ratio,
+            best_bid_price=close_book.best_bid_price,
+            best_ask_price=close_book.best_ask_price,
+            best_ask_amount=close_book.best_ask_amount,
+            quantity=group.quantity,
+            max_spread_ratio=self.config.covered_call_csp_self_assign_max_spread_ratio,
+        )
+        if not liquid:
+            return [_payload(reason="illiquid_close", liquidity=liq_why)]
+
+        parent_id = str(group.cash_secured_from_group_id or "").strip()
+        parent = next((item for item in context.state.groups if str(item.group_id) == parent_id), None)
+        if parent is None:
+            return [_payload(reason="parent_missing")]
+        blocked, block_why = cash_secured_roll_blocked(parent, context.state.groups)
+        if blocked:
+            return [_payload(reason=block_why)]
+
+        if context.regime_by_currency.get(group.currency, RiskRegime.NORMAL) is RiskRegime.CRISIS:
+            return []
+        if self._cash_secured_blocked_by_hard_derisk(context):
+            return []
+
+        min_strike, max_strike = cash_secured_strike_bounds(
+            parent.short_strike,
+            self.config.covered_call_csp_strike_floor_pct,
+        )
+
+        usdc = context.summaries.get("USDC")
+        usdc_free = Decimal("0")
+        usdc_equity = Decimal("0")
+        usdc_mm = Decimal("0")
+        if usdc is not None:
+            usdc_free = max(usdc.available_funds, usdc.available_withdrawal_funds, Decimal("0"))
+            usdc_equity = usdc.equity
+            usdc_mm = usdc.maintenance_margin
+        close_fee = option_trade_fee_usdc(
+            index_price=index_price,
+            premium=close_ask,
+            quantity=group.quantity,
+            fee_rate=self.config.option_fee_rate,
+            fee_cap_rate=self.config.option_fee_cap_rate,
+            base_currency=group.currency,
+            quote_currency="USDC",
+            settlement_currency="USDC",
+            fee_discount_rate=self._option_fee_discount_rate_at(),
+        )
+        freed = max(group.short_strike * group.quantity, Decimal("0"))
+        usdc_available = usdc_free + freed - close_debit - close_fee
+        if usdc_available < 0:
+            usdc_available = Decimal("0")
+        if usdc_equity < usdc_available:
+            usdc_equity = usdc_available
+
+        sold = cash_secured_target_native(parent, context.state.groups)
+        if sold <= 0:
+            return [_payload(reason="cover_restored")]
+        cover = covered_call_cover_native(parent)
+        qty_cap = group.quantity
+        if cover > 0:
+            qty_cap = min(qty_cap, cover)
+
+        ranked = self._rank_itm_cash_secured_candidates(
+            context,
+            parent,
+            sold_native=sold,
+            usdc_available=usdc_available,
+            min_strike=min_strike,
+            max_strike=max_strike,
+            summary_equity=usdc_equity,
+            summary_maintenance_margin=usdc_mm,
+            quantity_cap=qty_cap,
+            exclude_instrument=group.short_instrument_name,
+        )
+        if not ranked:
+            return [_payload(reason="illiquid_replacement")]
+
+        picked = self._pick_csp_daily_yield_candidate(
+            context,
+            ranked,
+            hold_credit=close_debit,
+            hold_dte=group.dte_days,
+            close_fee=close_fee,
+            index_price=index_price,
+            amortize_close_fee=True,
+        )
+        hold_daily = cash_secured_active_roll_daily_usdc(credit=close_debit, dte_days=group.dte_days)
+        if picked is None:
+            return [
+                _payload(
+                    reason="daily_yield_not_higher",
+                    hold_daily=format_decimal(hold_daily, 8),
+                    tv_ratio=format_decimal(tv_ratio, 4),
+                )
+            ]
+        candidate, numbers = picked
+        new_credit = Decimal(str(numbers["new_credit"]))
+        open_fee = Decimal(str(numbers["open_fee"]))
+        net, _edge_ok = cash_secured_active_roll_fee_edge(
+            new_credit=new_credit,
+            close_debit=close_debit,
+            close_fee=close_fee,
+            open_fee=open_fee,
+            min_net_usdc=self.config.covered_call_csp_active_roll_min_net_usdc,
+        )
+        numbers["net_edge"] = format_decimal(net, 8)
+        numbers["tv_ratio"] = format_decimal(tv_ratio, 4)
+
+        if not live:
+            actions = self._close_group(context, group, reason="csp_active_roll", live=False)
+            actions.append(_payload(reason="", would_place=True, **numbers))
+            return actions
+
+        actions = self._close_group(context, group, reason="csp_active_roll", live=True)
+        if group.status != "closed":
+            actions.append(_payload(reason="close_incomplete", would_place=True, **numbers))
+            return actions
+
+        parent.cash_secured_reason = "active_roll_entry_pending"
+        parent.cash_secured_instrument_name = candidate.short_leg.instrument_name
+        entry = self._execute_itm_cash_secured_entry(context, parent, candidate, live=True)
+        actions.append(entry)
+        if entry.get("action") == "cash_secured_entered":
+            parent.cash_secured_reason = "csp_active_roll"
+            self._telegram_alert(
+                "CSP active roll filled",
+                body=(
+                    f"closed={group.group_id} {group.short_instrument_name} "
+                    f"→ {candidate.short_leg.instrument_name} qty={format_decimal(candidate.quantity, 4)}"
+                ),
+                event_key=f"csp_active_roll:{self._journal_scope_key()}:{group.group_id}",
+                level="info",
+            )
+            actions.append(_payload(reason="", would_place=True, **numbers))
+            return actions
+
+        LOGGER.warning(
+            "cash_secured active roll: close filled but entry failed group=%s replacement=%s",
+            group.group_id,
+            candidate.short_leg.instrument_name,
+        )
+        self._telegram_alert(
+            "CSP active roll: entry failed after close",
+            body=(
+                f"closed={group.group_id} {group.short_instrument_name} "
+                f"replacement={candidate.short_leg.instrument_name} "
+                f"USDC parked; next cycle retries entry only"
+            ),
+            event_key=f"csp_active_roll_entry_fail:{self._journal_scope_key()}:{group.group_id}",
+            level="warning",
+        )
+        actions.append(_payload(reason="entry_unfilled", would_place=True, **numbers))
+        return actions
 
     def _cash_secured_put_itm_from_cache(
         self,
@@ -2015,24 +2774,21 @@ class CoveredCallMixin:
         return True
 
     def _cash_secured_blocked_by_hard_derisk(self, context: RuntimeContext) -> bool:
-        """USDT parking-book derisk must not block a USDC cash-secured put."""
-        if not context.snapshot.hard_derisk:
-            return False
+        """Only the USDC collateral book can skip a cash-secured put.
+
+        ITM cover sales crash the native BTC/ETH book (and USDT parking can
+        look like a wipeout). Those drawdowns must not block the wheel put;
+        crisis regime on the underlying is a separate skip.
+        """
         by_book = context.snapshot.hard_derisk_by_book or {}
-        if by_book.get("USDC"):
-            return True
-        other = [book for book, flag in by_book.items() if flag and book != "USDT"]
-        if other:
-            return True
-        if any(by_book.values()):
-            return False
-        return True
+        return bool(by_book.get("USDC"))
 
     def _spot_min_trade_amount(self, instrument_name: str, currency: str) -> tuple[Decimal, Decimal]:
         for lookup_currency in ("USDT", "USDC", currency.upper()):
             try:
                 rows = self.client.get_instruments(lookup_currency, kind="spot", expired=False)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("spot min trade amount: get_instruments(%s, spot) failed: %s", lookup_currency, exc)
                 continue
             for row in rows:
                 instrument = OptionInstrument.from_api(row)
@@ -2052,7 +2808,8 @@ class CoveredCallMixin:
             return index_price
         try:
             return self._get_orderbook(group.short_instrument_name, orderbook_cache).index_price
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("covered_call: no index price via %s: %s", group.short_instrument_name, exc)
             return Decimal("0")
 
     def _spot_exit_short_instrument(
@@ -2064,7 +2821,8 @@ class CoveredCallMixin:
             return None
         try:
             return self._find_or_fetch_instrument(markets_by_currency, group.short_instrument_name)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("covered_call: instrument metadata unavailable for %s: %s", group.short_instrument_name, exc)
             return None
 
     def _plan_covered_call_spot_exit(

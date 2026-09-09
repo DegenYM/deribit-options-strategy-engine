@@ -1,13 +1,41 @@
 from __future__ import annotations
 
-import copy
+import hashlib
+import json
 import logging
 from decimal import Decimal
 from typing import Any
 
+# Module-level so FastAPI can resolve the postponed ``Request`` annotation on
+# the route signature (``from __future__ import annotations`` makes it a string).
+from starlette.requests import Request
+
 from .context import RouteContext
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _json_body(payload: Any) -> bytes:
+    """Serialize exactly like ``JSONResponse`` so the ETag is stable across calls."""
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")).encode("utf-8")
+
+
+def _weak_etag(body: bytes) -> str:
+    return f'W/"{hashlib.sha1(body).hexdigest()}"'  # noqa: S324 — cache validator, not a security hash.
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    if not if_none_match:
+        return False
+    for candidate in if_none_match.split(","):
+        candidate = candidate.strip()
+        if candidate == "*" or candidate == etag:
+            return True
+        # Weak comparison: ignore the ``W/`` prefix on either side.
+        if candidate.removeprefix("W/") == etag.removeprefix("W/"):
+            return True
+    return False
+
 
 _BUNDLE_SECTIONS = frozenset({"status", "groups", "realized_summary"})
 _DEFAULT_BUNDLE_SECTIONS = frozenset({"status", "groups", "realized_summary"})
@@ -36,12 +64,22 @@ def _parse_bundle_sections(raw: str | None) -> frozenset[str]:
 
 def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
     from fastapi import HTTPException, Query
-    from fastapi.responses import JSONResponse
+    from fastapi.responses import JSONResponse, Response
 
     import deribit_engine.frontend_server as pkg
 
+    def _bundle_response(payload: dict[str, Any], *, request: Request, headers: dict[str, str]) -> Response:
+        """Finalize, serialize once, and answer 304 when the client already holds this body."""
+        body = _json_body(pkg._decimalize(ctx.finalize_dashboard_bundle(payload)))
+        etag = _weak_etag(body)
+        out_headers = {**headers, "ETag": etag, "Cache-Control": "private, no-cache"}
+        if _etag_matches(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=out_headers)
+        return Response(content=body, media_type="application/json", headers=out_headers)
+
     @app.get("/api/dashboard_bundle")
     def api_dashboard_bundle(
+        request: Request,
         days: int = Query(default=30, ge=0, le=3650),
         effective_capital_usdc: float | None = Query(default=None, ge=0),
         sections: str | None = Query(
@@ -85,22 +123,22 @@ def register_bundle_routes(app: Any, ctx: RouteContext) -> None:
             )
             return payload
 
+        # No deepcopy here: ``finalize_dashboard_bundle`` copies its input before
+        # the spot-native backfill mutates anything, so the cached payload is safe.
         try:
-            payload = copy.deepcopy(ctx.bundle_cache.get_or_set(cache_key, _compute))
+            payload = ctx.bundle_cache.get_or_set(cache_key, _compute)
         except Exception as exc:  # noqa: BLE001
             stale = ctx.bundle_cache.get_stale(cache_key)
             if stale is not None:
                 LOGGER.warning("dashboard /api/dashboard_bundle using stale cache: %s", exc)
-                payload = copy.deepcopy(stale)
-                headers: dict[str, str] = {"X-Cache-Stale": "true"}
-                return JSONResponse(pkg._decimalize(ctx.finalize_dashboard_bundle(payload)), headers=headers)
+                return _bundle_response(stale, request=request, headers={"X-Cache-Stale": "true"})
             LOGGER.warning("dashboard /api/dashboard_bundle failed: %s", exc, exc_info=True)
             raise HTTPException(status_code=502, detail=_exchange_http_detail("dashboard bundle", exc)) from exc
         headers: dict[str, str] = {}
         age_ms = ctx.bundle_cache.cache_age_ms(cache_key)
         if age_ms is not None:
             headers["X-Cache-Age-Ms"] = str(age_ms)
-        return JSONResponse(pkg._decimalize(ctx.finalize_dashboard_bundle(payload)), headers=headers)
+        return _bundle_response(payload, request=request, headers=headers)
 
     @app.get("/api/status")
     def api_status() -> Any:

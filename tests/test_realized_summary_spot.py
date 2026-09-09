@@ -583,3 +583,64 @@ def test_jack_0070_fold_stays_in_sold_not_remaining() -> None:
     assert summary["spot_held"]["ETH"] == Decimal("0")
     net = itm_spot_exit_net_usdt_for_total_profit(group)
     assert net == Decimal("3839.52123") - Decimal("3809.60951") - folded_usdt
+
+
+def test_csp_premium_split_goes_to_spot_remaining_and_leftover_usdc() -> None:
+    from deribit_engine.realized_summary import _aggregate_profit_disposition, _profit_disposition_for_row
+
+    swapped = {
+        "status": "closed",
+        "strategy": "cash_secured",
+        "collateral_currency": "USDC",
+        "currency": "ETH",
+        "cash_secured_from_group_id": "0095",
+        "entry_credit": "6.035",
+        "realized_pnl": "6.035",
+        "realized_close_debit": "0",
+        "realized_close_fee": "0",
+        "csp_premium_swap_status": "filled",
+        "csp_premium_swap_amount": "5.7845",
+        "csp_premium_swap_native": "0.0023",
+        "closed_timestamp_ms": 1_700_000_000_000,
+        "entry_timestamp_ms": 1_699_000_000_000,
+    }
+    skipped = {
+        "status": "closed",
+        "strategy": "cash_secured",
+        "collateral_currency": "USDC",
+        "currency": "BTC",
+        "cash_secured_from_group_id": "0097",
+        "entry_credit": "5.6875",
+        "realized_pnl": "5.6875",
+        "realized_close_debit": "0",
+        "realized_close_fee": "0",
+        "csp_premium_swap_status": "skipped",
+        "csp_premium_swap_reason": "dust_below_min_omitted",
+        "closed_timestamp_ms": 1_700_000_000_000,
+        "entry_timestamp_ms": 1_699_000_000_000,
+    }
+    swapped_disp = _profit_disposition_for_row(swapped)
+    assert swapped_disp is not None
+    assert swapped_disp["held"] == Decimal("0.2505")
+    assert swapped_disp["csp_spot_book"] == "ETH"
+    assert swapped_disp["csp_spot_native"] == Decimal("0.0023")
+
+    skipped_disp = _profit_disposition_for_row(skipped)
+    assert skipped_disp is not None
+    assert skipped_disp["held"] == Decimal("5.6875")
+    assert skipped_disp.get("csp_spot_native", Decimal("0")) == Decimal("0")
+
+    disposition = _aggregate_profit_disposition([swapped, skipped])
+    assert disposition is not None
+    assert disposition["held_native"]["USDC"] == Decimal("5.938")
+    assert disposition["held_native"]["ETH"] == Decimal("0.0023")
+    assert disposition["held_native"]["BTC"] == Decimal("0")
+
+    eth = Decimal("2500")
+    total = total_realized_usdc_from_swap_disposition(
+        [swapped, skipped],
+        spot_index={"BTC": Decimal("80000"), "ETH": eth},
+    )
+    expected = Decimal("5.938") + Decimal("0.0023") * eth
+    assert total is not None
+    assert abs(total - expected) < Decimal("0.001")

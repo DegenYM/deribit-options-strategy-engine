@@ -7,6 +7,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from ..realized_summary import realized_summary_from_closed
@@ -397,7 +398,9 @@ def _aggregate_status(
                 "env": account.config.env,
                 "option_strategy": account.config.option_strategy,
                 "risk_tier": account.config.risk_tier,
-                "state_file": str(account.state_path),
+                # Basename only: the dashboard just displays it and absolute
+                # paths would leak the operator's filesystem layout.
+                "state_file": Path(account.state_path).name,
             }
             for account in accounts
         ],

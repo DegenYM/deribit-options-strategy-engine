@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
@@ -15,6 +16,22 @@ if TYPE_CHECKING:
     from .client import DeribitClient
     from .engine import DeribitOptionTrialBot
     from .engine.context import RuntimeContext
+
+LOGGER = logging.getLogger("deribit_engine.profit_sweep")
+
+
+class ProfitSweepTradesUnavailable(Exception):
+    """``get_user_trades_by_currency`` failed, so exchange sweep fills are unknown.
+
+    Callers that decide whether to *place* a sweep must treat this as "skip this
+    group this cycle", never as "no fills yet → sweep". Read-only display paths
+    may fall back to their previous value.
+    """
+
+    def __init__(self, currency: str, cause: BaseException | str | None = None):
+        self.currency = str(currency or "").upper()
+        self.cause_text = str(cause) if cause is not None else ""
+        super().__init__(f"profit-sweep trades unavailable for {self.currency}: {self.cause_text}".rstrip(": "))
 
 
 def record_profit_sweep_lifetime_proceeds(group: TradeGroup, proceeds: Decimal) -> None:
@@ -59,31 +76,63 @@ def profit_sweep_has_exchange_fill(group: TradeGroup) -> bool:
 
 @dataclass
 class ProfitSweepTradeCache:
-    """Fetch each currency's profit-sweep spot sells once per sweep run."""
+    """Fetch each currency's profit-sweep spot sells once per sweep run.
+
+    A failed fetch is remembered for the life of the cache (one run / manage
+    cycle) in ``_unavailable`` and is *not* marked loaded, so the next cycle
+    retries. ``trades_for_group`` stays lenient (returns ``[]``) for read-only
+    callers; anything that decides whether to place a sweep must use
+    ``trades_for_group_strict`` or check ``is_unavailable``.
+    """
 
     client: DeribitClient
     _by_key: dict[tuple[str, str], list[dict[str, Any]]] = field(default_factory=dict)
     _loaded: set[str] = field(default_factory=set)
+    _unavailable: dict[str, str] = field(default_factory=dict)
 
     def trades_for_group(self, group: TradeGroup, order_label_prefix: str) -> list[dict[str, Any]]:
+        """Lenient lookup: ``[]`` when the currency's fills could not be fetched."""
+        try:
+            return self.trades_for_group_strict(group, order_label_prefix)
+        except ProfitSweepTradesUnavailable:
+            return []
+
+    def trades_for_group_strict(self, group: TradeGroup, order_label_prefix: str) -> list[dict[str, Any]]:
+        """Raise :class:`ProfitSweepTradesUnavailable` instead of returning ``[]`` on fetch failure."""
         currency = group.currency.upper()
         label = profit_sweep_order_label(order_label_prefix, group)
         self._ensure_currency(currency)
         return list(self._by_key.get((currency, label), []))
 
+    def is_unavailable(self, currency: str) -> bool:
+        return str(currency or "").upper() in self._unavailable
+
+    def unavailable_currencies(self) -> dict[str, str]:
+        """Currencies whose fills failed to load this run → error text."""
+        return dict(self._unavailable)
+
     def _ensure_currency(self, currency: str) -> None:
         currency = currency.upper()
         if currency in self._loaded:
             return
+        if currency in self._unavailable:
+            # Already failed once this run; do not hammer the API per group.
+            raise ProfitSweepTradesUnavailable(currency, self._unavailable[currency])
         fetch = getattr(self.client, "get_user_trades_by_currency", None)
         if not callable(fetch):
             self._loaded.add(currency)
             return
         try:
             payload = fetch(currency, kind="spot", count=100, historical=True)
-        except Exception:
-            self._loaded.add(currency)
-            return
+        except Exception as exc:  # noqa: BLE001
+            self._unavailable[currency] = str(exc)
+            LOGGER.warning(
+                "profit_sweep: get_user_trades_by_currency(%s) failed; sweep decisions for %s skipped this cycle: %s",
+                currency,
+                currency,
+                exc,
+            )
+            raise ProfitSweepTradesUnavailable(currency, exc) from exc
         seen: set[Any] = set()
         for trade in payload.get("trades", []):
             label = str(trade.get("label") or "")
@@ -193,17 +242,27 @@ def profit_sweep_sell_trades_for_group(
     *,
     trade_cache: ProfitSweepTradeCache | None = None,
 ) -> list[dict[str, Any]]:
-    """All spot sell fills for this group's profit-sweep order label."""
+    """All spot sell fills for this group's profit-sweep order label.
+
+    Raises :class:`ProfitSweepTradesUnavailable` when the exchange lookup fails
+    so callers cannot mistake an API outage for "not swept yet".
+    """
     if trade_cache is not None:
-        return trade_cache.trades_for_group(group, order_label_prefix)
+        return trade_cache.trades_for_group_strict(group, order_label_prefix)
     label = profit_sweep_order_label(order_label_prefix, group)
     fetch = getattr(client, "get_user_trades_by_currency", None)
     if not callable(fetch):
         return []
     try:
         payload = fetch(group.currency, kind="spot", count=100, historical=True)
-    except Exception:
-        return []
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "profit_sweep: get_user_trades_by_currency(%s) failed for group=%s; skipping sweep decision: %s",
+            group.currency.upper(),
+            group.group_id,
+            exc,
+        )
+        raise ProfitSweepTradesUnavailable(group.currency, exc) from exc
     seen: set[Any] = set()
     trades: list[dict[str, Any]] = []
     for trade in payload.get("trades", []):
@@ -317,12 +376,17 @@ def refresh_profit_sweep_exchange_native(
         return False
     if not profit_sweep_has_exchange_fill(group):
         return False
-    native, quote = attributed_profit_sweep_fill_for_group(
-        group,
-        client,
-        order_label_prefix,
-        trade_cache=trade_cache,
-    )
+    try:
+        native, quote = attributed_profit_sweep_fill_for_group(
+            group,
+            client,
+            order_label_prefix,
+            trade_cache=trade_cache,
+        )
+    except ProfitSweepTradesUnavailable as exc:
+        # Display-only sync: keep the previously persisted values.
+        LOGGER.warning("profit_sweep: exchange native refresh skipped for group=%s: %s", group.group_id, exc)
+        return False
     if native <= 0:
         return False
     changed = False
@@ -355,7 +419,11 @@ def guard_profit_sweep_against_oversell(
     *,
     trade_cache: ProfitSweepTradeCache | None = None,
 ) -> bool:
-    """Sync state from exchange fills; return True when nothing remains to sweep."""
+    """Sync state from exchange fills; return True when nothing remains to sweep.
+
+    Also returns True (block) when exchange fills cannot be fetched: without them
+    we cannot rule out an already-filled sweep, so no new sweep may be queued.
+    """
     if group.status != "closed" or not group.is_covered_call_group():
         return False
     refresh_profit_sweep_exchange_native(
@@ -371,12 +439,20 @@ def guard_profit_sweep_against_oversell(
     if native is None or native <= 0:
         return True
 
-    trades = profit_sweep_sell_trades_for_group(
-        client,
-        group,
-        order_label_prefix,
-        trade_cache=trade_cache,
-    )
+    try:
+        trades = profit_sweep_sell_trades_for_group(
+            client,
+            group,
+            order_label_prefix,
+            trade_cache=trade_cache,
+        )
+    except ProfitSweepTradesUnavailable as exc:
+        LOGGER.warning(
+            "profit_sweep: oversell guard blocking group=%s this cycle (exchange fills unavailable): %s",
+            group.group_id,
+            exc,
+        )
+        return True
     if not trades:
         return False
 
@@ -429,15 +505,20 @@ def _exchange_remaining_native(
     *,
     trade_cache: ProfitSweepTradeCache | None = None,
 ) -> Decimal | None:
+    """Remaining native to sweep, or ``None`` when unknown (no profit *or* fills unavailable)."""
     native = native_profit_for_group(group)
     if native is None:
         return None
-    exchange_swept = exchange_swept_native_for_group(
-        client,
-        group,
-        order_label_prefix,
-        trade_cache=trade_cache,
-    )
+    try:
+        exchange_swept = exchange_swept_native_for_group(
+            client,
+            group,
+            order_label_prefix,
+            trade_cache=trade_cache,
+        )
+    except ProfitSweepTradesUnavailable as exc:
+        LOGGER.warning("profit_sweep: remaining unknown for group=%s (skip this cycle): %s", group.group_id, exc)
+        return None
     if exchange_swept <= 0:
         status = str(group.profit_sweep_status or "").lower()
         if status in {"pending", "submitted"}:
@@ -484,7 +565,8 @@ def heal_reconciled_proceeds_drift(
     )
     try:
         exchange_net = actual_premium_sweep_usdt_net(bot.client, bot.config.order_label_prefix)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("profit_sweep: proceeds drift heal skipped (exchange USDT net unavailable): %s", exc)
         return False
     unlabeled_usdt = unlabeled_premium_usdt_total(groups)
     expected_usdt = exchange_net + unlabeled_usdt
@@ -698,12 +780,16 @@ def _ensure_pending_for_manual_sweep(
     native = bot._coin_profit_native_for_sweep(group)
     if native is None or native <= 0:
         return False
-    exchange_swept = exchange_swept_native_for_group(
-        bot.client,
-        group,
-        prefix,
-        trade_cache=trade_cache,
-    )
+    try:
+        exchange_swept = exchange_swept_native_for_group(
+            bot.client,
+            group,
+            prefix,
+            trade_cache=trade_cache,
+        )
+    except ProfitSweepTradesUnavailable as exc:
+        LOGGER.warning("profit_sweep: not queueing group=%s (exchange fills unavailable): %s", group.group_id, exc)
+        return False
     remaining = (
         max(Decimal("0"), native - exchange_swept) if exchange_swept > 0 else remaining_spot_profit_native(group)
     )
@@ -792,7 +878,15 @@ def reschedule_ledger_only_profit_sweeps(
         native = native_profit_for_group(group)
         if native is None or native <= 0:
             continue
-        if exchange_swept_native_for_group(bot.client, group, prefix, trade_cache=cache) > 0:
+        try:
+            if exchange_swept_native_for_group(bot.client, group, prefix, trade_cache=cache) > 0:
+                continue
+        except ProfitSweepTradesUnavailable as exc:
+            LOGGER.warning(
+                "profit_sweep: not re-queueing ledger-only group=%s (exchange fills unavailable): %s",
+                group.group_id,
+                exc,
+            )
             continue
         group.profit_sweep_status = "pending"
         group.profit_sweep_amount = native
@@ -884,6 +978,48 @@ def _run_profit_sweep_pass(
     return scheduled, actions
 
 
+def _run_dust_pool_sweeps_guarded(
+    bot: DeribitOptionTrialBot,
+    context: RuntimeContext,
+    *,
+    live: bool,
+    trade_cache: ProfitSweepTradeCache | None,
+) -> list[dict[str, Any]]:
+    """Dust-pool sweeps, skipped entirely when any currency's exchange fills are unavailable.
+
+    The dust pool sizes its sell from ``premium − exchange_swept``; with fills
+    unknown that difference is meaningless and could re-sell already-swept coin.
+    """
+    from .profit_sweep_dust import run_dust_pool_profit_sweeps
+
+    unavailable = trade_cache.unavailable_currencies() if trade_cache is not None else {}
+    if unavailable:
+        LOGGER.warning(
+            "profit_sweep: dust-pool sweep skipped this run; exchange fills unavailable for %s",
+            ", ".join(sorted(unavailable)),
+        )
+        return [
+            {
+                "action": "covered_call_profit_dust_sweep_skipped",
+                "reason": "exchange_trades_unavailable",
+                "currencies": sorted(unavailable),
+                "live": live,
+            }
+        ]
+    try:
+        return run_dust_pool_profit_sweeps(bot, context, live=live, trade_cache=trade_cache)
+    except ProfitSweepTradesUnavailable as exc:
+        LOGGER.warning("profit_sweep: dust-pool sweep aborted (exchange fills unavailable): %s", exc)
+        return [
+            {
+                "action": "covered_call_profit_dust_sweep_skipped",
+                "reason": "exchange_trades_unavailable",
+                "currencies": [exc.currency],
+                "live": live,
+            }
+        ]
+
+
 def _apply_exchange_guards(
     bot: DeribitOptionTrialBot,
     groups: list[TradeGroup],
@@ -972,9 +1108,7 @@ def run_remaining_profit_sweeps(
             group_id=group_id,
             trade_cache=trade_cache,
         )
-        from .profit_sweep_dust import run_dust_pool_profit_sweeps
-
-        summary.actions.extend(run_dust_pool_profit_sweeps(bot, preview, live=False, trade_cache=trade_cache))
+        summary.actions.extend(_run_dust_pool_sweeps_guarded(bot, preview, live=False, trade_cache=trade_cache))
         summary.saved = False
         return summary
 
@@ -989,14 +1123,7 @@ def run_remaining_profit_sweeps(
     if summary.actions:
         bot._persist_trade_journal_actions(summary.actions)
 
-    from .profit_sweep_dust import run_dust_pool_profit_sweeps
-
-    dust_actions = run_dust_pool_profit_sweeps(
-        bot,
-        context,
-        live=live,
-        trade_cache=trade_cache,
-    )
+    dust_actions = _run_dust_pool_sweeps_guarded(bot, context, live=live, trade_cache=trade_cache)
     summary.actions.extend(dust_actions)
     if dust_actions and live:
         bot._persist_trade_journal_actions(dust_actions)

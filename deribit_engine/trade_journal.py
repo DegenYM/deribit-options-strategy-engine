@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-import sqlite3
-import threading
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .sqlite_store_base import SqliteStoreBase
 from .utils import json_default, safe_div, to_decimal, utc_now_ms
 
 LOGGER = logging.getLogger(__name__)
@@ -100,24 +99,67 @@ def _fee_usdc_from_trade(trade: dict[str, Any]) -> Decimal | None:
     return fee
 
 
-class TradeJournalStore:
-    def __init__(self, db_path: Path) -> None:
-        self._path = db_path
-        self._lock = threading.Lock()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+_EXECUTION_COLUMNS = (
+    "ts_ms, event_type, source_action, group_id, leg, instrument_name, direction, amount, price, "
+    "fee_usdc, order_id, trade_id, label, strategy, reason, extra_json"
+)
+# SQLite's default SQLITE_MAX_VARIABLE_NUMBER is 999 on older builds; keep IN() chunks well under it.
+EXECUTIONS_IN_CLAUSE_CHUNK = 500
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
 
-    def _init_db(self) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                conn.commit()
+def _execution_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    """Positional ``_EXECUTION_COLUMNS`` row → the public execution dict shape."""
+    extra_raw = row[15]
+    try:
+        extra = json.loads(extra_raw) if extra_raw else {}
+    except json.JSONDecodeError:
+        extra = {}
+    return {
+        "ts_ms": row[0],
+        "event_type": row[1],
+        "source_action": row[2],
+        "group_id": row[3],
+        "leg": row[4],
+        "instrument_name": row[5],
+        "direction": row[6],
+        "amount": row[7],
+        "price": row[8],
+        "fee_usdc": row[9],
+        "order_id": row[10],
+        "trade_id": row[11],
+        "label": row[12],
+        "strategy": row[13],
+        "reason": row[14],
+        "extra": extra,
+    }
+
+
+class TradeJournalStore(SqliteStoreBase):
+    _schema = _SCHEMA
+    # Rows are indexed positionally (``row[15]``); keep tuple semantics.
+    row_factory = None
+
+    def purge_older_than(self, *, cutoff_ms: int, scope_key: str | None = None) -> int:
+        """Delete fills with ``ts_ms < cutoff_ms`` and group stats *closed* before it.
+
+        Open-group stats (``closed_ts_ms IS NULL``) are never removed. Returns
+        total rows deleted across both tables. Not called automatically anywhere:
+        the journal is the fill-level audit trail behind realized PnL / fee
+        reports, so retention is an operator decision.
+        """
+        params_fills: list[Any] = [int(cutoff_ms)]
+        where_fills = "ts_ms < ?"
+        params_stats: list[Any] = [int(cutoff_ms)]
+        where_stats = "closed_ts_ms IS NOT NULL AND closed_ts_ms < ?"
+        if scope_key is not None:
+            where_fills += " AND scope_key = ?"
+            params_fills.append(scope_key)
+            where_stats += " AND scope_key = ?"
+            params_stats.append(scope_key)
+        with self._transaction() as conn:
+            fills = conn.execute(f"DELETE FROM trade_executions WHERE {where_fills}", params_fills).rowcount
+            stats = conn.execute(f"DELETE FROM trade_group_stats WHERE {where_stats}", params_stats).rowcount
+        return int(fills) + int(stats)
 
     def record_fill(
         self,
@@ -282,9 +324,7 @@ class TradeJournalStore:
         where = " AND ".join(clauses)
         params.append(max(1, min(int(limit), 5000)))
         sql = f"""
-            SELECT ts_ms, event_type, source_action, group_id, leg, instrument_name,
-                   direction, amount, price, fee_usdc, order_id, trade_id, label,
-                   strategy, reason, extra_json
+            SELECT {_EXECUTION_COLUMNS}
             FROM trade_executions
             WHERE {where}
             ORDER BY ts_ms DESC, id DESC
@@ -292,33 +332,44 @@ class TradeJournalStore:
         """
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            extra_raw = row[15]
-            try:
-                extra = json.loads(extra_raw) if extra_raw else {}
-            except json.JSONDecodeError:
-                extra = {}
-            out.append(
-                {
-                    "ts_ms": row[0],
-                    "event_type": row[1],
-                    "source_action": row[2],
-                    "group_id": row[3],
-                    "leg": row[4],
-                    "instrument_name": row[5],
-                    "direction": row[6],
-                    "amount": row[7],
-                    "price": row[8],
-                    "fee_usdc": row[9],
-                    "order_id": row[10],
-                    "trade_id": row[11],
-                    "label": row[12],
-                    "strategy": row[13],
-                    "reason": row[14],
-                    "extra": extra,
-                }
-            )
+        return [_execution_row_to_dict(row) for row in rows]
+
+    def list_executions_by_groups(
+        self,
+        scope_key: str,
+        group_ids: list[str],
+        *,
+        per_group_limit: int = 50,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Bulk ``list_executions(group_id=...)`` for many groups on one connection.
+
+        Returns ``{group_id: rows}`` for every id in ``group_ids`` (missing /
+        journal-less groups map to ``[]``). Per group the newest
+        ``per_group_limit`` rows are kept, ordered ``ts_ms DESC, id DESC`` —
+        identical shape and order to ``list_executions``. Ids are queried in
+        ``IN (...)`` chunks of :data:`EXECUTIONS_IN_CLAUSE_CHUNK` to stay well
+        under SQLite's bound-parameter limit.
+        """
+        out: dict[str, list[dict[str, Any]]] = {gid: [] for gid in group_ids}
+        wanted = [gid for gid in dict.fromkeys(group_ids) if gid]
+        if not wanted:
+            return out
+        cap = max(1, int(per_group_limit))
+        with self._connect() as conn:
+            for start in range(0, len(wanted), EXECUTIONS_IN_CLAUSE_CHUNK):
+                chunk = wanted[start : start + EXECUTIONS_IN_CLAUSE_CHUNK]
+                placeholders = ",".join("?" for _ in chunk)
+                sql = f"""
+                    SELECT {_EXECUTION_COLUMNS}
+                    FROM trade_executions
+                    WHERE scope_key = ? AND group_id IN ({placeholders})
+                    ORDER BY ts_ms DESC, id DESC
+                """
+                for row in conn.execute(sql, [scope_key, *chunk]):
+                    bucket = out.get(str(row[3]))
+                    if bucket is None or len(bucket) >= cap:
+                        continue
+                    bucket.append(_execution_row_to_dict(row))
         return out
 
     def record_group_stats_open(

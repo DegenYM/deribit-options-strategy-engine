@@ -45,6 +45,10 @@ class StrategySelector:
         # Per-underlying trend signal (price vs MA) in [-1, 1]; refreshed each
         # manage cycle from index chart data.
         self._trend_by_currency: dict[str, Decimal] = {}
+        # Last regime passed into a public builder / refresh / scan-detail call.
+        # Rejection helpers read this so elevated can tighten hard delta_max
+        # without threading ``regime`` through every private signature.
+        self._active_regime: RiskRegime | None = None
         self.fee_discount = FeeDiscountContext.from_config(config)
 
     @property
@@ -82,7 +86,8 @@ class StrategySelector:
         and a VRP (IV-RV) reading is available for ``currency``, the target is
         shifted within the band: rich vol (VRP above the reference) moves it
         toward the lower-delta / further-OTM edge; thin vol moves it toward the
-        higher-delta edge. The shift is clamped to the preferred band.
+        higher-delta edge unless the strategy forbids an ATM tilt (naked short
+        defaults to OTM-only). The shift is clamped to the preferred band.
         """
         pdmin, pdmax = self.config.preferred_delta_bounds(currency, option_type)
         center = (pdmin + pdmax) / Decimal("2")
@@ -97,9 +102,68 @@ class StrategySelector:
         # signal in [-1, 1]: 0 at ref, +1 at >=2*ref (rich), -1 at <=0 (thin).
         signal = (vrp - ref) / ref
         signal = max(Decimal("-1"), min(Decimal("1"), signal))
+        if signal < 0 and not self.config.dynamic_target_delta_allow_closer():
+            signal = Decimal("0")
         half = (pdmax - pdmin) / Decimal("2")
         target = center - signal * self.config.dynamic_target_delta_strength * half
         return max(pdmin, min(pdmax, target))
+
+    def _set_active_regime(self, regime: RiskRegime | None) -> None:
+        self._active_regime = regime
+
+    def effective_delta_bounds(
+        self,
+        currency: str,
+        option_type: str,
+        regime: RiskRegime | None = None,
+    ) -> tuple[Decimal, Decimal]:
+        """Hard |delta| band, optionally tightened in an elevated regime.
+
+        Config ``*_DELTA_MIN`` / ``*_DELTA_MAX`` are never mutated. Elevated
+        only lowers the max by ``elevated_delta_tighten_amount()``, never
+        below min. Naked uses a larger default haircut than covered call.
+        """
+        dmin, dmax = self.config.delta_bounds(currency, option_type)
+        use = regime if regime is not None else self._active_regime
+        tighten = self.config.elevated_delta_tighten_amount()
+        if use is RiskRegime.ELEVATED and tighten > 0:
+            dmax = max(dmin, dmax - tighten)
+        return dmin, dmax
+
+    def effective_min_net_apr(self, currency: str) -> Decimal:
+        """MIN_NET_APR after the optional IVR / VRP continuous scaler.
+
+        Rich vol tightens the threshold. Low IV rank (or thin VRP when IVR is
+        missing) loosens it only when the strategy allows (covered call yes;
+        naked short tighten-only by default). Shift is capped at
+        ``dynamic_min_net_apr_max_shift`` and never below
+        ``dynamic_min_net_apr_bound()``.
+        """
+        base = self.config.min_net_apr
+        if not self.config.enable_dynamic_min_net_apr:
+            return base
+        max_shift = self.config.dynamic_min_net_apr_max_shift
+        if max_shift <= 0:
+            return base
+        ccy = currency.upper()
+        signal: Decimal | None = None
+        ivr = self._iv_rank_by_currency.get(ccy)
+        if ivr is not None:
+            ref = self.config.dynamic_min_net_apr_ivr_ref
+            if ref > 0:
+                signal = (ivr - ref) / ref
+        if signal is None:
+            vrp = self._iv_minus_rv_by_currency.get(ccy)
+            vrp_ref = self.config.dynamic_target_delta_vrp_ref
+            if vrp is not None and vrp_ref > 0:
+                signal = (vrp - vrp_ref) / vrp_ref
+        if signal is None:
+            return base
+        signal = max(Decimal("-1"), min(Decimal("1"), signal))
+        if signal < 0 and not self.config.dynamic_min_net_apr_allow_loosen():
+            signal = Decimal("0")
+        shifted = base + signal * max_shift
+        return max(self.config.dynamic_min_net_apr_bound(), shifted)
 
     def _refresh_skew_by_currency(self, candidates: list[NakedPutCandidate]) -> None:
         """Recompute per-underlying risk reversal from the candidate set.
@@ -530,13 +594,10 @@ class StrategySelector:
                 collateral_currency=collateral_currency or currency,
                 option_type=option_type,
             )
-            return f"apr={format_decimal(net_apr, 4)} min={format_decimal(self.config.min_net_apr, 4)}"
+            return f"apr={format_decimal(net_apr, 4)} min={format_decimal(self.effective_min_net_apr(currency), 4)}"
         if reason == "delta_out_of_range":
             abs_delta = abs(book.delta)
-            if option_type == "call":
-                dmin, dmax = self.config.call_delta_bounds(currency)
-            else:
-                dmin, dmax = self.config.put_delta_bounds(currency)
+            dmin, dmax = self.effective_delta_bounds(currency, option_type)
             return f"delta={format_decimal(abs_delta, 4)} range={format_decimal(dmin, 4)}-{format_decimal(dmax, 4)}"
         if reason == "otm_out_of_range":
             if option_type == "call":
@@ -638,7 +699,7 @@ class StrategySelector:
             return "best_ask<=0"
         if book.best_ask_price < book.best_bid_price:
             return "crossed_book"
-        min_oi, _max_spread, min_notional = self.config.cash_secured_liquidity_gates()
+        min_oi, _max_spread, min_notional = self.config.cash_secured_liquidity_gates(currency)
         if book.open_interest < min_oi:
             return "open_interest_below_min"
         if book.book_notional_usdc < min_notional:
@@ -658,7 +719,7 @@ class StrategySelector:
         if common is not None:
             return common
         abs_delta = abs(book.delta)
-        dmin, dmax = self.config.put_delta_bounds(currency)
+        dmin, dmax = self.effective_delta_bounds(currency, "put")
         if not (dmin <= abs_delta <= dmax):
             return "delta_out_of_range"
         otm = self._put_otm_ratio(instrument, book)
@@ -688,7 +749,7 @@ class StrategySelector:
         if common is not None:
             return common
         abs_delta = abs(book.delta)
-        dmin, dmax = self.config.call_delta_bounds(currency)
+        dmin, dmax = self.effective_delta_bounds(currency, "call")
         if not (dmin <= abs_delta <= dmax):
             return "delta_out_of_range"
         otm = self._call_otm_ratio(instrument, book)
@@ -726,6 +787,7 @@ class StrategySelector:
         orderbook_loader: Callable[[str], OrderBookSnapshot],
         option_type: str,
     ) -> tuple[bool, list[str]]:
+        self._set_active_regime(None)
         side = option_type.lower()
         if side not in {"put", "call"}:
             return False, [f"unsupported_regime_liquidity_side={side}"]
@@ -775,6 +837,7 @@ class StrategySelector:
         markets: Iterable[OptionInstrument],
         orderbook_loader: Callable[[str], OrderBookSnapshot],
     ) -> tuple[bool, list[str]]:
+        self._set_active_regime(None)
         markets_tuple = tuple(markets)
         puts = [
             item
@@ -1048,6 +1111,7 @@ class StrategySelector:
     ) -> tuple[NakedPutCandidate | None, str | None]:
         if quantity <= 0:
             return None, "quantity<=0"
+        self._set_active_regime(regime)
         rej = self._naked_short_put_rejection_reason(currency, instrument, book)
         if rej is not None:
             return None, f"rejection:{rej}"
@@ -1117,6 +1181,7 @@ class StrategySelector:
     ) -> tuple[NakedPutCandidate | None, str | None]:
         if quantity <= 0:
             return None, "quantity<=0"
+        self._set_active_regime(regime)
         rej = self._naked_short_call_rejection_reason(currency, instrument, book)
         if rej is not None:
             return None, f"rejection:{rej}"
@@ -1149,6 +1214,7 @@ class StrategySelector:
     ) -> tuple[NakedPutCandidate | None, str | None]:
         if quantity <= 0:
             return None, "quantity<=0"
+        self._set_active_regime(regime)
         rej = self._naked_short_call_rejection_reason(currency, instrument, book)
         if rej is not None:
             return None, f"rejection:{rej}"
@@ -1301,7 +1367,7 @@ class StrategySelector:
             collateral_currency=collateral_currency,
             option_type=option_type,
         )
-        if not relax_apr and net_apr < self.config.min_net_apr:
+        if not relax_apr and net_apr < self.effective_min_net_apr(currency):
             return None, "net_apr_below_min"
         if is_call:
             im_1, mm_1 = self._short_call_unit_margin(
@@ -1448,6 +1514,7 @@ class StrategySelector:
         index_price: Decimal | None = None,
     ) -> dict[str, Any]:
         """Aggregate why naked shorts are rejected (liquidity screen + sizing + build gates); for scan JSON."""
+        self._set_active_regime(regime)
         is_call = option_type == "call"
         side_value = OptionSide.CALL.value if is_call else OptionSide.PUT.value
         markets_in_window = [
@@ -1664,6 +1731,7 @@ class StrategySelector:
         index_price: Decimal | None = None,
     ) -> list[NakedPutCandidate]:
         """Build short-call candidates (same NakedPutCandidate class with option_type=call)."""
+        self._set_active_regime(regime)
         if regime is RiskRegime.CRISIS:
             return []
         if summary_equity <= 0:
@@ -1858,7 +1926,7 @@ class StrategySelector:
             net_credit_on_capital=round_trip_net,
             capital_base=max_loss_collateral,
         )
-        if net_apr < self.config.min_net_apr:
+        if net_apr < self.effective_min_net_apr(short_candidate.currency):
             return None
         long_leg = self._short_put_spread_leg(
             instrument=long_instrument,
@@ -2092,7 +2160,7 @@ class StrategySelector:
             collateral_currency=collateral_currency,
             option_type="call",
         )
-        if net_apr < self.config.min_net_apr:
+        if net_apr < self.effective_min_net_apr(currency):
             return None, "net_apr_below_min"
         short_leg = self._short_put_spread_leg(
             instrument=instrument,
@@ -2197,6 +2265,7 @@ class StrategySelector:
         open_group_count: int = 0,
     ) -> dict[str, Any]:
         """Aggregate why covered-call candidates are rejected; for scan JSON diagnostics."""
+        self._set_active_regime(regime)
         calls = [
             item
             for item in markets
@@ -2363,6 +2432,7 @@ class StrategySelector:
         index_price: Decimal | None = None,
         open_group_count: int = 0,
     ) -> list[NakedPutCandidate]:
+        self._set_active_regime(regime)
         if regime is RiskRegime.CRISIS:
             return []
         if collateral_currency.upper() != currency.upper():
@@ -2505,6 +2575,7 @@ class StrategySelector:
         existing_im_by_expiry: dict[int, Decimal],
         index_price: Decimal | None = None,
     ) -> list[NakedPutCandidate]:
+        self._set_active_regime(regime)
         if regime is RiskRegime.CRISIS:
             return []
         if summary_equity <= 0:

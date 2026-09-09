@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import threading
+import logging
 from typing import Any
 
 from .context import RouteContext
+
+LOGGER = logging.getLogger(__name__)
 
 
 def register_transfers_routes(app: Any, ctx: RouteContext) -> None:
@@ -23,7 +25,8 @@ def register_transfers_routes(app: Any, ctx: RouteContext) -> None:
     def _compute_live(*, days: int, limit: int, index_by_ccy: dict) -> dict[str, Any]:
         return ctx.locked_aggregate_transfers(days=days, limit=limit, index_by_ccy=index_by_ccy)
 
-    def _schedule_live_refresh(*, days: int, limit: int, index_by_ccy: dict) -> None:
+    def _schedule_live_refresh(*, days: int, limit: int, index_by_ccy: dict) -> bool:
+        """Warm the live payload behind a store hit; single-flight per cache key on the shared pool."""
         cache_key = _cache_key(days, limit)
 
         def _run() -> None:
@@ -31,11 +34,9 @@ def register_transfers_routes(app: Any, ctx: RouteContext) -> None:
                 payload = _compute_live(days=days, limit=limit, index_by_ccy=index_by_ccy)
                 ctx.transfers_cache.seed(cache_key, payload)
             except Exception as exc:  # noqa: BLE001
-                import logging
+                LOGGER.warning("transfers background refresh failed: %s", exc)
 
-                logging.getLogger(__name__).warning("transfers background refresh failed: %s", exc)
-
-        threading.Thread(target=_run, name="transfers-bg-refresh", daemon=True).start()
+        return ctx.background_runner.submit(("transfers-live", cache_key), _run)
 
     @app.get("/api/transfers")
     def api_transfers(

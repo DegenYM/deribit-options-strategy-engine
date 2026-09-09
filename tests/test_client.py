@@ -147,13 +147,15 @@ def test_rate_limit_feedback_widens_then_recovers_adaptive_interval(tmp_path, mo
         client = _make_client(tmp_path, session)
         with pytest.raises(TransientExchangeError):
             client.get_order_book("BTC-PERPETUAL")
-        assert exchange_throttle.adaptive_interval_seconds("id") > 0.10
+        # public/* is metered per IP, so the penalty lands on the host-wide key.
+        assert exchange_throttle.adaptive_interval_seconds(None) > 0.10
+        assert exchange_throttle.adaptive_interval_seconds("id") == pytest.approx(0.10)
 
         # A subsequent success decays the penalty back toward base.
         ok_session = FakeSession([FakeResponse(_ok_body({"ok": True}))])
         client2 = _make_client(tmp_path, ok_session)
         client2.get_order_book("BTC-PERPETUAL")
-        assert exchange_throttle.adaptive_interval_seconds("id") < 0.50
+        assert exchange_throttle.adaptive_interval_seconds(None) < 0.50
     finally:
         exchange_throttle.reset_adaptive_backoff()
 
@@ -340,25 +342,21 @@ def test_oauth_refreshes_when_token_expires(tmp_path):
 # ------------------------------------------------------------------
 
 
-def test_place_order_retries_once_on_connection_error(tmp_path, monkeypatch):
-    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
+def test_place_order_never_resends_on_connection_error(tmp_path, monkeypatch):
+    """A dropped socket may follow server-side acceptance; a resend could double-place."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda s: sleeps.append(s))
     session = FakeSession(
         [
             FakeResponse(_auth_result()),
+            # Would be consumed by a (forbidden) retry; must stay unused.
             FakeResponse(_ok_body({"order": {"order_id": "1"}, "trades": []})),
         ],
         raise_on_calls=[None, requests.exceptions.ConnectionError("down")],
     )
     client = _make_client(tmp_path, session)
 
-    with pytest.raises(TransientExchangeError, match="connection failed"):
-        # Only one connection-error retry is allowed (2 total calls after auth).
-        # Provide two failures, the second after retry, to confirm the cap.
-        session.raise_on_calls = [
-            None,
-            requests.exceptions.ConnectionError("down"),
-            requests.exceptions.ConnectionError("down"),
-        ]
+    with pytest.raises(TransientExchangeError, match="connection failed; reconcile required"):
         client.place_order(
             direction="sell",
             instrument_name="BTC-PERPETUAL",
@@ -366,8 +364,37 @@ def test_place_order_retries_once_on_connection_error(tmp_path, monkeypatch):
             label="trial-x",
             price="100",
         )
-    # auth + 2 order attempts (initial + 1 retry) = 3 calls total
-    assert len(session.calls) == 3
+    # auth + exactly one order attempt; no retry, no sleep.
+    assert len(session.calls) == 2
+    assert [c["json"]["method"] for c in session.calls] == ["public/auth", "private/sell"]
+    assert sleeps == []
+    assert DeribitClient.UNSAFE_CONNECTION_RETRIES == 0
+
+
+def test_private_buy_connection_error_posts_exactly_once(tmp_path, monkeypatch):
+    session = FakeSession(
+        [FakeResponse(_auth_result())],
+        raise_on_calls=[None, requests.exceptions.ConnectionError("reset by peer")],
+    )
+    client = _make_client(tmp_path, session)
+    post_calls: list[str] = []
+    original_post_raw = client._post_raw
+
+    def _spy(url, payload, *, headers):
+        post_calls.append(payload["method"])
+        return original_post_raw(url, payload, headers=headers)
+
+    monkeypatch.setattr(client, "_post_raw", _spy)
+
+    with pytest.raises(TransientExchangeError, match="private/buy connection failed; reconcile required"):
+        client.place_order(
+            direction="buy",
+            instrument_name="BTC-PERPETUAL",
+            amount="1",
+            label="trial-x",
+            price="100",
+        )
+    assert post_calls.count("private/buy") == 1
 
 
 def test_place_order_does_not_retry_on_timeout(tmp_path):
@@ -593,7 +620,9 @@ def test_idempotent_request_jsonrpc_too_many_requests_widens_adaptive_interval(t
         client = _make_client(tmp_path, session)
         with pytest.raises(TransientExchangeError):
             client.get_order_book("BTC-PERPETUAL")
-        assert exchange_throttle.adaptive_interval_seconds("id") > 0.10
+        # public/* → host-wide key; the per-account key is untouched.
+        assert exchange_throttle.adaptive_interval_seconds(None) > 0.10
+        assert exchange_throttle.adaptive_interval_seconds("id") == pytest.approx(0.10)
     finally:
         exchange_throttle.reset_adaptive_backoff()
 

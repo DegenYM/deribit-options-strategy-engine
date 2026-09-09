@@ -906,9 +906,15 @@ def build_pdf(out_path: Path, content: OnboardingContent, *, font: str) -> None:
 def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     out_dir = repo_root / "output" / "pdf"
-    zh_font = _register_cjk_font()
     out_path = out_dir / "Investor_Onboarding_zh-TW.pdf"
-    build_pdf(out_path, _zh_content(), font=zh_font)
+    try:
+        zh_font = _register_cjk_font()
+        build_pdf(out_path, _zh_content(), font=zh_font)
+    except ImportError as exc:  # reportlab is an optional dependency
+        raise SystemExit(
+            "This script needs the optional PDF dependency reportlab. "
+            f"Install it with: pip install -e '.[pdf]'  (or pip install -r requirements-pdf.txt)\n({exc})"
+        ) from exc
     print(f"Wrote {out_path}")
 
 

@@ -240,7 +240,9 @@ class EntryMixin:
                     existing_im_for_expiry=exp_im,
                 )
             apr_gate = (candidate.strategy or "") != "cash_secured"
-            if refreshed is None or (apr_gate and refreshed.net_apr < self.config.min_net_apr):
+            if refreshed is None or (
+                apr_gate and refreshed.net_apr < self.strategy.effective_min_net_apr(candidate.currency)
+            ):
                 reason = "candidate_failed_recheck"
                 if refresh_fail:
                     reason = f"candidate_failed_recheck:{refresh_fail}"
@@ -418,6 +420,70 @@ class EntryMixin:
             reduce_only=True,
         )
 
+    def _unwind_entry_long(
+        self,
+        context: RuntimeContext,
+        *,
+        instrument_name: str,
+        quantity: Decimal,
+        label: str,
+    ) -> tuple[dict[str, Any], Decimal]:
+        """Sell back an entry long leg; return ``(response, quantity_still_open)``.
+
+        Never raises: a failed unwind must still be reported to the caller so the
+        orphaned long is recorded in the action log and paged, not lost with a
+        traceback.
+        """
+        try:
+            response = self._close_entry_long_remainder(
+                context,
+                instrument_name=instrument_name,
+                quantity=quantity,
+                label=label,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "entry long unwind failed on %s (label=%s qty=%s): %s",
+                instrument_name,
+                label,
+                quantity,
+                exc,
+                exc_info=True,
+            )
+            return {"error": str(exc), "unwind_failed": True}, quantity
+        filled = self._response_filled_amount(response)
+        return response, max(quantity - filled, Decimal("0"))
+
+    def _alert_leg_risk(
+        self,
+        kind: str,
+        *,
+        group_id: str,
+        instrument_name: str,
+        quantity: Decimal,
+        detail: str,
+        level: str = "critical",
+    ) -> None:
+        """WARNING log + Telegram page for a spread whose legs are out of step."""
+        LOGGER.warning(
+            "LEG RISK %s: group=%s instrument=%s qty=%s — %s",
+            kind,
+            group_id,
+            instrument_name,
+            quantity,
+            detail,
+        )
+        try:
+            self._telegram_alert(
+                f"Spread leg risk: {kind}",
+                body=f"group={group_id} instrument={instrument_name} qty={format_decimal(quantity, 8)} — {detail}",
+                event_key=f"leg_risk:{kind}:{group_id}",
+                level=level,
+                extra={"leg_risk": kind, "quantity": format_decimal(quantity, 8)},
+            )
+        except Exception as alert_exc:  # noqa: BLE001
+            LOGGER.warning("leg risk alert delivery failed (%s): %s", kind, alert_exc)
+
     def _execute_bull_put_spread_entry(
         self,
         context: RuntimeContext,
@@ -439,23 +505,35 @@ class EntryMixin:
                 "responses": {"long_leg": long_state},
             }
 
-        execution = self._execute_repriced_naked_short(
-            context,
-            candidate,
-            label=labels["short"],
-            quantity=min(candidate.quantity, long_filled),
-        )
+        try:
+            execution = self._execute_repriced_naked_short(
+                context,
+                candidate,
+                label=labels["short"],
+                quantity=min(candidate.quantity, long_filled),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # The long leg is already on the exchange and nothing records it yet:
+            # page the operator before propagating so the orphan is not silent.
+            self._alert_leg_risk(
+                "orphan_long",
+                group_id=group_id,
+                instrument_name=candidate.long_leg.instrument_name,
+                quantity=long_filled,
+                detail=f"short leg placement raised: {exc}",
+            )
+            raise
         short_request = execution["first_request"]
         short_state = execution["last_response"]
         short_filled = execution["filled_amount"]
         if short_filled <= 0:
-            unwind = self._close_entry_long_remainder(
+            unwind, unwind_left = self._unwind_entry_long(
                 context,
                 instrument_name=candidate.long_leg.instrument_name,
                 quantity=long_filled,
                 label=f"{labels['long']}-abort",
             )
-            return {
+            result: dict[str, Any] = {
                 "action": "entry_aborted_short_unfilled",
                 "candidate": candidate.to_dict(),
                 "requests": {
@@ -471,16 +549,37 @@ class EntryMixin:
                 },
                 "reason": execution["reason"],
             }
+            if unwind_left > 0:
+                result["leg_risk"] = "orphan_long"
+                result["leg_risk_quantity"] = unwind_left
+                self._alert_leg_risk(
+                    "orphan_long",
+                    group_id=group_id,
+                    instrument_name=candidate.long_leg.instrument_name,
+                    quantity=unwind_left,
+                    detail=f"short unfilled ({execution['reason']}); long unwind left {unwind_left} open",
+                )
+            return result
 
         excess_long = long_filled - short_filled
         long_unwind = None
+        excess_left = Decimal("0")
         if excess_long > 0:
-            long_unwind = self._close_entry_long_remainder(
+            long_unwind, excess_left = self._unwind_entry_long(
                 context,
                 instrument_name=candidate.long_leg.instrument_name,
                 quantity=excess_long,
                 label=f"{labels['long']}-excess",
             )
+            if excess_left > 0:
+                self._alert_leg_risk(
+                    "excess_long_open",
+                    group_id=group_id,
+                    instrument_name=candidate.long_leg.instrument_name,
+                    quantity=excess_left,
+                    detail=f"long filled {long_filled} vs short {short_filled}; excess unwind left {excess_left}",
+                    level="warning",
+                )
 
         kept_quantity = short_filled
         final_c = execution["candidate"] or candidate
@@ -574,7 +673,7 @@ class EntryMixin:
         }
         if long_unwind is not None:
             responses["long_unwind"] = long_unwind
-        return {
+        entered: dict[str, Any] = {
             "action": "bull_put_spread_entered",
             "candidate": final_c.to_dict(),
             "group": group,
@@ -584,6 +683,10 @@ class EntryMixin:
             "responses": responses,
             "trades": {"long_leg": long_trades, "short_leg": short_trades},
         }
+        if excess_left > 0:
+            entered["leg_risk"] = "excess_long_open"
+            entered["leg_risk_quantity"] = excess_left
+        return entered
 
     def _place_entry_order(self, context: RuntimeContext, direction: str, request: dict[str, Any]) -> dict[str, Any]:
         instrument = self._find_instrument(context, str(request["instrument_name"]))

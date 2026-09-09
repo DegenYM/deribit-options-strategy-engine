@@ -110,8 +110,10 @@ function attachControls() {
     const estimates = !group
       ? null
       : kind === "recover"
-        ? domain.adminRecoverPreviewEstimates(group)
-        : domain.adminGroupPreviewEstimates(group, STATE.status, STATE.groups);
+        ? domain.adminRecoverPreviewEstimates(group, STATE.groups)
+        : kind === "csp-abort-restore"
+          ? domain.adminCspAbortPreviewEstimates(group, STATE.status, STATE.groups)
+          : domain.adminGroupPreviewEstimates(group, STATE.status, STATE.groups);
     try {
       window.parent.postMessage(
         {

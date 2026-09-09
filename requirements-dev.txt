@@ -1,7 +1,11 @@
+# Dev / CI — mirrors [project.optional-dependencies].dev in pyproject.toml.
+# Tests for the PDF fee report import reportlab, so the pdf extra is included.
 -r requirements.txt
+-r requirements-pdf.txt
 pytest>=8,<10
-pytest-cov>=6,<7
+pytest-cov>=6,<8
 pytest-socket>=0.7,<1
-ruff>=0.9,<1
+ruff>=0.15.16,<0.16
 pre-commit>=4,<5
 httpx>=0.27,<1
+pip-audit>=2.7,<3

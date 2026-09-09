@@ -48,8 +48,7 @@ class GroupExitMixin:
         if self._is_covered_call_group(group):
             return self._manage_covered_call_group(context, group, live=live)
         if group.is_cash_secured_group():
-            # Wheel: hold the put to expiry so ITM assignment can buy cover back.
-            return []
+            return self._manage_cash_secured_group(context, group, live=live)
         soft_delta, hard_delta = self._defense_delta_thresholds(group)
         raw_soft, raw_hard = evaluate_defense_triggers(
             group,
@@ -203,7 +202,13 @@ class GroupExitMixin:
         ctx = exit_eval_context_from_config(self.config)
         try:
             short_book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug(
+                "income_exit(native): orderbook unavailable for %s (group=%s): %s",
+                group.short_instrument_name,
+                group.group_id,
+                exc,
+            )
             return entry_native, None
         close_premium = income_exit_close_premium(short_book, ctx)
         if close_premium is None:
@@ -211,7 +216,13 @@ class GroupExitMixin:
         markets = getattr(context, "markets_by_currency", None) or {}
         try:
             short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug(
+                "income_exit(native): instrument metadata unavailable for %s (group=%s): %s",
+                group.short_instrument_name,
+                group.group_id,
+                exc,
+            )
             return entry_native, None
         fee_collateral = self._option_fee_native(
             premium=close_premium,

@@ -52,6 +52,29 @@ def open_group_count_for_book(
     return count
 
 
+def regime_blocks_new_entries(
+    regime: RiskRegime,
+    *,
+    regime_detail: tuple[str, ...] = (),
+    allow_elevated_entry: bool = False,
+) -> bool:
+    """True when this underlying's regime must skip new entries.
+
+    ``crisis`` always blocks. ``data_unavailable`` always blocks (we do not
+    open risk while blind). ``elevated`` blocks unless ``allow_elevated_entry``
+    is set — covered_call uses that path and tightens delta instead of halting.
+    """
+    if any(note.startswith("data_unavailable") for note in regime_detail):
+        return True
+    if regime is RiskRegime.CRISIS:
+        return True
+    if regime is RiskRegime.NORMAL:
+        return False
+    if regime is RiskRegime.ELEVATED and allow_elevated_entry:
+        return False
+    return True
+
+
 def currency_entry_halt_reasons(
     *,
     currency: str,
@@ -59,14 +82,20 @@ def currency_entry_halt_reasons(
     regime_detail: tuple[str, ...],
     crisis_open_group: bool,
     hard_derisk_on_crisis_open_group: bool,
+    allow_elevated_entry: bool = False,
 ) -> list[str]:
     """Reasons that block new entries for one managed underlying (BTC / ETH)."""
     ccy = currency.upper()
     reasons: list[str] = []
-    if regime is not RiskRegime.NORMAL:
-        reasons.append(f"{ccy}: regime={regime.value}")
-    if any(note.startswith("data_unavailable") for note in regime_detail):
-        reasons.append(f"{ccy}: regime data_unavailable")
+    if regime_blocks_new_entries(
+        regime,
+        regime_detail=regime_detail,
+        allow_elevated_entry=allow_elevated_entry,
+    ):
+        if any(note.startswith("data_unavailable") for note in regime_detail):
+            reasons.append(f"{ccy}: regime data_unavailable")
+        elif regime is not RiskRegime.NORMAL:
+            reasons.append(f"{ccy}: regime={regime.value}")
     if hard_derisk_on_crisis_open_group and crisis_open_group:
         reasons.append(f"{ccy}: open_trade_group_in_crisis_regime")
     return reasons
@@ -80,6 +109,7 @@ def build_halt_new_entries_by_currency(
     crisis_currencies_with_open_groups: set[str],
     hard_derisk_on_crisis_open_group: bool,
     portfolio_blocks_all: bool,
+    allow_elevated_entry: bool = False,
 ) -> dict[str, bool]:
     out: dict[str, bool] = {}
     for currency in managed_currencies:
@@ -90,6 +120,7 @@ def build_halt_new_entries_by_currency(
             regime_detail=regime_detail_by_currency.get(ccy, ()),
             crisis_open_group=ccy in crisis_currencies_with_open_groups,
             hard_derisk_on_crisis_open_group=hard_derisk_on_crisis_open_group,
+            allow_elevated_entry=allow_elevated_entry,
         )
         out[ccy] = portfolio_blocks_all or bool(reasons)
     return out

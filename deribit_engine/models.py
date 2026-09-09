@@ -15,6 +15,24 @@ _MIN_PLAUSIBLE_UNDERLYING_INDEX_USD = Decimal("100")
 PHANTOM_RECONCILE_MAX_HOLDING_MS = 300_000
 
 
+def _parse_group_id_list(raw: Any, *, fallback: str = "") -> list[str]:
+    ids: list[str] = []
+    if isinstance(raw, str):
+        parts = raw.split(",")
+    elif isinstance(raw, (list, tuple)):
+        parts = raw
+    else:
+        parts = []
+    for item in parts:
+        token = str(item or "").strip()
+        if token and token not in ids:
+            ids.append(token)
+    fb = str(fallback or "").strip()
+    if fb and fb not in ids:
+        ids.append(fb)
+    return ids
+
+
 def open_short_instrument_names(groups: list[TradeGroup]) -> set[str]:
     return {g.short_instrument_name for g in groups if g.status != "closed" and g.short_instrument_name}
 
@@ -704,6 +722,7 @@ class TradeGroup:
     #: Parent covered-call group after ITM spot exit sold to USDC.
     cash_secured_status: str = ""
     cash_secured_group_id: str = ""
+    cash_secured_group_ids: list[str] = field(default_factory=list)
     cash_secured_reason: str = ""
     cash_secured_order_id: str = ""
     cash_secured_instrument_name: str = ""
@@ -1533,6 +1552,8 @@ class TradeGroup:
             payload["cash_secured_status"] = self.cash_secured_status
         if self.cash_secured_group_id:
             payload["cash_secured_group_id"] = self.cash_secured_group_id
+        if self.cash_secured_group_ids:
+            payload["cash_secured_group_ids"] = list(self.cash_secured_group_ids)
         if self.cash_secured_reason:
             payload["cash_secured_reason"] = self.cash_secured_reason
         if self.cash_secured_order_id:
@@ -1696,6 +1717,10 @@ class TradeGroup:
             profit_sweep_reason=str(payload.get("profit_sweep_reason") or ""),
             cash_secured_status=str(payload.get("cash_secured_status") or ""),
             cash_secured_group_id=str(payload.get("cash_secured_group_id") or ""),
+            cash_secured_group_ids=_parse_group_id_list(
+                payload.get("cash_secured_group_ids"),
+                fallback=str(payload.get("cash_secured_group_id") or ""),
+            ),
             cash_secured_reason=str(payload.get("cash_secured_reason") or ""),
             cash_secured_order_id=str(payload.get("cash_secured_order_id") or ""),
             cash_secured_instrument_name=str(payload.get("cash_secured_instrument_name") or ""),

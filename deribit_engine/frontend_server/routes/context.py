@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from ..types import DashboardAccount, _TtlCache
+from ..types import DashboardAccount, SingleFlightRunner, _TtlCache
 
 
 @dataclass
@@ -30,3 +30,4 @@ class RouteContext:
     locked_aggregate_transfers: Callable[..., dict[str, Any]]
     seed_bundle_component_caches: Callable[..., None]
     finalize_dashboard_bundle: Callable[[dict[str, Any]], dict[str, Any]]
+    background_runner: SingleFlightRunner = field(default_factory=SingleFlightRunner)

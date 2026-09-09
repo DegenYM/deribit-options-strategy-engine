@@ -162,6 +162,8 @@ def _resolve_fee_subaccount_id_via_fee_env(
 def spot_instrument_name(base_currency: str, quote_currency: str) -> str:
     base = base_currency.upper()
     quote = quote_currency.upper()
+    if base == "USDC" and quote == "USDT":
+        return "USDC_USDT"
     if base not in SPOT_BASE_CURRENCIES:
         raise ConfigurationError(f"Unsupported spot base currency {base!r}; expected one of: BTC, ETH")
     if quote not in SPOT_QUOTE_CURRENCIES:
@@ -177,9 +179,14 @@ def resolve_spot_trade_side(from_currency: str, to_currency: str) -> tuple[str, 
         return "sell", source, target
     if source in SPOT_QUOTE_CURRENCIES and target in SPOT_BASE_CURRENCIES:
         return "buy", target, source
+    if source == "USDT" and target == "USDC":
+        return "buy", "USDC", "USDT"
+    if source == "USDC" and target == "USDT":
+        return "sell", "USDC", "USDT"
     raise ConfigurationError(
-        "trade-spot requires a BTC/ETH ↔ USDC/USDT pair, e.g. "
-        "--from-currency BTC --to USDC (sell) or --from-currency USDC --to BTC (buy)"
+        "trade-spot requires a BTC/ETH ↔ USDC/USDT pair or USDT ↔ USDC, e.g. "
+        "--from-currency BTC --to USDC (sell), --from-currency USDC --to BTC (buy), "
+        "or --from-currency USDT --to USDC (stable convert)"
     )
 
 
@@ -648,6 +655,18 @@ def trade_spot(
 
     from_amount: Decimal | None = None
     requested_from_amount: Decimal | None = None
+    buy_sizing_price = trade_price
+    if direction == "buy" and order_type == "market" and config.covered_call_spot_max_slippage_pct > 0:
+        _, limit_px, _, _ = resolve_protected_spot_order(
+            direction=direction,
+            book=book,
+            instrument=instrument,
+            order_type=order_type,
+            max_slippage_pct=config.covered_call_spot_max_slippage_pct,
+        )
+        if limit_px is not None and limit_px > buy_sizing_price:
+            # Deribit reserves base * limit; size --all so the cap still fits.
+            buy_sizing_price = limit_px
     if direction == "sell":
         order_amount = _resolve_sell_base_amount(
             amount_raw=amount,
@@ -666,7 +685,7 @@ def trade_spot(
         order_amount, from_amount = _resolve_buy_base_amount(
             quote_spend_raw=amount,
             available_quote=from_available,
-            trade_price=trade_price,
+            trade_price=buy_sizing_price,
             contract_size=instrument.contract_size,
             min_trade_amount=instrument.min_trade_amount,
             use_all=sell_all,

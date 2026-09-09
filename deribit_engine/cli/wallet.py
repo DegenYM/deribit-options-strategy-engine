@@ -13,7 +13,7 @@ WALLET_COMMANDS = frozenset({"trade-spot", "internal-transfer"})
 def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     trade_spot_parser = subparsers.add_parser(
         "trade-spot",
-        help="Trade spot: sell BTC/ETH→USDC/USDT or buy BTC/ETH with USDC/USDT",
+        help="Trade spot: BTC/ETH ↔ USDC/USDT, or convert USDT ↔ USDC",
     )
     add_env_file_after_subcommand(trade_spot_parser)
     trade_spot_parser.add_argument(

@@ -1,8 +1,72 @@
+"""Bot configuration: ``BotConfig`` + ``load_config`` (env layers → typed fields).
+
+``BotConfig`` is one flat frozen dataclass (~250 fields) and ``load_config`` is
+one long function. Splitting them into sub-dataclasses is deferred; the map
+below groups the fields so a future split (or a reader) can navigate them.
+
+Field groups
+------------
+- **identity / connection**: ``env``, ``client_id``, ``client_secret`` (masked in
+  ``repr`` / ``to_safe_dict``), ``request_timeout_seconds``, ``account_role``,
+  ``risk_tier``, ``order_label_prefix``, ``state_file``.
+- **state persistence**: ``state_json_pretty``, ``state_closed_archive_enabled``,
+  ``state_closed_archive_keep_days``, ``state_closed_archive_keep_min``.
+- **scan / universe**: ``option_strategy``, ``option_markets_profile``,
+  ``managed_currencies``, ``scan_assets``, ``scan_underlyings``,
+  ``traded_collaterals``, ``top_n``, ``min_liquid_expiries_required``,
+  ``scan_book_summary_prefilter``, ``enable_adopt_exchange_positions``,
+  ``enable_naked_topup``.
+- **entry selection (put / call bands)**: ``entry_dte_*``, ``short_put_delta_*``,
+  ``preferred_short_put_delta_*``, ``put_otm_*``, ``btc_/eth_put_*``,
+  ``btc_/eth_preferred_*``, ``short_call_delta_*``, ``call_otm_*``,
+  ``btc_/eth_call_*``, ``enable_short_put/call``, ``short_call_fallback_only``,
+  ``bull_put_long_delta_*``, ``min_net_apr``, ``target_net_apr_*``,
+  ``reference_capital_usdc``, ``target_portfolio_apr``.
+- **scoring / signals**: ``enable_weighted_candidate_scoring``, ``score_weight_*``,
+  ``enable_iv_entry_gate``, ``*_iv_rank``, ``min_iv_minus_rv``, ``*_lookback_days``,
+  ``enable_dynamic_target_delta``, ``dynamic_target_delta_*``,
+  ``enable_dynamic_min_net_apr``, ``dynamic_min_net_apr_*``,
+  ``elevated_delta_max_tighten``, ``elevated_max_groups_tighten``,
+  ``naked_allow_elevated_entry``, ``naked_elevated_delta_max_tighten``,
+  ``naked_dynamic_delta_allow_closer``, ``naked_dynamic_min_net_apr_allow_loosen``,
+  ``enable_skew_side_selection``, ``skew_side_min_rr``, ``enable_trend_side_bias``,
+  ``trend_*``.
+- **liquidity gates**: ``inverse_*``, ``linear_*``, ``btc_/eth_*_min_open_interest``.
+- **risk / books**: ``per_leg_im_cap_*``, ``expiry_im_cap_per_book``, ``book_im_*``,
+  ``book_mm_*``, ``max_concurrent_groups``, ``max_groups_per_currency``,
+  ``max_groups_per_book``, ``min_book_equity_usdc``, ``halt_open_max_loss_pct``,
+  ``halt_drawdown_pct``, ``hard_derisk_*``, ``index_drawdown_*``, ``dvol_*``,
+  ``cooldown_hours``, ``entry_cooldown_minutes``, ``recovery_normal_cycles``,
+  ``cash_flow_query_interval_seconds``, ``naked_entry_down_*``.
+- **exits / defense**: ``tp_capture_pct``, ``enable_dynamic_tp``, ``tp_*``,
+  ``enable_early_exit``, ``early_exit_*``, ``time_exit_*``, ``soft_/hard_defense_*``,
+  ``soft_defense_loss_pct``, ``hard_stop_loss_pct``, ``defense_confirm_cycles``,
+  ``defense_trigger_use_mark``, ``exit_buffer_ratio``, ``reprice_minutes``,
+  ``income_exit_*``, ``option_fee_*``.
+- **hedge**: ``enable_perp_hedge``, ``soft_/hard_hedge_delta_cap_pct``,
+  ``hedge_first_on_hard``, ``hedge_giveup_loss_pct``, ``per_position_hedge``,
+  ``soft_hedge_neutralize_pct``, ``hedge_reconcile_deadband_*``,
+  ``hedge_unwind_recovery_cycles``, ``hedge_order_type``, ``hedge_limit_slippage_pct``,
+  ``hedge_maker_max_cycles``.
+- **covered_call / wheel**:   ``covered_call_*`` (spot exit, robust exit, ITM
+  buffer, auto spot restore, CSP entry / liquidity / self-assign / active
+  roll / premium target, repair lookback, slot sizing), ``collateral_spot_btc/eth``,
+  ``spot_restore_*``.
+- **sweep**: ``covered_call_profit_sweep_enabled``,
+  ``covered_call_profit_sweep_dust_pool_enabled``.
+- **timing**: ``poll_seconds_*``, ``short_entry_wait_seconds``, ``order_poll_seconds``.
+
+Dashboard / alert settings are *not* on ``BotConfig``: the frontend reads its
+own env (``frontend_server``), Telegram reads ``telegram_alerts.TelegramAlertConfig``.
+"""
+
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 from dotenv import dotenv_values
 
@@ -18,8 +82,32 @@ from .env_layout import (
     manifest_context_for_account_env,
     normalize_risk_tier,
 )
+from .env_parse import parse_env_bool
 from .exceptions import ConfigurationError
 from .utils import parse_csv, to_decimal
+
+# Field-name substrings that mark a BotConfig attribute as secret-bearing.
+_SECRET_FIELD_MARKERS = ("secret", "token", "password", "passwd", "api_key", "apikey", "private_key")
+# Boolean companions of a secret (``DASHBOARD_API_TOKEN_EMBED``) carry no secret material.
+_NON_SECRET_FIELD_SUFFIXES = ("_embed",)
+SECRET_MASK = "***"
+
+
+def is_secret_field_name(name: str) -> bool:
+    lowered = name.lower()
+    if lowered.endswith(_NON_SECRET_FIELD_SUFFIXES):
+        return False
+    return any(marker in lowered for marker in _SECRET_FIELD_MARKERS)
+
+
+def mask_secret(value: object) -> str:
+    """``***`` + last two characters (or just ``***`` for short / empty values)."""
+    text = "" if value is None else str(value)
+    if not text:
+        return ""
+    if len(text) <= 4:
+        return SECRET_MASK
+    return f"{SECRET_MASK}{text[-2:]}"
 
 
 @dataclass(frozen=True)
@@ -170,14 +258,45 @@ class BotConfig:
     # within [pref_min, pref_max] based on the current IV-minus-RV (VRP) for the
     # underlying: rich vol (high VRP) pushes the target toward the lower-delta
     # (further-OTM) edge, so we collect the fat premium from safer strikes;
-    # thin vol pulls it toward the higher-delta edge. Requires the VRP context
-    # (auto-refreshed when this or the IV entry gate is enabled).
+    # thin vol pulls it toward the higher-delta edge unless the strategy
+    # forbids an ATM tilt (naked short puts default to OTM-only). Requires the
+    # VRP context (auto-refreshed when this or the IV entry gate is enabled).
     enable_dynamic_target_delta: bool = False
     # VRP (IV-RV, annualized decimal) that maps to "no tilt". It also doubles as
     # the normalization scale for the signal: VRP == 2*ref -> full tilt.
     dynamic_target_delta_vrp_ref: Decimal = Decimal("0.05")
     # Fraction of the preferred half-band to shift at full signal (0..1).
     dynamic_target_delta_strength: Decimal = Decimal("0.5")
+    # --- Elevated-regime entry scalers --------------------------------------
+    # When elevated entry is allowed, shrink the hard |delta| max by this
+    # amount (never below the existing *_DELTA_MIN). Crisis still full-halts.
+    elevated_delta_max_tighten: Decimal = Decimal("0.02")
+    # Optional: reduce MAX_GROUPS_PER_CURRENCY by N in elevated (0 = off).
+    # Never below 1 when a positive cap is configured.
+    elevated_max_groups_tighten: int = 0
+    # Naked short put = unhedged downside; elevated/down-streak is exactly when
+    # new shorts are most dangerous. Default halt. Opt in to use the tighten
+    # path (with a larger delta haircut than covered call).
+    naked_allow_elevated_entry: bool = False
+    # Used when naked elevated entry is opted in. Larger than covered-call's
+    # 0.02 so any remaining shorts sit further OTM.
+    naked_elevated_delta_max_tighten: Decimal = Decimal("0.04")
+    # Thin VRP may pull the preferred target toward ATM. Naked defaults off:
+    # only rich vol may rank further-OTM strikes higher.
+    naked_dynamic_delta_allow_closer: bool = False
+    # Low IVR may loosen MIN_NET_APR. Naked defaults off so cheap crash
+    # insurance is not accepted just because realized vol is quiet.
+    naked_dynamic_min_net_apr_allow_loosen: bool = False
+    # --- Dynamic MIN_NET_APR (IVR / VRP continuous scaler) ------------------
+    enable_dynamic_min_net_apr: bool = False
+    # Absolute APR shift at full signal (0.005 = 0.5pp). Applied as
+    # +shift when IVR/VRP is rich, -shift when thin (if the strategy allows
+    # loosening). Naked short ignores negative shifts by default.
+    dynamic_min_net_apr_max_shift: Decimal = Decimal("0.005")
+    # Hard floor for the loosened threshold. Empty → MIN_NET_APR * 0.7.
+    dynamic_min_net_apr_floor: Decimal | None = None
+    # IV rank (0..1) that maps to "no APR tilt".
+    dynamic_min_net_apr_ivr_ref: Decimal = Decimal("0.50")
     # --- Skew-aware side selection (risk reversal) ---------------------------
     # When enabled (weighted scoring only), a per-underlying risk reversal
     # rr = put_IV(near pref delta) - call_IV(near pref delta) tilts the score so
@@ -328,13 +447,34 @@ class BotConfig:
     covered_call_csp_dte_min: int = 2
     covered_call_csp_dte_max: int = 10
     covered_call_csp_strike_floor_pct: Decimal = Decimal("0.05")
-    # CSP-only liquidity; slightly looser than linear_* , not market-chasing.
-    covered_call_csp_min_open_interest: Decimal = Decimal("6")
+    # CSP-only liquidity. BTC wheel size is typically ≤ 0.5; ETH can be ~5.
+    covered_call_csp_min_open_interest: Decimal = Decimal("0.5")
+    covered_call_csp_min_open_interest_btc: Decimal = Decimal("0.5")
+    covered_call_csp_min_open_interest_eth: Decimal = Decimal("5")
     covered_call_csp_max_spread_ratio: Decimal = Decimal("0.18")
     covered_call_csp_min_book_notional_usdc: Decimal = Decimal("3000")
     # Where the CSP premium lands: "usdc" keeps it as stablecoin, "spot" swaps the
     # net premium (not the reserved assignment cash) into native coin after entry.
     covered_call_csp_premium_target: str = "usdc"
+    # European CSP does not assign on an intra-period dip. When enabled (default
+    # on with the wheel), live manage may buy back the put and buy spot once the
+    # put is confirmed ITM and either near expiry or time value is thin vs
+    # intrinsic — economics close to assignment without waiting for expiry.
+    covered_call_csp_self_assign_enabled: bool = True
+    covered_call_csp_self_assign_confirm_cycles: int | None = None
+    covered_call_csp_self_assign_max_dte: Decimal = Decimal("2")
+    covered_call_csp_self_assign_max_tv_pct: Decimal = Decimal("0.12")
+    # Short-dated CSP books are often too wide/thin to lift; block self-assign
+    # and wait for expiry settlement instead of paying a fantasy ask.
+    covered_call_csp_self_assign_max_spread_ratio: Decimal = Decimal("0.25")
+    # Buy back an OTM cash-secured put before expiry and sell a later-dated
+    # replacement. Default OFF — live investors inherit false unless they set it.
+    # Liquidity reuses COVERED_CALL_CSP_SELF_ASSIGN_MAX_SPREAD_RATIO + ask size.
+    covered_call_csp_active_roll_enabled: bool = False
+    covered_call_csp_active_roll_min_dte: int = 2
+    covered_call_csp_active_roll_max_dte: int = 10
+    covered_call_csp_active_roll_min_tv_ratio: Decimal = Decimal("0.25")
+    covered_call_csp_active_roll_min_net_usdc: Decimal = Decimal("5")
     covered_call_profit_sweep_enabled: bool = False
     # Crash-recovery repair re-queries the exchange for every closed group, one
     # request each, so its cost grows without bound as history accumulates. A
@@ -365,6 +505,45 @@ class BotConfig:
     # OPTION_STRATEGY=naked_short and ENABLE_SHORT_PUT is on.
     naked_entry_down_streak_days: int = 0
     naked_entry_down_day_pct: Decimal = Decimal("0.015")
+    # --- State persistence ------------------------------------------------------
+    # ``STATE_JSON_PRETTY=true`` writes indented state JSON (default compact: the
+    # file is rewritten every cycle and grows with closed-group history).
+    state_json_pretty: bool = False
+    # Opt-in: move closed groups older than ``keep_days`` (beyond the newest
+    # ``keep_min``) from the state file into ``<stem>.closed_archive.jsonl``.
+    # Default off because report / fee / dashboard readers still assume every
+    # group is in the state file; see ``state.iter_all_groups``.
+    state_closed_archive_enabled: bool = False
+    state_closed_archive_keep_days: int = 90
+    state_closed_archive_keep_min: int = 20
+    # --- Dashboard / admin console access (mirrors of process env) --------------
+    # ``frontend_server.auth`` and ``admin_server`` read these straight from
+    # ``os.environ`` (they run without a BotConfig); they are mirrored here so
+    # ``to_safe_dict()`` / ``repr()`` show them *masked* alongside the other
+    # knobs. Empty token = gate disabled; empty CORS = no CORS middleware.
+    dashboard_api_token: str = ""
+    dashboard_api_token_embed: bool = False
+    dashboard_cors_origins: tuple[str, ...] = ()
+    admin_console_token: str = ""
+    admin_console_token_embed: bool = False
+
+    def __repr__(self) -> str:
+        parts = ", ".join(f"{name}={value!r}" for name, value in self.to_safe_dict().items())
+        return f"{type(self).__name__}({parts})"
+
+    __str__ = __repr__
+
+    def to_safe_dict(self) -> dict[str, Any]:
+        """Shallow field dict with secret-like fields masked (``***`` + last 2 chars).
+
+        Use this — never ``dataclasses.asdict(config)`` — for anything that may
+        be logged, serialized or shown in a dashboard/debug payload.
+        """
+        out: dict[str, Any] = {}
+        for f in dataclasses.fields(self):
+            value = getattr(self, f.name)
+            out[f.name] = mask_secret(value) if is_secret_field_name(f.name) else value
+        return out
 
     @property
     def is_fee_collection_account(self) -> bool:
@@ -392,6 +571,61 @@ class BotConfig:
         return (
             self.option_strategy == "naked_short" and self.enable_short_put and self.naked_entry_down_streak_days >= 2
         )
+
+    def allows_elevated_entry(self) -> bool:
+        """True when ``elevated`` may still open new risk (with delta tighten).
+
+        Covered call always allows a tighter elevated entry. Naked short
+        defaults to halt (unhedged downside into a drawdown); set
+        ``naked_allow_elevated_entry`` to opt into the tighten path. Other
+        strategies (including bull_put_spread) keep the halt-on-elevated rule.
+        """
+        if self.option_strategy == "covered_call":
+            return True
+        if self.option_strategy == "naked_short":
+            return self.naked_allow_elevated_entry
+        return False
+
+    def elevated_delta_tighten_amount(self) -> Decimal:
+        """|delta| max haircut applied when elevated entry is allowed."""
+        if self.option_strategy == "naked_short":
+            return self.naked_elevated_delta_max_tighten
+        return self.elevated_delta_max_tighten
+
+    def dynamic_target_delta_allow_closer(self) -> bool:
+        """Whether thin vol may pull the preferred target toward ATM.
+
+        Covered call can; naked short puts default to OTM-only tilt.
+        """
+        if self.option_strategy == "naked_short":
+            return self.naked_dynamic_delta_allow_closer
+        return True
+
+    def dynamic_min_net_apr_allow_loosen(self) -> bool:
+        """Whether low IVR / thin VRP may lower ``MIN_NET_APR``.
+
+        Covered call can; naked short defaults to tighten-only.
+        """
+        if self.option_strategy == "naked_short":
+            return self.naked_dynamic_min_net_apr_allow_loosen
+        return True
+
+    def effective_max_groups_per_currency(self, *, elevated: bool = False) -> int:
+        """``MAX_GROUPS_PER_CURRENCY`` after the optional elevated tighten.
+
+        ``elevated_max_groups_tighten`` defaults to 0 (off). When set and
+        ``elevated`` is true, the cap is reduced but never below 1.
+        """
+        cap = self.max_groups_per_currency
+        if cap <= 0 or not elevated or self.elevated_max_groups_tighten <= 0:
+            return cap
+        return max(1, cap - self.elevated_max_groups_tighten)
+
+    def dynamic_min_net_apr_bound(self) -> Decimal:
+        """Lowest allowed MIN_NET_APR after the IVR/VRP scaler."""
+        if self.dynamic_min_net_apr_floor is not None:
+            return self.dynamic_min_net_apr_floor
+        return self.min_net_apr * Decimal("0.7")
 
     @property
     def naked_scan_put_and_call_compete(self) -> bool:
@@ -573,15 +807,24 @@ class BotConfig:
             self.inverse_min_book_notional_usdc,
         )
 
-    def cash_secured_liquidity_gates(self) -> tuple[Decimal, Decimal, Decimal]:
+    def cash_secured_min_open_interest(self, currency: str = "") -> Decimal:
+        """Open-interest floor for a cash-secured put, in native coin."""
+        c = currency.upper()
+        if c == "ETH":
+            return self.covered_call_csp_min_open_interest_eth
+        if c == "BTC":
+            return self.covered_call_csp_min_open_interest_btc
+        return self.covered_call_csp_min_open_interest
+
+    def cash_secured_liquidity_gates(self, currency: str = "") -> tuple[Decimal, Decimal, Decimal]:
         """Return ``(min_oi, max_spread_ratio, min_book_notional_usdc)`` for CSP.
 
-        OI and notional are slightly looser than generic linear gates. Spread is
-        unused: CSP takes the bid with IOC. Naked scans keep
-        ``liquidity_gates``.
+        OI is per underlying (BTC 0.5 / ETH 5 by default). Notional is slightly
+        looser than generic linear gates. Spread is unused: CSP takes the bid
+        with IOC. Naked scans keep ``liquidity_gates``.
         """
         return (
-            self.covered_call_csp_min_open_interest,
+            self.cash_secured_min_open_interest(currency),
             self.covered_call_csp_max_spread_ratio,
             self.covered_call_csp_min_book_notional_usdc,
         )
@@ -611,14 +854,12 @@ def _to_path(value: str) -> Path:
 
 
 def _to_bool(value: str, default: bool = False) -> bool:
-    if value == "":
-        return default
-    normalized = value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    raise ConfigurationError(f"Invalid boolean config value: {value}")
+    """Strict env boolean: invalid text is a ``ConfigurationError`` (shared grammar in ``env_parse``)."""
+    try:
+        parsed = parse_env_bool(value, default=default, strict=True)
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    return bool(parsed)
 
 
 def _short_option_side_overrides(raw: str) -> tuple[bool, bool, bool] | None:
@@ -752,6 +993,15 @@ def _load_env_values_with_strategy_profile(
     return values
 
 
+def load_env_values(env_file: str | Path, *, strategy_override: str | None = None) -> dict[str, str]:
+    """Merged raw env values (all layers) for ``env_file`` without building a ``BotConfig``.
+
+    Used by supervisors that only need a couple of keys (e.g. ``STATE_FILE``) and
+    must not fail on incomplete strategy configs.
+    """
+    return _load_env_values_with_strategy_profile(env_file, strategy_override=strategy_override)
+
+
 def has_private_creds_config(config: BotConfig) -> bool:
     """True when both Deribit API credentials are present (non-empty after strip)."""
     return bool(config.client_id.strip() and config.client_secret.strip())
@@ -848,13 +1098,23 @@ def load_config(
     covered_call_csp_strike_floor_pct = to_decimal(_optional(values, "COVERED_CALL_CSP_STRIKE_FLOOR_PCT", "0.05"))
     if covered_call_csp_strike_floor_pct < 0 or covered_call_csp_strike_floor_pct >= 1:
         raise ConfigurationError("COVERED_CALL_CSP_STRIKE_FLOOR_PCT must be in [0, 1)")
-    covered_call_csp_min_open_interest = to_decimal(_optional(values, "COVERED_CALL_CSP_MIN_OPEN_INTEREST", "6"))
+    covered_call_csp_min_open_interest = to_decimal(_optional(values, "COVERED_CALL_CSP_MIN_OPEN_INTEREST", "0.5"))
+    btc_csp_oi = _optional_decimal(values, "COVERED_CALL_CSP_MIN_OPEN_INTEREST_BTC")
+    covered_call_csp_min_open_interest_btc = (
+        btc_csp_oi if btc_csp_oi is not None else covered_call_csp_min_open_interest
+    )
+    eth_csp_oi = _optional_decimal(values, "COVERED_CALL_CSP_MIN_OPEN_INTEREST_ETH")
+    covered_call_csp_min_open_interest_eth = eth_csp_oi if eth_csp_oi is not None else Decimal("5")
     covered_call_csp_max_spread_ratio = to_decimal(_optional(values, "COVERED_CALL_CSP_MAX_SPREAD_RATIO", "0.18"))
     covered_call_csp_min_book_notional_usdc = to_decimal(
         _optional(values, "COVERED_CALL_CSP_MIN_BOOK_NOTIONAL_USDC", "3000")
     )
     if covered_call_csp_min_open_interest < 0:
         raise ConfigurationError("COVERED_CALL_CSP_MIN_OPEN_INTEREST must be >= 0")
+    if covered_call_csp_min_open_interest_btc < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_MIN_OPEN_INTEREST_BTC must be >= 0")
+    if covered_call_csp_min_open_interest_eth < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_MIN_OPEN_INTEREST_ETH must be >= 0")
     if covered_call_csp_max_spread_ratio < 0 or covered_call_csp_max_spread_ratio >= 1:
         raise ConfigurationError("COVERED_CALL_CSP_MAX_SPREAD_RATIO must be in [0, 1)")
     if covered_call_csp_min_book_notional_usdc < 0:
@@ -862,6 +1122,48 @@ def load_config(
     covered_call_csp_premium_target = str(_optional(values, "COVERED_CALL_CSP_PREMIUM_TARGET", "usdc")).strip().lower()
     if covered_call_csp_premium_target not in {"usdc", "spot"}:
         raise ConfigurationError("COVERED_CALL_CSP_PREMIUM_TARGET must be one of: usdc, spot")
+    covered_call_csp_self_assign_enabled = _to_bool(
+        _optional(
+            values,
+            "COVERED_CALL_CSP_SELF_ASSIGN_ENABLED",
+            "true" if covered_call_itm_to_cash_secured_enabled else "false",
+        )
+    )
+    raw_csp_self_assign_confirm = _optional(values, "COVERED_CALL_CSP_SELF_ASSIGN_CONFIRM_CYCLES", "").strip()
+    covered_call_csp_self_assign_confirm_cycles: int | None
+    if raw_csp_self_assign_confirm == "":
+        covered_call_csp_self_assign_confirm_cycles = None
+    else:
+        covered_call_csp_self_assign_confirm_cycles = max(1, int(raw_csp_self_assign_confirm))
+    covered_call_csp_self_assign_max_dte = to_decimal(_optional(values, "COVERED_CALL_CSP_SELF_ASSIGN_MAX_DTE", "2"))
+    if covered_call_csp_self_assign_max_dte < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_SELF_ASSIGN_MAX_DTE must be >= 0")
+    covered_call_csp_self_assign_max_tv_pct = to_decimal(
+        _optional(values, "COVERED_CALL_CSP_SELF_ASSIGN_MAX_TV_PCT", "0.12")
+    )
+    if covered_call_csp_self_assign_max_tv_pct < 0 or covered_call_csp_self_assign_max_tv_pct > 1:
+        raise ConfigurationError("COVERED_CALL_CSP_SELF_ASSIGN_MAX_TV_PCT must be in [0, 1]")
+    covered_call_csp_self_assign_max_spread_ratio = to_decimal(
+        _optional(values, "COVERED_CALL_CSP_SELF_ASSIGN_MAX_SPREAD_RATIO", "0.25")
+    )
+    if covered_call_csp_self_assign_max_spread_ratio < 0 or covered_call_csp_self_assign_max_spread_ratio >= 1:
+        raise ConfigurationError("COVERED_CALL_CSP_SELF_ASSIGN_MAX_SPREAD_RATIO must be in [0, 1)")
+    covered_call_csp_active_roll_enabled = _to_bool(_optional(values, "COVERED_CALL_CSP_ACTIVE_ROLL_ENABLED", "false"))
+    covered_call_csp_active_roll_min_dte = max(0, int(_optional(values, "COVERED_CALL_CSP_ACTIVE_ROLL_MIN_DTE", "2")))
+    covered_call_csp_active_roll_max_dte = max(
+        covered_call_csp_active_roll_min_dte,
+        int(_optional(values, "COVERED_CALL_CSP_ACTIVE_ROLL_MAX_DTE", "10")),
+    )
+    covered_call_csp_active_roll_min_tv_ratio = to_decimal(
+        _optional(values, "COVERED_CALL_CSP_ACTIVE_ROLL_MIN_TV_RATIO", "0.25")
+    )
+    if covered_call_csp_active_roll_min_tv_ratio < 0 or covered_call_csp_active_roll_min_tv_ratio > 1:
+        raise ConfigurationError("COVERED_CALL_CSP_ACTIVE_ROLL_MIN_TV_RATIO must be in [0, 1]")
+    covered_call_csp_active_roll_min_net_usdc = to_decimal(
+        _optional(values, "COVERED_CALL_CSP_ACTIVE_ROLL_MIN_NET_USDC", "5")
+    )
+    if covered_call_csp_active_roll_min_net_usdc < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_ACTIVE_ROLL_MIN_NET_USDC must be >= 0")
     covered_call_profit_sweep_enabled = _to_bool(_optional(values, "COVERED_CALL_PROFIT_SWEEP_ENABLED", "false"))
     covered_call_profit_sweep_dust_pool_enabled = _to_bool(
         _optional(values, "COVERED_CALL_PROFIT_SWEEP_DUST_POOL_ENABLED", "true"),
@@ -907,6 +1209,18 @@ def load_config(
     eth_inverse_min_open_interest = _optional_decimal(values, "ETH_INVERSE_MIN_OPEN_INTEREST", eth_min_open_interest)
     btc_linear_min_open_interest = _optional_decimal(values, "BTC_LINEAR_MIN_OPEN_INTEREST", btc_min_open_interest)
     eth_linear_min_open_interest = _optional_decimal(values, "ETH_LINEAR_MIN_OPEN_INTEREST", eth_min_open_interest)
+
+    state_json_pretty = _to_bool(_optional(values, "STATE_JSON_PRETTY", "false"))
+    state_closed_archive_enabled = _to_bool(_optional(values, "STATE_CLOSED_ARCHIVE_ENABLED", "false"))
+    state_closed_archive_keep_days = max(0, int(_optional(values, "STATE_CLOSED_ARCHIVE_KEEP_DAYS", "90")))
+    state_closed_archive_keep_min = max(0, int(_optional(values, "STATE_CLOSED_ARCHIVE_KEEP_MIN", "20")))
+
+    # Same env names ``frontend_server.auth`` / ``admin_server`` consult directly.
+    dashboard_api_token = _optional(values, "DASHBOARD_API_TOKEN", "").strip()
+    dashboard_api_token_embed = _to_bool(_optional(values, "DASHBOARD_API_TOKEN_EMBED", "false"))
+    dashboard_cors_origins = parse_csv(_optional(values, "DASHBOARD_CORS_ORIGINS", ""))
+    admin_console_token = _optional(values, "ADMIN_CONSOLE_TOKEN", "").strip()
+    admin_console_token_embed = _to_bool(_optional(values, "ADMIN_CONSOLE_TOKEN_EMBED", "false"))
 
     return BotConfig(
         env=env,
@@ -1065,6 +1379,26 @@ def load_config(
         enable_dynamic_target_delta=_to_bool(_optional(values, "ENABLE_DYNAMIC_TARGET_DELTA", "false"), default=False),
         dynamic_target_delta_vrp_ref=to_decimal(_optional(values, "DYNAMIC_TARGET_DELTA_VRP_REF", "0.05")),
         dynamic_target_delta_strength=to_decimal(_optional(values, "DYNAMIC_TARGET_DELTA_STRENGTH", "0.5")),
+        elevated_delta_max_tighten=max(
+            Decimal("0"), to_decimal(_optional(values, "ELEVATED_DELTA_MAX_TIGHTEN", "0.02"))
+        ),
+        elevated_max_groups_tighten=max(0, int(_optional(values, "ELEVATED_MAX_GROUPS_TIGHTEN", "0"))),
+        naked_allow_elevated_entry=_to_bool(_optional(values, "NAKED_ALLOW_ELEVATED_ENTRY", "false"), default=False),
+        naked_elevated_delta_max_tighten=max(
+            Decimal("0"), to_decimal(_optional(values, "NAKED_ELEVATED_DELTA_MAX_TIGHTEN", "0.04"))
+        ),
+        naked_dynamic_delta_allow_closer=_to_bool(
+            _optional(values, "NAKED_DYNAMIC_DELTA_ALLOW_CLOSER", "false"), default=False
+        ),
+        naked_dynamic_min_net_apr_allow_loosen=_to_bool(
+            _optional(values, "NAKED_DYNAMIC_MIN_NET_APR_ALLOW_LOOSEN", "false"), default=False
+        ),
+        enable_dynamic_min_net_apr=_to_bool(_optional(values, "ENABLE_DYNAMIC_MIN_NET_APR", "false"), default=False),
+        dynamic_min_net_apr_max_shift=max(
+            Decimal("0"), to_decimal(_optional(values, "DYNAMIC_MIN_NET_APR_MAX_SHIFT", "0.005"))
+        ),
+        dynamic_min_net_apr_floor=_optional_decimal(values, "DYNAMIC_MIN_NET_APR_FLOOR"),
+        dynamic_min_net_apr_ivr_ref=to_decimal(_optional(values, "DYNAMIC_MIN_NET_APR_IVR_REF", "0.50")),
         enable_skew_side_selection=_to_bool(_optional(values, "ENABLE_SKEW_SIDE_SELECTION", "false"), default=False),
         score_weight_skew=to_decimal(_optional(values, "SCORE_WEIGHT_SKEW", "4")),
         skew_side_min_rr=to_decimal(_optional(values, "SKEW_SIDE_MIN_RR", "0.02")),
@@ -1137,9 +1471,21 @@ def load_config(
         covered_call_csp_dte_max=covered_call_csp_dte_max,
         covered_call_csp_strike_floor_pct=covered_call_csp_strike_floor_pct,
         covered_call_csp_min_open_interest=covered_call_csp_min_open_interest,
+        covered_call_csp_min_open_interest_btc=covered_call_csp_min_open_interest_btc,
+        covered_call_csp_min_open_interest_eth=covered_call_csp_min_open_interest_eth,
         covered_call_csp_max_spread_ratio=covered_call_csp_max_spread_ratio,
         covered_call_csp_min_book_notional_usdc=covered_call_csp_min_book_notional_usdc,
         covered_call_csp_premium_target=covered_call_csp_premium_target,
+        covered_call_csp_self_assign_enabled=covered_call_csp_self_assign_enabled,
+        covered_call_csp_self_assign_confirm_cycles=covered_call_csp_self_assign_confirm_cycles,
+        covered_call_csp_self_assign_max_dte=covered_call_csp_self_assign_max_dte,
+        covered_call_csp_self_assign_max_tv_pct=covered_call_csp_self_assign_max_tv_pct,
+        covered_call_csp_self_assign_max_spread_ratio=covered_call_csp_self_assign_max_spread_ratio,
+        covered_call_csp_active_roll_enabled=covered_call_csp_active_roll_enabled,
+        covered_call_csp_active_roll_min_dte=covered_call_csp_active_roll_min_dte,
+        covered_call_csp_active_roll_max_dte=covered_call_csp_active_roll_max_dte,
+        covered_call_csp_active_roll_min_tv_ratio=covered_call_csp_active_roll_min_tv_ratio,
+        covered_call_csp_active_roll_min_net_usdc=covered_call_csp_active_roll_min_net_usdc,
         covered_call_robust_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_ROBUST_EXIT_ENABLED", "false")),
         covered_call_robust_exit_dte=to_decimal(_optional(values, "COVERED_CALL_ROBUST_EXIT_DTE", "0.5")),
         covered_call_itm_buffer_pct=to_decimal(_optional(values, "COVERED_CALL_ITM_BUFFER_PCT", "0")),
@@ -1155,4 +1501,13 @@ def load_config(
         covered_call_slot_sizing=covered_call_slot_sizing,
         account_role=account_role,
         risk_tier=risk_tier,
+        state_json_pretty=state_json_pretty,
+        state_closed_archive_enabled=state_closed_archive_enabled,
+        state_closed_archive_keep_days=state_closed_archive_keep_days,
+        state_closed_archive_keep_min=state_closed_archive_keep_min,
+        dashboard_api_token=dashboard_api_token,
+        dashboard_api_token_embed=dashboard_api_token_embed,
+        dashboard_cors_origins=dashboard_cors_origins,
+        admin_console_token=admin_console_token,
+        admin_console_token_embed=admin_console_token_embed,
     )

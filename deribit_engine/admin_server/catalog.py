@@ -11,6 +11,7 @@ from typing import Any
 
 from ..env_layout import find_repo_root
 from ..exceptions import ConfigurationError
+from ..frontend_server.auth import DASHBOARD_TOKEN_ENV, configured_token
 from ..investor_ops import list_investors
 from ..utils import utc_now_ms
 
@@ -53,7 +54,13 @@ def probe_frontend_health(
             "error": "missing frontend_port",
         }
 
-    request = urllib.request.Request(url, headers={"User-Agent": _HEALTH_USER_AGENT})
+    headers = {"User-Agent": _HEALTH_USER_AGENT}
+    # Investor frontends gated by DASHBOARD_API_TOKEN answer 401 otherwise; the
+    # admin console shares the operator's env so it can present the same token.
+    dashboard_token = configured_token(DASHBOARD_TOKEN_ENV)
+    if dashboard_token:
+        headers["X-Dashboard-Token"] = dashboard_token
+    request = urllib.request.Request(url, headers=headers)
     started = time.monotonic()
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:

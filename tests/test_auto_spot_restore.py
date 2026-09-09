@@ -111,6 +111,40 @@ def test_evaluate_auto_spot_restore_skips_already_restored() -> None:
     assert decision["reason"] == "already_restored"
 
 
+def test_evaluate_auto_spot_restore_credits_child_assignment() -> None:
+    parent = _itm_sold_group(
+        cash_secured_group_id="0026",
+        cash_secured_group_ids=["0026"],
+    )
+    child = TradeGroup.from_dict(
+        {
+            "group_id": "0026",
+            "currency": "BTC",
+            "status": "closed",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "collateral_currency": "USDC",
+            "quantity": "0.1",
+            "short_instrument_name": "BTC_USDC-11SEP26-73000-P",
+            "short_strike": "73000",
+            "cash_secured_from_group_id": "0095",
+            "entry_timestamp_ms": 1,
+            "expiration_timestamp_ms": 2,
+            "entry_credit": "5",
+            "max_loss": "7300",
+            "regime_at_entry": "normal",
+            "spot_restore_status": "filled",
+            "spot_restore_amount": "0.1",
+            "spot_restore_quote_spent": "7100",
+        }
+    )
+    alone = evaluate_auto_spot_restore(parent, buy_price=Decimal("60000"))
+    assert alone["ok"] is True
+    decision = evaluate_auto_spot_restore(parent, buy_price=Decimal("60000"), groups=[parent, child])
+    assert decision["ok"] is False
+    assert decision["reason"] in {"already_restored", "nothing_to_restore"}
+
+
 def test_evaluate_auto_spot_restore_partial_uses_remaining_proceeds() -> None:
     group = _itm_sold_group(
         spot_restore_status="filled",

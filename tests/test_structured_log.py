@@ -88,3 +88,42 @@ def test_scrub_secrets_masks_query_params():
     assert "abcd1234" not in masked
     assert "zzz" not in masked
     assert "foo=bar" in masked
+
+
+def test_redacts_dashboard_and_admin_token_extra_fields():
+    formatter = LiveJsonFormatter()
+    logger = logging.getLogger("test.structured.tokens")
+    record = logger.makeRecord(
+        name="test.structured.tokens", level=logging.INFO, fn=__file__, lno=1, msg="boot", args=(), exc_info=None
+    )
+    record.DASHBOARD_API_TOKEN = "dash-secret-1"
+    record.ADMIN_CONSOLE_TOKEN = "admin-secret-2"
+    record.dashboard_api_token = "dash-secret-3"
+    record.admin_console_token = "admin-secret-4"
+    record.client_secret = "cs-5"
+    record.TELEGRAM_BOT_TOKEN = "123:abc"
+    payload = json.loads(formatter.format(record))
+    for key in (
+        "DASHBOARD_API_TOKEN",
+        "ADMIN_CONSOLE_TOKEN",
+        "dashboard_api_token",
+        "admin_console_token",
+        "client_secret",
+        "TELEGRAM_BOT_TOKEN",
+    ):
+        assert payload[key] == REDACTED
+    rendered = json.dumps(payload)
+    for leaked in ("dash-secret", "admin-secret", "cs-5", "123:abc"):
+        assert leaked not in rendered
+
+
+def test_scrub_secrets_masks_env_style_tokens_and_bearer_headers():
+    text = (
+        "env: DASHBOARD_API_TOKEN=dash123 ADMIN_CONSOLE_TOKEN=adm456 TELEGRAM_BOT_TOKEN=999:tg "
+        "Authorization: Bearer eyJhbGciOi X-API-Token: xyz789 CLIENT_SECRET: cs000 keep=this"
+    )
+    masked = scrub_secrets(text)
+    for leaked in ("dash123", "adm456", "999:tg", "eyJhbGciOi", "xyz789", "cs000"):
+        assert leaked not in masked, leaked
+    assert "keep=this" in masked
+    assert masked.count(REDACTED) == 6

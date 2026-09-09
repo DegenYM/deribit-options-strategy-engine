@@ -74,6 +74,36 @@ def spot_restore_filled_native(group: TradeGroup) -> Decimal:
     return Decimal("0")
 
 
+def wheel_spot_restore_filled_native(
+    group: TradeGroup,
+    groups: list[TradeGroup] | None = None,
+) -> Decimal:
+    """Parent restore plus CSP-child assignment buys that refill the same cover."""
+    restored = spot_restore_filled_native(group)
+    if not groups or not group.is_covered_call_group():
+        return restored
+    from .cash_secured_ops import cash_secured_children
+
+    for child in cash_secured_children(groups, group):
+        restored += spot_restore_filled_native(child)
+    return restored
+
+
+def wheel_spot_restore_realized_usdt(
+    group: TradeGroup,
+    groups: list[TradeGroup] | None = None,
+) -> Decimal:
+    """Parent restore quote plus CSP-child assignment spend for the same cover."""
+    spent = spot_restore_realized_usdt(group)
+    if not groups or not group.is_covered_call_group():
+        return spent
+    from .cash_secured_ops import cash_secured_children
+
+    for child in cash_secured_children(groups, group):
+        spent += spot_restore_realized_usdt(child)
+    return spent
+
+
 def _spot_exit_swap_native(group: TradeGroup) -> Decimal:
     """Native actually sold via ITM spot exit (includes partial pending fills)."""
     from .spot_exit_ops import spot_exit_filled_native
@@ -100,6 +130,7 @@ def plan_spot_restore_to_cover(
     group: TradeGroup,
     *,
     settlement_loss: Decimal | None = None,
+    groups: list[TradeGroup] | None = None,
 ) -> dict[str, Decimal | str | bool]:
     """Restore plan to original cover: ``swap + settle − premium``.
 
@@ -139,7 +170,7 @@ def plan_spot_restore_to_cover(
         premium_in_swap = abs(swap - structural_with_premium) <= abs(swap - structural_cover_only)
     else:
         premium_in_swap = False
-    restored = spot_restore_filled_native(group)
+    restored = wheel_spot_restore_filled_native(group, groups)
     unrestored = max(target - restored, Decimal("0"))
     return {
         "cover": cover,
@@ -157,10 +188,30 @@ def plan_spot_restore_to_cover(
     }
 
 
+def spot_restore_spot_instrument_name(group: TradeGroup) -> str:
+    """Spot pair used to buy cover back. Follows the ITM exit quote (USDC vs USDT).
+
+    Prefer the exit instrument over a parked restore pair so a USDT auto-restore
+    GTC does not force a USDC wheel to buy the wrong quote.
+    """
+    exit_name = str(group.spot_exit_instrument_name or "").strip()
+    if exit_name:
+        return exit_name
+    existing = str(group.spot_restore_instrument_name or "").strip()
+    if existing:
+        return existing
+    from .spot_exit_ops import spot_exit_quote_currency
+
+    currency = str(group.currency or "").upper() or "BTC"
+    quote = spot_exit_quote_currency(group)
+    return f"{currency}_{quote}"
+
+
 def unrestored_spot_exit_native(
     group: TradeGroup,
     *,
     settlement_loss: Decimal | None = None,
+    groups: list[TradeGroup] | None = None,
 ) -> Decimal:
     """Native still needed after ITM spot exit (honours partial SWAP fills)."""
     swap = _spot_exit_swap_native(group)
@@ -171,7 +222,7 @@ def unrestored_spot_exit_native(
     )
     if swap <= 0 and settle <= 0:
         return Decimal("0")
-    plan = plan_spot_restore_to_cover(group, settlement_loss=settlement_loss)
+    plan = plan_spot_restore_to_cover(group, settlement_loss=settlement_loss, groups=groups)
     return to_decimal(plan["unrestored"])
 
 
@@ -335,28 +386,32 @@ def mark_spot_restore_dust_complete(group: TradeGroup, *, dust_amount: Decimal) 
     if str(group.spot_restore_status or "").lower() != "filled":
         group.spot_restore_status = "filled"
     if not group.spot_restore_instrument_name:
-        group.spot_restore_instrument_name = f"{group.currency.upper()}_USDT"
+        group.spot_restore_instrument_name = spot_restore_spot_instrument_name(group)
     tag = "dust_below_min_omitted"
     reason = str(group.spot_restore_reason or "").strip()
     if tag not in reason:
         group.spot_restore_reason = f"{reason};{tag}" if reason else tag
 
 
-def itm_spot_round_trip_complete(group: TradeGroup) -> bool:
+def itm_spot_round_trip_complete(
+    group: TradeGroup,
+    groups: list[TradeGroup] | None = None,
+) -> bool:
     """True when ITM exit/restore round-trip is done for PnL recognition.
 
     Prefer plan ``unrestored == 0``. Also accept both legs ``filled`` with real
     quote flows — incomplete SWAP journals sometimes keep an overstated
     ``spot_exit_amount`` (structural target) after restore already bought back
     the amount actually sold. Sub-min dust remainders are treated as complete
-    (omit, never round up past cover).
+    (omit, never round up past cover). CSP assignment restores journaled on a
+    child count toward the parent's cover.
     """
-    plan = plan_spot_restore_to_cover(group)
+    plan = plan_spot_restore_to_cover(group, groups=groups)
     unrestored = to_decimal(plan["unrestored"])
+    restore_u = wheel_spot_restore_realized_usdt(group, groups)
     if unrestored <= Decimal("1e-8"):
         target = to_decimal(plan["target"])
         restored = to_decimal(plan["restored"])
-        restore_u = spot_restore_realized_usdt(group)
         if target > 0 and restored <= 0 and restore_u <= 0:
             return False
         return True
@@ -364,19 +419,25 @@ def itm_spot_round_trip_complete(group: TradeGroup) -> bool:
     restore_status = str(group.spot_restore_status or "").lower()
     dust_omitted = "dust_below_min_omitted" in str(group.spot_restore_reason or "")
     dust_remainder = unrestored < spot_restore_lot_threshold(group.currency)
-    if restore_status == "filled" and (dust_omitted or dust_remainder):
+    child_filled = restore_u > 0 and to_decimal(plan["restored"]) > 0
+    if (restore_status == "filled" or child_filled) and (dust_omitted or dust_remainder):
         from .spot_exit_ops import spot_exit_realized_usdt
 
         if exit_status == "filled" and spot_exit_realized_usdt(group) > 0:
             return True
-    if exit_status != "filled" or restore_status != "filled":
+    if exit_status != "filled":
+        return False
+    if restore_status != "filled" and restore_u <= 0:
         return False
     from .spot_exit_ops import spot_exit_realized_usdt
 
-    return spot_exit_realized_usdt(group) > 0 and spot_restore_realized_usdt(group) > 0
+    return spot_exit_realized_usdt(group) > 0 and restore_u > 0
 
 
-def itm_spot_exit_net_usdt_for_total_profit(group: TradeGroup) -> Decimal | None:
+def itm_spot_exit_net_usdt_for_total_profit(
+    group: TradeGroup,
+    groups: list[TradeGroup] | None = None,
+) -> Decimal | None:
     """Recognize cover round-trip ``exit USDT − restore USDT`` after restore-to-cover.
 
     Before restore completes, do **not** treat raw exit proceeds as Total profit
@@ -394,9 +455,9 @@ def itm_spot_exit_net_usdt_for_total_profit(group: TradeGroup) -> Decimal | None
     exit_u = spot_exit_realized_usdt(group)
     if exit_u <= 0:
         return None
-    if not itm_spot_round_trip_complete(group):
+    if not itm_spot_round_trip_complete(group, groups):
         return None
-    restore_u = spot_restore_realized_usdt(group)
+    restore_u = wheel_spot_restore_realized_usdt(group, groups)
     net = exit_u - restore_u
     folded = itm_folded_premium_usdt(group)
     if folded > 0:
@@ -409,6 +470,7 @@ def evaluate_auto_spot_restore(
     *,
     buy_price: Decimal,
     min_edge_pct: Decimal = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT,
+    groups: list[TradeGroup] | None = None,
 ) -> dict[str, Any]:
     """Whether buying back ITM-sold cover at ``buy_price`` would lock in USDT profit.
 
@@ -444,9 +506,9 @@ def evaluate_auto_spot_restore(
     if not group_has_itm_spot_exit_fills(group):
         payload["reason"] = "no_spot_exit_fill"
         return payload
-    unrestored = unrestored_spot_exit_native(group)
+    unrestored = unrestored_spot_exit_native(group, groups=groups)
     proceeds = spot_exit_realized_usdt(group)
-    already_spent = spot_restore_realized_usdt(group)
+    already_spent = wheel_spot_restore_realized_usdt(group, groups)
     remaining_proceeds = proceeds - already_spent
     payload["unrestored"] = format_decimal(unrestored, 8)
     payload["exit_proceeds"] = format_decimal(proceeds, 4) if proceeds > 0 else None
@@ -487,12 +549,13 @@ def auto_spot_restore_cap_price(
     group: TradeGroup,
     *,
     min_edge_pct: Decimal = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT,
+    groups: list[TradeGroup] | None = None,
 ) -> Decimal:
     """Highest USDT price that still leaves a non-negative restore round-trip."""
     from .spot_exit_ops import spot_exit_realized_usdt
 
-    unrestored = unrestored_spot_exit_native(group)
-    remaining = spot_exit_realized_usdt(group) - spot_restore_realized_usdt(group)
+    unrestored = unrestored_spot_exit_native(group, groups=groups)
+    remaining = spot_exit_realized_usdt(group) - wheel_spot_restore_realized_usdt(group, groups)
     if unrestored <= 0 or remaining <= 0:
         return Decimal("0")
     edge = min_edge_pct if min_edge_pct > 0 else Decimal("0")
@@ -505,6 +568,7 @@ def evaluate_auto_spot_restore_park(
     group: TradeGroup,
     *,
     min_edge_pct: Decimal = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT,
+    groups: list[TradeGroup] | None = None,
 ) -> dict[str, Any]:
     """Whether we can park a GTC limit at the restore cap (ignores current ask)."""
     from .spot_exit_ops import spot_exit_realized_usdt
@@ -526,9 +590,9 @@ def evaluate_auto_spot_restore_park(
     if not group_has_itm_spot_exit_fills(group):
         payload["reason"] = "no_spot_exit_fill"
         return payload
-    unrestored = unrestored_spot_exit_native(group)
-    remaining = spot_exit_realized_usdt(group) - spot_restore_realized_usdt(group)
-    cap = auto_spot_restore_cap_price(group, min_edge_pct=min_edge_pct)
+    unrestored = unrestored_spot_exit_native(group, groups=groups)
+    remaining = spot_exit_realized_usdt(group) - wheel_spot_restore_realized_usdt(group, groups)
+    cap = auto_spot_restore_cap_price(group, min_edge_pct=min_edge_pct, groups=groups)
     payload["unrestored"] = format_decimal(unrestored, 8)
     payload["remaining_proceeds"] = format_decimal(remaining, 4) if remaining != 0 else "0"
     payload["max_buy_price"] = format_decimal(cap, 4) if cap > 0 else None
@@ -574,12 +638,13 @@ def attach_auto_spot_restore_preview(
     min_edge_pct: Decimal | None = None,
     enabled: bool = False,
     price_source: str = "",
+    groups: list[TradeGroup] | None = None,
 ) -> None:
     """Annotate a restore preview with auto-buy threshold vs current ask."""
     edge = min_edge_pct if min_edge_pct is not None else DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
     if edge < 0 or edge >= 1:
         edge = DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
-    decision = evaluate_auto_spot_restore(group, buy_price=buy_price, min_edge_pct=edge)
+    decision = evaluate_auto_spot_restore(group, buy_price=buy_price, min_edge_pct=edge, groups=groups)
     payload["auto_spot_restore_enabled"] = bool(enabled)
     payload["auto_would_buy"] = bool(decision.get("ok"))
     payload["auto_reason"] = decision.get("reason")
@@ -596,13 +661,15 @@ def attach_auto_spot_restore_preview(
 
 def sum_itm_spot_exit_net_usdt_for_total_profit(rows: list[dict[str, Any]]) -> Decimal:
     """Sum recognized ITM spot round-trip nets across closed (or journal) rows."""
-    total = Decimal("0")
+    parsed: list[TradeGroup] = []
     for row in rows:
         try:
-            group = TradeGroup.from_dict(row)
+            parsed.append(TradeGroup.from_dict(row))
         except Exception:
             continue
-        net = itm_spot_exit_net_usdt_for_total_profit(group)
+    total = Decimal("0")
+    for group in parsed:
+        net = itm_spot_exit_net_usdt_for_total_profit(group, parsed)
         if net is None:
             continue
         total += net
@@ -615,7 +682,10 @@ def apply_spot_restore_quote_spent(
     *,
     cumulative: bool = False,
 ) -> Decimal:
-    spent = spot_buy_quote_spent_from_trades(trades, quote_currency="USDT")
+    from .spot_exit_ops import spot_exit_quote_currency
+
+    quote = spot_exit_quote_currency(group, group.spot_restore_instrument_name)
+    spent = spot_buy_quote_spent_from_trades(trades, quote_currency=quote)
     if spent <= 0:
         return Decimal("0")
     if cumulative:
@@ -803,14 +873,16 @@ def list_spot_restore_candidates(
     groups: list[TradeGroup],
     *,
     group_id: str | None = None,
+    plan_groups: list[TradeGroup] | None = None,
 ) -> list[SpotRestoreCandidate]:
     rows: list[SpotRestoreCandidate] = []
+    plan_pool = plan_groups if plan_groups is not None else groups
     for group in groups:
         if group_id and group.group_id != group_id:
             continue
         if group.status != "closed" or not group.is_covered_call_group():
             continue
-        plan = plan_spot_restore_to_cover(group)
+        plan = plan_spot_restore_to_cover(group, groups=plan_pool)
         swap = to_decimal(plan["swap"])
         settle = to_decimal(plan["settle"])
         if swap <= 0 and settle <= 0:
@@ -832,12 +904,10 @@ def list_spot_restore_candidates(
                 restore_target=to_decimal(plan["target"]),
                 spot_exit_quote_proceeds=spot_exit_realized_usdt(group),
                 restored_amount=restored_amt,
-                restored_quote_spent=spot_restore_realized_usdt(group),
+                restored_quote_spent=wheel_spot_restore_realized_usdt(group, plan_pool),
                 unrestored_amount=unrestored,
                 spot_restore_status=str(group.spot_restore_status or ""),
-                instrument_name=group.spot_restore_instrument_name
-                or group.spot_exit_instrument_name
-                or f"{group.currency.upper()}_USDT",
+                instrument_name=spot_restore_spot_instrument_name(group),
             )
         )
     rows.sort(key=lambda row: row.group_id)
@@ -1345,7 +1415,14 @@ def place_spot_restore_resting_limit_buy(
 
     base = instrument_name.split("_", 1)[0]
     instrument = _lookup_spot_instrument(client, instrument_name, base)
-    target = ceil_option_order_amount(amount, instrument.contract_size, instrument.min_trade_amount)
+    # Never ceil above the caller-sized amount — CSP restore sizes to free USDC;
+    # rounding up would trigger not_enough_funds_in_currency and crash the loop.
+    target = ceil_option_order_amount(
+        amount,
+        instrument.contract_size,
+        instrument.min_trade_amount,
+        cap=amount,
+    )
     limit_px = _align_spot_limit_price(price, instrument)
     if target <= 0:
         return {
@@ -1647,6 +1724,8 @@ def execute_spot_restore_for_group(
     sleep_fn: SleepFn | None = None,
     restore_reason: str = "manual_spot_restore",
     park_resting: bool = False,
+    instrument_name: str | None = None,
+    groups: list[TradeGroup] | None = None,
 ) -> dict[str, Any]:
     """Buy back cover sold by ITM spot exit; records spot_restore_* for accounting.
 
@@ -1660,7 +1739,7 @@ def execute_spot_restore_for_group(
             "reason": "not_covered_call",
         }
     _ensure_spot_exit_settlement_loss(bot, group)
-    plan = plan_spot_restore_to_cover(group)
+    plan = plan_spot_restore_to_cover(group, groups=groups)
     swap = to_decimal(plan["swap"])
     settle = to_decimal(plan["settle"])
     if swap <= 0 and settle <= 0:
@@ -1672,7 +1751,20 @@ def execute_spot_restore_for_group(
         }
     unrestored = to_decimal(plan["unrestored"])
     currency = group.currency.upper()
-    instrument_name = f"{currency}_USDT"
+    override = str(instrument_name or "").strip().upper()
+    if override:
+        allowed = {f"{currency}_USDC", f"{currency}_USDT"}
+        if override not in allowed:
+            return {
+                "action": "spot_restore_skipped",
+                "group_id": group.group_id,
+                "reason": "invalid_spot_instrument",
+                "instrument_name": override,
+                "allowed": sorted(allowed),
+            }
+        instrument_name = override
+    else:
+        instrument_name = spot_restore_spot_instrument_name(group)
     label = spot_restore_order_label(group, bot.config.order_label_prefix)
     auto_restore = str(restore_reason or "").startswith("auto_spot_restore")
     if auto_restore:
@@ -1700,7 +1792,7 @@ def execute_spot_restore_for_group(
         or DEFAULT_AUTO_SPOT_RESTORE_MIN_EDGE_PCT
     )
     if park_resting:
-        cap = auto_spot_restore_cap_price(group, min_edge_pct=park_min_edge)
+        cap = auto_spot_restore_cap_price(group, min_edge_pct=park_min_edge, groups=groups)
         trade_price, price_source = cap, "auto_max_buy"
     else:
         trade_price, price_source = _spot_restore_buy_quote(
@@ -1726,6 +1818,7 @@ def execute_spot_restore_for_group(
         ),
         "enabled": bool(getattr(bot.config, "covered_call_auto_spot_restore_enabled", False)),
         "price_source": auto_ask_source,
+        "groups": groups,
     }
     quote_for_unrestored = (
         _quote_budget_for_base_buy(
@@ -2040,6 +2133,7 @@ def run_spot_restores(
     reconcile_only: bool = False,
     order_type: str | None = None,
     wait_seconds: int | None = None,
+    instrument_name: str | None = None,
 ) -> SpotRestoreRunSummary:
     """Reconcile and optionally buy back cover sold by ITM spot exits."""
     context = bot._load_runtime(live=live)
@@ -2066,7 +2160,7 @@ def run_spot_restores(
         if (not group_id or g.group_id == group_id)
         and g.status == "closed"
         and g.is_covered_call_group()
-        and unrestored_spot_exit_native(g) > 0
+        and unrestored_spot_exit_native(g, groups=context.state.groups) > 0
     ]
     sized_request = (amount is not None and amount > 0) or (quote_usdt is not None and quote_usdt > 0)
     if sized_request and len(targets) > 1:
@@ -2075,6 +2169,10 @@ def run_spot_restores(
         raise SystemExit("spot-restore: use either --amount or --usdt, not both")
 
     for group in targets:
+        if live and str(group.cash_secured_status or "").lower() in {"entered", "submitted"}:
+            group.cash_secured_status = "skipped"
+            group.cash_secured_reason = "operator_spot_restore"
+            bot.state_store.save(context.state)
         action = execute_spot_restore_for_group(
             bot,
             group,
@@ -2083,6 +2181,8 @@ def run_spot_restores(
             live=live,
             order_type=order_type,
             wait_seconds=wait_seconds,
+            instrument_name=instrument_name,
+            groups=context.state.groups,
         )
         summary.actions.append(action)
         if str(action.get("action") or "").startswith("spot_restore") and "skipped" not in str(

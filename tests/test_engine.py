@@ -4328,6 +4328,19 @@ def test_drawdown_ignores_usdt_to_usdc_convert_hard_derisk(tmp_path, fake_client
     assert engine._cash_secured_blocked_by_hard_derisk(SimpleNamespace(snapshot=snapshot)) is False
 
 
+def test_cash_secured_not_blocked_by_native_book_hard_derisk(tmp_path, fake_client):
+    """ITM cover sale crashes BTC/ETH books; that must not skip the USDC put."""
+    config = make_config(tmp_path, option_strategy="covered_call")
+    engine = DeribitOptionTrialBot(config, fake_client)
+    snapshot = SimpleNamespace(
+        hard_derisk=True,
+        hard_derisk_by_book={"BTC": True, "ETH": True, "USDC": False, "USDT": False},
+    )
+    assert engine._cash_secured_blocked_by_hard_derisk(SimpleNamespace(snapshot=snapshot)) is False
+    snapshot.hard_derisk_by_book["USDC"] = True
+    assert engine._cash_secured_blocked_by_hard_derisk(SimpleNamespace(snapshot=snapshot)) is True
+
+
 def test_manage_clears_stale_usdt_cooldown_after_swap_fix(tmp_path, fake_client):
     """Phantom USDT cooldown must drop once cross-book drawdown is corrected."""
     from datetime import UTC, datetime

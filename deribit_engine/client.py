@@ -35,6 +35,10 @@ _AUTH_CACHE_LOCK = threading.Lock()
 # single snapshot consistent.
 _PUBLIC_READ_CACHE: dict[str, tuple[float, Any]] = {}
 _PUBLIC_READ_CACHE_LOCK = threading.Lock()
+# Per-key single-flight: the first thread to miss on ``key`` loads it while
+# concurrent misses wait on the same lock and then re-read the cache. Guarded by
+# ``_PUBLIC_READ_CACHE_LOCK``.
+_PUBLIC_READ_INFLIGHT: dict[str, threading.Lock] = {}
 
 
 def _instruments_cache_ttl_seconds() -> float:
@@ -83,21 +87,46 @@ def _cached_public_read(key: str, ttl: float, loader: Callable[[], Any]) -> Any:
     """
     if ttl <= 0:
         return loader()
+    cached = _public_read_cache_get(key, ttl)
+    if cached is not None:
+        return _copy_cached(cached[1])
+    # Single-flight per key: only one thread in this process performs the
+    # shared-store read + network load; the rest block here and re-read.
+    with _PUBLIC_READ_CACHE_LOCK:
+        flight = _PUBLIC_READ_INFLIGHT.get(key)
+        if flight is None:
+            flight = threading.Lock()
+            _PUBLIC_READ_INFLIGHT[key] = flight
+    with flight:
+        try:
+            cached = _public_read_cache_get(key, ttl)
+            if cached is not None:
+                return _copy_cached(cached[1])
+            hit, shared = public_cache.read(key, ttl)
+            if hit:
+                with _PUBLIC_READ_CACHE_LOCK:
+                    _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(shared))
+                return _copy_cached(shared)
+            value = loader()
+            with _PUBLIC_READ_CACHE_LOCK:
+                _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(value))
+            public_cache.write(key, value)
+            return value
+        finally:
+            # Drop the in-flight marker so a failed load does not pin a stale lock
+            # object; a later miss simply creates a fresh one.
+            with _PUBLIC_READ_CACHE_LOCK:
+                if _PUBLIC_READ_INFLIGHT.get(key) is flight:
+                    _PUBLIC_READ_INFLIGHT.pop(key, None)
+
+
+def _public_read_cache_get(key: str, ttl: float) -> tuple[float, Any] | None:
     now = time.monotonic()
     with _PUBLIC_READ_CACHE_LOCK:
         cached = _PUBLIC_READ_CACHE.get(key)
-        if cached is not None and (now - cached[0]) < ttl:
-            return _copy_cached(cached[1])
-    hit, shared = public_cache.read(key, ttl)
-    if hit:
-        with _PUBLIC_READ_CACHE_LOCK:
-            _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(shared))
-        return _copy_cached(shared)
-    value = loader()
-    with _PUBLIC_READ_CACHE_LOCK:
-        _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(value))
-    public_cache.write(key, value)
-    return value
+    if cached is not None and (now - cached[0]) < ttl:
+        return cached
+    return None
 
 
 def _copy_cached(value: Any) -> Any:
@@ -112,6 +141,7 @@ def reset_public_read_cache() -> None:
     """Clear process-global read caches (intended for tests)."""
     with _PUBLIC_READ_CACHE_LOCK:
         _PUBLIC_READ_CACHE.clear()
+        _PUBLIC_READ_INFLIGHT.clear()
 
 
 class DeribitClient:
@@ -119,16 +149,25 @@ class DeribitClient:
 
     - Uses POST + JSON-RPC body for all requests so order parameters never appear in the URL.
     - OAuth2 client_credentials auth; tokens are cached and refreshed before expiry.
-    - Idempotent reads retry on transient errors; non-idempotent mutations retry at most once
-      on pure connection errors and never on 5xx/timeout/429 (caller must reconcile).
+    - Idempotent reads retry on transient errors; non-idempotent mutations are never
+      resent by the client (not on connection errors, 5xx, timeout, or 429). A dropped
+      connection may have happened *after* Deribit accepted the order, so any resend
+      could double-place; the caller must reconcile via order state / open orders.
+    - Public (unauthenticated) methods pace against the host-wide slot because Deribit
+      meters them per IP; private methods pace per client_id.
     """
 
     RETRYABLE_STATUS_CODES = {408, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
     RATE_LIMIT_STATUS = 429
     IDEMPOTENT_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
     AUTH_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
-    UNSAFE_CONNECTION_RETRIES = 1
+    # Kept at 0 on purpose: a ConnectionError on private/buy|sell|edit|cancel can
+    # arrive after the exchange already accepted the request, so a resend risks a
+    # duplicate order. Do not raise this above 0.
+    UNSAFE_CONNECTION_RETRIES = 0
     TOKEN_REFRESH_SAFETY_SECONDS = 30
+    # JSON-RPC error code Deribit returns for ``too_many_requests``.
+    JSONRPC_TOO_MANY_REQUESTS = 10028
 
     # JSON-RPC methods that mutate exchange state; must NOT be blindly retried.
     _UNSAFE_METHODS = frozenset(
@@ -330,7 +369,7 @@ class DeribitClient:
             result = data.get("result")
             if not isinstance(result, dict):
                 raise AuthenticationError("public/auth returned no result")
-            note_success(self.config.client_id or None)
+            note_success(self._pace_identity("public/auth"))
             return result
         raise TransientExchangeError("public/auth failed after retries")
 
@@ -372,6 +411,26 @@ class DeribitClient:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
+    @staticmethod
+    def _is_public_method(method_name: str) -> bool:
+        return str(method_name or "").startswith("public/")
+
+    def _pace_identity(self, method_name: str) -> str | None:
+        """Throttle key for ``method_name``.
+
+        Deribit meters ``public/*`` per source IP, so every client on this host must
+        share one slot (``None`` == global key) regardless of ``client_id``. Private
+        methods are metered per account and pace per ``client_id``.
+        """
+        if self._is_public_method(method_name):
+            return None
+        return self.config.client_id or None
+
+    @staticmethod
+    def _payload_method(payload: dict[str, Any]) -> str:
+        method = payload.get("method") if isinstance(payload, dict) else None
+        return str(method or "")
+
     def _post_raw(
         self,
         url: str,
@@ -379,7 +438,7 @@ class DeribitClient:
         *,
         headers: dict[str, str],
     ) -> requests.Response:
-        identity = self.config.client_id or None
+        identity = self._pace_identity(self._payload_method(payload))
         pace_exchange_request(identity)
         response = self.session.post(
             url,
@@ -450,6 +509,14 @@ class DeribitClient:
             return TransientExchangeError(text)
         return ExchangeError(text)
 
+    @classmethod
+    def _is_too_many_requests(cls, error: dict[str, Any]) -> bool:
+        try:
+            code_int = int(error.get("code") or 0)
+        except (TypeError, ValueError):
+            code_int = 0
+        return code_int == cls.JSONRPC_TOO_MANY_REQUESTS
+
     @staticmethod
     def _jsonrpc_transient_wait_seconds(error: dict[str, Any]) -> float | None:
         data = error.get("data")
@@ -477,12 +544,8 @@ class DeribitClient:
         classified = self._classify_error(method_name, error)
         if not isinstance(classified, TransientExchangeError):
             return False
-        try:
-            code_int = int(error.get("code") or 0)
-        except (TypeError, ValueError):
-            code_int = 0
-        if code_int == 10028:
-            note_rate_limited(self.config.client_id or None)
+        if self._is_too_many_requests(error):
+            note_rate_limited(self._pace_identity(method_name))
         wait = self._jsonrpc_transient_wait_seconds(error)
         if wait is None:
             wait = self._backoff_with_jitter(self.IDEMPOTENT_RETRY_BACKOFF_SECONDS[attempt])
@@ -569,13 +632,13 @@ class DeribitClient:
                 ):
                     continue
                 raise self._classify_error(method_name, json_error)
-            note_success(self.config.client_id or None)
+            note_success(self._pace_identity(method_name))
             return payload.get("result")
 
         raise TransientExchangeError(f"{method_name} failed after retries: {last_error}")
 
     # ------------------------------------------------------------------
-    # Non-idempotent (unsafe) request path — retries only on connection errors, at most once.
+    # Non-idempotent (unsafe) request path — exactly one send, never resent.
     # ------------------------------------------------------------------
 
     def _unsafe_request(
@@ -584,46 +647,49 @@ class DeribitClient:
         *,
         params: dict[str, Any] | None = None,
     ) -> Any:
+        """Send a state-mutating JSON-RPC call exactly once.
+
+        Every transport failure (connection drop, timeout, 5xx, 429) is surfaced as
+        ``TransientExchangeError`` *without* a resend: the exchange may already have
+        accepted the order, so the caller must reconcile from order/position state
+        before deciding to place again.
+        """
         url = f"{self.config.rest_base_url}/{method_name}"
-        attempts = self.UNSAFE_CONNECTION_RETRIES + 1
-        last_error: Exception | None = None
-        for attempt in range(attempts):
-            body = self._jsonrpc_body(method_name, params)
-            try:
-                response = self._post_raw(url, body, headers=self._headers(private=True))
-            except requests.exceptions.ConnectionError as exc:
-                last_error = exc
-                if attempt < attempts - 1:
-                    time.sleep(0.25)
-                    continue
-                raise TransientExchangeError(
-                    f"{method_name} connection failed after {attempt + 1} attempts: {exc}"
-                ) from exc
-            except requests.exceptions.Timeout as exc:
-                # Non-idempotent: order may have been accepted. Caller must reconcile.
-                raise TransientExchangeError(f"{method_name} timed out; reconcile required: {exc}") from exc
-            except requests.exceptions.RequestException as exc:
-                raise TransientExchangeError(f"{method_name} request error: {exc}") from exc
+        identity = self._pace_identity(method_name)
+        body = self._jsonrpc_body(method_name, params)
+        try:
+            response = self._post_raw(url, body, headers=self._headers(private=True))
+        except requests.exceptions.ConnectionError as exc:
+            # Non-idempotent: the socket may have dropped after the server accepted
+            # the order. Never resend; caller must reconcile.
+            raise TransientExchangeError(f"{method_name} connection failed; reconcile required: {exc}") from exc
+        except requests.exceptions.Timeout as exc:
+            # Non-idempotent: order may have been accepted. Caller must reconcile.
+            raise TransientExchangeError(f"{method_name} timed out; reconcile required: {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise TransientExchangeError(f"{method_name} request error: {exc}") from exc
 
-            status = response.status_code
-            if status == self.RATE_LIMIT_STATUS:
-                raise TransientExchangeError(f"{method_name} rate limited: HTTP 429 (no auto-retry for unsafe calls)")
-            if status in self.RETRYABLE_STATUS_CODES:
-                raise TransientExchangeError(f"{method_name} server error HTTP {status}; reconcile required")
-            if self._is_maintenance_http_block(status, response):
-                raise TransientExchangeError(
-                    f"{method_name}: Deribit system maintenance (POST blocked at edge); HTTP 405"
-                )
-            if status >= 400:
-                raise ExchangeError(f"{method_name} failed: HTTP {status} {response.text}")
+        status = response.status_code
+        if status == self.RATE_LIMIT_STATUS:
+            # ``_post_raw`` already noted the 429 for adaptive pacing.
+            raise TransientExchangeError(f"{method_name} rate limited: HTTP 429 (no auto-retry for unsafe calls)")
+        if status in self.RETRYABLE_STATUS_CODES:
+            raise TransientExchangeError(f"{method_name} server error HTTP {status}; reconcile required")
+        if self._is_maintenance_http_block(status, response):
+            raise TransientExchangeError(f"{method_name}: Deribit system maintenance (POST blocked at edge); HTTP 405")
+        payload, json_error = self._parse_jsonrpc_payload(response, method_name)
+        if json_error is not None and self._is_too_many_requests(json_error):
+            # JSON-RPC 10028 (too_many_requests) must widen adaptive pacing exactly
+            # like HTTP 429 does on the idempotent path, even though we never resend.
+            note_rate_limited(identity)
+        if status >= 400:
+            raise ExchangeError(f"{method_name} failed: HTTP {status} {response.text}")
+        if payload is None:
             payload = self._parse_jsonrpc(response, method_name)
-            error = payload.get("error")
-            if isinstance(error, dict) and error:
-                raise self._classify_error(method_name, error)
-            note_success(self.config.client_id or None)
-            return payload.get("result")
-
-        raise TransientExchangeError(f"{method_name} failed: {last_error}")
+        if json_error is not None:
+            raise self._classify_error(method_name, json_error)
+        note_success(identity)
+        return payload.get("result")
 
     def _request(
         self,
@@ -655,13 +721,19 @@ class DeribitClient:
         return _cached_public_read(key, _instruments_cache_ttl_seconds(), _load)
 
     def get_instrument(self, instrument_name: str) -> dict[str, Any]:
-        return (
-            self._request(
-                "public/get_instrument",
-                params={"instrument_name": instrument_name},
+        def _load() -> dict[str, Any]:
+            return (
+                self._request(
+                    "public/get_instrument",
+                    params={"instrument_name": instrument_name},
+                )
+                or {}
             )
-            or {}
-        )
+
+        # Instrument metadata (tick size, contract size, expiry) is static for the
+        # life of the contract, so share the instruments TTL.
+        key = f"instrument:{str(instrument_name).strip()}"
+        return _cached_public_read(key, _instruments_cache_ttl_seconds(), _load)
 
     def get_tradingview_chart_data(
         self,

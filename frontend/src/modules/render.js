@@ -723,7 +723,7 @@ export function buildStrategySummaries(status, report, groups) {
     if (!isDashboardStrategy(id)) continue;
     const s = ensureStrategySummary(summaries, ids, id);
     s.closedCount += 1;
-    const pnl = realizedPnlDisplayUsdc(g, status);
+    const pnl = realizedPnlDisplayUsdc(g, status, groups);
     if (pnl !== null && pnl > 0) s.wins += 1;
     const holding = groupHoldingDays(g);
     if (holding !== null) {
@@ -1036,7 +1036,7 @@ export function openPositionCardDesktopHtml(g, status, groups) {
             <h3>${escapeHtml(openPositionTitle(g))}</h3>
             <span class="open-book-pill">${escapeHtml(bookPill)}</span>
             <span class="open-status-pill">${openPositionStatusLabel(pnlUsd)}</span>
-            ${adminGroupActionsHtml(g)}
+            ${adminGroupActionsHtml(g, groups)}
           </div>
           <div class="open-position-instruments">
             <span>${escapeHtml(g.short_instrument_name || "—")}</span>

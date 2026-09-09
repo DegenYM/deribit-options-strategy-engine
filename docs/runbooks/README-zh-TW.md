@@ -13,11 +13,19 @@ Live 營運故障照表操課。搭配 [Telegram 告警](../telegram-alerts-zh-T
 
 ## Heartbeat 過期
 
-1. 確認 launchd / `run_live_profiles.py` 是否在跑：`./bot investor live status`
-2. 看子帳 log：`logs/live/<investor_id>/<slug>.log`
+**自動處理**：`run_live_profiles.py --restart-failed`（launchd 範本預設）會自行偵測 heartbeat 過期（預設 600 秒、可用 `LIVE_HEARTBEAT_STALE_SECONDS` 或 `--heartbeat-stale-seconds` 調），對卡住的子程序 SIGTERM → 30 秒後 SIGKILL → 依指數退避（15s 起、上限 600s）重啟，並發 Telegram `[CRITICAL] Live bot heartbeat stale; restarting`（`event_key=live_heartbeat_stale_restart:<env>`）。收到此告警時：
+
+1. 看 `logs/live/<investor_id>/supervisor.log`：確認 `restarted ... pid=` 有出現、`attempt=` 是否持續增加（連續失敗代表重啟後仍卡住 → 往下查根因）
+2. 看子帳 log：`logs/live/<investor_id>/<slug>.log`（輪替檔 `<slug>.log.1..N`）
 3. 看 heartbeat：`.state/investors/<investor_id>/<slug>.heartbeat.json` 的 `ts_ms` / `last_error`
-4. 手動重啟：`./bot investor live restart --investor <id>`
-5. 定期檢查（建議每 5 分鐘）：
+4. 若 supervisor.log 出現 `heartbeat missing ... not restarting`：heartbeat 路徑與 bot 實際 `STATE_FILE` 不符（或舊版 bot 尚未載入 heartbeat 邏輯），不會自動重啟，請手動 `./bot investor live restart --investor <id>` 並核對 env 內 `STATE_FILE`
+5. 要暫停自動重啟（例如手動 debug 中）：在 plist 加 `--no-heartbeat-restart` 後 `launchctl kickstart -k`
+
+**手動處理 / 未啟用自動重啟時**：
+
+1. 確認 launchd / `run_live_profiles.py` 是否在跑：`./bot investor live status`
+2. 手動重啟：`./bot investor live restart --investor <id>`
+3. 定期純告警檢查（建議每 5 分鐘，不會重啟）：
 
 ```bash
 python scripts/check_live_heartbeat.py

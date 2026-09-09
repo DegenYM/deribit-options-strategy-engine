@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -64,9 +65,11 @@ from .types import (
     BundleWarmScheduler,
     DashboardAccount,
     EquitySnapshotScheduler,
+    SingleFlightRunner,
     TradeJournalSyncScheduler,
     TransferWarmScheduler,
     _TtlCache,
+    make_background_executor,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -92,6 +95,7 @@ class RuntimeSetup:
     portal_service: PortalSnapshotService | None
     journal_scheduler: TradeJournalSyncScheduler
     background_schedulers: list[Any]
+    background_executor: ThreadPoolExecutor
     status_cache: _TtlCache
     spot_cache: _TtlCache
     series_cache: _TtlCache
@@ -177,15 +181,19 @@ def build_runtime_setup(
         )
     )
     status_ttl = investor_status_ttl if investor_portal else STATUS_CACHE_TTL_SEC
-    status_cache = _TtlCache(status_ttl, stale_while_revalidate=True)
+    # One bounded pool for every background refresh (SWR caches, transfers warm
+    # behind a store hit). Shut down in the app lifespan.
+    background_executor = make_background_executor()
+    background_runner = SingleFlightRunner(background_executor)
+    status_cache = _TtlCache(status_ttl, stale_while_revalidate=True, executor=background_executor)
     fill_stats_cache = _TtlCache(DEFAULT_PREMIUM_SWEEP_FILL_STATS_CACHE_TTL_SEC)
     report_cache = _TtlCache(REPORT_CACHE_TTL_SEC)
     groups_cache = _TtlCache(GROUPS_CACHE_TTL_SEC)
-    bundle_cache = _TtlCache(status_ttl, stale_while_revalidate=True)
+    bundle_cache = _TtlCache(status_ttl, stale_while_revalidate=True, executor=background_executor)
     exchange_prefetch_cache = _TtlCache(status_ttl)
     spot_cache = _TtlCache(SPOT_CACHE_TTL_SEC)
     stress_cache = _TtlCache(STATUS_CACHE_TTL_SEC)
-    transfers_cache = _TtlCache(TRANSFERS_CACHE_TTL_SEC, stale_while_revalidate=True)
+    transfers_cache = _TtlCache(TRANSFERS_CACHE_TTL_SEC, stale_while_revalidate=True, executor=background_executor)
     series_cache = _TtlCache(SERIES_CACHE_TTL_SEC)
     heavy_portfolio_lock = threading.Lock()
 
@@ -622,11 +630,18 @@ def build_runtime_setup(
             "last_trade_journal_sync_success_ms": journal_scheduler.state.last_success_ms,
             "last_trade_journal_sync_error": journal_scheduler.state.last_error,
             "last_trade_journal_sync_inserted": journal_scheduler.state.last_inserted,
-            "state_file": str(state_path) if not multi_account else "multi",
-            "ledger_dir": str(ledger_root),
+            # Basenames only: absolute paths leak the operator's home directory
+            # and repo layout to anyone who can read /api/health.
+            "state_file": state_path.name if not multi_account else "multi",
+            "state_file_present": state_path.is_file()
+            if not multi_account
+            else all(account.state_path.is_file() for account in accounts),
+            "ledger_dir": ledger_root.name,
+            "ledger_dir_present": ledger_root.is_dir(),
             "investor_id": dashboard_investor_id,
             "investor_display_name": dashboard_investor_display_name,
-            "metrics_db": str(metrics_db_path),
+            "metrics_db": metrics_db_path.name,
+            "metrics_db_present": metrics_db_path.is_file(),
             "managed_currencies": list(config_public.managed_currencies),
             "traded_collaterals": list(config_public.traded_collaterals),
             "option_strategy": "multi_account" if multi_account else config_public.option_strategy,
@@ -660,8 +675,10 @@ def build_runtime_setup(
                         if account.config.option_strategy == "covered_call"
                         else False
                     ),
-                    "state_file": str(account.state_path),
-                    "ledger_dir": str(account.ledger_root),
+                    "state_file": account.state_path.name,
+                    "state_file_present": account.state_path.is_file(),
+                    "ledger_dir": account.ledger_root.name,
+                    "ledger_dir_present": account.ledger_root.is_dir(),
                     "has_private_creds": _has_private_creds(account.config),
                 }
                 for account in accounts
@@ -699,6 +716,7 @@ def build_runtime_setup(
         locked_aggregate_transfers=_locked_aggregate_transfers,
         seed_bundle_component_caches=_seed_bundle_component_caches,
         finalize_dashboard_bundle=_finalize_dashboard_bundle,
+        background_runner=background_runner,
     )
 
     if enable_scheduler and repo_root is not None:
@@ -783,6 +801,7 @@ def build_runtime_setup(
         portal_service=portal_service,
         journal_scheduler=journal_scheduler,
         background_schedulers=background_schedulers,
+        background_executor=background_executor,
         status_cache=status_cache,
         spot_cache=spot_cache,
         series_cache=series_cache,

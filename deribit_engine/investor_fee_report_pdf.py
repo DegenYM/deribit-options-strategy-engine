@@ -8,11 +8,31 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+# reportlab is an optional dependency (``pip install -e '.[pdf]'``). Importing
+# this module must not fail without it; the public ``write_*_pdf`` entry points
+# call ``_require_reportlab()`` and raise a clear ImportError instead.
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+except ImportError as _exc:  # pragma: no cover — exercised only without the pdf extra
+    _REPORTLAB_IMPORT_ERROR: ImportError | None = _exc
+else:
+    _REPORTLAB_IMPORT_ERROR = None
+
+_REPORTLAB_MISSING_MSG = (
+    "reportlab is required to render investor fee-report PDFs but is not installed. "
+    "Install the optional PDF extra: pip install -e '.[pdf]'  (or pip install -r requirements-pdf.txt)"
+)
+
+
+def _require_reportlab() -> None:
+    """Raise a clear ImportError if the optional reportlab dependency is missing."""
+    if _REPORTLAB_IMPORT_ERROR is not None:
+        raise ImportError(_REPORTLAB_MISSING_MSG) from _REPORTLAB_IMPORT_ERROR
+
 
 from .investor_cash_flow import initial_spot_deduction_usdc, native_book_amount_to_usdc
 from .investor_fee_report import (
@@ -340,6 +360,7 @@ def _append_flow_section_pdf(
 
 
 def write_initial_fee_report_pdf(ctx: InitialFeeReportContext, path: Path) -> Path:
+    _require_reportlab()
     path.parent.mkdir(parents=True, exist_ok=True)
     styles = _styles()
     story: list[Any] = []
@@ -533,6 +554,7 @@ def write_settlement_fee_report_pdf(
     *,
     repo_root: Path | str,
 ) -> Path:
+    _require_reportlab()
     from .investor_fee_report_period import (
         build_investor_period_report,
         iter_period_header_fields,

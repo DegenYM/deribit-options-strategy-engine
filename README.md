@@ -65,6 +65,7 @@ Models, risk controls, and payoff diagrams: [`docs/strategies-zh-TW.md`](docs/st
 | [Telegram alerts](docs/telegram-alerts-zh-TW.md) | Alert setup |
 | [Live incident runbooks](docs/runbooks/README-zh-TW.md) | State drift, 429, panic, Tunnel |
 | [Optimization roadmap](docs/optimization-plan-zh-TW.md) | CI, ops, architecture split |
+| [Optimization spec (2026-09)](docs/optimization-spec-zh-TW.md) | Hardening batch: findings, implemented changes, new env knobs, deferred items |
 
 ### Other
 

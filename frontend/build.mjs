@@ -22,16 +22,24 @@ execSync(
   { cwd: root, stdio: "inherit" }
 );
 
+// The `define` below fixes DASHBOARD_MODE at build time. Newer esbuild releases
+// constant-fold and drop the dead branch, so the mode is not reliably visible
+// as a string literal in the minified output; the footer is a stable marker
+// that tests / operators can grep for regardless of minifier behaviour.
+const buildModeFooter = (mode) => ({ js: `//# dashboardBuildMode=${mode}` });
+
 await build({
   ...sharedBuildOptions,
   outfile: resolve(root, "app.js"),
   define: { __BUILD_INVESTOR__: "false" },
+  footer: buildModeFooter("ops"),
 });
 
 await build({
   ...sharedBuildOptions,
   outfile: resolve(root, "app-investor.js"),
   define: { __BUILD_INVESTOR__: "true" },
+  footer: buildModeFooter("investor"),
 });
 
 // Cache-busting: stamp each asset's `?v=` with a hash of its current content so

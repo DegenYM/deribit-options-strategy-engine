@@ -117,6 +117,7 @@ class ManagementMixin(
 
         if live:
             self._persist_trade_journal_actions(actions)
+            self._archive_closed_groups_if_enabled(context.state)
         self.state_store.save(context.state)
         return {
             "action": "manage",
@@ -129,6 +130,26 @@ class ManagementMixin(
             ),
             "actions": actions,
         }
+
+    def _archive_closed_groups_if_enabled(self, state: StrategyState) -> int:
+        """Opt-in (``STATE_CLOSED_ARCHIVE_ENABLED``): move old closed groups out of
+        ``state.groups`` into the JSONL side-car right before the live manage-cycle
+        save, so the running bot never writes archived groups back. Default off.
+        """
+        if not self.config.state_closed_archive_enabled:
+            return 0
+        archived = self.state_store.archive_closed_groups(
+            state,
+            keep_recent_days=self.config.state_closed_archive_keep_days,
+            keep_min=self.config.state_closed_archive_keep_min,
+        )
+        if archived:
+            LOGGER.info(
+                "manage cycle archived %d closed groups to %s",
+                archived,
+                self.state_store.archive_path,
+            )
+        return archived
 
     def run(
         self,

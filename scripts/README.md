@@ -26,9 +26,11 @@ Profit sweep 修復腳本需指定子帳 env（`--env-file` 或 `--investor` + `
 | Script | 用途 |
 |--------|------|
 | `fix_dashboard_modules.mjs` | Dashboard 模組化重構輔助（legacy；模組化完成後通常不需再跑） |
-| `check_dashboard_modules.mjs` | 靜態檢查 modules 未定義識別符 |
-| `test_dashboard_boot.mjs` | 手動 boot operator dashboard |
-| `test_dashboard_investor_boot.mjs` | 手動 boot investor portal |
-| `test_overview_equity.mjs` | 手動驗證 overview equity 渲染 |
-| `test_profit_disposition.mjs` | 手動驗證 profit disposition UI |
+| `check_dashboard_modules.mjs` | 靜態檢查 modules 未定義識別符（啟發式、有 false positive；手動參考用，不進 CI） |
+| `run_unit_tests.mjs` | **CI JS 單元測試 runner**：逐一執行下列 `test_*.mjs` 純單元測試；`cd frontend && npm run test:unit` |
+| `test_profit_disposition.mjs` | 單元測試：profit disposition / realized APR 計算（`node:assert`，CI 執行） |
+| `test_open_group_dedupe.mjs` | 單元測試：open group 去重（`node:assert`，CI 執行） |
+| `test_overview_equity.mjs` | 單元測試：overview equity native/USD 換算（CI 執行） |
+| `test_dashboard_boot.mjs` | 手動 boot operator dashboard（mock DOM/API；會持續跑 timer，不進 CI） |
+| `test_dashboard_investor_boot.mjs` | 手動 boot investor portal（同上，不進 CI） |
 | `backfill_state_apr.py` | 回填 state 內已平倉 group 的 APR / PnL 索引 |

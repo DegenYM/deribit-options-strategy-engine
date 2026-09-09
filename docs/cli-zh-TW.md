@@ -66,7 +66,7 @@ export INVESTOR=youming
 ./bot frontend --account-env-files config/investors/$INVESTOR/accounts/.env.naked,config/investors/$INVESTOR/accounts/.env.bull_put
 
 # 管理者後台（所有投資人 frontend；只綁 127.0.0.1，預設 :8750）
-# Recover market / Close / Panic close 只在此頁，先 Preview 再輸入 LIVE
+# Recover market / Close / CSP關倉補現貨 / Panic close 只在此頁，先 Preview 再輸入 LIVE
 ./bot admin
 
 # macOS launchd 常駐（依 registry.toml）
@@ -262,6 +262,10 @@ ACCT=covered_call
 ./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --wait-seconds 180 --live
 ./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --order-type market --live
 
+# CSP 平倉後錢包是 USDC：指定現貨對，不要用裸 trade-spot（否則 wheel 會再賣 put）
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --instrument BTC_USDC --order-type market
+./bot --investor $INVESTOR --account $ACCT spot-restore --group-id 0017 --instrument BTC_USDC --order-type market --live
+
 # 只從 Deribit `*-spot-restore` label 同步 spot_restore_*，不下單
 ./bot --investor $INVESTOR --account $ACCT spot-restore --reconcile-only --json
 ```
@@ -271,7 +275,7 @@ ACCT=covered_call
 | `--group-id` | 只處理指定已平倉 group |
 | `--amount` | 買回 native 數量；**預設**為補滿原始 cover：`swap（spot exit）+ settle + fee − 已 restore` |
 | `--usdt` / `--quote` | 花費 USDT 買回（與 `--amount` 互斥）；超過尚未補滿的 cover 時會封頂 |
-| `--order-type` | `limit`（預設）或 `market`；亦可設 `SPOT_RESTORE_ORDER_TYPE` |
+| `--instrument` | 現貨對，例如 `BTC_USDC`（預設跟 ITM 出場同一對，常是 `BTC_USDT`） |
 | `--wait-seconds` | limit 掛單等待秒數後取消未成交（預設 `SPOT_RESTORE_WAIT_SECONDS=120`） |
 | `--reconcile-only` | 只同步 state 上的 restore 欄位，不送 spot 單 |
 | `--live` | 實際下單並寫入 state（預設 dry-run） |

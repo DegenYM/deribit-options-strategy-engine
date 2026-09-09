@@ -76,7 +76,10 @@ class EngineBase:
         self.config = config
         self.client = client
         self.strategy = StrategySelector(config)
-        self.state_store = state_store or StrategyStateStore(config.state_file)
+        # ``pretty`` must come from the loaded config (``STATE_JSON_PRETTY`` in the
+        # profile .env); without it the store falls back to the process environ
+        # and the ``BotConfig.state_json_pretty`` knob is silently ignored.
+        self.state_store = state_store or StrategyStateStore(config.state_file, pretty=config.state_json_pretty)
         self.sleep_fn = sleep_fn or time.sleep
         # Cache per-currency regime decisions keyed by currency → (regime, ts_ms).
         # Used when index/DVOL feeds are temporarily unavailable so we fall back
@@ -1455,12 +1458,16 @@ class EngineBase:
             and self._open_group_count_for_strategy(state, strategy) >= self.config.max_concurrent_groups
         )
 
-    def _strategy_at_currency_limit(self, state: StrategyState, strategy: str, currency: str) -> bool:
-        return (
-            self.config.max_groups_per_currency > 0
-            and self._open_group_count_for_currency(state, currency, strategy=strategy)
-            >= self.config.max_groups_per_currency
-        )
+    def _strategy_at_currency_limit(
+        self,
+        state: StrategyState,
+        strategy: str,
+        currency: str,
+        *,
+        elevated: bool = False,
+    ) -> bool:
+        cap = self.config.effective_max_groups_per_currency(elevated=elevated)
+        return cap > 0 and self._open_group_count_for_currency(state, currency, strategy=strategy) >= cap
 
     def _strategy_at_book_limit(self, state: StrategyState, book: str, *, strategy: str | None = None) -> bool:
         return (
@@ -1501,7 +1508,11 @@ class EngineBase:
         return underlying_entry_halted(context.snapshot, underlying)
 
     def _refresh_vol_entry_context(self) -> None:
-        need_vol = self.config.enable_iv_entry_gate or self.config.enable_dynamic_target_delta
+        need_vol = (
+            self.config.enable_iv_entry_gate
+            or self.config.enable_dynamic_target_delta
+            or self.config.enable_dynamic_min_net_apr
+        )
         need_trend = self.config.enable_trend_side_bias
         if not need_vol and not need_trend:
             self.strategy.update_vol_entry_context()

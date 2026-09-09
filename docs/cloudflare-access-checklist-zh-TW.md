@@ -70,6 +70,19 @@ frontend_enabled = true
 | 4.3 | 投資人 A 的 Email 開投資人 B 的 hostname | 仍被擋（B 的 policy 不含 A） | ☐ |
 | 4.4 | `GET https://<hostname>/api/health`（已通過 Access 的 session） | 200 | ☐ |
 | 4.5 | 直接打本機 `http://127.0.0.1:<port>/`（不經 Tunnel） | 僅本機可達；確認未對公網開 port | ☐ |
+| 4.6 | （選用，有設 `DASHBOARD_API_TOKEN` 時）`curl https://<hostname>/api/health` **不帶** token | `401`；帶 `X-Dashboard-Token` 後 200 | ☐ |
+| 4.7 | `GET https://<hostname>/package-lock.json`、`/src/main.js` | `404`（靜態白名單） | ☐ |
+
+### 4a. 第二層 token（選用）
+
+Access 是主要防線；`DASHBOARD_API_TOKEN` 是縫隙防護（Access path 設錯、Tunnel 誤把埠對外時仍擋得住 `/api/*` 與 `/ws/*`）。
+
+- 在該投資人 frontend 的環境（launchd plist / `.env`）設 `DASHBOARD_API_TOKEN=<隨機 32+ 字元>`。
+- **投資人 portal**（`investor.html`，投資人自己看）：要讓瀏覽器自動帶 token，只能設 `DASHBOARD_API_TOKEN_EMBED=true` 把 token 寫進 HTML。這代表「能通過 Access 載入頁面的人 = 有 token 的人」，防護等級與 Access 相同，不會更高；**沒有 Access 就不要開 embed**。
+- **只有營運者看的 ops dashboard**：可不 embed，改在瀏覽器 `localStorage.dashboard_api_token` 放 token。
+- `./bot admin` 的探活需要同一個 `DASHBOARD_API_TOKEN` 值在其環境中。
+- 預設不掛 CORS；只有把 HTML 放到別的網域時才設 `DASHBOARD_CORS_ORIGINS=https://a.example,https://b.example`。
+- 詳細見 [`dashboard-zh-TW.md`](dashboard-zh-TW.md#api-存取控制選用)。
 
 ---
 
@@ -91,7 +104,8 @@ frontend_enabled = true
 | 投資人看到 Cloudflare 403 / Access denied | Email 不在 policy；或登入錯誤 Google/IdP | 核對 `dashboard_email` 與 Access Include |
 | 通過 Access 但 dashboard 空白 / API 502 | 本機 frontend 未跑；Tunnel ingress 埠錯 | `./bot investor frontend status`；對照 `registry.toml` 與 `config.yml` |
 | A 能看到 B 的資料 | 共用同一 `--investor` 行程或同一 hostname | 每位投資人獨立 frontend + hostname + Access app |
-| `/api/*` 未受保護 | Access 只設了 `/investor.html` path | Path 留空或明確包含 `/api` |
+| `/api/*` 未受保護 | Access 只設了 `/investor.html` path | Path 留空或明確包含 `/api`；另可加 `DASHBOARD_API_TOKEN` 當第二層 |
+| 通過 Access 後 API 全部 `401` | frontend 設了 `DASHBOARD_API_TOKEN` 但沒 embed、瀏覽器也沒放 token | 開 `DASHBOARD_API_TOKEN_EMBED=true`（僅限 Access 後方）或改用 ops 專用 localStorage 流程 |
 
 ---
 

@@ -9,6 +9,16 @@ from pydantic import BaseModel
 
 from ..env_layout import find_repo_root
 from ..exceptions import AuthenticationError, ConfigurationError, ExchangeError
+from ..frontend_server.auth import (
+    ADMIN_TOKEN_EMBED_ENV,
+    ADMIN_TOKEN_ENV,
+    ADMIN_TOKEN_HEADER,
+    ADMIN_TOKEN_META,
+    SharedTokenGate,
+    configured_token,
+    env_flag,
+    inject_token_meta,
+)
 from .catalog import DEFAULT_LOCAL_HOST, build_admin_catalog
 
 
@@ -24,11 +34,38 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_ADMIN_PORT = 8750
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 ALLOWED_REQUEST_HOSTS = LOOPBACK_HOSTS | {"testserver"}
+# Peer addresses accepted without ``--allow-public``. ``testclient`` is what
+# Starlette's TestClient reports; it cannot appear on a real socket.
+LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient"})
 FRONTEND_ACTIONS = frozenset({"start", "stop", "restart"})
+
+# Files the admin origin may serve. ``admin.html`` loads ``src/admin.js``
+# unbundled, so exactly that one ``src/`` entry is allowed — nothing else under
+# ``frontend/`` (node_modules, package-lock, e2e, …) is reachable.
+ADMIN_ROOT_ASSETS: dict[str, str] = {
+    "styles.css": "text/css",
+    "tailwind.css": "text/css",
+    "tokens.css": "text/css",
+    "favicon.svg": "image/svg+xml",
+}
+ADMIN_SRC_ASSETS: dict[str, str] = {"admin.js": "application/javascript"}
 
 
 def frontend_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "frontend"
+
+
+def _client_is_loopback(request: Any) -> bool:
+    client = getattr(request, "client", None)
+    host = str(getattr(client, "host", "") or "").strip().lower()
+    if not host:
+        return False
+    if host in LOOPBACK_CLIENT_HOSTS:
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def assert_admin_bind_host(host: str, *, allow_public: bool) -> None:
@@ -56,20 +93,32 @@ def _request_host(request: Any) -> str:
     return host
 
 
-def create_admin_app(*, repo_root: Path | str | None = None) -> Any:
+def create_admin_app(*, repo_root: Path | str | None = None, allow_public: bool = False) -> Any:
     try:
         from fastapi import FastAPI, HTTPException
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
-        from fastapi.staticfiles import StaticFiles
         from starlette.middleware.gzip import GZipMiddleware
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("fastapi/uvicorn not installed; run `pip install -r requirements.txt`") from exc
 
     resolved_root = Path(repo_root) if repo_root is not None else find_repo_root(Path.cwd())
     assets = frontend_dir()
+    admin_token = configured_token(ADMIN_TOKEN_ENV)
+    embed_token = admin_token if (admin_token and env_flag(ADMIN_TOKEN_EMBED_ENV)) else None
 
     app = FastAPI(title="Deribit Admin Console", version="0.1.0")
+    # Token gate is added first so it runs *inside* the loopback check below
+    # (later ``add_middleware`` calls wrap earlier ones).
+    if admin_token:
+        app.add_middleware(
+            SharedTokenGate,
+            token=admin_token,
+            header_name=ADMIN_TOKEN_HEADER,
+            gated_prefixes=("/api/",),
+            detail="unauthorized: missing or invalid admin console token",
+        )
+        LOGGER.info("admin console token gate enabled (%s set)", ADMIN_TOKEN_ENV)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -77,16 +126,23 @@ def create_admin_app(*, repo_root: Path | str | None = None) -> Any:
             f"http://localhost:{DEFAULT_ADMIN_PORT}",
         ],
         allow_methods=["GET", "POST"],
-        allow_headers=["*"],
+        allow_headers=["Authorization", "X-Admin-Token", "Content-Type"],
     )
     app.add_middleware(GZipMiddleware, minimum_size=500)
 
     @app.middleware("http")
-    async def _loopback_hosts_only(request: Any, call_next: Any) -> Any:
+    async def _loopback_only(request: Any, call_next: Any) -> Any:
+        # ``Host`` alone is attacker-controlled (DNS rebinding, curl -H); the
+        # peer address is what actually proves the request came from this box.
         host = _request_host(request)
-        if host and host not in ALLOWED_REQUEST_HOSTS:
+        if host and host not in ALLOWED_REQUEST_HOSTS and not allow_public:
             return JSONResponse(
                 {"detail": "admin console is loopback-only"},
+                status_code=403,
+            )
+        if not allow_public and not _client_is_loopback(request):
+            return JSONResponse(
+                {"detail": "admin console is loopback-only (client address rejected)"},
                 status_code=403,
             )
         return await call_next(request)
@@ -104,7 +160,8 @@ def create_admin_app(*, repo_root: Path | str | None = None) -> Any:
         return {
             "ok": True,
             "role": "admin",
-            "loopback_only": True,
+            "loopback_only": not allow_public,
+            "token_required": bool(admin_token),
         }
 
     @app.get("/api/admin/investors")
@@ -173,6 +230,23 @@ def create_admin_app(*, repo_root: Path | str | None = None) -> Any:
         except (ConfigurationError, ExchangeError, AuthenticationError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/admin/investors/{investor_id}/csp-abort-restore")
+    def api_admin_csp_abort_restore(investor_id: str, payload: AdminTradePayload | None = None) -> Any:
+        from .actions import run_csp_abort_restore
+
+        body = payload or AdminTradePayload()
+        try:
+            return run_csp_abort_restore(
+                investor_id,
+                repo_root=_root(),
+                account=body.account,
+                group_id=str(body.group_id or ""),
+                live=bool(body.live),
+                confirm=body.confirm,
+            )
+        except (ConfigurationError, ExchangeError, AuthenticationError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/api/admin/frontend/{investor_id}/{action}")
     def api_admin_frontend_action(investor_id: str, action: str) -> Any:
         normalized = str(action or "").strip().lower()
@@ -220,19 +294,39 @@ def create_admin_app(*, repo_root: Path | str | None = None) -> Any:
         return Response(status_code=204)
 
     if assets.is_dir():
+        from ..frontend_server.routes.static import bundle_cache_headers
+
         admin_html = assets / "admin.html"
 
         @app.get("/admin.html", include_in_schema=False)
         def admin_page() -> Any:
             if not admin_html.is_file():
                 raise HTTPException(status_code=404, detail="admin.html not found")
+            body = admin_html.read_text(encoding="utf-8")
+            if embed_token:
+                body = inject_token_meta(body, meta_name=ADMIN_TOKEN_META, token=embed_token)
             return Response(
-                content=admin_html.read_text(encoding="utf-8"),
+                content=body,
                 media_type="text/html",
                 headers={"Cache-Control": "no-cache, must-revalidate"},
             )
 
-        app.mount("/", StaticFiles(directory=str(assets), html=False), name="frontend")
+        @app.get("/src/{asset_name}", include_in_schema=False)
+        def admin_src_asset(asset_name: str, v: str | None = None) -> Any:
+            media_type = ADMIN_SRC_ASSETS.get(asset_name)
+            path = assets / "src" / asset_name
+            if media_type is None or not path.is_file():
+                raise HTTPException(status_code=404, detail="Not Found")
+            return FileResponse(path, media_type=media_type, headers=bundle_cache_headers(v))
+
+        @app.get("/{asset_name}", include_in_schema=False)
+        def admin_root_asset(asset_name: str, v: str | None = None) -> Any:
+            media_type = ADMIN_ROOT_ASSETS.get(asset_name)
+            path = assets / asset_name
+            if media_type is None or not path.is_file():
+                raise HTTPException(status_code=404, detail="Not Found")
+            return FileResponse(path, media_type=media_type, headers=bundle_cache_headers(v))
+
     else:  # pragma: no cover
         LOGGER.warning("frontend dir not found at %s; admin UI disabled", assets)
 
@@ -253,5 +347,5 @@ def serve_admin(
         raise RuntimeError("uvicorn not installed; run `pip install -r requirements.txt`") from exc
 
     assert_admin_bind_host(host, allow_public=allow_public)
-    app = create_admin_app(repo_root=repo_root)
+    app = create_admin_app(repo_root=repo_root, allow_public=allow_public)
     uvicorn.run(app, host=host, port=port, log_level=log_level)

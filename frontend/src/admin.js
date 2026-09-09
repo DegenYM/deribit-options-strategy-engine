@@ -37,6 +37,59 @@ let catalog = { investors: [] };
 let selectedId = null;
 let actionBusy = false;
 
+const ADMIN_TOKEN_HEADER = "X-Admin-Token";
+const ADMIN_TOKEN_STORAGE_KEY = "admin_console_token";
+let adminTokenPromptShown = false;
+
+/**
+ * Shared secret for an `ADMIN_CONSOLE_TOKEN`-gated console. Order:
+ * `<meta name="admin-console-token">` (server-embedded) → `window.__ADMIN_TOKEN__`
+ * → `localStorage.admin_console_token` (filled by the 401 prompt below).
+ */
+function adminToken() {
+  const meta = document.querySelector('meta[name="admin-console-token"]');
+  const fromMeta = meta?.getAttribute("content")?.trim();
+  if (fromMeta) return fromMeta;
+  if (window.__ADMIN_TOKEN__) {
+    const fromWindow = String(window.__ADMIN_TOKEN__).trim();
+    if (fromWindow) return fromWindow;
+  }
+  try {
+    return String(localStorage.getItem(ADMIN_TOKEN_STORAGE_KEY) || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function rememberAdminToken(token) {
+  try {
+    if (token) localStorage.setItem(ADMIN_TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(ADMIN_TOKEN_STORAGE_KEY);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+/** `fetch()` for `/api/admin/*`: attaches the token; on 401 prompts once and retries. */
+async function adminFetch(url, options = {}) {
+  const send = (token) => {
+    const headers = { ...(options.headers || {}) };
+    if (token) headers[ADMIN_TOKEN_HEADER] = token;
+    return fetch(url, { ...options, headers });
+  };
+  let response = await send(adminToken());
+  if (response.status !== 401 || adminTokenPromptShown) return response;
+  adminTokenPromptShown = true;
+  const typed = window.prompt("Admin console token (ADMIN_CONSOLE_TOKEN):", "");
+  adminTokenPromptShown = false;
+  if (typed === null) return response;
+  const token = String(typed).trim();
+  rememberAdminToken(token);
+  response = await send(token);
+  if (response.status === 401) rememberAdminToken("");
+  return response;
+}
+
 function formatTime(ts) {
   if (!ts) return "—";
   try {
@@ -202,7 +255,7 @@ function onEmbedMessage(event) {
     return;
   }
   if (data.type === "admin-group-action") {
-    const kind = data.kind === "recover" ? "recover" : "close";
+    const kind = ["recover", "csp-abort-restore"].includes(data.kind) ? data.kind : "close";
     openTradeDialog(kind, {
       groupId: String(data.group_id || ""),
       account: String(data.account || ""),
@@ -265,7 +318,7 @@ function updateToolbar(row) {
 
 async function loadCatalog({ keepFrame = false } = {}) {
   if (els.hint) els.hint.textContent = "Loading…";
-  const response = await fetch("/api/admin/investors", { cache: "no-store" });
+  const response = await adminFetch("/api/admin/investors", { cache: "no-store" });
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(detail || `HTTP ${response.status}`);
@@ -294,7 +347,7 @@ async function runFrontendAction(action) {
   actionBusy = true;
   setActionStatus(`${verb} ${row.investor_id}…`, "info");
   try {
-    const response = await fetch(`/api/admin/frontend/${encodeURIComponent(row.investor_id)}/${action}`, {
+    const response = await adminFetch(`/api/admin/frontend/${encodeURIComponent(row.investor_id)}/${action}`, {
       method: "POST",
     });
     const payload = await response.json().catch(() => ({}));
@@ -318,6 +371,13 @@ const TRADE_KINDS = {
     endpoint: "spot-restore",
     empty: "No recoverable groups (need closed + unrestored).",
     pick: "restore",
+  },
+  "csp-abort-restore": {
+    title: "Close CSP + recover cover",
+    lead: "Skip the cash-secured wheel, market-close the open put, then market-buy cover on the ITM exit pair (BTC_USDC / ETH_USDC when the wheel sold USDC). Preview first; type LIVE to submit.",
+    endpoint: "csp-abort-restore",
+    empty: "No open cash-secured puts.",
+    pick: "csp-abort",
   },
   close: {
     title: "Close position",
@@ -435,6 +495,32 @@ function formatPreviewText(body) {
     lines.push(`#${body.group_id}  ${plan.short_instrument_name || plan.instrument_name || pickEstimate(plan, "instrument") || ""}`);
   }
   if (body.account) lines.push(`account: ${body.account}`);
+  if (body.kind === "csp_abort_restore" || plan.action === "csp-abort-restore") {
+    const close = plan.close || {};
+    const restore = plan.restore || {};
+    lines.push("");
+    if (Array.isArray(plan.will)) {
+      for (const step of plan.will) lines.push(`- ${step}`);
+    }
+    if (plan.csp_group_id || close.short_instrument_name) {
+      lines.push("");
+      lines.push(
+        `CSP close           #${plan.csp_group_id || close.group_id || "—"}  ${close.short_instrument_name || ""}`
+      );
+      if (close.est_pnl_usdc != null) lines.push(`Est. CSP PnL        ${formatUsd(close.est_pnl_usdc)}`);
+    }
+    if (restore.unrestored_amount) {
+      const quote = restore.quote_currency || "USDT";
+      lines.push("");
+      lines.push(`Cover restore       ${restore.spot_instrument_name || restore.instrument_name || ""}`);
+      lines.push(`Unrestored          ${restore.unrestored_amount} ${restore.currency || ""}`);
+      lines.push(`Quote               ${quote}`);
+      lines.push(`Breakeven           ${formatPx(restore.breakeven_price, quote)}`);
+    }
+    lines.push("");
+    lines.push("Live market fill can differ from this estimate.");
+    return lines.join("\n");
+  }
   if (plan.quantity) lines.push(`qty ${plan.quantity} · ${plan.order_type || "market"}`);
   if (plan.unrestored_amount) lines.push(`unrestored ${plan.unrestored_amount} ${plan.currency || book}`);
 
@@ -523,7 +609,9 @@ function renderTradeTargets(kind) {
   const rows =
     kind === "recover"
       ? tradeTargets?.restore_candidates || []
-      : kind === "close"
+      : kind === "csp-abort-restore"
+        ? tradeTargets?.csp_abort_candidates || []
+        : kind === "close"
         ? tradeTargets?.open_groups || []
         : [
             { slug: "", display_name: "All accounts", strategy: "all" },
@@ -554,13 +642,17 @@ function renderTradeTargets(kind) {
         const title =
           kind === "recover"
             ? `#${row.group_id}  Recover ${row.unrestored_amount} ${row.currency}`
-            : `#${row.group_id}  ${row.short_instrument_name || ""}`;
+            : kind === "csp-abort-restore"
+              ? `#${row.group_id}  ${row.short_instrument_name || "CSP"}`
+              : `#${row.group_id}  ${row.short_instrument_name || ""}`;
         label.append(input, document.createTextNode(title));
         const small = document.createElement("small");
         small.textContent =
           kind === "recover"
             ? `${row.account} · ${row.instrument_name} · status ${row.spot_restore_status || "none"}`
-            : `${row.account} · qty ${row.quantity} · ${row.currency}`;
+            : kind === "csp-abort-restore"
+              ? `${row.account} · parent #${row.parent_group_id || "—"} · ${row.spot_instrument_name || "spot"}`
+              : `${row.account} · qty ${row.quantity} · ${row.currency}`;
         label.append(small);
       }
       return label;
@@ -609,7 +701,7 @@ async function openTradeDialog(kind, preset = null) {
     return;
   }
   try {
-    const response = await fetch(`/api/admin/investors/${encodeURIComponent(row.investor_id)}/targets`, {
+    const response = await adminFetch(`/api/admin/investors/${encodeURIComponent(row.investor_id)}/targets`, {
       cache: "no-store",
     });
     const payload = await response.json().catch(() => ({}));
@@ -657,7 +749,7 @@ async function postTrade({ live }) {
   if (els.dialogLiveBtn) els.dialogLiveBtn.disabled = true;
   actionBusy = true;
   try {
-    const response = await fetch(`/api/admin/investors/${encodeURIComponent(row.investor_id)}/${spec.endpoint}`, {
+    const response = await adminFetch(`/api/admin/investors/${encodeURIComponent(row.investor_id)}/${spec.endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

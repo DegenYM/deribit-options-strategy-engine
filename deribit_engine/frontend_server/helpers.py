@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -81,12 +82,16 @@ def _has_private_creds(config: BotConfig) -> bool:
 
 
 def _live_api_identity_config(config: BotConfig, label: str) -> str:
-    """Same meaning as `_live_api_identity`, but accepts a config object directly."""
+    """Same meaning as `_live_api_identity`, but accepts a config object directly.
+
+    The identity is a short digest rather than the raw ``client_secret`` so it
+    can safely travel through cache keys, log lines and debug payloads.
+    """
     if not _has_private_creds(config):
         return f"noid:{label}"
     cid = config.client_id.strip().lower()
     csec = config.client_secret.strip()
-    return f"{cid}\0{csec}"
+    return hashlib.sha256(f"{cid}\0{csec}".encode()).hexdigest()[:16]
 
 
 def _live_api_identity(account: DashboardAccount) -> str:
@@ -136,11 +141,61 @@ def _append_ledger(root: Path, row: dict[str, Any]) -> None:
     line = json.dumps(row, default=json_default, ensure_ascii=False)
     with path.open("a", encoding="utf-8") as fp:
         fp.write(line + "\n")
+        # The ledger is the only record of intraday equity; a power loss right
+        # after the write must not silently drop the row.
+        fp.flush()
+        os.fsync(fp.fileno())
+
+
+_LEDGER_TAIL_CHUNK_BYTES = 64 * 1024
+
+
+def _last_json_line(path: Path) -> dict[str, Any] | None:
+    """Return the last parseable JSON object in ``path`` without reading the whole file.
+
+    Seeks backwards from EOF in fixed-size chunks; ledger rows are a few KB so one
+    chunk almost always suffices. Trailing blank / partial lines are skipped.
+    """
+    try:
+        with path.open("rb") as fp:
+            fp.seek(0, os.SEEK_END)
+            end = fp.tell()
+            if end == 0:
+                return None
+            buffer = b""
+            position = end
+            while position > 0:
+                step = min(_LEDGER_TAIL_CHUNK_BYTES, position)
+                position -= step
+                fp.seek(position)
+                buffer = fp.read(step) + buffer
+                lines = buffer.split(b"\n")
+                # ``lines[0]`` may be a partial line unless we reached file start.
+                complete = lines[1:] if position > 0 else lines
+                for raw in reversed(complete):
+                    text = raw.strip()
+                    if not text:
+                        continue
+                    try:
+                        row = json.loads(text.decode("utf-8"))
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
+                    if isinstance(row, dict):
+                        return row
+                # Keep only the (possibly partial) first line for the next chunk.
+                buffer = lines[0]
+    except OSError as exc:  # pragma: no cover — best-effort log only.
+        LOGGER.warning("ledger tail read failed for %s: %s", path, exc)
+    return None
 
 
 def _latest_ledger_row(root: Path) -> dict[str, Any] | None:
-    rows = _read_ledger(root)
-    return rows[-1] if rows else None
+    """Newest ledger row: tail of the lexically-last ``equity_*.jsonl`` (falls back to older files)."""
+    for path in reversed(_iter_ledger_files(root)):
+        row = _last_json_line(path)
+        if row is not None:
+            return row
+    return None
 
 
 def _latest_ledger_snapshot(
@@ -166,7 +221,7 @@ def _latest_ledger_snapshot(
                 "env": row.get("env") or account.config.env,
                 "option_strategy": row.get("option_strategy") or account.config.option_strategy,
                 "ts_ms": ts,
-                "ledger_dir": str(account.ledger_root),
+                "ledger_dir": account.ledger_root.name,
             }
         )
         identity = _live_api_identity(account)
@@ -1030,7 +1085,9 @@ def _rolling_apr_series_from_store(
 def _tag_row(row: dict[str, Any], account: DashboardAccount) -> dict[str, Any]:
     out = dict(row)
     out["account_name"] = account.name
-    out["account_env_file"] = str(account.env_file)
+    # Basename only (the frontend just matches on ".env.<strategy>"); the full
+    # path would leak the operator's filesystem layout through /api/groups.
+    out["account_env_file"] = Path(account.env_file).name
     return out
 
 

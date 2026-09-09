@@ -1,4 +1,4 @@
-import { ADMIN_EMBED, INVESTOR, INVESTOR_ZH, i18n, resolveApiUrl } from "../shared/context.js";
+import { ADMIN_EMBED, INVESTOR, INVESTOR_ZH, apiFetch, i18n, resolveApiUrl } from "../shared/context.js";
 import {
   ACTIVITY_PAGE_SIZE,
   BOOK_COLORS,
@@ -645,8 +645,8 @@ function buildProfitCompositionRows(ctx) {
   } = profitCompositionByBook;
   const hedgeUsd = num(hedgeTotalUsd) ?? 0;
   const hasHedge = Math.abs(hedgeUsd) >= 0.005;
-  const places = { BTC: 5, ETH: 4, USDC: 2 };
-  const entries = PROFIT_HELD_BOOKS.map((book) => {
+  const places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 };
+  const entries = CORE_BOOKS.map((book) => {
     const native = num(nativeByBook?.[book]);
     const earnedNative = num(earnedNativeByBook?.[book]) ?? 0;
     const swappedNative = num(swappedNativeByBook?.[book]) ?? 0;
@@ -654,15 +654,6 @@ function buildProfitCompositionRows(ctx) {
       num(earnedUsdByBook?.[book]) ??
       (native !== null && native !== 0 ? profitNativeToUsdApprox(book, native) : null);
     const swappedUsdt = num(swappedUsdtByBook?.[book]) ?? 0;
-    if (earnedUsd === null && (native === null || native === 0) && earnedNative === 0) return null;
-    if (
-      earnedUsd !== null &&
-      Math.abs(earnedUsd) < 0.005 &&
-      (native === null || Math.abs(native) < 1e-8) &&
-      Math.abs(earnedNative) < 1e-8
-    ) {
-      return null;
-    }
     const totalUsd =
       num(usdByBook?.[book]) ??
       (swappedUsdt > 0.005 && isMeaningfulNativeForBook(native, book)
@@ -670,6 +661,17 @@ function buildProfitCompositionRows(ctx) {
         : null) ??
       earnedUsd ??
       (native !== null && native !== 0 ? profitNativeToUsdApprox(book, native) : null);
+    const hasUsd =
+      (earnedUsd !== null && Math.abs(earnedUsd) >= 0.005) ||
+      (totalUsd !== null && Math.abs(totalUsd) >= 0.005);
+    if (!hasUsd && (native === null || native === 0) && earnedNative === 0) return null;
+    if (
+      !hasUsd &&
+      (native === null || Math.abs(native) < 1e-8) &&
+      Math.abs(earnedNative) < 1e-8
+    ) {
+      return null;
+    }
     return {
       book,
       native: native ?? 0,
@@ -708,7 +710,10 @@ function buildProfitCompositionRows(ctx) {
       detailText = i18n("native · USD pending", "原幣 · USD 待更新");
       primaryText = nativeText;
     } else if (isStable) {
-      detailText = i18n("stablecoin", "穩定幣");
+      detailText =
+        book === "USDT"
+          ? i18n("exit − restore", "賣出 − 買回")
+          : i18n("stablecoin", "穩定幣");
       primaryText = displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : nativeText;
     } else if (swappedUsdt > 0.005 && isMeaningfulNativeForBook(swappedNative, book)) {
       const swappedLabel = i18n("swapped", "已兌");
@@ -2783,13 +2788,46 @@ function _itmSpotExitSwapNative(g) {
 
 function _itmSpotRestoreFilledNative(g) {
   const restoreStatus = String(g?.spot_restore_status || "").toLowerCase();
+  const amount = Math.max(num(g?.spot_restore_amount) ?? 0, 0);
   if (restoreStatus === "filled" || restoreStatus === "pending" || restoreStatus === "submitted") {
-    return Math.max(num(g?.spot_restore_amount) ?? 0, 0);
+    return amount;
   }
+  // Status left as skipped after a real restore fill (amount + quote spend present).
+  const spent =
+    (num(g?.spot_restore_quote_spent_lifetime) ?? 0) > 0
+      ? (num(g?.spot_restore_quote_spent_lifetime) ?? 0)
+      : (num(g?.spot_restore_quote_spent) ?? 0);
+  if (amount > 0 && spent > 0) return amount;
   return 0;
 }
 
-function _itmSpotRestorePlan(g) {
+function _groupsForSpotRestore(groups) {
+  return groups ?? STATE.groups;
+}
+
+/** Parent restore plus CSP-child assignment buys that refill the same cover. */
+function wheelSpotRestoreFilledNative(g, groups) {
+  let restored = _itmSpotRestoreFilledNative(g);
+  const kids = cashSecuredChildrenForParent(_groupsForSpotRestore(groups), g);
+  if (!looksLikeCoveredCallRow(g) && !kids.length) return restored;
+  for (const child of kids) {
+    restored += _itmSpotRestoreFilledNative(child);
+  }
+  return restored;
+}
+
+/** Parent restore quote plus CSP-child assignment spend for the same cover. */
+function wheelSpotRestoreQuoteUsdt(g, groups) {
+  let spent = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+  const kids = cashSecuredChildrenForParent(_groupsForSpotRestore(groups), g);
+  if (!looksLikeCoveredCallRow(g) && !kids.length) return spent;
+  for (const child of kids) {
+    spent += spotRestoreRealizedQuoteUsdt(child) ?? 0;
+  }
+  return spent;
+}
+
+function _itmSpotRestorePlan(g, groups) {
   const cover = num(g?.covered_underlying_quantity) ?? num(g?.quantity) ?? 0;
   const swap = _itmSpotExitSwapNative(g);
   const settle = Math.max(num(g?.spot_exit_settlement_loss) ?? 0, 0);
@@ -2797,7 +2835,7 @@ function _itmSpotRestorePlan(g) {
   let rawTarget = swap + settle - premium;
   if (rawTarget < 0) rawTarget = 0;
   const target = cover > 0 ? Math.min(rawTarget, cover) : rawTarget;
-  const restored = _itmSpotRestoreFilledNative(g);
+  const restored = wheelSpotRestoreFilledNative(g, groups);
   const structuralWithPremium = Math.max(cover + premium - settle, 0);
   const structuralCoverOnly = Math.max(cover - settle, 0);
   let premiumInSwap = false;
@@ -2844,13 +2882,13 @@ export function itmFoldedPremiumUsdt(g) {
  * Restore-to-cover target still unpaid (same identity as backend
  * ``plan_spot_restore_to_cover`` / ``unrestored_spot_exit_native``).
  */
-export function unrestoredSpotExitNative(g) {
+export function unrestoredSpotExitNative(g, groups) {
   const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
   if (book !== "BTC" && book !== "ETH") return 0;
   const swap = _itmSpotExitSwapNative(g);
   const settle = Math.max(num(g?.spot_exit_settlement_loss) ?? 0, 0);
   if (swap <= 0 && settle <= 0) return 0;
-  return _itmSpotRestorePlan(g).unrestored;
+  return _itmSpotRestorePlan(g, groups).unrestored;
 }
 
 /** Conservative spot min lot when instrument lookup is unavailable (ETH 0.001 / BTC 0.0001). */
@@ -2859,10 +2897,10 @@ export function spotRestoreLotThreshold(currency) {
 }
 
 /** Both ITM legs filled with real USDT flows (restore may predate an overstated exit amount). */
-export function itmSpotRoundTripComplete(g) {
-  const plan = _itmSpotRestorePlan(g);
+export function itmSpotRoundTripComplete(g, groups) {
+  const plan = _itmSpotRestorePlan(g, groups);
+  const restoreU = wheelSpotRestoreQuoteUsdt(g, groups);
   if (plan.unrestored <= 1e-8) {
-    const restoreU = spotRestoreRealizedQuoteUsdt(g) ?? 0;
     if (plan.target > 0 && plan.restored <= 0 && restoreU <= 0) return false;
     return true;
   }
@@ -2872,14 +2910,15 @@ export function itmSpotRoundTripComplete(g) {
   const dustOmitted = reason.includes("dust_below_min_omitted");
   const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
   const dustRemainder = plan.unrestored < spotRestoreLotThreshold(book);
+  const childFilled = restoreU > 0 && plan.restored > 0;
   // Sub-min remainder: omit (never round up). Treat as complete when restore already filled.
-  if (restoreStatus === "filled" && (dustOmitted || dustRemainder)) {
+  if ((restoreStatus === "filled" || childFilled) && (dustOmitted || dustRemainder)) {
     const exitU = spotExitRealizedQuoteUsdt(g) ?? 0;
     if (exitStatus === "filled" && exitU > 0) return true;
   }
-  if (exitStatus !== "filled" || restoreStatus !== "filled") return false;
+  if (exitStatus !== "filled") return false;
+  if (restoreStatus !== "filled" && restoreU <= 0) return false;
   const exitU = spotExitRealizedQuoteUsdt(g) ?? 0;
-  const restoreU = spotRestoreRealizedQuoteUsdt(g) ?? 0;
   return exitU > 0 && restoreU > 0;
 }
 
@@ -2888,12 +2927,12 @@ export function itmSpotRoundTripComplete(g) {
  * only after restore-to-cover is complete (do not count raw cover sale as profit).
  * Legacy folded premium USDT is attributed to Profit swap instead.
  */
-export function itmSpotExitNetUsdtForTotalProfit(g) {
+export function itmSpotExitNetUsdtForTotalProfit(g, groups) {
   if (!groupHasItmSpotExitFills(g)) return null;
   const exitU = spotExitRealizedQuoteUsdt(g);
   if (exitU === null || exitU <= 0) return null;
-  if (!itmSpotRoundTripComplete(g)) return null;
-  const restoreU = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+  if (!itmSpotRoundTripComplete(g, groups)) return null;
+  const restoreU = wheelSpotRestoreQuoteUsdt(g, groups);
   let net = exitU - restoreU;
   const folded = itmFoldedPremiumUsdt(g);
   if (folded > 0) net -= folded;
@@ -2904,14 +2943,14 @@ export function itmSpotExitNetUsdtForTotalProfit(g) {
  * Closed-trade card ITM PnL: exit − restore once restore has quote spend
  * (or round-trip is complete for fee recognition).
  */
-export function itmSpotExitDisplayNetUsdt(g) {
+export function itmSpotExitDisplayNetUsdt(g, groups) {
   if (!groupHasItmSpotExitFills(g)) return null;
-  const feeNet = itmSpotExitNetUsdtForTotalProfit(g);
+  const feeNet = itmSpotExitNetUsdtForTotalProfit(g, groups);
   if (feeNet !== null) return feeNet;
   const exitU = spotExitRealizedQuoteUsdt(g);
-  const restoreU = spotRestoreRealizedQuoteUsdt(g);
+  const restoreU = wheelSpotRestoreQuoteUsdt(g, groups);
   if (exitU === null || exitU <= 0) return null;
-  if (restoreU === null || restoreU <= 0) return null;
+  if (!(restoreU > 0)) return null;
   return exitU - restoreU;
 }
 
@@ -2919,7 +2958,7 @@ export function sumItmSpotExitNetUsdtForTotalProfit(rows) {
   let total = 0;
   let any = false;
   for (const g of rows || []) {
-    const net = itmSpotExitNetUsdtForTotalProfit(g);
+    const net = itmSpotExitNetUsdtForTotalProfit(g, rows);
     if (net === null) continue;
     total += net;
     any = true;
@@ -3146,6 +3185,125 @@ export function isCashSecuredGroup(g) {
   return normalizeStrategyId(g?.strategy) === "cash_secured" || Boolean(String(g?.cash_secured_from_group_id || "").trim());
 }
 
+/** Closed CSP realized premium in USDC (entry credit − close debit − close fee). */
+export function cspPremiumRealizedUsdc(g) {
+  if (String(g?.status || "").toLowerCase() !== "closed") return 0;
+  const credit = num(g?.entry_credit) ?? 0;
+  if (credit <= 0) return 0;
+  const debit = Math.max(num(g?.realized_close_debit) ?? 0, 0);
+  const fee = Math.max(num(g?.realized_close_fee) ?? 0, 0);
+  const kept = credit - debit - fee;
+  return kept > 0 ? kept : 0;
+}
+
+/** USDC already spent buying native; pending rows that still stash the full target count as 0. */
+export function cspPremiumSwapSpentUsdc(g) {
+  const spent = num(g?.csp_premium_swap_amount) ?? 0;
+  if (spent <= 0) return 0;
+  const status = String(g?.csp_premium_swap_status || "").toLowerCase();
+  const premium = cspPremiumRealizedUsdc(g);
+  if ((status === "pending" || status === "submitted" || status === "") && premium > 0 && spent === premium) {
+    return 0;
+  }
+  return spent;
+}
+
+/** Leftover USDC vs native already bought for a closed CSP child. */
+export function cspPremiumDispositionSplit(g) {
+  if (!isCashSecuredGroup(g)) return null;
+  let remainingUsdc = Math.max(0, cspPremiumRealizedUsdc(g) - cspPremiumSwapSpentUsdc(g));
+  let spotNative = num(g?.csp_premium_swap_native) ?? 0;
+  if (spotNative < 0) spotNative = 0;
+  let spotBook = String(g?.currency || "").toUpperCase();
+  if (spotBook !== "BTC" && spotBook !== "ETH") spotBook = "";
+  if (remainingUsdc <= 0 && spotNative <= 0) {
+    const stored = num(g?.realized_pnl);
+    if (stored === null || stored === 0) return null;
+    remainingUsdc = stored;
+    spotNative = 0;
+    spotBook = "";
+  }
+  return {
+    remainingUsdc,
+    spotBook: spotNative > 0 ? spotBook : "",
+    spotNative,
+  };
+}
+
+function cspPremiumSwapSkipDetail(g) {
+  const reason = String(g?.csp_premium_swap_reason || "").toLowerCase();
+  if (reason.includes("dust_below_min")) {
+    return i18n("below min size, skipped", "低於最小成交單位，未兌換");
+  }
+  if (reason.includes("no_realized")) {
+    return i18n("no premium to swap", "無權利金可兌");
+  }
+  return i18n("skipped", "已略過");
+}
+
+function cspPremiumSwapMetaLineForRow(g) {
+  const status = String(g?.csp_premium_swap_status || "").toLowerCase();
+  if (!status) return null;
+  const book = String(g?.currency || "").toUpperCase();
+  const spotBook = book === "BTC" || book === "ETH" ? book : "—";
+  const spent = cspPremiumSwapSpentUsdc(g);
+  const native = num(g?.csp_premium_swap_native) ?? 0;
+  const leftover = Math.max(0, cspPremiumRealizedUsdc(g) - spent);
+  const spentText = spent > 0 ? fmtProfitNative("USDC", spent) : null;
+  const nativeText = native > 0 ? fmtProfitNative(spotBook, native) : null;
+  const leftoverText = leftover >= 0.005 ? fmtProfitNative("USDC", leftover) : null;
+  if (status === "filled") {
+    if (!spentText && !nativeText && leftoverText) {
+      return [i18n("CSP swapped", "CSP 已兌現貨"), `${leftoverText} USDC`];
+    }
+    if (!spentText && !nativeText) return null;
+    const avgSuffix =
+      spent > 0 && native > 0
+        ? (() => {
+            const avg = profitSwapDisplayAvg(spotBook, spent, native);
+            return avg === null ? "" : ` · ${i18n("avg", "均價")} ${fmtProfitAvgUsd(spotBook, avg)}`;
+          })()
+        : "";
+    const leftoverSuffix = leftoverText ? ` · ${i18n("leftover", "剩餘")} ${leftoverText} USDC` : "";
+    const detail =
+      spentText && nativeText
+        ? `${spentText} USDC → ${nativeText} ${spotBook}${avgSuffix}${leftoverSuffix}`
+        : nativeText
+          ? `→ ${nativeText} ${spotBook}${leftoverSuffix}`
+          : `${spentText} USDC → ${spotBook}${leftoverSuffix}`;
+    return [i18n("CSP swapped", "CSP 已兌現貨"), detail];
+  }
+  if (status === "pending" || status === "submitted") {
+    const budget = spent > 0 ? spent : cspPremiumRealizedUsdc(g);
+    const budgetText = budget > 0 ? fmtProfitNative("USDC", budget) : null;
+    return [
+      i18n("CSP swapped", "CSP 已兌現貨"),
+      budgetText
+        ? `${budgetText} USDC → ${spotBook} (${i18n("pending", "待兌")})`
+        : i18n("pending", "待兌"),
+    ];
+  }
+  if (status === "skipped") {
+    const amountText = leftoverText || (cspPremiumRealizedUsdc(g) > 0 ? fmtProfitNative("USDC", cspPremiumRealizedUsdc(g)) : null);
+    const skip = cspPremiumSwapSkipDetail(g);
+    return [i18n("CSP swap", "CSP 兌現貨"), amountText ? `${amountText} USDC · ${skip}` : skip];
+  }
+  if (status === "failed") {
+    return [i18n("CSP swap", "CSP 兌現貨"), i18n("failed", "兌換失敗")];
+  }
+  return null;
+}
+
+/** Closed-trade meta: CSP premium → native spot (own row, or parent looking up the child). */
+export function cspPremiumSwapMetaLine(g, groups) {
+  const own = cspPremiumSwapMetaLineForRow(g);
+  if (own) return own;
+  const childId = String(g?.cash_secured_group_id || "").trim();
+  if (!childId) return null;
+  const child = findTradeGroupById(groups, childId);
+  return child ? cspPremiumSwapMetaLineForRow(child) : null;
+}
+
 export function summarizeCashSecuredDisposition(groups) {
   const rows = cashSecuredGroupRows(groups);
   const children = rows.filter((g) => isCashSecuredGroup(g));
@@ -3156,53 +3314,157 @@ export function summarizeCashSecuredDisposition(groups) {
   );
   const open = children.filter((g) => String(g?.status || "").toLowerCase() === "open");
   const closed = children.filter((g) => String(g?.status || "").toLowerCase() === "closed");
-  return { children, parents, open, closed };
+  return { children, parents, open, closed, groups };
+}
+
+function sameTradeGroupId(left, right) {
+  const a = String(left || "").trim();
+  const b = String(right || "").trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return /^\d+$/.test(a) && /^\d+$/.test(b) && Number(a) === Number(b);
+}
+
+export function cashSecuredChildrenForParent(groups, parent) {
+  const pid = String(parent?.group_id || "").trim();
+  const rawIds = parent?.cash_secured_group_ids;
+  const known = new Set(
+    []
+      .concat(Array.isArray(rawIds) ? rawIds : typeof rawIds === "string" ? rawIds.split(",") : [])
+      .concat(parent?.cash_secured_group_id || [])
+      .map((x) => String(x || "").trim())
+      .filter(Boolean)
+  );
+  return cashSecuredGroupRows(groups).filter((g) => {
+    const gid = String(g?.group_id || "").trim();
+    if (!gid || sameTradeGroupId(gid, pid)) return false;
+    const fromParent = String(g?.cash_secured_from_group_id || "").trim();
+    return sameTradeGroupId(fromParent, pid) || [...known].some((id) => sameTradeGroupId(id, gid));
+  });
+}
+
+export function cashSecuredWheelPnl(parent, groups) {
+  // ITM cover sales store assignment settlement on realized_pnl; wheel income is
+  // the call credit plus closed CSP legs.
+  const itmSold = String(parent?.spot_exit_status || "").toLowerCase() === "filled";
+  const parentPnl = itmSold
+    ? (num(parent?.entry_credit) ?? 0)
+    : (num(parent?.realized_pnl) ?? 0);
+  let cspPnl = 0;
+  let closedLegs = 0;
+  for (const child of cashSecuredChildrenForParent(groups, parent)) {
+    if (String(child?.status || "").toLowerCase() !== "closed") continue;
+    const pnl = num(child?.realized_pnl);
+    if (pnl === null) continue;
+    cspPnl += pnl;
+    closedLegs += 1;
+  }
+  return { parentPnl, cspPnl, total: parentPnl + cspPnl, closedLegs };
+}
+
+function cashSecuredCallLabel(parent) {
+  const strike = num(parent?.short_strike);
+  if (strike === null) return "";
+  const n = Number.isInteger(strike) ? String(strike) : fmtNum(strike, 0);
+  return `${n}-C`;
+}
+
+function sortCashSecuredLegs(kids) {
+  return [...(kids || [])].sort((a, b) => {
+    const ao = String(a?.status || "").toLowerCase() === "open" ? 0 : 1;
+    const bo = String(b?.status || "").toLowerCase() === "open" ? 0 : 1;
+    if (ao !== bo) return ao - bo;
+    const ae = num(a?.entry_timestamp_ms) ?? 0;
+    const be = num(b?.entry_timestamp_ms) ?? 0;
+    if (ae !== be) return be - ae;
+    return String(a?.group_id || "").localeCompare(String(b?.group_id || ""));
+  });
+}
+
+function cashSecuredLegLabel(g) {
+  const raw = String(g?.short_instrument_name || "").trim();
+  if (!raw) return "—";
+  const m = raw.match(/^[A-Z0-9]+(?:_[A-Z0-9]+)?-(\d{1,2}[A-Z]{3}\d{2})-(\d+(?:\.\d+)?)-([CP])$/i);
+  if (!m) return raw;
+  return `${m[1].toUpperCase()} ${m[2]}-${m[3].toUpperCase()}`;
 }
 
 export function fmtCashSecuredPanel(summary) {
   if (!summary) return "";
-  const { open, closed, parents } = summary;
-  if (!open.length && !closed.length && !parents.length) return "";
-  const lines = [];
-  for (const g of open) {
-    const inst = String(g?.short_instrument_name || "—");
-    const qty = fmtProfitNative(g?.currency || "BTC", g?.quantity);
-    const fromId = String(g?.cash_secured_from_group_id || "").trim();
-    const from = fromId ? ` · #${fromId}` : "";
-    lines.push(
-      `<div class="profit-swap-book-slot"><div class="profit-swap-book-slot-main">${escapeHtml(inst)}</div><div class="profit-swap-book-slot-sub">${i18n("Open", "持倉中")} · ${qty}${from}</div></div>`
-    );
+  const { open, closed, parents, groups } = summary;
+  if (!open.length && !closed.length) return "";
+  const parentById = new Map((parents || []).map((g) => [String(g?.group_id || "").trim(), g]));
+  const byParent = new Map();
+  for (const g of [...open, ...closed]) {
+    const fromId = String(g?.cash_secured_from_group_id || "").trim() || "_";
+    if (!byParent.has(fromId)) byParent.set(fromId, []);
+    byParent.get(fromId).push(g);
   }
-  for (const g of closed) {
-    const inst = String(g?.short_instrument_name || "—");
-    const fromId = String(g?.cash_secured_from_group_id || "").trim();
-    const from = fromId ? ` · #${fromId}` : "";
-    lines.push(
-      `<div class="profit-swap-book-slot"><div class="profit-swap-book-slot-main">${escapeHtml(inst)}</div><div class="profit-swap-book-slot-sub">${i18n("Closed", "已平倉")}${from}</div></div>`
-    );
+  const wheels = [...byParent.entries()].map(([fromId, kids]) => ({
+    fromId,
+    parent: parentById.get(fromId) || null,
+    kids: sortCashSecuredLegs(kids),
+  }));
+  wheels.sort((a, b) => {
+    const ao = a.kids.some((g) => String(g?.status || "").toLowerCase() === "open") ? 0 : 1;
+    const bo = b.kids.some((g) => String(g?.status || "").toLowerCase() === "open") ? 0 : 1;
+    if (ao !== bo) return ao - bo;
+    return a.fromId.localeCompare(b.fromId);
+  });
+  const cards = [];
+  for (const { fromId, parent, kids } of wheels) {
+    const wheel = parent
+      ? cashSecuredWheelPnl(parent, groups)
+      : {
+          parentPnl: 0,
+          cspPnl: kids.reduce((sum, g) => {
+            if (String(g?.status || "").toLowerCase() !== "closed") return sum;
+            return sum + (num(g?.realized_pnl) ?? 0);
+          }, 0),
+          total: 0,
+          closedLegs: kids.filter((g) => String(g?.status || "").toLowerCase() === "closed").length,
+        };
+    if (!parent) wheel.total = wheel.cspPnl;
+    const callLabel = cashSecuredCallLabel(parent);
+    const titleId = fromId === "_" ? i18n("Unlinked", "未歸戶") : `#${fromId}`;
+    const split = [callLabel, `${i18n("Call", "Call")} ${fmtUsd(wheel.parentPnl)}`, `CSP ${fmtUsd(wheel.cspPnl)}`]
+      .filter(Boolean)
+      .join(" · ");
+    const legs = kids
+      .map((g) => {
+        const gid = String(g?.group_id || "").trim();
+        const inst = cashSecuredLegLabel(g);
+        const qty = fmtProfitNative(g?.currency || "BTC", g?.quantity);
+        const isOpen = String(g?.status || "").toLowerCase() === "open";
+        const pnl = num(g?.realized_pnl);
+        const meta = isOpen ? qty : pnl !== null ? fmtUsd(pnl) : qty;
+        const metaClass = isOpen ? "" : pnlClass(pnl);
+        const status = isOpen ? i18n("Open", "持倉") : i18n("Closed", "已平");
+        const idHtml = gid
+          ? `<span class="csp-leg-id">#${escapeHtml(gid)}</span>`
+          : "";
+        return `<li class="csp-leg ${isOpen ? "is-open" : "is-closed"}">
+          <span class="csp-leg-status">${escapeHtml(status)}</span>
+          <span class="csp-leg-body">${idHtml} <span class="csp-leg-name font-mono">${escapeHtml(inst)}</span></span>
+          <span class="csp-leg-meta font-mono tabular-nums ${metaClass}">${escapeHtml(meta)}</span>
+        </li>`;
+      })
+      .join("");
+    cards.push(`<article class="csp-wheel" aria-label="${escapeHtml(titleId)}">
+      <header class="csp-wheel-head">
+        <div class="csp-wheel-id">${escapeHtml(titleId)}</div>
+        <div class="csp-wheel-pnl">
+          <span class="csp-wheel-pnl-label">${i18n("Wheel PnL", "母倉累計")}</span>
+          <span class="csp-wheel-pnl-value font-mono tabular-nums ${pnlClass(wheel.total)}">${escapeHtml(fmtUsd(wheel.total))}</span>
+        </div>
+      </header>
+      <p class="csp-wheel-split">${escapeHtml(split)}</p>
+      ${legs ? `<ol class="csp-wheel-legs">${legs}</ol>` : ""}
+    </article>`);
   }
-  for (const g of parents) {
-    if (isCashSecuredGroup(g)) continue;
-    const status = String(g?.cash_secured_status || "").toLowerCase();
-    if (status === "entered" && open.some((c) => String(c.group_id) === String(g.cash_secured_group_id))) {
-      continue;
-    }
-    const childId = String(g?.cash_secured_group_id || "").trim();
-    const reason = String(g?.cash_secured_reason || "").trim();
-    const inst = String(g?.cash_secured_instrument_name || "").trim();
-    const limit = String(g?.cash_secured_limit_price || "").trim();
-    let detail = childId ? `#${childId}` : status || reason || i18n("pending", "待開倉");
-    if (status === "submitted") {
-      const mid = limit ? ` mid ${limit}` : "";
-      detail = inst ? `${inst}${mid}` : i18n("parked mid", "掛 mid 限價");
-    }
-    lines.push(
-      `<div class="profit-swap-book-slot"><div class="profit-swap-book-slot-main">${i18n("ITM", "ITM")} #${escapeHtml(String(g?.group_id || "—"))}</div><div class="profit-swap-book-slot-sub">${escapeHtml(status || "pending")} · ${escapeHtml(detail)}</div></div>`
-    );
-  }
-  if (!lines.length) return "";
+  if (!cards.length) return "";
   return `<div class="profit-disposition-panel profit-swap-panel cash-secured-panel">
-    <div class="profit-swap-detail">${lines.join("")}</div>
+    <div class="csp-wheel-grid">${cards.join("")}</div>
   </div>`;
 }
 
@@ -3214,7 +3476,7 @@ export function overviewCashSecuredSectionHtml(ctx) {
   return `<section class="overview-composition-card overview-composition-card--swap overview-composition-card--csp" aria-label="${i18n("Cash-secured puts", "現金擔保賣權")}">
     <header class="overview-composition-head">
       <h3 class="overview-composition-title">${i18n("Cash-secured puts", "現金擔保賣權")}</h3>
-      <span class="overview-composition-sub">${i18n("ITM cover → USDC put", "ITM cover → USDC 賣權")}</span>
+      <span class="overview-composition-sub">${i18n("ITM cover ↔ USDC put", "ITM cover ↔ USDC 賣權")}</span>
     </header>
     ${body}
   </section>`;
@@ -3239,6 +3501,21 @@ export function profitDispositionForGroup(g, status) {
   const book = tradeGroupAprBook(g);
   const native = realizedPnlInAprBookNative(g, status);
   if (book === "USDC") {
+    if (isCashSecuredGroup(g)) {
+      const split = cspPremiumDispositionSplit(g);
+      if (split) {
+        const remaining = num(split.remainingUsdc) ?? 0;
+        const spotNative = num(split.spotNative) ?? 0;
+        if (remaining === 0 && spotNative <= 0) return null;
+        const payload = { held: remaining, pending: 0, sweptNative: 0, sweptUsdt: 0, book: "USDC" };
+        const spotBook = String(split.spotBook || "").toUpperCase();
+        if ((spotBook === "BTC" || spotBook === "ETH") && spotNative > 0) {
+          payload.cspSpotBook = spotBook;
+          payload.cspSpotNative = spotNative;
+        }
+        return payload;
+      }
+    }
     if (native === null || native === 0) return null;
     return { held: native, pending: 0, sweptNative: 0, sweptUsdt: 0, book: "USDC" };
   }
@@ -3800,11 +4077,18 @@ const TRADE_GROUP_ENRICH_KEYS = [
   "spot_restore_quote_spent_lifetime",
   "cash_secured_status",
   "cash_secured_group_id",
+  "cash_secured_group_ids",
   "cash_secured_reason",
   "cash_secured_order_id",
   "cash_secured_instrument_name",
   "cash_secured_limit_price",
   "cash_secured_from_group_id",
+  "csp_premium_swap_status",
+  "csp_premium_swap_amount",
+  "csp_premium_swap_native",
+  "csp_premium_swap_instrument_name",
+  "csp_premium_swap_order_id",
+  "csp_premium_swap_reason",
 ];
 
 export function hasTradeGroupValue(v) {
@@ -4057,12 +4341,52 @@ export function accountHint(g) {
   return account ? `Account ${account}` : "";
 }
 
-export function adminGroupActionKind(g) {
-  if (!ADMIN_EMBED) return null;
+const ADMIN_RECOVER_EPS = 1e-8;
+
+/** Parent (or leftover skipped journal) already has a real restore fill. */
+export function groupHasFilledSpotRestore(g) {
+  const status = String(g?.spot_restore_status || "").toLowerCase();
+  const amount = num(g?.spot_restore_amount) ?? 0;
+  const spent = Math.max(
+    spotRestoreRealizedQuoteUsdt(g) ?? 0,
+    num(g?.spot_restore_quote_spent) ?? 0,
+    num(g?.spot_restore_quote_spent_lifetime) ?? 0
+  );
+  if (status === "filled" && (amount > ADMIN_RECOVER_EPS || spent > ADMIN_RECOVER_EPS)) return true;
+  return amount > ADMIN_RECOVER_EPS && spent > ADMIN_RECOVER_EPS;
+}
+
+/**
+ * Closed ITM group still needs an emergency market buyback.
+ * Ignores ADMIN_EMBED so unit tests can assert the same condition the button uses.
+ * Hide Recover when unrestored is ~0 after child credit, or leftover dust after a
+ * real restore fill / completed round-trip. Keep it when a tradable remainder remains.
+ */
+export function adminGroupNeedsMarketRecover(g, groups = STATE.groups) {
+  const unrestored = unrestoredSpotExitNative(g, groups);
+  if (unrestored <= ADMIN_RECOVER_EPS) return false;
+  const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
+  const dust = unrestored < spotRestoreLotThreshold(book);
+  if (dust && (itmSpotRoundTripComplete(g, groups) || groupHasFilledSpotRestore(g))) return false;
+  return true;
+}
+
+/** Recover / CSP-abort / Close kind without the admin-embed gate. */
+export function resolveAdminGroupActionKind(g, groups = STATE.groups) {
   if (!String(g?.group_id || "").trim()) return null;
+  const openOwnCsp = isCashSecuredGroup(g) && !isClosedTradeGroup(g);
+  const openChildCsp = cashSecuredChildrenForParent(groups, g).some(
+    (child) => String(child?.status || "").toLowerCase() === "open"
+  );
+  if (openOwnCsp || openChildCsp) return "csp-abort-restore";
   if (!isClosedTradeGroup(g)) return "close";
-  if (unrestoredSpotExitNative(g) > 1e-8) return "recover";
+  if (adminGroupNeedsMarketRecover(g, groups)) return "recover";
   return null;
+}
+
+export function adminGroupActionKind(g, groups = STATE.groups) {
+  if (!ADMIN_EMBED) return null;
+  return resolveAdminGroupActionKind(g, groups);
 }
 
 export function findAdminPreviewGroup(groupId, status = STATE.status, groups = STATE.groups) {
@@ -4100,10 +4424,10 @@ export function adminGroupPreviewEstimates(g, status, groups) {
   };
 }
 
-export function adminRecoverPreviewEstimates(g) {
-  const unrestored = unrestoredSpotExitNative(g);
+export function adminRecoverPreviewEstimates(g, groups = STATE.groups) {
+  const unrestored = unrestoredSpotExitNative(g, groups);
   const proceeds = spotExitRealizedQuoteUsdt(g) ?? 0;
-  const spent = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+  const spent = wheelSpotRestoreQuoteUsdt(g, groups);
   const remaining = proceeds - spent;
   return {
     book: String(g?.currency || g?.collateral_currency || "").toUpperCase(),
@@ -4114,12 +4438,32 @@ export function adminRecoverPreviewEstimates(g) {
   };
 }
 
-export function adminGroupActionsHtml(g) {
-  const kind = adminGroupActionKind(g);
+export function adminCspAbortPreviewEstimates(g, status, groups = STATE.groups) {
+  const openOwn = isCashSecuredGroup(g) && !isClosedTradeGroup(g);
+  const child = openOwn
+    ? g
+    : cashSecuredChildrenForParent(groups, g).find((row) => String(row?.status || "").toLowerCase() === "open") || null;
+  const parent = isCashSecuredGroup(g)
+    ? findTradeGroupById(groups, g?.cash_secured_from_group_id)
+    : g;
+  return {
+    close: child ? adminGroupPreviewEstimates(child, status, groups) : null,
+    restore: parent ? adminRecoverPreviewEstimates(parent, groups) : null,
+    instrument: String(child?.short_instrument_name || parent?.short_instrument_name || ""),
+  };
+}
+
+export function adminGroupActionsHtml(g, groups = STATE.groups) {
+  const kind = adminGroupActionKind(g, groups);
   if (!kind) return "";
   const groupId = String(g?.group_id || "").trim();
   const account = String(g?.account_name || "").trim();
-  const label = kind === "recover" ? "Recover market" : "Close";
+  const label =
+    kind === "csp-abort-restore"
+      ? i18n("Close CSP + cover", "CSP關倉補現貨")
+      : kind === "recover"
+        ? "Recover market"
+        : "Close";
   return `<div class="admin-group-actions">
     <button type="button" class="ds-btn ds-btn-danger admin-group-action" data-admin-kind="${escapeHtml(kind)}" data-admin-group="${escapeHtml(groupId)}" data-admin-account="${escapeHtml(account)}">${label}</button>
   </div>`;
@@ -4405,21 +4749,30 @@ export function realizedPnlNativeForProfitSwap(g, status) {
 /** Coin collateral PnL in USDT terms: swapped portion uses actual USDT received;
  *  unswept/pending portion uses live index × native. USDC book uses stored USDC PnL.
  *  ITM spot-exit groups use exit−restore net (+ any separate premium-sweep USDT). */
-export function realizedPnlDisplayUsdc(g, status) {
+export function realizedPnlDisplayUsdc(g, status, groups) {
   const book = tradeGroupAprBook(g);
-  if (book === "USDC") return num(g?.realized_pnl);
+  if (book === "USDC") {
+    if (isCashSecuredGroup(g)) {
+      const disp = profitDispositionForGroup(g, status);
+      if (disp) {
+        const remaining = num(disp.held) ?? 0;
+        const spotNative = num(disp.cspSpotNative) ?? 0;
+        const spotBook = String(disp.cspSpotBook || "").toUpperCase();
+        const spot = spotUsdForBook(status, spotBook);
+        const spotUsd =
+          spotNative > 0 && spot !== null && spot > 0 ? spotNative * spot : 0;
+        return remaining + spotUsd;
+      }
+    }
+    return num(g?.realized_pnl);
+  }
   if (groupHasItmSpotExitFills(g)) {
     const disp = profitDispositionForGroup(g, status);
     const sweptUsdt = num(disp?.sweptUsdt) ?? 0;
-    const itm = itmSpotExitDisplayNetUsdt(g);
+    const itm = itmSpotExitDisplayNetUsdt(g, groups);
     if (itm !== null) return itm + sweptUsdt;
     if (sweptUsdt > 0) return sweptUsdt;
-    // Exit done, restore not started: keep option PnL (never blank the card).
-    const stored = num(g?.realized_pnl);
-    if (stored !== null) return stored;
-    const spot = collateralBookSpotUsd(g, status);
-    const native = realizedPnlInAprBookNative(g, status);
-    if (native !== null && spot !== null && spot > 0) return native * spot;
+    // Cover still sold: do not show assignment settlement as Realized PnL.
     return null;
   }
   const spot = collateralBookSpotUsd(g, status);
@@ -4458,7 +4811,7 @@ export function sumItmSpotExitNetUsdtByBook(rows) {
   const out = { BTC: 0, ETH: 0 };
   let any = false;
   for (const g of rows || []) {
-    const net = itmSpotExitNetUsdtForTotalProfit(g);
+    const net = itmSpotExitNetUsdtForTotalProfit(g, rows);
     if (net === null) continue;
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH") continue;
@@ -4533,7 +4886,7 @@ export function annualizedAprOnBookEquity(g, status, equityNative) {
 }
 
 /** 逆線：USDC 標記 = 幣本位 × 現價；USDC 帳本直接用 stored USDC。 */
-export function fmtRealizedPnlDisplay(g, status) {
+export function fmtRealizedPnlDisplay(g, status, groups) {
   const book = tradeGroupAprBook(g);
   if (!isInverseCoinBookGroup(g)) {
     const pnlUsd = num(g?.realized_pnl);
@@ -4541,15 +4894,16 @@ export function fmtRealizedPnlDisplay(g, status) {
   }
   // ITM spot exit: show exit−restore USDT (not the stale option settlement USDC line).
   if (groupHasItmSpotExitFills(g)) {
-    const net = realizedPnlDisplayUsdc(g, status);
-    if (net === null) return "—";
-    const usdStr = fmtUsdPrecise(net);
-    if (!itmSpotRoundTripComplete(g)) {
-      const note = i18n("restore incomplete", "尚未補滿 cover");
-      return `${usdStr} · ${note}`;
+    const note = i18n("restore incomplete", "尚未補滿 cover");
+    if (!itmSpotRoundTripComplete(g, groups)) {
+      const net = realizedPnlDisplayUsdc(g, status, groups);
+      if (net === null) return note;
+      return `${fmtUsdPrecise(net)} · ${note}`;
     }
+    const net = realizedPnlDisplayUsdc(g, status, groups);
+    if (net === null) return "—";
     const tag = i18n("exit − restore", "賣出 − 買回");
-    return `${usdStr}（${tag}）`;
+    return `${fmtUsdPrecise(net)}（${tag}）`;
   }
   const native =
     g?.realized_pnl_collateral_native !== undefined &&
@@ -4652,7 +5006,8 @@ export function usdcLinearUnderlyingIndexUsd(g, status) {
  * Closed-trade APR: prefer backend-enriched ``realized_apr_on_equity`` (recomputed on
  * each /api/groups load); fall back to client recompute when missing.
  */
-export function groupRealizedApr(g, status) {
+export function groupRealizedApr(g, status, groups) {
+  if (groupHasItmSpotExitFills(g) && !itmSpotRoundTripComplete(g, groups)) return null;
   const holding = groupHoldingDays(g);
   if (holding === null || holding <= 0) return null;
   const stored = num(g?.realized_apr_on_equity) ?? num(g?.realized_annualized_return);
@@ -4959,12 +5314,25 @@ function cashSecuredAssignmentRestoreLine(g) {
   const restore = String(g?.spot_restore_status || "").toLowerCase();
   const restoreReason = String(g?.spot_restore_reason || "");
   if (!restoreReason.startsWith("cash_secured_itm_assignment")) return null;
+  const book = String(g?.currency || "").toUpperCase() || "—";
+  const native = num(g?.spot_restore_amount);
+  const spent = spotRestoreRealizedQuoteUsdt(g);
+  const nativeText =
+    native !== null && native > 0 ? `${fmtProfitNative(book, native)} ${book}` : "";
+  const spentText =
+    spent !== null && spent > 0 ? `${fmtProfitNative("USDC", spent)} USDC` : "";
   if (restore === "filled") {
-    return [i18n("CSP", "CSP"), i18n("ITM → cover restored", "ITM → 已補回現貨")];
+    let detail = i18n("ITM → cover restored", "ITM → 已補回現貨");
+    if (spentText && nativeText) detail = `ITM ${spentText} → ${nativeText}`;
+    else if (nativeText) detail = `ITM → ${nativeText}`;
+    return [i18n("CSP", "CSP"), detail];
   }
   if (restore === "submitted" || restore === "pending") {
     const inst = String(g?.spot_restore_instrument_name || "").trim();
-    return [i18n("CSP", "CSP"), inst ? `${i18n("buying cover", "補回現貨")} ${inst}` : i18n("buying cover", "補回現貨")];
+    const pending = inst
+      ? `${i18n("buying cover", "補回現貨")} ${inst}`
+      : i18n("buying cover", "補回現貨");
+    return [i18n("CSP", "CSP"), spentText ? `${pending} · ${spentText}` : pending];
   }
   return null;
 }
@@ -4982,11 +5350,14 @@ export function cashSecuredMetaLine(g, groups) {
   const child = childId ? findTradeGroupById(groups, childId) : null;
   const childAssignment = child ? cashSecuredAssignmentRestoreLine(child) : null;
   if (childAssignment) return childAssignment;
+  const wheel = cashSecuredWheelPnl(g, groups);
+  const pnlText = fmtUsd(wheel.total);
   const inst = String(child?.short_instrument_name || "").trim();
   if (status === "entered" || childId) {
+    const extra = wheel.closedLegs > 1 ? ` · ${wheel.closedLegs}` : "";
     return [
-      i18n("CSP", "CSP"),
-      inst ? `#${childId} ${inst}` : childId ? `#${childId}` : i18n("entered", "已開倉"),
+      i18n("CSP wheel", "CSP 輪轉"),
+      inst ? `#${childId} ${inst}${extra} · ${pnlText}` : `${pnlText}${extra}`,
     ];
   }
   if (status === "pending") {
@@ -5083,9 +5454,9 @@ export function activityLifecycleCardHtml(g, status, groups) {
   const creditNative = groupEntryCreditNative(g, status);
   const entryMs = entryTimestampMs(g);
   const closed = isClosedTradeGroup(g);
-  const pnl = realizedPnlDisplayUsdc(g, status);
+  const pnl = realizedPnlDisplayUsdc(g, status, groups);
   const holding = groupHoldingDays(g);
-  const realizedApr = closed ? groupRealizedApr(g, status) : null;
+  const realizedApr = closed ? groupRealizedApr(g, status, groups) : null;
   const amountLabel = activityAmountDisplay(g, status, groups);
   const title = isBullPutClosed ? bullPutSpreadClosedTitle(g) : tradeGroupActivityTitle(g);
   const entryCreditDisplay = credit === null ? "—" : fmtUsdWithNativeBookAmount(credit, creditNative, book);
@@ -5136,15 +5507,26 @@ export function activityLifecycleCardHtml(g, status, groups) {
       profitSweepMetaLine(g),
       spotExitMetaLine(g),
       cashSecuredMetaLine(g, groups),
+      cspPremiumSwapMetaLine(g, groups),
     ].filter(Boolean);
-    const pnlValue =
-      pnl !== null
-        ? `<span class="activity-closed-pnl-value ${pnlClass(pnl)}">${fmtRealizedPnlDisplay(g, status)}</span>`
-        : `<span class="activity-closed-pnl-value activity-closed-pnl-value-missing">—</span>`;
+    const pnlValue = `<span class="activity-closed-pnl-value ${pnlClass(pnl)}">${fmtRealizedPnlDisplay(g, status, groups)}</span>`;
     const aprValue =
       realizedApr !== null
         ? `<span class="activity-closed-pnl-value ${pnlClass(realizedApr)}">${fmtPct(realizedApr, 1)}</span>`
         : `<span class="activity-closed-pnl-value activity-closed-pnl-value-missing">—</span>`;
+    const wheel = looksLikeCoveredCallRow(g) ? cashSecuredWheelPnl(g, groups) : null;
+    const showWheel =
+      wheel &&
+      (wheel.closedLegs > 0 ||
+        Boolean(String(g?.cash_secured_group_id || "").trim()) ||
+        Boolean(String(g?.cash_secured_status || "").trim()));
+    const wheelMetric = showWheel
+      ? `<div class="activity-closed-pnl">
+          <span class="activity-closed-pnl-label">${i18n("Wheel PnL", "母倉累計")}</span>
+          <span class="activity-closed-pnl-value ${pnlClass(wheel.total)}">${escapeHtml(fmtUsd(wheel.total))}</span>
+          <span class="activity-closed-pnl-sub">${i18n("Call", "Call")} ${escapeHtml(fmtUsd(wheel.parentPnl))} · CSP ${escapeHtml(fmtUsd(wheel.cspPnl))}${wheel.closedLegs ? ` · ${wheel.closedLegs}` : ""}</span>
+        </div>`
+      : "";
     const closedMetrics = `<div class="activity-closed-metrics">
         <div class="activity-closed-pnl">
           <span class="activity-closed-pnl-label">${i18n("Realized PnL", "已實現損益")}</span>
@@ -5154,6 +5536,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
           <span class="activity-closed-pnl-label">${i18n("Realized APR", "實現年化報酬")}</span>
           ${aprValue}
         </div>
+        ${wheelMetric}
       </div>`;
     exitInner = `${closedMetrics}<div class="activity-phase-meta activity-phase-meta-secondary">${activityDetailLine(
       exitMetaSecondary
@@ -5191,7 +5574,7 @@ export function activityLifecycleCardHtml(g, status, groups) {
         <span class="activity-card-title">${escapeHtml(title)}</span>
         <span class="text-[11px] text-slate-500">${escapeHtml(book)}</span>
         ${acct ? `<span class="text-[11px] text-slate-500">${escapeHtml(acct)}</span>` : ""}
-        ${adminGroupActionsHtml(g)}
+        ${adminGroupActionsHtml(g, groups)}
       </div>
       <div class="activity-card-instrument">${instrumentBlock}${groupIdSuffix}</div>
       <div class="activity-lifecycle">
@@ -5357,7 +5740,8 @@ export async function fetchJson(url, options = {}) {
     const timeoutSignal = attemptTimeoutSignal(timeoutMs);
     let res;
     try {
-      res = await fetch(targetUrl, {
+      // apiFetch attaches X-Dashboard-Token when the server is token-gated.
+      res = await apiFetch(targetUrl, {
         ...fetchOptions,
         signal: mergeAbortSignals(callerSignal, timeoutSignal),
       });

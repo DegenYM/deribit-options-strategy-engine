@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import threading
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .sqlite_store_base import SqliteStoreBase
 from .utils import to_decimal
 
 LOGGER = logging.getLogger(__name__)
@@ -131,30 +131,27 @@ def fee_ledger_db_path(repo_root: Path, investor_id: str) -> Path:
     return repo_root / "data" / "fee_ledger" / investor_id / "snapshots.db"
 
 
-class FeeSnapshotStore:
-    def __init__(self, db_path: Path) -> None:
-        self._path = db_path
-        self._lock = threading.Lock()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+class FeeSnapshotStore(SqliteStoreBase):
+    _schema = _SCHEMA
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._path, timeout=30.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        self._ensure_columns(
+            "nav_snapshots",
+            {"wallet_native_by_book_json": "TEXT NOT NULL DEFAULT '{}'"},
+            conn=conn,
+        )
 
-    def _init_db(self) -> None:
-        with self._lock:
-            with self._connect() as conn:
-                conn.executescript(_SCHEMA)
-                cols = {row[1] for row in conn.execute("PRAGMA table_info(nav_snapshots)")}
-                if "wallet_native_by_book_json" not in cols:
-                    conn.execute(
-                        "ALTER TABLE nav_snapshots ADD COLUMN wallet_native_by_book_json TEXT NOT NULL DEFAULT '{}'"
-                    )
-                conn.commit()
+    def purge_older_than(self, *, cutoff_ms: int, investor_id: str | None = None) -> int:
+        """Delete ``nav_snapshots`` rows with ``ts_ms < cutoff_ms``. Returns rows deleted.
+
+        Only the high-frequency snapshot table is touched: ``fee_settlements``,
+        ``hwm_state`` and ``flow_baseline`` are the fee ledger of record and are
+        never purged here. Not called automatically anywhere — retention of NAV
+        history is an operator decision (settlement audits read old snapshots).
+        """
+        if investor_id is None:
+            return self._delete_where("nav_snapshots", "ts_ms < ?", (int(cutoff_ms),))
+        return self._delete_where("nav_snapshots", "investor_id = ? AND ts_ms < ?", (investor_id, int(cutoff_ms)))
 
     def append_snapshot(
         self,

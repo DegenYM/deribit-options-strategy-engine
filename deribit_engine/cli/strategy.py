@@ -154,7 +154,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
 
     spot_restore_parser = subparsers.add_parser(
         "spot-restore",
-        help="Buy back cover sold by ITM/settlement spot exit (USDT→BTC/ETH); journals spot_restore_*",
+        help="Buy back cover sold by ITM/settlement spot exit (USDT or USDC→BTC/ETH); journals spot_restore_*",
     )
     add_env_file_after_subcommand(spot_restore_parser)
     spot_restore_parser.add_argument(
@@ -190,7 +190,12 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         choices=("limit", "market"),
         default=None,
         help="Spot buy style (default: SPOT_RESTORE_ORDER_TYPE / limit). "
-        "limit = post-only buy@bid GTC for --wait-seconds; market = immediate USDT spend",
+        "limit = post-only buy@bid GTC for --wait-seconds; market = immediate quote spend",
+    )
+    spot_restore_parser.add_argument(
+        "--instrument",
+        default=None,
+        help="Spot pair to buy, e.g. BTC_USDC (default: the ITM exit pair, often BTC_USDT)",
     )
     spot_restore_parser.add_argument(
         "--wait-seconds",
@@ -689,6 +694,7 @@ def _dispatch_bot_commands(args: argparse.Namespace) -> int:
                 reconcile_only=bool(getattr(args, "reconcile_only", False)),
                 order_type=getattr(args, "order_type", None),
                 wait_seconds=int(wait_seconds) if wait_seconds is not None else None,
+                instrument_name=getattr(args, "instrument", None),
             )
             if args.json:
                 render(summary.to_dict(), True)

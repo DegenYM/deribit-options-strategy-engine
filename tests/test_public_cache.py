@@ -103,6 +103,91 @@ def test_store_failure_falls_through_to_network(tmp_path, monkeypatch):
     assert c.requests == ["public/get_book_summary_by_currency"]
 
 
+def _sqlite_rows(tmp_path):
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "public.db") as conn:
+        return conn.execute("SELECT key, stored_ms FROM public_reads ORDER BY stored_ms").fetchall()
+
+
+def test_eviction_drops_rows_older_than_max_age(tmp_path, monkeypatch):
+    monkeypatch.setenv("DERIBIT_PUBLIC_CACHE_PATH", str(tmp_path / "public.db"))
+    monkeypatch.setenv("PUBLIC_CACHE_MAX_AGE_SECONDS", "3600")
+    public_cache.reset_for_tests(str(tmp_path / "public.db"))
+
+    public_cache.write("fresh", {"v": 1})
+    # Backdate one row to two hours ago.
+    import sqlite3
+
+    with sqlite3.connect(tmp_path / "public.db") as conn:
+        conn.execute(
+            "INSERT INTO public_reads (key, stored_ms, payload) VALUES ('old', ?, '{}')",
+            (int(__import__("time").time() * 1000) - 2 * 3600 * 1000,),
+        )
+    assert public_cache.row_count() == 2
+
+    conn = public_cache._connect()
+    assert public_cache.evict(conn) == 1
+    assert [row[0] for row in _sqlite_rows(tmp_path)] == ["fresh"]
+
+
+def test_eviction_trims_to_row_cap_oldest_first(tmp_path, monkeypatch):
+    monkeypatch.setenv("DERIBIT_PUBLIC_CACHE_PATH", str(tmp_path / "public.db"))
+    monkeypatch.setenv("PUBLIC_CACHE_MAX_ROWS", "100")  # clamped to the minimum of 100
+    public_cache.reset_for_tests(str(tmp_path / "public.db"))
+    import sqlite3
+
+    conn = public_cache._connect()
+    now_ms = int(__import__("time").time() * 1000)
+    with sqlite3.connect(tmp_path / "public.db") as raw:
+        raw.executemany(
+            "INSERT INTO public_reads (key, stored_ms, payload) VALUES (?, ?, '{}')",
+            [
+                (
+                    f"k{i:04d}",
+                    now_ms - (150 - i) * 1000,
+                )
+                for i in range(150)
+            ],
+        )
+    assert public_cache.row_count() == 150
+
+    assert public_cache.evict(conn) == 50
+    keys = [row[0] for row in _sqlite_rows(tmp_path)]
+    assert len(keys) == 100
+    assert keys[0] == "k0050"  # the 50 oldest (k0000..k0049) were removed
+    assert keys[-1] == "k0149"
+
+
+def test_write_runs_eviction_every_n_writes(tmp_path, monkeypatch):
+    monkeypatch.setenv("DERIBIT_PUBLIC_CACHE_PATH", str(tmp_path / "public.db"))
+    public_cache.reset_for_tests(str(tmp_path / "public.db"))
+    monkeypatch.setattr(public_cache, "_EVICT_EVERY_N_WRITES", 5)
+    calls: list[int] = []
+    real_evict = public_cache.evict
+
+    def _spy(conn, *, now_ms=None):
+        calls.append(1)
+        return real_evict(conn, now_ms=now_ms)
+
+    monkeypatch.setattr(public_cache, "evict", _spy)
+    for i in range(12):
+        public_cache.write(f"k{i}", {"i": i})
+    assert len(calls) == 2  # writes 5 and 10
+    assert public_cache.row_count() == 12
+
+
+def test_env_knobs_have_floors_and_defaults(monkeypatch):
+    monkeypatch.delenv("PUBLIC_CACHE_MAX_AGE_SECONDS", raising=False)
+    monkeypatch.delenv("PUBLIC_CACHE_MAX_ROWS", raising=False)
+    assert public_cache.max_age_seconds() == public_cache.DEFAULT_MAX_AGE_SECONDS == 86_400
+    assert public_cache.max_rows() == public_cache.DEFAULT_MAX_ROWS == 5_000
+    monkeypatch.setenv("PUBLIC_CACHE_MAX_AGE_SECONDS", "1")
+    monkeypatch.setenv("PUBLIC_CACHE_MAX_ROWS", "abc")
+    assert public_cache.max_age_seconds() == 60
+    assert public_cache.max_rows() == 5_000
+
+
 def test_inverse_native_skips_the_usdc_option_chain(tmp_path, monkeypatch):
     """inverse_native rejects every USDC-quoted+settled market, so fetching the
     whole USDC chain only to discard it wastes a per-IP public request."""

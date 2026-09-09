@@ -5,6 +5,7 @@ import {
   computeLifetimeRealizedApr,
   computeWindowRealizedApr,
   profitCompositionByBook,
+  sumLifetimeEarnedUsdByBook,
   sumLifetimeRealizedPnlUsdcByBook,
 } from "../../frontend/src/modules/charts.js";
 import {
@@ -16,6 +17,13 @@ import {
   itmFoldedPremiumUsdt,
   itmSpotExitNetUsdtForTotalProfit,
   itmSpotExitPremiumFolded,
+  itmSpotExitDisplayNetUsdt,
+  itmSpotRoundTripComplete,
+  unrestoredSpotExitNative,
+  adminGroupNeedsMarketRecover,
+  groupHasFilledSpotRestore,
+  resolveAdminGroupActionKind,
+  fmtRealizedPnlDisplay,
   profitDispositionForGroup,
   profitSweepHasExchangeFill,
   profitSweepExchangeNativeSold,
@@ -26,6 +34,13 @@ import {
   summarizeProfitDisposition,
   summarizeSpotExitDisposition,
   truncateDecimal,
+  cspPremiumSwapMetaLine,
+  cashSecuredMetaLine,
+  cashSecuredWheelPnl,
+  fmtCashSecuredPanel,
+  summarizeCashSecuredDisposition,
+  activityLifecycleCardHtml,
+  overviewProfitCompositionHtml,
 } from "../../frontend/src/modules/domain.js";
 
 const status = { underlying_index_usd: { BTC: 63000, ETH: 1675 } };
@@ -873,5 +888,427 @@ const failedDisp = profitDispositionForGroup(failedItmPlan, status);
 assert.ok(failedDisp);
 assert.equal(failedDisp.fromItmFold, undefined);
 assert.ok(Math.abs(failedDisp.held - 0.01) < 1e-12);
+
+const cspSwapped = group({
+  group_id: "0115",
+  currency: "ETH",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  cash_secured_from_group_id: "0095",
+  entry_credit: "6.035",
+  realized_pnl: "6.035",
+  realized_close_debit: "0",
+  realized_close_fee: "0",
+  csp_premium_swap_status: "filled",
+  csp_premium_swap_amount: "5.7845",
+  csp_premium_swap_native: "0.0023",
+});
+const cspSkipped = group({
+  group_id: "0097",
+  currency: "BTC",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  cash_secured_from_group_id: "0096",
+  entry_credit: "5.6875",
+  realized_pnl: "5.6875",
+  realized_close_debit: "0",
+  realized_close_fee: "0",
+  csp_premium_swap_status: "skipped",
+  csp_premium_swap_reason: "dust_below_min_omitted",
+});
+const cspSwappedDisp = profitDispositionForGroup(cspSwapped, status);
+assert.ok(cspSwappedDisp);
+assert.ok(Math.abs(cspSwappedDisp.held - 0.2505) < 1e-12);
+assert.equal(cspSwappedDisp.cspSpotBook, "ETH");
+assert.ok(Math.abs(cspSwappedDisp.cspSpotNative - 0.0023) < 1e-12);
+const cspSkippedDisp = profitDispositionForGroup(cspSkipped, status);
+assert.ok(cspSkippedDisp);
+assert.ok(Math.abs(cspSkippedDisp.held - 5.6875) < 1e-12);
+assert.equal(cspSkippedDisp.cspSpotNative, undefined);
+const cspComposition = profitCompositionByBook(
+  report,
+  { closed: [cspSwapped, cspSkipped], open: [] },
+  { ...status, underlying_index_usd: { BTC: 80000, ETH: 2500 } },
+);
+assert.ok(Math.abs(cspComposition.nativeByBook.USDC - 5.938) < 1e-8);
+assert.ok(Math.abs(cspComposition.nativeByBook.ETH - 0.0023) < 1e-12);
+assert.ok(Math.abs((cspComposition.nativeByBook.BTC ?? 0)) < 1e-12);
+assert.ok(Math.abs(cspComposition.usdByBook.USDC - 5.938) < 0.01);
+assert.ok(Math.abs(cspComposition.usdByBook.ETH - 0.0023 * 2500) < 0.02);
+assert.ok(Math.abs(cspComposition.earnedUsdByBook.USDC - 5.938) < 0.01);
+assert.ok(Math.abs(cspComposition.earnedUsdByBook.ETH - 0.0023 * 2500) < 0.02);
+assert.ok(Math.abs(realizedPnlDisplayUsdc(cspSwapped, { ...status, underlying_index_usd: { BTC: 80000, ETH: 2500 } }) - (0.2505 + 0.0023 * 2500)) < 0.02);
+
+const cspSwapMeta = cspPremiumSwapMetaLine(cspSwapped);
+assert.ok(cspSwapMeta);
+assert.equal(cspSwapMeta[0], "CSP swapped");
+assert.ok(cspSwapMeta[1].includes("USDC →"), cspSwapMeta[1]);
+assert.ok(cspSwapMeta[1].includes("ETH"), cspSwapMeta[1]);
+assert.ok(cspSwapMeta[1].includes("leftover"), cspSwapMeta[1]);
+const cspSkipMeta = cspPremiumSwapMetaLine(cspSkipped);
+assert.ok(cspSkipMeta);
+assert.equal(cspSkipMeta[0], "CSP swap");
+assert.ok(cspSkipMeta[1].includes("USDC"), cspSkipMeta[1]);
+assert.ok(cspSkipMeta[1].includes("skipped"), cspSkipMeta[1]);
+const cspParent = group({
+  group_id: "0095",
+  cash_secured_status: "entered",
+  cash_secured_group_id: "0115",
+  cash_secured_group_ids: ["0115"],
+  spot_exit_status: "filled",
+  entry_credit: "8.77",
+  covered_underlying_quantity: "0.1",
+});
+const cspParentGroups = { closed: [cspSwapped, cspSkipped], open: [] };
+const cspParentWheel = cashSecuredWheelPnl(cspParent, cspParentGroups);
+assert.ok(Number.isFinite(cspParentWheel.total));
+assert.ok(cspParentWheel.closedLegs >= 1);
+const cspParentMeta = cashSecuredMetaLine(cspParent, cspParentGroups);
+assert.ok(cspParentMeta);
+assert.equal(cspParentMeta[0], "CSP wheel");
+const cspParentCard = activityLifecycleCardHtml(cspParent, status, cspParentGroups);
+assert.ok(cspParentCard.includes("Wheel PnL") || cspParentCard.includes("母倉累計"), cspParentCard);
+const cspPanelParentA = group({
+  group_id: "0095",
+  cash_secured_status: "entered",
+  cash_secured_group_id: "0099",
+  cash_secured_group_ids: ["0097", "0099"],
+  spot_exit_status: "filled",
+  entry_credit: "8.77",
+  short_strike: "73000",
+  covered_underlying_quantity: "0.1",
+});
+const cspPanelParentB = group({
+  group_id: "0096",
+  cash_secured_status: "entered",
+  cash_secured_group_id: "0098",
+  spot_exit_status: "filled",
+  entry_credit: "28.79",
+  short_strike: "75000",
+  covered_underlying_quantity: "0.1",
+});
+const cspPanelOpenA = group({
+  group_id: "0099",
+  status: "open",
+  strategy: "cash_secured",
+  cash_secured_from_group_id: "0095",
+  short_instrument_name: "BTC_USDC-11SEP26-72000-P",
+  quantity: "0.1",
+  entry_timestamp_ms: 3,
+  collateral_currency: "USDC",
+});
+const cspPanelClosedA = group({
+  group_id: "0097",
+  status: "closed",
+  strategy: "cash_secured",
+  cash_secured_from_group_id: "0095",
+  short_instrument_name: "BTC_USDC-4SEP26-73000-P",
+  quantity: "0.1",
+  realized_pnl: "5.69",
+  entry_timestamp_ms: 1,
+  collateral_currency: "USDC",
+});
+const cspPanelOpenB = group({
+  group_id: "0098",
+  status: "open",
+  strategy: "cash_secured",
+  cash_secured_from_group_id: "0096",
+  short_instrument_name: "BTC_USDC-11SEP26-75000-P",
+  quantity: "0.1",
+  entry_timestamp_ms: 2,
+  collateral_currency: "USDC",
+});
+const cspPanelHtml = fmtCashSecuredPanel(
+  summarizeCashSecuredDisposition({
+    closed: [cspPanelParentA, cspPanelParentB, cspPanelClosedA],
+    open: [cspPanelOpenA, cspPanelOpenB],
+  }),
+);
+assert.ok(cspPanelHtml.includes("csp-wheel-grid"), cspPanelHtml);
+assert.ok(cspPanelHtml.includes("#0095"), cspPanelHtml);
+assert.ok(cspPanelHtml.includes("#0096"), cspPanelHtml);
+assert.ok(cspPanelHtml.includes("73000-C"), cspPanelHtml);
+assert.ok(cspPanelHtml.includes("72000-P"), cspPanelHtml);
+assert.ok(cspPanelHtml.includes("75000-P"), cspPanelHtml);
+assert.ok(cspPanelHtml.includes("#0099"), cspPanelHtml);
+assert.ok(cspPanelHtml.includes("#0097"), cspPanelHtml);
+const firstWheel = cspPanelHtml.indexOf("csp-wheel");
+const idx95 = cspPanelHtml.indexOf("#0095");
+const idx72000 = cspPanelHtml.indexOf("72000-P");
+const idx73000p = cspPanelHtml.indexOf("73000-P");
+const idx75000 = cspPanelHtml.indexOf("75000-P");
+const idx96 = cspPanelHtml.indexOf("#0096");
+assert.ok(firstWheel >= 0 && idx95 > firstWheel);
+assert.ok(idx72000 > idx95 && idx72000 < idx96, "72000 put stays inside #0095 card");
+assert.ok(idx73000p > idx95 && idx73000p < idx96, "closed 73000 put stays inside #0095 card");
+assert.ok(idx72000 < idx73000p, "open put listed before closed history");
+assert.ok(idx75000 > idx96, "75000 put stays inside #0096 card");
+const cspParentSwap = cspPremiumSwapMetaLine(cspParent, { closed: [cspSwapped], open: [] });
+assert.ok(cspParentSwap);
+assert.equal(cspParentSwap[0], "CSP swapped");
+assert.ok(cspParentSwap[1].includes("ETH"), cspParentSwap[1]);
+const cspItmRestore = group({
+  group_id: "0115",
+  currency: "ETH",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  cash_secured_from_group_id: "0095",
+  spot_restore_status: "filled",
+  spot_restore_reason: "cash_secured_itm_assignment",
+  spot_restore_amount: "2",
+  spot_restore_quote_spent: "4600",
+});
+const cspItmMeta = cashSecuredMetaLine(cspItmRestore);
+assert.ok(cspItmMeta);
+assert.equal(cspItmMeta[0], "CSP");
+assert.ok(cspItmMeta[1].includes("ITM"), cspItmMeta[1]);
+assert.ok(cspItmMeta[1].includes("USDC"), cspItmMeta[1]);
+assert.ok(cspItmMeta[1].includes("ETH"), cspItmMeta[1]);
+
+const eugene0021 = group({
+  group_id: "0021",
+  currency: "ETH",
+  collateral_currency: "ETH",
+  quantity: "1",
+  covered_underlying_quantity: "1",
+  short_instrument_name: "ETH-28AUG26-2400-C",
+  account_name: "covered_call",
+  cash_secured_group_id: "0026",
+  cash_secured_group_ids: ["0026"],
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.9608",
+  spot_exit_quote_proceeds: "2399.43",
+  spot_exit_quote_proceeds_lifetime: "2399.43",
+  spot_exit_settlement_loss: "0.0392",
+  spot_restore_status: "skipped",
+  realized_pnl: "-261",
+  realized_pnl_collateral_native: "-0.03657",
+});
+const eugene0026 = group({
+  group_id: "0026",
+  currency: "ETH",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  option_type: "put",
+  cash_secured_from_group_id: "0021",
+  spot_restore_status: "filled",
+  spot_restore_reason: "cash_secured_itm_assignment",
+  spot_restore_amount: "1",
+  spot_restore_quote_spent: "2405.859",
+  spot_restore_quote_spent_lifetime: "2405.859",
+});
+const eugeneGroups = { closed: [eugene0021, eugene0026], open: [] };
+assert.ok(unrestoredSpotExitNative(eugene0021) > 0.9);
+assert.ok(unrestoredSpotExitNative(eugene0021, eugeneGroups) < 1e-8);
+assert.equal(itmSpotRoundTripComplete(eugene0021, eugeneGroups), true);
+const eugeneNet = itmSpotExitDisplayNetUsdt(eugene0021, eugeneGroups);
+assert.ok(eugeneNet !== null);
+assert.ok(Math.abs(eugeneNet - (2399.43 - 2405.859)) < 0.01, `eugeneNet=${eugeneNet}`);
+const eugeneShown = fmtRealizedPnlDisplay(eugene0021, status, eugeneGroups);
+assert.ok(!eugeneShown.includes("尚未補滿"), eugeneShown);
+assert.ok(!eugeneShown.includes("restore incomplete"), eugeneShown);
+assert.ok(eugeneShown.includes("賣出") || eugeneShown.includes("exit"), eugeneShown);
+assert.equal(resolveAdminGroupActionKind(eugene0021, eugeneGroups), null);
+assert.equal(adminGroupNeedsMarketRecover(eugene0021, eugeneGroups), false);
+assert.equal(adminGroupNeedsMarketRecover(eugene0021), true);
+assert.equal(resolveAdminGroupActionKind(eugene0021), "recover");
+
+const eugene0020 = group({
+  group_id: "0020",
+  currency: "ETH",
+  collateral_currency: "ETH",
+  quantity: "1",
+  covered_underlying_quantity: "1",
+  short_instrument_name: "ETH-28AUG26-2300-C",
+  cash_secured_group_id: "0031",
+  cash_secured_group_ids: ["0031"],
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.9208",
+  spot_exit_quote_proceeds: "2299.4334",
+  spot_exit_quote_proceeds_lifetime: "2299.4334",
+  spot_exit_settlement_loss: "0.07917862",
+  spot_restore_status: "skipped",
+  realized_pnl: "-193",
+  realized_pnl_collateral_native: "-0.077325",
+});
+const eugene0022 = group({
+  group_id: "0022",
+  currency: "BTC",
+  collateral_currency: "BTC",
+  quantity: "0.1",
+  covered_underlying_quantity: "0.1",
+  short_instrument_name: "BTC-28AUG26-77000-C",
+  cash_secured_group_id: "0033",
+  cash_secured_group_ids: ["0032", "0033"],
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.0965",
+  spot_exit_quote_proceeds: "7688.8399",
+  spot_exit_quote_proceeds_lifetime: "7688.8399",
+  spot_exit_settlement_loss: "0.00340308",
+  spot_restore_status: "filled",
+  spot_restore_amount: "0.1",
+  spot_restore_quote_spent: "7856.6957",
+  spot_restore_quote_spent_lifetime: "7856.6957",
+  realized_pnl: "-261",
+  realized_pnl_collateral_native: "-0.00327575",
+});
+const eugene0026Premium = group({
+  group_id: "0026",
+  currency: "ETH",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  option_type: "put",
+  cash_secured_from_group_id: "0021",
+  entry_credit: "23.1350224",
+  realized_pnl: "4.6873599",
+  realized_pnl_collateral_native: "4.6873599",
+  realized_close_debit: "18.4476625",
+  realized_close_fee: "0.6476625",
+  spot_restore_status: "filled",
+  spot_restore_reason: "cash_secured_itm_assignment",
+  spot_restore_amount: "1",
+  spot_restore_quote_spent: "2405.859",
+  spot_restore_quote_spent_lifetime: "2405.859",
+  csp_premium_swap_status: "filled",
+  csp_premium_swap_amount: "4.0396974",
+  csp_premium_swap_native: "0.00167237",
+});
+const eugene0027 = group({
+  group_id: "0027",
+  currency: "BTC",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  option_type: "put",
+  cash_secured_from_group_id: "0022",
+  entry_credit: "47.87675159",
+  realized_pnl: "47.87675159",
+  realized_close_debit: "0",
+  realized_close_fee: "0",
+  csp_premium_swap_status: "filled",
+  csp_premium_swap_amount: "40.3435",
+  csp_premium_swap_native: "0.0005",
+});
+const eugeneCompStatus = { ...status, underlying_index_usd: { BTC: 80000, ETH: 2400 } };
+const eugene0021Net = 2399.43 - 2405.859;
+const eugene0022Net = 7688.8399 - 7856.6957;
+
+const eugene0020Comp = profitCompositionByBook(
+  report,
+  { closed: [eugene0020], open: [] },
+  eugeneCompStatus,
+);
+assert.ok(Math.abs(eugene0020Comp.usdByBook?.USDT ?? 0) < 0.005, "unrestored #0020 must not count cover sale");
+assert.ok(Math.abs(eugene0020Comp.earnedUsdByBook?.USDT ?? 0) < 0.005);
+
+const eugene0021Comp = profitCompositionByBook(
+  report,
+  { closed: [eugene0021, eugene0026Premium], open: [] },
+  eugeneCompStatus,
+);
+assert.ok(Math.abs((eugene0021Comp.usdByBook?.USDT ?? 0) - eugene0021Net) < 0.02, `0021 usdt=${eugene0021Comp.usdByBook?.USDT}`);
+assert.ok(Math.abs((eugene0021Comp.earnedUsdByBook?.USDT ?? 0) - eugene0021Net) < 0.02);
+assert.ok(
+  Math.abs(eugene0021Comp.usdByBook?.USDC ?? 0) < 0.05,
+  `child restore spend must not appear as USDC; usdc=${eugene0021Comp.usdByBook?.USDC}`,
+);
+assert.ok(
+  Math.abs((eugene0021Comp.usdByBook?.ETH ?? 0) - 0.00167237 * 2400) < 0.05,
+  `0021 eth=${eugene0021Comp.usdByBook?.ETH}`,
+);
+
+const eugene0022Only = profitCompositionByBook(
+  report,
+  { closed: [eugene0022], open: [] },
+  eugeneCompStatus,
+);
+assert.ok(Math.abs((eugene0022Only.usdByBook?.USDT ?? 0) - eugene0022Net) < 0.05, `0022 usdt=${eugene0022Only.usdByBook?.USDT}`);
+assert.ok(Math.abs((eugene0022Only.earnedUsdByBook?.USDT ?? 0) - eugene0022Net) < 0.05);
+assert.ok(Math.abs(eugene0022Only.usdByBook?.BTC ?? 0) < 0.01, "ITM net must not mix into BTC premium");
+assert.ok(Math.abs(eugene0022Only.usdByBook?.USDC ?? 0) < 0.01);
+
+const eugeneWheelComp = profitCompositionByBook(
+  report,
+  { closed: [eugene0020, eugene0021, eugene0022, eugene0026Premium, eugene0027], open: [] },
+  eugeneCompStatus,
+);
+assert.ok(
+  Math.abs((eugeneWheelComp.usdByBook?.USDT ?? 0) - (eugene0021Net + eugene0022Net)) < 0.05,
+  `combined usdt=${eugeneWheelComp.usdByBook?.USDT}`,
+);
+assert.ok(
+  Math.abs((eugeneWheelComp.usdByBook?.USDC ?? 0) - (47.87675159 - 40.3435)) < 0.05,
+  `usdc=${eugeneWheelComp.usdByBook?.USDC}`,
+);
+assert.ok(Math.abs((eugeneWheelComp.usdByBook?.BTC ?? 0) - 0.0005 * 80000) < 0.5);
+const eugeneHtml = overviewProfitCompositionHtml({
+  summary: { realized_pnl_usdc: "1" },
+  profitCompositionByBook: eugene0022Only,
+});
+assert.ok(eugeneHtml.includes("USDT"), eugeneHtml);
+assert.ok(eugeneHtml.includes("exit") || eugeneHtml.includes("賣出"), eugeneHtml);
+
+const itmFoldComp = profitCompositionByBook(report, { closed: [itmFolded], open: [] }, status);
+const foldNet = itmSpotExitNetUsdtForTotalProfit(itmFolded);
+assert.ok(foldNet !== null);
+assert.ok(Math.abs((itmFoldComp.usdByBook?.USDT ?? 0) - foldNet) < 0.05);
+assert.ok(Math.abs((itmFoldComp.swappedUsdtByBook?.ETH ?? 0) - foldedUsdt) < 0.05);
+assert.ok(Math.abs((itmFoldComp.usdByBook?.ETH ?? 0) - foldedUsdt) < 1);
+
+const lifetimeUsd = sumLifetimeRealizedPnlUsdcByBook(report, { closed: [eugene0022], open: [] }, eugeneCompStatus);
+const lifetimeEarned = sumLifetimeEarnedUsdByBook(report, { closed: [eugene0022], open: [] }, eugeneCompStatus);
+assert.ok(Math.abs((lifetimeUsd?.USDT ?? 0) - eugene0022Net) < 0.05);
+assert.ok(Math.abs((lifetimeEarned?.USDT ?? 0) - eugene0022Net) < 0.05);
+
+const cspClosedCard = activityLifecycleCardHtml(
+  cspSwapped,
+  { ...status, underlying_index_usd: { BTC: 80000, ETH: 2500 } },
+  { closed: [cspSwapped], open: [] },
+);
+assert.ok(cspClosedCard.includes("CSP swapped"), cspClosedCard);
+assert.ok(cspClosedCard.includes("USDC"), cspClosedCard);
+assert.ok(cspClosedCard.includes("ETH"), cspClosedCard);
+assert.ok(cspClosedCard.includes("leftover") || cspClosedCard.includes("剩餘"), cspClosedCard);
+
+assert.equal(groupHasFilledSpotRestore(eugene0022), true);
+assert.equal(adminGroupNeedsMarketRecover(eugene0022, { closed: [eugene0022], open: [] }), false);
+assert.equal(resolveAdminGroupActionKind(eugene0022, { closed: [eugene0022], open: [] }), null);
+assert.equal(itmSpotRoundTripComplete(eugene0022, { closed: [eugene0022], open: [] }), true);
+const eugene0022SkippedStatus = { ...eugene0022, spot_restore_status: "skipped" };
+assert.equal(groupHasFilledSpotRestore(eugene0022SkippedStatus), true);
+assert.equal(
+  resolveAdminGroupActionKind(eugene0022SkippedStatus, { closed: [eugene0022SkippedStatus], open: [] }),
+  null,
+);
+
+const eugene0031Open = group({
+  group_id: "0031",
+  status: "open",
+  currency: "ETH",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  option_type: "put",
+  cash_secured_from_group_id: "0020",
+});
+assert.equal(adminGroupNeedsMarketRecover(eugene0020, { closed: [eugene0020], open: [] }), true);
+assert.equal(resolveAdminGroupActionKind(eugene0020, { closed: [eugene0020], open: [] }), "recover");
+assert.equal(
+  resolveAdminGroupActionKind(eugene0020, { closed: [eugene0020], open: [eugene0031Open] }),
+  "csp-abort-restore",
+);
+assert.equal(resolveAdminGroupActionKind(eugene0021, eugeneGroups), null);
+
+const partialRestore = group({
+  group_id: "partial",
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.1",
+  spot_exit_quote_proceeds: "7800",
+  spot_restore_status: "filled",
+  spot_restore_amount: "0.04",
+  spot_restore_quote_spent: "3700",
+  covered_underlying_quantity: "0.1",
+  quantity: "0.1",
+});
+assert.ok(unrestoredSpotExitNative(partialRestore) > 0.05);
+assert.equal(resolveAdminGroupActionKind(partialRestore, { closed: [partialRestore], open: [] }), "recover");
 
 console.log("test_profit_disposition: ok");

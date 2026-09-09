@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,32 @@ class SnapshotState:
     last_success_ms: int | None = None
     last_error: str | None = None
     running: bool = False
+    stop_requested: bool = False
+
+
+def _stop_scheduler_thread(
+    *,
+    stop_event: threading.Event,
+    thread: threading.Thread | None,
+    state: Any,
+    name: str,
+    timeout: float,
+) -> bool:
+    """Shared ``stop()`` body: signal, join, and only mark stopped when the thread really exited.
+
+    A tick stuck inside a Deribit call can outlive the join timeout; reporting
+    ``running=False`` in that case hides the leak from ``/api/health``. Instead
+    keep ``running=True``, set ``stop_requested`` and warn.
+    """
+    stop_event.set()
+    state.stop_requested = True
+    if thread is not None:
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            LOGGER.warning("%s scheduler thread still running after %ss", name, timeout)
+            return False
+    state.running = False
+    return True
 
 
 @dataclass(frozen=True)
@@ -66,16 +93,20 @@ class EquitySnapshotScheduler:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self.state.stop_requested = False
         self._thread = threading.Thread(target=self._loop, name="equity-snapshot", daemon=True)
         self.state.running = True
         self._thread.start()
         LOGGER.info("snapshot scheduler started (interval=%ss)", self._interval_sec)
 
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-        self.state.running = False
+    def stop(self, timeout: float = 2.0) -> bool:
+        return _stop_scheduler_thread(
+            stop_event=self._stop,
+            thread=self._thread,
+            state=self.state,
+            name="equity-snapshot",
+            timeout=timeout,
+        )
 
     def _loop(self) -> None:
         # Take an immediate snapshot so the ledger gets a row even on first
@@ -99,7 +130,7 @@ class EquitySnapshotScheduler:
                 "account_name": self._account_name,
                 "env": self._config.env,
                 "option_strategy": self._config.option_strategy,
-                "state_file": str(self._config.state_file),
+                "state_file": Path(self._config.state_file).name,
                 "regime": snapshot.regime.value,
                 "total_equity_usdc": str(snapshot.total_equity_usdc),
                 "day_start_equity_usdc": str(snapshot.day_start_equity_usdc),
@@ -141,6 +172,7 @@ class TradeJournalSyncState:
     last_error: str | None = None
     last_inserted: int = 0
     running: bool = False
+    stop_requested: bool = False
 
 
 class TradeJournalSyncScheduler:
@@ -167,16 +199,20 @@ class TradeJournalSyncScheduler:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self.state.stop_requested = False
         self._thread = threading.Thread(target=self._loop, name="trade-journal-sync", daemon=True)
         self.state.running = True
         self._thread.start()
         LOGGER.info("trade journal sync scheduler started (interval=%ss)", self._interval_sec)
 
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-        self.state.running = False
+    def stop(self, timeout: float = 2.0) -> bool:
+        return _stop_scheduler_thread(
+            stop_event=self._stop,
+            thread=self._thread,
+            state=self.state,
+            name="trade-journal-sync",
+            timeout=timeout,
+        )
 
     def run_once(self) -> dict[str, Any]:
         """Run a single sync pass (used by scheduler tick and manual API)."""
@@ -253,16 +289,20 @@ class BundleWarmScheduler:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self.state.stop_requested = False
         self._thread = threading.Thread(target=self._loop, name="bundle-warm", daemon=True)
         self.state.running = True
         self._thread.start()
         LOGGER.info("bundle warm scheduler started (interval=%ss)", self._interval_sec)
 
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-        self.state.running = False
+    def stop(self, timeout: float = 2.0) -> bool:
+        return _stop_scheduler_thread(
+            stop_event=self._stop,
+            thread=self._thread,
+            state=self.state,
+            name="bundle-warm",
+            timeout=timeout,
+        )
 
     def _loop(self) -> None:
         self._tick()
@@ -304,16 +344,20 @@ class TransferWarmScheduler:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
+        self.state.stop_requested = False
         self._thread = threading.Thread(target=self._loop, name="transfer-warm", daemon=True)
         self.state.running = True
         self._thread.start()
         LOGGER.info("transfer warm scheduler started (interval=%ss)", self._interval_sec)
 
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2)
-        self.state.running = False
+    def stop(self, timeout: float = 2.0) -> bool:
+        return _stop_scheduler_thread(
+            stop_event=self._stop,
+            thread=self._thread,
+            state=self.state,
+            name="transfer-warm",
+            timeout=timeout,
+        )
 
     def _loop(self) -> None:
         self._tick()
@@ -331,21 +375,101 @@ class TransferWarmScheduler:
             self.state.last_error = str(exc)
 
 
+DEFAULT_BACKGROUND_WORKERS = 4
+
+
+def make_background_executor(max_workers: int = DEFAULT_BACKGROUND_WORKERS) -> ThreadPoolExecutor:
+    """Bounded pool shared by every stale-while-revalidate / warm-behind-response path."""
+    return ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dash-bg")
+
+
+class SingleFlightRunner:
+    """Submit ``fn`` for ``key`` on a bounded executor unless the same key is already in flight.
+
+    Replaces the historical ``threading.Thread(...).start()`` per cache miss: a
+    burst of identical misses used to fan out into N unbounded threads all
+    recomputing the same payload against Deribit.
+    """
+
+    def __init__(self, executor: ThreadPoolExecutor | None = None) -> None:
+        self._executor = executor
+        self._lock = threading.Lock()
+        self._inflight: set[Any] = set()
+
+    @property
+    def inflight_count(self) -> int:
+        with self._lock:
+            return len(self._inflight)
+
+    def submit(self, key: Any, fn: Callable[[], Any]) -> bool:
+        """Return True when scheduled, False when ``key`` was already in flight (or pool closed)."""
+        with self._lock:
+            if key in self._inflight:
+                return False
+            self._inflight.add(key)
+
+        def _run() -> None:
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001 — background work must not raise into the pool.
+                LOGGER.warning("background task failed for %r: %s", key, exc)
+            finally:
+                with self._lock:
+                    self._inflight.discard(key)
+
+        try:
+            if self._executor is not None:
+                self._executor.submit(_run)
+            else:
+                threading.Thread(target=_run, name="dash-bg-fallback", daemon=True).start()
+        except RuntimeError:
+            # Executor already shut down (server stopping) — drop the refresh.
+            with self._lock:
+                self._inflight.discard(key)
+            return False
+        return True
+
+
 class _TtlCache:
     """Trivial TTL cache — just enough to avoid hammering Deribit.
 
     When ``stale_while_revalidate`` is set, an expired-but-present entry is served
-    immediately while a single background thread recomputes it. This keeps user
+    immediately while a single background task recomputes it. This keeps user
     requests fast (no blocking on a slow Deribit prefetch) once any value exists;
-    only the very first cold compute for a key blocks.
+    only the very first cold compute for a key blocks. Refreshes run on the
+    shared bounded ``executor`` when one is supplied (falling back to a daemon
+    thread only for ad-hoc caches built without a runtime).
     """
 
-    def __init__(self, ttl_seconds: float, *, stale_while_revalidate: bool = False) -> None:
+    def __init__(
+        self,
+        ttl_seconds: float,
+        *,
+        stale_while_revalidate: bool = False,
+        executor: ThreadPoolExecutor | None = None,
+    ) -> None:
         self._ttl = ttl_seconds
         self._swr = stale_while_revalidate
+        self._executor = executor
         self._lock = threading.Lock()
         self._store: dict[Any, tuple[float, Any]] = {}
         self._inflight: dict[Any, threading.Event] = {}
+
+    def _spawn_refresh(self, key: Any, factory: Callable[[], Any], event: threading.Event) -> None:
+        if self._executor is not None:
+            try:
+                self._executor.submit(self._background_refresh, key, factory, event)
+                return
+            except RuntimeError:
+                # Pool shut down during server stop; fall through to a one-off thread
+                # so the in-flight marker is still cleared.
+                pass
+        threading.Thread(
+            target=self._background_refresh,
+            args=(key, factory, event),
+            name="ttl-cache-swr",
+            daemon=True,
+        ).start()
 
     def get_or_set(self, key: Any, factory: Callable[[], Any]) -> Any:
         now = time.monotonic()
@@ -359,12 +483,7 @@ class _TtlCache:
                 if key not in self._inflight:
                     event = threading.Event()
                     self._inflight[key] = event
-                    threading.Thread(
-                        target=self._background_refresh,
-                        args=(key, factory, event),
-                        name="ttl-cache-swr",
-                        daemon=True,
-                    ).start()
+                    self._spawn_refresh(key, factory, event)
                 return cached[1]
             event = self._inflight.get(key)
             if event is None:

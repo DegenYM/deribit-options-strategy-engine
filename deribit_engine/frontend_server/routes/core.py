@@ -96,9 +96,13 @@ def register_core_routes(app: Any, runtime: RuntimeSetup) -> None:
             }
         )
 
-    @app.get("/api/trade_journal/sync")
+    @app.post("/api/trade_journal/sync")
     def api_trade_journal_sync() -> Any:
-        """Manual one-shot journal sync (normally runs on a background scheduler)."""
+        """Manual one-shot journal sync (normally runs on a background scheduler).
+
+        POST-only: it writes to ``trade_journal.db`` and hits Deribit, so a GET
+        (prefetchers, link previews, cached crawlers) must not trigger it.
+        """
         return JSONResponse(runtime.journal_scheduler.run_once())
 
     @app.get("/api/realized_summary")

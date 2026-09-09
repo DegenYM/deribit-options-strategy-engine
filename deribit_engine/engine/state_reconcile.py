@@ -593,7 +593,13 @@ class StateReconcileMixin:
                 if short_book.index_price > 0:
                     close_index_usd = short_book.index_price
                     group.close_index_usd = close_index_usd
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning(
+                    "reconcile: orderbook unavailable for %s (group=%s); close index / fills-based debit skipped: %s",
+                    group.short_instrument_name,
+                    group.group_id,
+                    exc,
+                )
                 short_book = None
                 close_index_usd = None
             if group.is_coin_collateral() and short_book is not None:
@@ -745,7 +751,13 @@ class StateReconcileMixin:
         try:
             short_instrument = self._find_or_fetch_instrument(markets, group.short_instrument_name)
             return self._currency_index_price(short_instrument.base_currency, orderbook_cache)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "reconcile: no index price for group=%s (%s); settlement debit cannot be computed: %s",
+                group.group_id,
+                group.short_instrument_name,
+                exc,
+            )
             return Decimal("0")
 
     def _naked_reconcile_close_debit_at_index(
@@ -802,8 +814,16 @@ class StateReconcileMixin:
         try:
             if group.long_instrument_name:
                 return self._find_or_fetch_instrument(markets, group.long_instrument_name)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # The long-leg debit feeds the spread's close_debit; fall back to a
+            # strike-based lookup but make the degradation visible.
+            LOGGER.warning(
+                "reconcile: long instrument %s lookup failed for group=%s; using strike-based fallback: %s",
+                group.long_instrument_name,
+                group.group_id,
+                exc,
+                exc_info=True,
+            )
         return long_instrument_for_spread_reconcile(group, short_instrument, markets)
 
     def _reconcile_usdc_close_debit_from_trades(
@@ -869,7 +889,9 @@ class StateReconcileMixin:
         markets = markets_by_currency or {}
         is_spread = self._is_bull_put_spread_group(group)
         spread_settlement = is_spread and group_uses_spread_settlement_pricing(group)
-        if group.current_debit > 0 and not spread_settlement and not group.is_coin_collateral():
+        expired = self._group_is_expired(group)
+        # Stale mark/current_debit must not override true expiry settlement (esp. OTM → 0).
+        if group.current_debit > 0 and not spread_settlement and not group.is_coin_collateral() and not expired:
             debit = group.current_debit
             if is_spread:
                 return self._cap_spread_reconcile_close_debit(group, debit)
@@ -880,7 +902,6 @@ class StateReconcileMixin:
             index_price = short_book.index_price
             if index_price <= 0:
                 index_price = group.close_index_usd or group.entry_index_usd or Decimal("0")
-            expired = self._group_is_expired(group)
             if spread_settlement and index_price > 0:
                 long_instrument = self._long_instrument_for_spread_reconcile(
                     group, markets, short_instrument=short_instrument
@@ -927,7 +948,13 @@ class StateReconcileMixin:
                             long_premium = (
                                 long_book.best_bid_price if long_book.best_bid_price > 0 else long_book.mark_price
                             )
-                    except Exception:
+                    except Exception as long_exc:  # noqa: BLE001
+                        LOGGER.warning(
+                            "reconcile: long leg %s orderbook unavailable for group=%s; long credit may be omitted: %s",
+                            group.long_instrument_name,
+                            group.group_id,
+                            long_exc,
+                        )
                         if spread_settlement and index_price > 0 and long_instrument is not None:
                             return self._spread_reconcile_close_debit_at_index(
                                 group,
@@ -961,7 +988,14 @@ class StateReconcileMixin:
             if is_spread:
                 return self._cap_spread_reconcile_close_debit(group, max(mark_debit, Decimal("0")))
             return max(mark_debit, Decimal("0"))
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning(
+                "reconcile: mark-based close debit failed for group=%s (%s); trying settlement fallback: %s",
+                group.group_id,
+                group.short_instrument_name,
+                exc,
+                exc_info=True,
+            )
             expired = self._group_is_expired(group) or (
                 is_spread and in_spread_expiry_settlement_window(int(group.expiration_timestamp_ms or 0))
             )
@@ -990,10 +1024,26 @@ class StateReconcileMixin:
                             short_instrument=short_instrument,
                             index_price=idx,
                         )
-                    except Exception:
-                        pass
+                    except Exception as settle_exc:  # noqa: BLE001
+                        LOGGER.warning(
+                            "reconcile: intrinsic settlement debit failed for expired group=%s (index=%s): %s",
+                            group.group_id,
+                            idx,
+                            settle_exc,
+                            exc_info=True,
+                        )
             if group.current_debit >= 0 and not group.is_coin_collateral():
                 debit = group.current_debit
+                # PnL component is unknown here; the stale pre-close mark is the only
+                # value left. Say so loudly so the operator can verify the realized
+                # PnL for this group.
+                LOGGER.warning(
+                    "reconcile: close debit for group=%s falls back to stale current_debit=%s "
+                    "(expired=%s); realized PnL may be inaccurate",
+                    group.group_id,
+                    debit,
+                    expired,
+                )
                 if is_spread:
                     return self._cap_spread_reconcile_close_debit(group, debit)
                 return debit
