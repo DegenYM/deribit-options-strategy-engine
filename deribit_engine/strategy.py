@@ -29,7 +29,7 @@ from .margin import (
 )
 from .models import NakedPutCandidate, OptionInstrument, OptionSide, OrderBookSnapshot, RiskRegime, SpreadLeg
 from .utils import ceil_to_step, floor_to_step, format_decimal
-from .vol_metrics import passes_iv_entry_gate
+from .vol_metrics import TrendReading, passes_iv_entry_gate
 
 
 class StrategySelector:
@@ -42,9 +42,9 @@ class StrategySelector:
         # Per-underlying risk reversal (put_IV - call_IV) recomputed each ranking
         # pass from the current candidate set; consumed by skew side selection.
         self._skew_by_currency: dict[str, Decimal] = {}
-        # Per-underlying trend signal (price vs MA) in [-1, 1]; refreshed each
-        # manage cycle from index chart data.
-        self._trend_by_currency: dict[str, Decimal] = {}
+        # Per-underlying trend reading (signal, raw deviation, regime); refreshed
+        # each manage cycle from settled daily closes.
+        self._trend_by_currency: dict[str, TrendReading] = {}
         # Last regime passed into a public builder / refresh / scan-detail call.
         # Rejection helpers read this so elevated can tighten hard delta_max
         # without threading ``regime`` through every private signature.
@@ -70,14 +70,27 @@ class StrategySelector:
         *,
         iv_rank_by_currency: dict[str, Decimal] | None = None,
         iv_minus_rv_by_currency: dict[str, Decimal] | None = None,
-        trend_by_currency: dict[str, Decimal] | None = None,
+        trend_by_currency: dict[str, TrendReading | Decimal] | None = None,
     ) -> None:
         self._iv_rank_by_currency = dict(iv_rank_by_currency or {})
         self._iv_minus_rv_by_currency = dict(iv_minus_rv_by_currency or {})
         if trend_by_currency is not None:
-            self._trend_by_currency = dict(trend_by_currency)
-        elif not self.config.enable_trend_side_bias:
+            self._trend_by_currency = {ccy: self._as_trend_reading(value) for ccy, value in trend_by_currency.items()}
+        elif not (self.config.enable_trend_side_bias or self.config.enable_trend_adaptive_selection):
             self._trend_by_currency = {}
+
+    def _as_trend_reading(self, value: TrendReading | Decimal) -> TrendReading:
+        """Normalize what callers hand in.
+
+        The engine passes a ``TrendReading``. Side-bias callers written before it (and
+        their tests) still pass a bare signal; wrap it so both paths read one shape. A
+        wrapped number carries ``bull_regime=False``, so it can steer side selection
+        but can never start the adaptive pause.
+        """
+        if isinstance(value, TrendReading):
+            return value
+        signal = max(Decimal("-1"), min(Decimal("1"), Decimal(str(value))))
+        return TrendReading(signal=signal, deviation=signal * self.config.trend_side_ref_pct, bull_regime=False)
 
     def _preferred_target_delta(self, currency: str, option_type: str) -> Decimal:
         """Target |delta| inside the preferred band used by candidate scoring.
@@ -87,25 +100,31 @@ class StrategySelector:
         shifted within the band: rich vol (VRP above the reference) moves it
         toward the lower-delta / further-OTM edge; thin vol moves it toward the
         higher-delta edge unless the strategy forbids an ATM tilt (naked short
-        defaults to OTM-only). The shift is clamped to the preferred band.
+        defaults to OTM-only). The trend term (covered call only) adds to it, and
+        the combined shift is clamped to the preferred band.
         """
-        pdmin, pdmax = self.config.preferred_delta_bounds(currency, option_type)
+        pdmin, pdmax = self.effective_preferred_delta_bounds(currency, option_type)
         center = (pdmin + pdmax) / Decimal("2")
-        if not self.config.enable_dynamic_target_delta:
-            return center
-        vrp = self._iv_minus_rv_by_currency.get(currency.upper())
-        if vrp is None:
-            return center
-        ref = self.config.dynamic_target_delta_vrp_ref
-        if ref <= 0:
-            return center
-        # signal in [-1, 1]: 0 at ref, +1 at >=2*ref (rich), -1 at <=0 (thin).
-        signal = (vrp - ref) / ref
-        signal = max(Decimal("-1"), min(Decimal("1"), signal))
-        if signal < 0 and not self.config.dynamic_target_delta_allow_closer():
-            signal = Decimal("0")
         half = (pdmax - pdmin) / Decimal("2")
-        target = center - signal * self.config.dynamic_target_delta_strength * half
+
+        # Two readings, same direction, one sum. Rich vol and a rising market both say
+        # "further out"; thin vol and a falling one both say "nearer". Adding them and
+        # clamping once beats two sequential shifts.
+        shift = Decimal("0")
+        if self.config.enable_dynamic_target_delta:
+            vrp = self._iv_minus_rv_by_currency.get(currency.upper())
+            ref = self.config.dynamic_target_delta_vrp_ref
+            if vrp is not None and ref > 0:
+                # signal in [-1, 1]: 0 at ref, +1 at >=2*ref (rich), -1 at <=0 (thin).
+                signal = (vrp - ref) / ref
+                signal = max(Decimal("-1"), min(Decimal("1"), signal))
+                if signal < 0 and not self.config.dynamic_target_delta_allow_closer():
+                    signal = Decimal("0")
+                shift += signal * self.config.dynamic_target_delta_strength
+        shift += self._trend_tilt(currency) * self.config.trend_target_delta_strength
+        if shift == 0:
+            return center
+        target = center - shift * half
         return max(pdmin, min(pdmax, target))
 
     def _set_active_regime(self, regime: RiskRegime | None) -> None:
@@ -124,6 +143,9 @@ class StrategySelector:
         below min. Naked uses a larger default haircut than covered call.
         """
         dmin, dmax = self.config.delta_bounds(currency, option_type)
+        # The tape first, the regime after — so an elevated haircut still bites on the
+        # widened ceiling rather than being cancelled by it.
+        dmax += self._trend_delta_stretch(currency, option_type)
         use = regime if regime is not None else self._active_regime
         tighten = self.config.elevated_delta_tighten_amount()
         if use is RiskRegime.ELEVATED and tighten > 0:
@@ -225,14 +247,93 @@ class StrategySelector:
         side_sign = Decimal("1") if (candidate.option_type or "put") == "put" else Decimal("-1")
         return self.config.score_weight_skew * side_sign * rr
 
-    def _trend_signal(self, currency: str) -> Decimal | None:
+    def _trend_side_signal(self, currency: str) -> Decimal | None:
+        """For side selection only — picking a put over a call, or the reverse.
+
+        Separate from the adaptive tilt because they are different features sharing one
+        number: turning adaptive selection on must not quietly arm side selection, which
+        does real work for an account that sells both sides.
+        """
         if not self.config.enable_trend_side_bias:
             return None
-        return self._trend_by_currency.get(currency.upper())
+        reading = self._trend_by_currency.get(currency.upper())
+        return None if reading is None else reading.signal
+
+    def _trend_tilt(self, currency: str) -> Decimal:
+        """Signal in [-1, 1] driving every adaptive shift; 0 when off, too weak, or not a covered call.
+
+        Positive is a market above its own moving average — the one that calls the coin
+        away — so every use below reads "+1 = back off, -1 = lean in". That is only
+        right for a short call (for a short put a rising market is the safe one), so the
+        tilt is confined to covered calls even if the flag is set on another account.
+        """
+        if not self.config.enable_trend_adaptive_selection or self.config.option_strategy != "covered_call":
+            return Decimal("0")
+        reading = self._trend_by_currency.get(currency.upper())
+        signal = None if reading is None else reading.signal
+        if signal is None or abs(signal) < self.config.trend_side_min_signal:
+            return Decimal("0")
+        return max(Decimal("-1"), min(Decimal("1"), signal))
+
+    def _trend_delta_stretch(self, currency: str, option_type: str) -> Decimal:
+        """Extra |delta| headroom a falling market buys, on the call ceiling only.
+
+        A rising market never widens anything — it only slides the target down and
+        lifts the OTM floor. Asymmetric on purpose: the risk being managed is losing
+        the coin, and that risk is not symmetric.
+        """
+        if option_type != "call":
+            return Decimal("0")
+        tilt = self._trend_tilt(currency)
+        if tilt >= 0:
+            return Decimal("0")
+        return -tilt * self.config.trend_delta_max_stretch
+
+    def effective_preferred_delta_bounds(self, currency: str, option_type: str) -> tuple[Decimal, Decimal]:
+        """Preferred band after the tape. The floor never moves."""
+        pdmin, pdmax = self.config.preferred_delta_bounds(currency, option_type)
+        return pdmin, pdmax + self._trend_delta_stretch(currency, option_type)
+
+    def trend_pause_reason_zh(self, currency: str) -> str | None:
+        """Chinese reason when the tape is too strong to write a new call, else None.
+
+        Deeper OTM handles an ordinary climb; this is for the case where deeper stops
+        being enough. Says the actual reading — the number is what lets someone decide
+        whether they agree.
+        """
+        threshold = self.config.trend_pause_above_pct
+        if (
+            threshold <= 0
+            or not self.config.enable_trend_adaptive_selection
+            or self.config.option_strategy != "covered_call"
+        ):
+            return None
+        reading = self._trend_by_currency.get(currency.upper())
+        if reading is None or reading.deviation < threshold:
+            return None
+        # Two conditions, deliberately: being stretched above a 20-day average is a fast
+        # week; the long average says whether the week is part of an uptrend. Pausing
+        # is the one response that earns nothing, so it asks for both.
+        if self.config.trend_pause_requires_bull_regime and not reading.bull_regime:
+            return None
+        above = reading.deviation * Decimal("100")
+        return (
+            f"{currency.upper()} 現價高於 {self.config.trend_ma_days} 日均線約 "
+            f"{above.quantize(Decimal('0.1'))}%，且 {self.config.trend_ma_days} 日均線仍在 "
+            f"{self.config.trend_regime_ma_days} 日均線之上，賣出的買權容易被 call 走，暫緩開新倉。"
+        )
+
+    def effective_call_otm_min(self, currency: str) -> Decimal:
+        """The call's OTM floor after the tape — further out when climbing, nearer when falling."""
+        omin, _omax = self.config.call_otm_bounds(currency)
+        # Proportional, not absolute: three points off an 8% floor is a nudge, off a
+        # 5% one it is most of the distance.
+        shifted = omin * (Decimal("1") + self._trend_tilt(currency) * self.config.trend_otm_floor_ratio)
+        return max(Decimal("0"), shifted)
 
     def _trend_side_sort_tier(self, candidate: NakedPutCandidate) -> int:
         """Lexicographic tie-breaker: 0 = trend-aligned side, 1 = counter-trend."""
-        signal = self._trend_signal(candidate.currency)
+        signal = self._trend_side_signal(candidate.currency)
         if signal is None or abs(signal) < self.config.trend_side_min_signal:
             return 0
         is_put = (candidate.option_type or "put") == "put"
@@ -242,7 +343,7 @@ class StrategySelector:
 
     def _trend_score_term(self, candidate: NakedPutCandidate) -> Decimal:
         """Score bonus/penalty steering side selection with the tape."""
-        signal = self._trend_signal(candidate.currency)
+        signal = self._trend_side_signal(candidate.currency)
         if signal is None or abs(signal) < self.config.trend_side_min_signal:
             return Decimal("0")
         side_sign = Decimal("1") if (candidate.option_type or "put") == "put" else Decimal("-1")
@@ -522,7 +623,7 @@ class StrategySelector:
             return True
         otm = self._otm_ratio_from_strike(instrument, index_price=index_price, option_type=option_type)
         if option_type == "call":
-            omin, omax = self.config.call_otm_bounds(currency)
+            omin, omax = self.effective_call_otm_min(currency), self.config.call_otm_bounds(currency)[1]
         else:
             omin, omax = self.config.put_otm_bounds(currency)
         slack = Decimal("0.005")
@@ -602,7 +703,7 @@ class StrategySelector:
         if reason == "otm_out_of_range":
             if option_type == "call":
                 otm = self._call_otm_ratio(instrument, book)
-                omin, omax = self.config.call_otm_bounds(currency)
+                omin, omax = self.effective_call_otm_min(currency), self.config.call_otm_bounds(currency)[1]
             else:
                 otm = self._put_otm_ratio(instrument, book)
                 omin, omax = self.config.put_otm_bounds(currency)
@@ -753,7 +854,7 @@ class StrategySelector:
         if not (dmin <= abs_delta <= dmax):
             return "delta_out_of_range"
         otm = self._call_otm_ratio(instrument, book)
-        omin, omax = self.config.call_otm_bounds(currency)
+        omin, omax = self.effective_call_otm_min(currency), self.config.call_otm_bounds(currency)[1]
         # Covered call prioritizes delta for assignment risk; OTM% is a floor
         # only (must be sufficiently OTM). Do not hard-cap OTM max so low-IV
         # deep-OTM strikes that still match delta remain eligible.
@@ -1402,7 +1503,7 @@ class StrategySelector:
             pdmin, pdmax = self.config.preferred_call_delta_bounds(currency)
             pomin, pomax = self.config.preferred_call_otm_bounds(currency)
             otm = self._call_otm_ratio(instrument, book)
-            omin, _omax = self.config.call_otm_bounds(currency)
+            omin = self.effective_call_otm_min(currency)
         else:
             pdmin, pdmax = self.config.preferred_put_delta_bounds(currency)
             pomin, pomax = self.config.preferred_put_otm_bounds(currency)
@@ -2170,7 +2271,7 @@ class StrategySelector:
             target_price=self.sell_mid_price(instrument, book),
         )
         pdmin, pdmax = self.config.preferred_call_delta_bounds(currency)
-        omin, _omax = self.config.call_otm_bounds(currency)
+        omin = self.effective_call_otm_min(currency)
         otm = self._call_otm_ratio(instrument, book)
         return (
             NakedPutCandidate(

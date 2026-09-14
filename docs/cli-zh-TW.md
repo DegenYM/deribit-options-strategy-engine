@@ -121,6 +121,27 @@ CSP 挑選標的（不下單）：在 **covered_call** 子帳跑
 
 會用和 live `manage` 同一套排序（滿張 → 最接近原履約價 → 較短 DTE / APR）。不帶 `--from-group` 時，**每一筆 ITM 已賣 cover 的備兌**各出一組 `groups[]`（含 BTC / ETH）；`--from-group` 才只看單一母單或 CSP 子單。不必先開 CSP，也不必先開旗標（`csp_enabled=false` 時 `would_place` 仍是 false）。沒有已賣 cover 時才退回開著的備兌（假設賣出所得，`hypothetical_usdc`）。`manage` 不帶 `--live` 只在尚未開倉時回一筆 `cash_secured_preview`。
 
+## 接回遷移前檢查（唯讀）
+
+把**正在跑的** covered_call 帳戶換到共用設定（ITM 賣出、CSP 接回、權利金階梯、權利金留 USDC）之前，先跑
+`scripts/wheel_migration_preflight.py`。它只讀設定與 state：不寫任何檔案、不打私有 API（`--no-network` 連公開指數也不查），bot 不用停。
+
+```bash
+python scripts/wheel_migration_preflight.py --investor $INVESTOR
+python scripts/wheel_migration_preflight.py --all --json
+# Docker：新 image、同一份 host config 與 .state
+INVESTOR=$INVESTOR docker compose run --rm --no-deps live python scripts/wheel_migration_preflight.py --all
+```
+
+每個 covered_call 子帳列出：
+
+- 設定載不載得起來（子帳還設 `COVERED_CALL_CSP_PREMIUM_TARGET=spot` 會失敗，exit code 2）、每個輪動 key 由哪一層決定、哪些 `.env.investor` 的值被共用設定蓋掉。
+- 每一組已賣出現貨的備兌在輪動的哪個階段：`first_put`（從沒接回過——**沒有年限**，開接回後第一輪就會替它賣賣權）、`next_put`（等下一張，階梯馬上生效）、`put_open`、`not_eligible`；原本的窗口、加上階梯的窗口、計入的權利金、已換成幣而不計的權利金。
+- 警告：現貨低於履約價上限（窗口裡是價內賣權）、自動買回單還掛著（開接回後這條路不再對帳）。
+- 開著的賣權，以及現貨離履約價多遠。
+
+`manage`、`scan`、`status` 不帶 `--live` 也會寫 state 檔：bot 在跑的時候，不要用它們檢查同一個帳戶。
+
 ## 歷史回測（research only）
 
 使用 Deribit 公開行情做離線回測；報告預設寫入 `docs/backtest/`（不影響 live state）。
@@ -275,7 +296,7 @@ ACCT=covered_call
 | `--group-id` | 只處理指定已平倉 group |
 | `--amount` | 買回 native 數量；**預設**為補滿原始 cover：`swap（spot exit）+ settle + fee − 已 restore` |
 | `--usdt` / `--quote` | 花費 USDT 買回（與 `--amount` 互斥）；超過尚未補滿的 cover 時會封頂 |
-| `--instrument` | 現貨對，例如 `BTC_USDC`（預設跟 ITM 出場同一對，常是 `BTC_USDT`） |
+| `--instrument` | 現貨對，例如 `BTC_USDC`（預設跟 ITM 出場同一對：接回開啟時是 `BTC_USDC`，關閉時是 `BTC_USDT`） |
 | `--wait-seconds` | limit 掛單等待秒數後取消未成交（預設 `SPOT_RESTORE_WAIT_SECONDS=120`） |
 | `--reconcile-only` | 只同步 state 上的 restore 欄位，不送 spot 單 |
 | `--live` | 實際下單並寫入 state（預設 dry-run） |

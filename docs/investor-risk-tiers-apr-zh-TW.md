@@ -52,14 +52,14 @@
 | 分級 | 適合對象 | Strike 選擇（約略） | 保證金紀律 | 進場 APR 門檻 |
 |------|----------|---------------------|------------|---------------|
 | **Low** | 重視保留現貨／上漲空間 | BTC delta 約 0.05–0.10（偏好 0.05–0.08）；OTM 地板約 12%（ETH 14%） | IM 硬上限 48%；最多 3 組／幣；spread 上限 **18%** | 最低 **3.5%**，偏好 **4–6%** |
-| **Medium** | 平衡權利金與被 call 走機率 | BTC delta 約 0.06–0.13（偏好 0.07–0.11）；OTM 地板約 8%（ETH 10%） | IM 硬上限 62% | 最低 **4%**，偏好 **5–8%** |
+| **Medium** | 平衡權利金與被 call 走機率 | BTC delta 約 0.06–0.13（偏好 0.07–0.11）；OTM 地板約 8%（ETH 10%） | IM 硬上限 62% | 最低 **4.5%**，偏好 **5–8%** |
 | **High** | 願接受較高被履約／封頂機率 | BTC delta 約 0.10–0.17（偏好 0.11–0.15）；OTM 地板約 5%（ETH 6%） | IM 硬上限 65% | 最低 **7%**，偏好 **8–12%** |
 
-**選約原則**：排序為 **delta → 更深 OTM → TARGET APR（軟）**；硬門檻只有 delta 帶與 `*_CALL_OTM_MIN`（無 OTM max）。TARGET APR 不再壓過保留現貨的選約。
+**選約原則**：排序為 **delta → 更深 OTM → TARGET APR（軟）**；硬門檻只有 delta 帶與 `*_CALL_OTM_MIN`（無 OTM max）。TARGET APR 不再壓過保留現貨的選約。另有**趨勢自適應**：上漲時往更遠的履約價站，漲得過快且仍在牛市結構時暫停開新倉；下跌時可以靠近一點（見 `strategies-zh-TW.md` 的 covered_call 節）。
 
 **流動性**：Low 的 `INVERSE_MAX_SPREAD_RATIO=0.18`（18%）；medium／high 仍為 **15%**。上漲週期只放寬 bid-ask 閘門、**不動 OTM 與 delta**——strike 距離才決定被 call 走機率；spread 過寬多半是薄盤流動性，不是「賣更近」。
 
-**風險重點**：現貨下跌風險仍在；ITM 結算後 tier 預設會 **settlement spot exit**（賣 BTC_USDT / ETH_USDT，數量 = cover − 結算損失；權利金走 Profit swap）。High tier strike 較近，較容易在強勢行情中被 call 走。
+**風險重點**：現貨下跌風險仍在；ITM 結算後預設 **settlement spot exit** 賣成 **BTC_USDC / ETH_USDC**（數量 = cover − 結算損失；權利金走 Profit swap），再以 cash-secured put 接回現貨（共用設定預設開啟，接回的履約價上限隨各輪賣權收到的權利金往上墊；帳戶關閉接回則賣 BTC_USDT / ETH_USDT、不接回）。是否 ITM 以到期日結算價判斷。High tier strike 較近，較容易在強勢行情中被 call 走。
 
 ---
 

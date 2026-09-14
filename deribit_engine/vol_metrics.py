@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -240,6 +241,33 @@ def trend_signal_vs_ma(
     return max(Decimal("-1"), min(Decimal("1"), signal))
 
 
+@dataclass(frozen=True)
+class TrendReading:
+    """One read of the tape, in the three shapes its callers need.
+
+    ``signal`` is the clamped number every gradual shift uses. ``deviation`` is the
+    same thing before the clamp, because a threshold like "more than 6% above the
+    average" cannot be expressed once the scale saturates at ``ref_pct``. And
+    ``bull_regime`` is structure rather than speed — a short average above a long one
+    — which is what separates "a hard week" from "we are in an uptrend".
+    """
+
+    signal: Decimal
+    deviation: Decimal
+    bull_regime: bool
+
+
+def _closes_up_to(series: Sequence[tuple[int, Decimal | float | str]], end_ts_ms: int) -> list[tuple[int, Decimal]]:
+    out: list[tuple[int, Decimal]] = []
+    for ts, val in series:
+        if int(ts) > end_ts_ms:
+            break
+        close = to_decimal(val)
+        if close > 0:
+            out.append((int(ts), close))
+    return out
+
+
 def trend_signal_from_index_series(
     series: Sequence[tuple[int, Decimal | float | str]],
     *,
@@ -247,15 +275,67 @@ def trend_signal_from_index_series(
     ma_window: int = 20,
     ref_pct: Decimal = Decimal("0.05"),
 ) -> Decimal | None:
-    """Trend signal from ``(ts_ms, close)`` index series up to ``end_ts_ms``."""
-    closes: list[Decimal] = []
-    for ts, val in series:
-        if int(ts) > end_ts_ms:
-            break
-        close = to_decimal(val)
-        if close > 0:
-            closes.append(close)
+    """Trend signal from ``(ts_ms, close)`` index series up to ``end_ts_ms``.
+
+    ``ma_window`` counts **days**. The index chart endpoint returns 6-hourly prints
+    for a one-year range, so the series is resampled to one close per UTC day first
+    — without that, a 20-day average is a 5-day one.
+    """
+    closes = daily_closes_from_index_series(_closes_up_to(series, end_ts_ms))
     return trend_signal_vs_ma(closes, ma_window=ma_window, ref_pct=ref_pct)
+
+
+def trend_reading_from_daily_closes(
+    closes: Sequence[Decimal],
+    *,
+    price: Decimal,
+    ma_window: int = 20,
+    ref_pct: Decimal = Decimal("0.05"),
+    regime_ma_window: int = 100,
+) -> TrendReading | None:
+    """The reading, given settled daily closes and a separate live price.
+
+    Splitting the two is the point. An average belongs over *settled* closes — one
+    per day, no resampling judgement — while "how stretched are we" has to be
+    measured from the price you would actually sell at.
+
+    ``bull_regime`` is False — never None — when there is not enough history for the
+    long average. A missing reading must not be able to *start* the pause; the point
+    of gating on it is to require more evidence, not less.
+    """
+    if ma_window < 2 or len(closes) < ma_window or price <= 0 or ref_pct <= 0:
+        return None
+    short_ma = sum(closes[-ma_window:]) / Decimal(ma_window)
+    if short_ma <= 0:
+        return None
+    deviation = safe_div(price - short_ma, short_ma)
+    bull = False
+    if regime_ma_window >= 2 and len(closes) >= regime_ma_window:
+        long_ma = sum(closes[-regime_ma_window:]) / Decimal(regime_ma_window)
+        bull = long_ma > 0 and short_ma > long_ma
+    signal = deviation / ref_pct
+    return TrendReading(
+        signal=max(Decimal("-1"), min(Decimal("1"), signal)),
+        deviation=deviation,
+        bull_regime=bull,
+    )
+
+
+def trend_reading_from_index_series(
+    series: Sequence[tuple[int, Decimal | float | str]],
+    *,
+    end_ts_ms: int,
+    ma_window: int = 20,
+    ref_pct: Decimal = Decimal("0.05"),
+    regime_ma_window: int = 100,
+) -> TrendReading | None:
+    """Signal, raw deviation, and whether the structure is an uptrend (chart input)."""
+    closes = daily_closes_from_index_series(_closes_up_to(series, end_ts_ms))
+    if not closes:
+        return None
+    return trend_reading_from_daily_closes(
+        closes, price=closes[-1], ma_window=ma_window, ref_pct=ref_pct, regime_ma_window=regime_ma_window
+    )
 
 
 def passes_iv_entry_gate(

@@ -299,6 +299,36 @@ class CoveredCallMixin:
                 )
         return actions
 
+    def _cash_secured_skip_memory(self) -> dict[str, str]:
+        memory = getattr(self, "_cash_secured_skip_reason_by_group", None)
+        if memory is None:
+            memory = {}
+            self._cash_secured_skip_reason_by_group = memory
+        return memory
+
+    def _cash_secured_skip(
+        self,
+        group: TradeGroup,
+        reason: str,
+        *,
+        live: bool,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """A skipped wheel put the operator can see.
+
+        Dry-run reports every cycle, as before. Live used to report nothing, so a wheel that
+        never re-entered looked the same as one with nothing to do. Live now reports each
+        reason once per group — when it first appears or changes — so it reaches the run
+        output and the log without repeating every poll.
+        """
+        memory = self._cash_secured_skip_memory()
+        if live and memory.get(group.group_id) == reason:
+            return None
+        memory[group.group_id] = reason
+        if live:
+            LOGGER.info("cash_secured: skipped group=%s reason=%s", group.group_id, reason)
+        return {"action": "cash_secured_skipped", "group_id": group.group_id, "reason": reason, **(detail or {})}
+
     def _pending_itm_cash_secured_actions(
         self,
         context: RuntimeContext,
@@ -317,7 +347,6 @@ class CoveredCallMixin:
             cash_secured_hold_credit_dte_from_closed_roll,
             cash_secured_last_active_roll_child,
             cash_secured_quantity,
-            cash_secured_strike_bounds,
             cash_secured_target_native,
             itm_sold_ready_for_cash_secured,
         )
@@ -336,39 +365,25 @@ class CoveredCallMixin:
         for group in context.state.groups:
             ready, reason = itm_sold_ready_for_cash_secured(group, context.state.groups)
             if not ready:
-                if not live and reason in {"spot_exit_not_usdc", "spot_exit_not_filled"}:
-                    actions.append(
-                        {
-                            "action": "cash_secured_skipped",
-                            "group_id": group.group_id,
-                            "reason": reason,
-                        }
-                    )
+                if reason in {"spot_exit_not_usdc", "spot_exit_not_filled"}:
+                    skip = self._cash_secured_skip(group, reason, live=live)
+                    if skip:
+                        actions.append(skip)
                 continue
             if cash_secured_child_is_open(context.state.groups, group):
                 continue
             regime = context.regime_by_currency.get(group.currency, RiskRegime.CRISIS)
             if regime is RiskRegime.CRISIS:
-                if not live:
-                    actions.append(
-                        {
-                            "action": "cash_secured_skipped",
-                            "group_id": group.group_id,
-                            "reason": "crisis_regime",
-                        }
-                    )
+                skip = self._cash_secured_skip(group, "crisis_regime", live=live)
+                if skip:
+                    actions.append(skip)
                 continue
 
             usdc = context.summaries.get("USDC")
             if usdc is None or usdc.equity <= 0:
-                if not live:
-                    actions.append(
-                        {
-                            "action": "cash_secured_skipped",
-                            "group_id": group.group_id,
-                            "reason": "usdc_unavailable",
-                        }
-                    )
+                skip = self._cash_secured_skip(group, "usdc_unavailable", live=live)
+                if skip:
+                    actions.append(skip)
                 continue
             usdc_free = max(usdc.available_funds, usdc.available_withdrawal_funds, Decimal("0"))
             sold = cash_secured_target_native(group, context.state.groups)
@@ -377,21 +392,17 @@ class CoveredCallMixin:
                     "cash_secured: skip entry, cover already restored group=%s",
                     group.group_id,
                 )
-                if not live:
-                    actions.append(
-                        {
-                            "action": "cash_secured_skipped",
-                            "group_id": group.group_id,
-                            "reason": "cover_restored",
-                        }
-                    )
+                skip = self._cash_secured_skip(group, "cover_restored", live=live)
+                if skip:
+                    actions.append(skip)
                 continue
             cover = covered_call_cover_native(group)
-            min_strike, max_strike = cash_secured_strike_bounds(
-                group.short_strike,
-                self.config.covered_call_csp_strike_floor_pct,
-            )
             qty_cap = cover if cover > 0 else sold
+            min_strike, max_strike = self._cash_secured_strike_window(
+                context,
+                group,
+                quantity=qty_cap if qty_cap > 0 else sold,
+            )
             roll_child = cash_secured_last_active_roll_child(group, context.state.groups)
             if roll_child is not None:
                 hold_credit, hold_dte = cash_secured_hold_credit_dte_from_closed_roll(roll_child)
@@ -424,14 +435,9 @@ class CoveredCallMixin:
                         "cash_secured: skip retry after active roll, daily yield not higher group=%s",
                         group.group_id,
                     )
-                    if not live:
-                        actions.append(
-                            {
-                                "action": "cash_secured_skipped",
-                                "group_id": group.group_id,
-                                "reason": "daily_yield_not_higher",
-                            }
-                        )
+                    skip = self._cash_secured_skip(group, "daily_yield_not_higher", live=live)
+                    if skip:
+                        actions.append(skip)
                     continue
                 candidate = picked[0]
             else:
@@ -447,25 +453,27 @@ class CoveredCallMixin:
                     summary_maintenance_margin=usdc.maintenance_margin,
                 )
             if candidate is None:
-                if not live:
-                    actions.append(
-                        {
-                            "action": "cash_secured_skipped",
-                            "group_id": group.group_id,
-                            "reason": "no_short_dated_put",
-                            "strike_min": format_decimal(min_strike, 2),
-                            "strike_max": format_decimal(max_strike, 2),
-                            "quantity": cash_secured_quantity(
-                                sold_native=sold,
-                                usdc_available=usdc_free,
-                                strike=group.short_strike,
-                                contract_size=Decimal("1"),
-                                min_trade_amount=Decimal("0.01"),
-                                cap=cover if cover > 0 else None,
-                            ),
-                        }
-                    )
+                skip = self._cash_secured_skip(
+                    group,
+                    "no_short_dated_put",
+                    live=live,
+                    detail={
+                        "strike_min": format_decimal(min_strike, 2),
+                        "strike_max": format_decimal(max_strike, 2),
+                        "quantity": cash_secured_quantity(
+                            sold_native=sold,
+                            usdc_available=usdc_free,
+                            strike=group.short_strike,
+                            contract_size=Decimal("1"),
+                            min_trade_amount=Decimal("0.01"),
+                            cap=cover if cover > 0 else None,
+                        ),
+                    },
+                )
+                if skip:
+                    actions.append(skip)
                 continue
+            self._cash_secured_skip_memory().pop(group.group_id, None)
             actions.append(
                 self._execute_itm_cash_secured_entry(
                     context,
@@ -475,6 +483,33 @@ class CoveredCallMixin:
                 )
             )
         return actions
+
+    def _cash_secured_strike_window(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        *,
+        quantity: Decimal,
+        strike_floor_pct: Decimal | None = None,
+    ) -> tuple[Decimal, Decimal]:
+        """The strike window for this wheel's next put, in one place.
+
+        Three callers needed the same answer (the live entry, the dry-run preview, and
+        the active roll) and the ladder has to mean the same thing in all three or the
+        scan would promise a strike the bot would not write.
+        """
+        from ..cash_secured_ops import cash_secured_premium_ledger, cash_secured_strike_bounds
+
+        floor = strike_floor_pct if strike_floor_pct is not None else self.config.covered_call_csp_strike_floor_pct
+        ledger = Decimal("0")
+        if self.config.covered_call_csp_premium_ladder:
+            ledger = cash_secured_premium_ledger(group, context.state.groups)
+        return cash_secured_strike_bounds(
+            group.short_strike,
+            floor,
+            premium_credit=ledger,
+            quantity=quantity,
+        )
 
     def _load_linear_usdc_puts(self, currency: str) -> list[OptionInstrument]:
         ccy = currency.upper()
@@ -705,7 +740,6 @@ class CoveredCallMixin:
         strike_floor_pct: Decimal | None = None,
     ) -> dict[str, Any]:
         from ..cash_secured_ops import (
-            cash_secured_strike_bounds,
             cash_secured_target_native,
             itm_sold_ready_for_cash_secured,
         )
@@ -716,10 +750,11 @@ class CoveredCallMixin:
         cover = covered_call_cover_native(parent)
         if sold <= 0 and cover > 0 and ready_reason in {"not_closed", "spot_exit_not_filled"}:
             sold = cover
-        floor = strike_floor_pct if strike_floor_pct is not None else self.config.covered_call_csp_strike_floor_pct
-        min_strike, max_strike = cash_secured_strike_bounds(
-            parent.short_strike,
-            floor,
+        min_strike, max_strike = self._cash_secured_strike_window(
+            context,
+            parent,
+            quantity=cover if cover > 0 else sold,
+            strike_floor_pct=strike_floor_pct,
         )
         usdc_free = Decimal("0")
         usdc_equity = Decimal("0")
@@ -2380,6 +2415,62 @@ class CoveredCallMixin:
         trigger = group.short_strike * (Decimal("1") + self.config.covered_call_itm_buffer_pct)
         return index_price > trigger
 
+    def _expiry_settlement_price(self, group: TradeGroup) -> Decimal | None:
+        """Deribit's delivery price for the day ``group`` expired, or None when unavailable.
+
+        Expiry decisions — was the call exercised, was the put — belong to the price the
+        exchange settled at, not to whatever the index is when reconcile gets round to the
+        group. After downtime the two can sit on opposite sides of the strike.
+        """
+        from datetime import UTC, datetime
+
+        from ..utils import utc_now_ms
+
+        expiry_ms = int(group.expiration_timestamp_ms or 0)
+        getter = getattr(self.client, "get_delivery_prices", None)
+        if expiry_ms <= 0 or getter is None:
+            return None
+        expiry_day = datetime.fromtimestamp(expiry_ms / 1000, UTC).strftime("%Y-%m-%d")
+        age_days = max(0, (utc_now_ms() - expiry_ms) // 86_400_000)
+        try:
+            rows = getter(f"{str(group.currency).lower()}_usd", days=int(age_days) + 5)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("expiry settlement price unavailable group=%s: %s", group.group_id, exc)
+            return None
+        for day, price in rows or []:
+            if day == expiry_day and price > 0:
+                return price
+        return None
+
+    def _covered_call_expired_itm(
+        self,
+        group: TradeGroup,
+        orderbook_cache: dict[str, OrderBookSnapshot],
+    ) -> bool:
+        """Was this expired call exercised? Settlement price first, today's index only as a fallback."""
+        settlement = self._expiry_settlement_price(group)
+        if settlement is None or group.short_strike <= 0:
+            return self._covered_call_itm_from_cache(group, orderbook_cache)
+        return settlement > group.short_strike * (Decimal("1") + self.config.covered_call_itm_buffer_pct)
+
+    def _cash_secured_put_expired_itm(
+        self,
+        group: TradeGroup,
+        orderbook_cache: dict[str, OrderBookSnapshot],
+        close_index_usd: Decimal | None = None,
+    ) -> bool:
+        """Was this expired put exercised? Settlement price first, the close index only as a fallback."""
+        from ..cash_secured_ops import cash_secured_put_is_itm
+
+        settlement = self._expiry_settlement_price(group)
+        if settlement is None:
+            return self._cash_secured_put_itm_from_cache(group, orderbook_cache, close_index_usd)
+        return cash_secured_put_is_itm(
+            index_price=settlement,
+            strike=group.short_strike,
+            buffer_pct=self.config.covered_call_itm_buffer_pct,
+        )
+
     def _cash_secured_put_itm(self, group: TradeGroup, context: RuntimeContext) -> bool:
         return self._cash_secured_put_itm_from_cache(group, context.orderbook_cache)
 
@@ -2530,7 +2621,6 @@ class CoveredCallMixin:
             cash_secured_active_roll_tv_ratio,
             cash_secured_roll_blocked,
             cash_secured_self_assign_liquidity_ok,
-            cash_secured_strike_bounds,
             cash_secured_target_native,
         )
         from ..fees import option_trade_fee_usdc
@@ -2611,9 +2701,10 @@ class CoveredCallMixin:
         if self._cash_secured_blocked_by_hard_derisk(context):
             return []
 
-        min_strike, max_strike = cash_secured_strike_bounds(
-            parent.short_strike,
-            self.config.covered_call_csp_strike_floor_pct,
+        min_strike, max_strike = self._cash_secured_strike_window(
+            context,
+            parent,
+            quantity=group.quantity if group.quantity > 0 else parent.quantity,
         )
 
         usdc = context.summaries.get("USDC")

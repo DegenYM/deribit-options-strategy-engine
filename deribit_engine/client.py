@@ -16,7 +16,7 @@ from . import public_cache
 from .config import BotConfig
 from .exceptions import AuthenticationError, ExchangeError, TransientExchangeError
 from .exchange_throttle import note_rate_limited, note_success, pace_exchange_request
-from .utils import format_decimal, utc_now_ms
+from .utils import format_decimal, to_decimal, utc_now_ms
 
 
 @dataclass(frozen=True)
@@ -74,8 +74,15 @@ def _book_summary_cache_ttl_seconds() -> float:
 
 
 def _macro_cache_ttl_seconds() -> float:
-    # Index chart / DVOL are daily-resolution series; a longer window is safe.
+    # DVOL is a daily series. The index chart is NOT — a "1y" range comes back as
+    # 6-hourly prints, which is what made a 20-bar average a five-day one. Anything
+    # wanting daily closes should use ``get_delivery_prices`` instead.
     return _env_float("DERIBIT_MACRO_CACHE_TTL_SEC", 60.0)
+
+
+def _settlement_cache_ttl_seconds() -> float:
+    # Delivery prices settle once a day and never revise, so an hour is generous.
+    return _env_float("DERIBIT_SETTLEMENT_CACHE_TTL_SEC", 3600.0)
 
 
 def _cached_public_read(key: str, ttl: float, loader: Callable[[], Any]) -> Any:
@@ -796,6 +803,42 @@ class DeribitClient:
             return self._request("public/get_index_price", params={"index_name": index_name}) or {}
 
         return _cached_public_read(f"index_price:{index_name}", _index_price_cache_ttl_seconds(), _load)
+
+    def get_delivery_prices(self, index_name: str, *, days: int = 400) -> list[tuple[str, Decimal]]:
+        """Deribit's own daily settlement prices, oldest first, as ``(YYYY-MM-DD, price)``.
+
+        The authoritative daily close. Unlike ``get_index_chart_data`` — capped at a
+        one-year range and 6-hourly — this goes back to the index's first delivery
+        (BTC: 2016), so a 100-day average exists on a freshly deployed bot.
+        Paged at 1000 per request; ``days`` bounds how far back to walk.
+        """
+        def _load() -> list[list[Any]]:
+            out: list[list[Any]] = []
+            offset = 0
+            while offset < days:
+                result = self._request(
+                    "public/get_delivery_prices",
+                    params={"index_name": index_name, "offset": offset, "count": min(1000, days - offset)},
+                )
+                rows = (result or {}).get("data") or []
+                if not rows:
+                    break
+                out.extend([row.get("date"), row.get("delivery_price")] for row in rows)
+                offset += len(rows)
+                if offset >= int((result or {}).get("records_total") or 0):
+                    break
+            return out
+
+        cached = _cached_public_read(f"delivery_prices:{index_name}:{days}", _settlement_cache_ttl_seconds(), _load)
+        out: list[tuple[str, Decimal]] = []
+        for row in cached or []:
+            if not isinstance(row, list | tuple) or len(row) < 2 or not row[0]:
+                continue
+            price = to_decimal(row[1])
+            if price > 0:
+                out.append((str(row[0]), price))
+        out.sort()
+        return out
 
     def get_index_chart_data(self, index_name: str, *, range_name: str = "1d") -> list[list[Any]]:
         def _load() -> list[list[Any]]:

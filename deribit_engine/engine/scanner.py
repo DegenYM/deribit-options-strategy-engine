@@ -241,6 +241,10 @@ class ScannerMixin:
                         blockers.append(
                             f"{currency} [covered_call]: ITM spot_exit pending remaining={format_decimal(remaining, 8)}"
                         )
+                for currency in selected_currencies:
+                    reason = self.strategy.trend_pause_reason_zh(currency)
+                    if reason:
+                        blockers.append(f"{currency} [covered_call]: {reason}")
             cooled_books = [
                 book
                 for book in sorted({(c.collateral_currency or c.currency or "").upper() for c in candidates})
@@ -276,6 +280,11 @@ class ScannerMixin:
                 if regime is RiskRegime.CRISIS:
                     detail = snap.regime_detail_by_currency.get(currency, ())
                     blockers.append(f"{currency}: regime=crisis — {'; '.join(detail)}")
+            if self.config.option_strategy == "covered_call":
+                for currency in selected_currencies:
+                    reason = self.strategy.trend_pause_reason_zh(currency)
+                    if reason:
+                        blockers.append(f"{currency} [covered_call]: {reason}")
             if not blockers:
                 blockers.append("no_candidates: run `./bot scan --diagnostics` for rejection detail")
             return blockers
@@ -487,6 +496,10 @@ class ScannerMixin:
                 detail = snap.regime_detail_by_currency.get(ccy, ())
                 blockers.append(f"{ccy}: regime=crisis — {'; '.join(detail)}")
                 continue
+            trend_pause = self.strategy.trend_pause_reason_zh(ccy)
+            if trend_pause:
+                blockers.append(f"{ccy} [covered_call]: {trend_pause}")
+                continue
             if self._covered_call_spot_exit_blocks_entry(context.state, ccy):
                 from ..spot_exit_ops import pending_spot_exit_remaining_native
 
@@ -682,6 +695,13 @@ class ScannerMixin:
                 regime_detail=currency_detail,
                 allow_elevated_entry=self.config.allows_elevated_entry(),
             ):
+                continue
+            trend_pause = self.strategy.trend_pause_reason_zh(currency)
+            if trend_pause:
+                # Not a halt and not a risk trigger: the book is fine, this particular
+                # week is just a bad one to hand away upside in. The entry-blockers
+                # report asks the strategy the same question, so the reason shows there.
+                LOGGER.info("covered_call entry paused currency=%s reason=%s", currency, trend_pause)
                 continue
             elevated = regime is RiskRegime.ELEVATED
             threshold = self.strategy.effective_min_net_apr(currency)

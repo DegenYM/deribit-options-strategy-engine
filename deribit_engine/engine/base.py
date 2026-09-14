@@ -51,11 +51,12 @@ from ..utils import (
     utc_now_ms,
 )
 from ..vol_metrics import (
+    TrendReading,
     dvol_iv_rank_from_daily_rows,
     index_chart_close_series,
     iv_minus_rv_spread,
     realized_vol_annualized_from_index_series,
-    trend_signal_from_index_series,
+    trend_reading_from_daily_closes,
 )
 from .context import (
     LOGGER,
@@ -1513,13 +1514,13 @@ class EngineBase:
             or self.config.enable_dynamic_target_delta
             or self.config.enable_dynamic_min_net_apr
         )
-        need_trend = self.config.enable_trend_side_bias
+        need_trend = self.config.enable_trend_side_bias or self.config.enable_trend_adaptive_selection
         if not need_vol and not need_trend:
             self.strategy.update_vol_entry_context()
             return
         iv_rank_by_currency: dict[str, Decimal] = {}
         iv_minus_rv_by_currency: dict[str, Decimal] = {}
-        trend_by_currency: dict[str, Decimal] = {}
+        trend_by_currency: dict[str, TrendReading] = {}
         end_timestamp = utc_now_ms()
         start_timestamp = end_timestamp - (self.config.iv_rank_lookback_days * 24 * 3600 * 1000)
         for currency in self.config.managed_currencies:
@@ -1544,12 +1545,15 @@ class EngineBase:
                     current_iv = to_decimal(dvol_rows[-1][4]) if dvol_rows else Decimal("0")
                 except Exception:
                     current_iv = Decimal("0")
+            # Only realized vol still wants the chart; the trend reading moved to
+            # settled daily closes below.
             index_series: list[tuple[int, Decimal]] = []
-            try:
-                index_payload = self.client.get_index_chart_data(f"{ccy.lower()}_usd", range_name="1y")
-                index_series = index_chart_close_series(index_payload)
-            except Exception:
-                index_series = []
+            if need_vol:
+                try:
+                    index_payload = self.client.get_index_chart_data(f"{ccy.lower()}_usd", range_name="1y")
+                    index_series = index_chart_close_series(index_payload)
+                except Exception:
+                    index_series = []
             if need_vol and index_series:
                 try:
                     rv = realized_vol_annualized_from_index_series(
@@ -1563,13 +1567,25 @@ class EngineBase:
                             iv_minus_rv_by_currency[ccy] = spread
                 except Exception:
                     pass
-            if need_trend and index_series:
+            if need_trend:
+                # Settled daily closes, not the index chart: the chart is capped at a
+                # one-year range and returns 6-hourly prints, while delivery prices are
+                # one per day going back years. The live index supplies the price the
+                # average is measured against.
                 try:
-                    trend = trend_signal_from_index_series(
-                        index_series,
-                        end_ts_ms=end_timestamp,
+                    lookback = max(self.config.trend_ma_days, self.config.trend_regime_ma_days) + 30
+                    closes = [
+                        price for _day, price in self.client.get_delivery_prices(f"{ccy.lower()}_usd", days=lookback)
+                    ]
+                    price = to_decimal((self.client.get_index_price(f"{ccy.lower()}_usd") or {}).get("index_price"))
+                    if price <= 0 and closes:
+                        price = closes[-1]
+                    trend = trend_reading_from_daily_closes(
+                        closes,
+                        price=price,
                         ma_window=self.config.trend_ma_days,
                         ref_pct=self.config.trend_side_ref_pct,
+                        regime_ma_window=self.config.trend_regime_ma_days,
                     )
                     if trend is not None:
                         trend_by_currency[ccy] = trend

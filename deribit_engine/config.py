@@ -319,6 +319,27 @@ class BotConfig:
     # Deadband: |signal| below this is treated as neutral (no side tilt).
     trend_side_min_signal: Decimal = Decimal("0.02")
     score_weight_trend: Decimal = Decimal("3")
+    # --- Trend-adaptive selection (covered call) -------------------------------
+    # Same price-vs-MA reading as side bias, a different job: side bias picks put or
+    # call; this changes *which* call, and whether to write one at all.
+    enable_trend_adaptive_selection: bool = False
+    #: How far a full-strength trend slides the target |delta| inside the preferred
+    #: band, as a fraction of the half-band. Adds to the VRP term, then clamps.
+    trend_target_delta_strength: Decimal = Decimal("0.8")
+    #: A falling market may stretch the call's |delta| ceiling (hard and preferred)
+    #: by up to this much. Rising never stretches it.
+    trend_delta_max_stretch: Decimal = Decimal("0.03")
+    #: The call's OTM floor moves with the tape, both ways, as a fraction of the
+    #: tier's own floor.
+    trend_otm_floor_ratio: Decimal = Decimal("0.375")
+    #: Stop opening new calls when spot is more than this far above the moving
+    #: average (a percentage — the signal saturates at ``trend_side_ref_pct``).
+    #: 0 disables the pause.
+    trend_pause_above_pct: Decimal = Decimal("0.05")
+    #: Pause only while the short MA is also above the long one: speed and direction.
+    trend_pause_requires_bull_regime: bool = True
+    #: Long moving average defining that regime, in days.
+    trend_regime_ma_days: int = 100
     # Dynamic take-profit thresholds by DTE.
     enable_dynamic_tp: bool = False
     tp_capture_pct_dte_long: Decimal = Decimal("0.40")
@@ -456,6 +477,10 @@ class BotConfig:
     # Where the CSP premium lands: "usdc" keeps it as stablecoin, "spot" swaps the
     # net premium (not the reserved assignment cash) into native coin after entry.
     covered_call_csp_premium_target: str = "usdc"
+    # Premium ladder: what this wheel's closed puts have banked lifts the next put's
+    # strike ceiling to K + banked / contracts. Off in code; cannot be combined with
+    # premium_target="spot" — both spend the same premium.
+    covered_call_csp_premium_ladder: bool = False
     # European CSP does not assign on an intra-period dip. When enabled (default
     # on with the wheel), live manage may buy back the put and buy spot once the
     # put is confirmed ITM and either near expiry or time value is thin vs
@@ -1016,6 +1041,32 @@ def has_private_creds_for_env(env_file: str | Path) -> bool:
     return has_private_creds_config(config)
 
 
+def _parse_trend_adaptive_fields(values: dict[str, str]) -> dict[str, Any]:
+    """Trend-adaptive selection for covered calls, parsed into ``BotConfig`` kwargs."""
+    enabled = _to_bool(_optional(values, "ENABLE_TREND_ADAPTIVE_SELECTION", "false"))
+    strength = to_decimal(_optional(values, "TREND_TARGET_DELTA_STRENGTH", "0.8"))
+    if strength < 0 or strength > 2:
+        raise ConfigurationError("TREND_TARGET_DELTA_STRENGTH must be in [0, 2]")
+    delta_stretch = to_decimal(_optional(values, "TREND_DELTA_MAX_STRETCH", "0.03"))
+    if delta_stretch < 0 or delta_stretch >= 1:
+        raise ConfigurationError("TREND_DELTA_MAX_STRETCH must be in [0, 1)")
+    otm_ratio = to_decimal(_optional(values, "TREND_OTM_FLOOR_RATIO", "0.375"))
+    if otm_ratio < 0 or otm_ratio >= 1:
+        raise ConfigurationError("TREND_OTM_FLOOR_RATIO must be in [0, 1)")
+    pause_pct = to_decimal(_optional(values, "TREND_PAUSE_ABOVE_PCT", "0.05"))
+    if pause_pct < 0 or pause_pct >= 1:
+        raise ConfigurationError("TREND_PAUSE_ABOVE_PCT must be in [0, 1)")
+    return {
+        "enable_trend_adaptive_selection": enabled,
+        "trend_target_delta_strength": strength,
+        "trend_delta_max_stretch": delta_stretch,
+        "trend_otm_floor_ratio": otm_ratio,
+        "trend_pause_above_pct": pause_pct,
+        "trend_pause_requires_bull_regime": _to_bool(_optional(values, "TREND_PAUSE_REQUIRES_BULL_REGIME", "true")),
+        "trend_regime_ma_days": max(2, int(_optional(values, "TREND_REGIME_MA_DAYS", "100"))),
+    }
+
+
 def load_config(
     env_file: str | Path = ".env",
     require_private: bool = False,
@@ -1122,6 +1173,15 @@ def load_config(
     covered_call_csp_premium_target = str(_optional(values, "COVERED_CALL_CSP_PREMIUM_TARGET", "usdc")).strip().lower()
     if covered_call_csp_premium_target not in {"usdc", "spot"}:
         raise ConfigurationError("COVERED_CALL_CSP_PREMIUM_TARGET must be one of: usdc, spot")
+    # Same key as Canopy on purpose: one name for the switch in both engines.
+    covered_call_csp_premium_ladder = _to_bool(_optional(values, "CSP_PREMIUM_LADDER", "false"))
+    if covered_call_csp_premium_ladder and covered_call_csp_premium_target == "spot":
+        # They spend the same money. The ladder secures a higher strike with the banked
+        # premium; the swap turns it into coin. Whichever ran second would find it gone.
+        raise ConfigurationError(
+            "CSP_PREMIUM_LADDER and COVERED_CALL_CSP_PREMIUM_TARGET=spot cannot both be on: "
+            "they spend the same cash-secured put premium"
+        )
     covered_call_csp_self_assign_enabled = _to_bool(
         _optional(
             values,
@@ -1404,9 +1464,14 @@ def load_config(
         skew_side_min_rr=to_decimal(_optional(values, "SKEW_SIDE_MIN_RR", "0.02")),
         enable_trend_side_bias=_to_bool(_optional(values, "ENABLE_TREND_SIDE_BIAS", "true"), default=True),
         trend_ma_days=max(2, int(_optional(values, "TREND_MA_DAYS", "20"))),
-        trend_side_ref_pct=to_decimal(_optional(values, "TREND_SIDE_REF_PCT", "0.05")),
-        trend_side_min_signal=to_decimal(_optional(values, "TREND_SIDE_MIN_SIGNAL", "0.02")),
+        trend_side_ref_pct=to_decimal(
+            _optional(values, "TREND_REF_PCT", _optional(values, "TREND_SIDE_REF_PCT", "0.05"))
+        ),
+        trend_side_min_signal=to_decimal(
+            _optional(values, "TREND_MIN_SIGNAL", _optional(values, "TREND_SIDE_MIN_SIGNAL", "0.02"))
+        ),
         score_weight_trend=to_decimal(_optional(values, "SCORE_WEIGHT_TREND", "3")),
+        **_parse_trend_adaptive_fields(values),
         enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "false"), default=False),
         tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.40")),
         tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.60")),
@@ -1476,6 +1541,7 @@ def load_config(
         covered_call_csp_max_spread_ratio=covered_call_csp_max_spread_ratio,
         covered_call_csp_min_book_notional_usdc=covered_call_csp_min_book_notional_usdc,
         covered_call_csp_premium_target=covered_call_csp_premium_target,
+        covered_call_csp_premium_ladder=covered_call_csp_premium_ladder,
         covered_call_csp_self_assign_enabled=covered_call_csp_self_assign_enabled,
         covered_call_csp_self_assign_confirm_cycles=covered_call_csp_self_assign_confirm_cycles,
         covered_call_csp_self_assign_max_dte=covered_call_csp_self_assign_max_dte,

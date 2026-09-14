@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from decimal import Decimal
 from typing import Any
 
@@ -602,6 +603,20 @@ class StateReconcileMixin:
                 )
                 short_book = None
                 close_index_usd = None
+            settlement_index: Decimal | None = None
+            if expired and (group.is_cash_secured_group() or self._is_covered_call_group(group)):
+                # The exercise decisions below read the delivery price, so everything this
+                # reconcile derives from the index has to use that same price: the close index,
+                # the coin close ledger, the expiry close debit. Otherwise they disagree later —
+                # the wheel's roll check stops for good after a put that settled OTM while the
+                # index at reconcile time sat below its strike, and a phantom intrinsic debit
+                # shrinks the premium the ladder counts.
+                settlement_index = self._expiry_settlement_price(group)
+                if settlement_index is not None:
+                    close_index_usd = settlement_index
+                    group.close_index_usd = settlement_index
+                    if short_book is not None:
+                        short_book = replace(short_book, index_price=settlement_index)
             if group.is_coin_collateral() and short_book is not None:
                 try:
                     short_instrument = self._find_or_fetch_instrument(
@@ -647,6 +662,7 @@ class StateReconcileMixin:
                         group,
                         orderbook_cache,
                         markets_by_currency=markets_by_currency,
+                        settlement_index=settlement_index,
                     )
             if estimated_close_debit is not None:
                 realized_pnl = group.entry_credit_net_usdc() - estimated_close_debit
@@ -681,7 +697,7 @@ class StateReconcileMixin:
                 and not self.config.covered_call_robust_exit_enabled
                 and self._is_covered_call_group(group)
                 and group.spot_exit_status not in {"submitted", "filled", "pending"}
-                and self._covered_call_itm_from_cache(group, orderbook_cache)
+                and self._covered_call_expired_itm(group, orderbook_cache)
             ):
                 group.spot_exit_status = "pending"
                 group.spot_exit_instrument_name = self._covered_call_spot_instrument(group.currency)
@@ -692,7 +708,7 @@ class StateReconcileMixin:
                 and self.config.covered_call_itm_to_cash_secured_enabled
                 and group.is_cash_secured_group()
                 and str(group.spot_restore_status or "").lower() not in {"submitted", "filled", "pending"}
-                and self._cash_secured_put_itm_from_cache(group, orderbook_cache, close_index_usd)
+                and self._cash_secured_put_expired_itm(group, orderbook_cache, close_index_usd)
             ):
                 group.spot_restore_status = "pending"
                 group.spot_restore_instrument_name = f"{group.currency.upper()}_USDC"
@@ -885,6 +901,7 @@ class StateReconcileMixin:
         orderbook_cache: dict[str, OrderBookSnapshot],
         *,
         markets_by_currency: dict[str, list[OptionInstrument]] | None = None,
+        settlement_index: Decimal | None = None,
     ) -> Decimal | None:
         markets = markets_by_currency or {}
         is_spread = self._is_bull_put_spread_group(group)
@@ -902,6 +919,8 @@ class StateReconcileMixin:
             index_price = short_book.index_price
             if index_price <= 0:
                 index_price = group.close_index_usd or group.entry_index_usd or Decimal("0")
+            if settlement_index is not None and settlement_index > 0:
+                index_price = settlement_index
             if spread_settlement and index_price > 0:
                 long_instrument = self._long_instrument_for_spread_reconcile(
                     group, markets, short_instrument=short_instrument

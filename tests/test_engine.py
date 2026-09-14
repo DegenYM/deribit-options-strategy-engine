@@ -4695,3 +4695,123 @@ def test_naked_im_by_expiry_fallback_uses_current_index_for_legacy_inverse(tmp_p
     by_exp = engine._naked_im_by_expiry(state, "BTC", orderbook_cache={})
     # 800 USDC / 80_000 USDC-per-BTC = 0.01 BTC
     assert by_exp == {legacy.expiration_timestamp_ms: Decimal("0.01")}
+
+
+def test_covered_call_trend_pause_skips_the_coin_and_says_why(tmp_path):
+    """A paused coin is left out of the scan, and the report names the reason."""
+    from deribit_engine.strategy import StrategySelector
+
+    client = FakeClient(btc_book_equity="0.5", eth_book_equity="5")
+    engine = DeribitOptionTrialBot(_covered_call_scan_config(tmp_path, covered_call_spot_exit_enabled=False), client)
+    reason = "BTC 現價高於 20 日均線約 6.0%，且 20 日均線仍在 100 日均線之上，賣出的買權容易被 call 走，暫緩開新倉。"
+    with patch.object(
+        StrategySelector, "trend_pause_reason_zh", side_effect=lambda ccy: reason if ccy.upper() == "BTC" else None
+    ):
+        scan = engine.scan(currencies=("BTC", "ETH"), top_n=5)
+    assert not any(row["currency"] == "BTC" for row in scan["candidates"])
+    assert any(row["currency"] == "ETH" for row in scan["candidates"])
+    assert f"BTC [covered_call]: {reason}" in scan["entry_blockers"]
+
+
+def test_covered_call_trend_pause_is_the_reported_blocker_when_nothing_else_is(tmp_path):
+    """With no other coin to fall back on, the pause is the answer — not 'no candidates'."""
+    from deribit_engine.strategy import StrategySelector
+
+    client = FakeClient(btc_book_equity="0.5")
+    config = _covered_call_scan_config(tmp_path, managed_currencies=("BTC",), covered_call_spot_exit_enabled=False)
+    engine = DeribitOptionTrialBot(config, client)
+    with patch.object(StrategySelector, "trend_pause_reason_zh", side_effect=lambda ccy: "暫緩開新倉"):
+        scan = engine.scan(currencies=("BTC",), top_n=1)
+    assert scan["candidates"] == []
+    assert "BTC [covered_call]: 暫緩開新倉" in scan["entry_blockers"]
+
+
+def test_covered_call_settlement_exit_follows_the_delivery_price_not_the_index(tmp_path):
+    """Settled below the strike, spot above it by the time reconcile runs: the coin stays."""
+    from datetime import UTC, datetime
+
+    group = _covered_call_group()
+    expiry_day = datetime.fromtimestamp(group.expiration_timestamp_ms / 1000, UTC).strftime("%Y-%m-%d")
+
+    class _SettledBelowStrike(FakeClient):
+        def get_delivery_prices(self, index_name, *, days=400):
+            return [(expiry_day, group.short_strike - Decimal("1000"))]
+
+    client = _SettledBelowStrike(btc_book_equity="0.5")
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        time_exit_dte=0,
+        covered_call_spot_exit_enabled=True,
+        covered_call_profit_sweep_enabled=True,
+        covered_call_robust_exit_enabled=False,
+    )
+    engine = DeribitOptionTrialBot(config, client)
+    state = StrategyState()
+    state.groups.append(group)
+    engine.state_store.save(state)
+
+    result = engine.manage(live=False)
+
+    assert not any(str(a.get("action") or "").startswith("covered_call_spot_exit") for a in result["actions"])
+    saved = engine.state_store.load().groups[0]
+    assert saved.status == "closed"
+    assert not saved.spot_exit_status
+    # The same price is what the group remembers as its close index.
+    assert saved.close_index_usd == group.short_strike - Decimal("1000")
+
+
+def test_a_put_that_settled_otm_keeps_the_wheel_rolling_when_the_index_has_since_dropped(tmp_path):
+    """Settled above the strike, index below it by reconcile time: no buy-back, and no roll block.
+
+    The buy-back decision read the delivery price while the close index stayed at the reconcile-time
+    index, so the wheel's roll check saw an ITM expiry the exchange never had and stopped for good.
+    """
+    from datetime import UTC, datetime
+
+    from deribit_engine.cash_secured_ops import cash_secured_child_expired_itm
+
+    put = _build_group(
+        short_instrument_name="BTC_USDC-14APR30-72000-P",
+        currency="BTC",
+        collateral_currency="USDC",
+        quantity=Decimal("0.1"),
+        short_strike=Decimal("72000"),
+        entry_credit=Decimal("30"),
+        max_loss=Decimal("7200"),
+        dte_days=0,
+    )
+    put.option_type = "put"
+    put.strategy = "cash_secured"
+    put.cash_secured_from_group_id = "P0"
+    expiry_day = datetime.fromtimestamp(put.expiration_timestamp_ms / 1000, UTC).strftime("%Y-%m-%d")
+
+    class _SettledAboveStrike(FakeClient):
+        def get_delivery_prices(self, index_name, *, days=400):
+            return [(expiry_day, Decimal("73000"))]
+
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        time_exit_dte=0,
+        covered_call_spot_exit_enabled=True,
+        covered_call_itm_to_cash_secured_enabled=True,
+    )
+    engine = DeribitOptionTrialBot(config, _SettledAboveStrike())
+    state = StrategyState()
+    state.groups.append(put)
+    engine.state_store.save(state)
+
+    engine.manage(live=False)
+
+    saved = engine.state_store.load().groups[0]
+    assert saved.status == "closed"
+    # FakeClient's BTC index is 70,000 — below the strike, where the close index used to land.
+    assert saved.close_index_usd == Decimal("73000")
+    assert not saved.spot_restore_status
+    assert cash_secured_child_expired_itm(saved) is False
+    # No intrinsic debit either: priced at the reconcile index it would have booked (72,000 − 70,000) × 0.1
+    # and shrunk the premium the ladder counts.
+    assert (saved.realized_close_debit or Decimal("0")) == Decimal("0")

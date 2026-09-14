@@ -14,12 +14,69 @@ CSP_ABORT_RESTORE_REASON = "operator_csp_abort_restore"
 def cash_secured_strike_bounds(
     original_strike: Decimal,
     floor_pct: Decimal,
+    *,
+    premium_credit: Decimal = Decimal("0"),
+    quantity: Decimal = Decimal("0"),
 ) -> tuple[Decimal, Decimal]:
-    """Inclusive strike window: original ITM strike down to ``(1 − floor_pct)``."""
+    """Inclusive strike window for the wheel's put: ceiling down to ``(1 − floor_pct)``.
+
+    Plain, the ceiling is the strike the coin was called away at — it comes back where
+    it left. That ceiling never moves on its own, so once spot has drifted above it
+    every strike inside the window is worthless and the wheel quietly stops.
+
+    ``premium_credit`` raises it by exactly what this wheel's closed puts have banked,
+    per contract. Cash-secured means the strike is capped by collateral, and the
+    collateral is the sale proceeds plus what the puts earned; buying the coin back one
+    premium higher therefore costs nothing that was not already earned. What it buys is
+    a strike closer to spot and so a better chance of actually getting the coin — a
+    trade along the risk axis, not free money.
+
+    Spot is deliberately not an input. A call settles in the money, so at entry spot is
+    always above this window; and if spot later falls through it, the put that is
+    already open goes ITM and the self-assign path (close it, buy the coin) ends the leg
+    — the engine never gets to write a new put far below the market. Capping the ceiling
+    at spot only gave up premium in the ordinary case to guard one that cannot arise.
+    """
     if original_strike <= 0:
         return Decimal("0"), Decimal("0")
+    ceiling = original_strike
+    if premium_credit and quantity > 0:
+        ceiling = max(original_strike + premium_credit / quantity, Decimal("0"))
+    if ceiling <= 0:
+        return Decimal("0"), Decimal("0")
     floor = max(Decimal("0"), min(floor_pct, Decimal("1")))
-    return original_strike * (Decimal("1") - floor), original_strike
+    return ceiling * (Decimal("1") - floor), ceiling
+
+
+def cash_secured_premium_ledger(
+    parent: TradeGroup,
+    groups: list[TradeGroup] | None,
+) -> Decimal:
+    """Net USDC this wheel's closed puts have banked, in the book's own units.
+
+    Signed on purpose: an active roll that closed at a loss lowers what the next put
+    can be secured at, exactly as it lowers the cash. Only closed children count —
+    an open put's premium is already committed as collateral. A child with no
+    recorded credit is skipped rather than counted as a loss: missing bookkeeping
+    must not quietly shrink the strike the coin comes back at.
+
+    Premium already swapped into coin (``COVERED_CALL_CSP_PREMIUM_TARGET=spot``, Canopy's
+    ``CSP_PREMIUM_SWEEP``) is no longer collateral and does not count. The two switches
+    cannot be on together, but an account may have run the swap before the ladder.
+    """
+    from .csp_premium_swap_ops import csp_premium_swap_spent_usdc
+
+    total = Decimal("0")
+    for child in cash_secured_children(groups or [], parent):
+        if str(child.status or "").lower() != "closed":
+            continue
+        credit = child.entry_credit or Decimal("0")
+        if credit <= 0:
+            continue
+        debit = max(child.realized_close_debit or Decimal("0"), Decimal("0"))
+        fee = max(child.realized_close_fee or Decimal("0"), Decimal("0"))
+        total += credit - debit - fee - csp_premium_swap_spent_usdc(child)
+    return total
 
 
 def cash_secured_cover_complete(
