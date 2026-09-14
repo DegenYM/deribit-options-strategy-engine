@@ -576,6 +576,7 @@ function overviewBreakdownRowHtml(row) {
       </div>
       ${row.showBar === false ? "" : `<div class="overview-breakdown-bar" aria-hidden="true"><span class="overview-breakdown-bar-fill ${row.barFillClass ?? `overview-breakdown-bar-fill--${row.book.toLowerCase()}`}" style="width:${row.barWidth}"></span></div>`}
       ${valuesBlock}
+      ${row.extraHtml || ""}
     </div>`;
 }
 
@@ -589,7 +590,7 @@ function overviewBreakdownRowsHtml(rows, { emptyLabel, sectionLabel = "" } = {})
   return `${label}<div class="overview-breakdown">${rows.map((row) => overviewBreakdownRowHtml(row)).join("")}</div>`;
 }
 
-export function overviewEquityCompositionHtml(totalEquity, nativeByBook, usdByBook) {
+export function overviewEquityCompositionHtml(totalEquity, nativeByBook, usdByBook, status = null) {
   const total = num(totalEquity);
   const places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 };
   const rows = CORE_BOOKS.map((book) => {
@@ -604,12 +605,25 @@ export function overviewEquityCompositionHtml(totalEquity, nativeByBook, usdByBo
     const pctText = pct !== null ? fmtPct(pct, 1) : "—";
     const barWidth = pct !== null ? `${Math.min(100, Math.max(pct * 100, 2)).toFixed(1)}%` : "0%";
     const primaryText = usd !== null ? fmtUsd(usd) : i18n("pending", "待更新");
-    const detailText = isStable
-      ? i18n("stablecoin", "穩定幣")
-      : native !== null
-      ? fmtNum(native, places[book])
-      : "—";
-    return { book, pctText, barWidth, detailText, primaryText };
+    const splits = bookEquityBySubAccount(book, status);
+    const showSplit = splits.length >= 2;
+    const countLabel = showSplit ? bookSubAccountCountLabel(splits.length, { localized: true }) : "";
+    let detailText;
+    if (isStable) {
+      detailText = showSplit ? countLabel : i18n("stablecoin", "穩定幣");
+    } else if (native !== null) {
+      detailText = showSplit ? `${fmtNum(native, places[book])} · ${countLabel}` : fmtNum(native, places[book]);
+    } else {
+      detailText = "—";
+    }
+    return {
+      book,
+      pctText,
+      barWidth,
+      detailText,
+      primaryText,
+      extraHtml: showSplit ? bookSubAccountSplitsHtml(splits, { classPrefix: "overview-breakdown" }) : "",
+    };
   }).filter(Boolean);
   return overviewBreakdownRowsHtml(rows, { emptyLabel: i18n("No book balances", "尚無帳本餘額") });
 }
@@ -796,14 +810,14 @@ export function overviewProfitCompositionHtml(ctx) {
 }
 
 export function overviewCompositionGridHtml(ctx) {
-  const { totalEquity, equityNativeByBook, equityUsdByBook } = ctx;
+  const { totalEquity, equityNativeByBook, equityUsdByBook, status } = ctx;
   return `<div class="overview-composition-grid">
     <section class="overview-composition-card overview-composition-card--equity" aria-label="${i18n("Equity composition", "權益組成")}">
       <header class="overview-composition-head">
         <h3 class="overview-composition-title">${i18n("Equity composition", "權益組成")}</h3>
         <span class="overview-composition-sub">${i18n("By collateral book · USDC eq.", "依帳本 · USDC 約當")}</span>
       </header>
-      ${overviewEquityCompositionHtml(totalEquity, equityNativeByBook, equityUsdByBook)}
+      ${overviewEquityCompositionHtml(totalEquity, equityNativeByBook, equityUsdByBook, status)}
     </section>
     <section class="overview-composition-card overview-composition-card--profit" aria-label="${i18n("Profit composition", "獲利組成")}">
       <header class="overview-composition-head">
@@ -1926,6 +1940,51 @@ export function bookEquityUsdByBook(status) {
   return out;
 }
 
+/** Hide dust / explicit $0 so a second empty wallet does not force a split. */
+const BOOK_SUB_ACCOUNT_USD_EPS = 0.005;
+
+/**
+ * Per-sub-account USD equity for one book, from ``account_statuses``.
+ * Only rows with meaningful equity are returned (no $0 noise).
+ */
+export function bookEquityBySubAccount(book, status) {
+  const b = String(book || "").toUpperCase();
+  const rows = Array.isArray(status?.account_statuses) ? status.account_statuses : [];
+  const out = [];
+  for (const row of rows) {
+    const name = String(row?.name || "").trim();
+    if (!name) continue;
+    const usd = bookEquityUsdForDisplay(b, {
+      portfolio: row.portfolio || {},
+      accounts: row.accounts || {},
+      underlying_index_usd: status?.underlying_index_usd,
+    });
+    if (usd === null || Math.abs(usd) < BOOK_SUB_ACCOUNT_USD_EPS) continue;
+    out.push({ name, equityUsd: usd });
+  }
+  return out;
+}
+
+export function bookSubAccountCountLabel(count, { localized = false } = {}) {
+  const n = Math.max(0, Math.round(Number(count) || 0));
+  if (!localized) return `${n} sub-accounts`;
+  return i18n(`${n} sub-accounts`, `${n} 個子帳戶`);
+}
+
+export function bookSubAccountSplitsHtml(rows, { classPrefix = "book-card" } = {}) {
+  if (!Array.isArray(rows) || rows.length < 2) return "";
+  return `<div class="${classPrefix}-splits">${rows
+    .map(
+      (row) =>
+        `<div class="${classPrefix}-split"><span class="${classPrefix}-split-name">${escapeHtml(
+          row.name
+        )}</span> <span class="${classPrefix}-split-value font-mono tabular-nums">${fmtUsd(
+          row.equityUsd
+        )}</span></div>`
+    )
+    .join("")}</div>`;
+}
+
 // Match USDC equity / day-start: include spot MTM (and exclude external flows).
 // ``day_pnl_usdc_ex_flow_ex_spot`` is for native-book risk gates only.
 export function portfolioDayPnlUsdForDisplay(portfolio, totalEquity, dayStart) {
@@ -2805,26 +2864,42 @@ function _groupsForSpotRestore(groups) {
   return groups ?? STATE.groups;
 }
 
+function _itmRestoreTargetNative(g) {
+  const cover = num(g?.covered_underlying_quantity) ?? num(g?.quantity) ?? 0;
+  const swap = _itmSpotExitSwapNative(g);
+  const settle = Math.max(num(g?.spot_exit_settlement_loss) ?? 0, 0);
+  const premium = Math.max(coinCollateralNetEntryCreditNative(g) ?? 0, 0);
+  let rawTarget = swap + settle - premium;
+  if (rawTarget < 0) rawTarget = 0;
+  return cover > 0 ? Math.min(rawTarget, cover) : rawTarget;
+}
+
+function _wheelSpotRestoreTotals(g, groups) {
+  let restored = _itmSpotRestoreFilledNative(g);
+  let spent = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+  const kids = cashSecuredChildrenForParent(_groupsForSpotRestore(groups), g);
+  if (!looksLikeCoveredCallRow(g) && !kids.length) return { restored, spent };
+  let remaining = Math.max(_itmRestoreTargetNative(g) - restored, 0);
+  for (const child of kids) {
+    if (remaining <= 0) break;
+    const childN = _itmSpotRestoreFilledNative(child);
+    const childU = spotRestoreRealizedQuoteUsdt(child) ?? 0;
+    if (childN <= 0 && childU <= 0) continue;
+    restored += childN;
+    spent += childU;
+    remaining = Math.max(_itmRestoreTargetNative(g) - restored, 0);
+  }
+  return { restored, spent };
+}
+
 /** Parent restore plus CSP-child assignment buys that refill the same cover. */
 function wheelSpotRestoreFilledNative(g, groups) {
-  let restored = _itmSpotRestoreFilledNative(g);
-  const kids = cashSecuredChildrenForParent(_groupsForSpotRestore(groups), g);
-  if (!looksLikeCoveredCallRow(g) && !kids.length) return restored;
-  for (const child of kids) {
-    restored += _itmSpotRestoreFilledNative(child);
-  }
-  return restored;
+  return _wheelSpotRestoreTotals(g, groups).restored;
 }
 
 /** Parent restore quote plus CSP-child assignment spend for the same cover. */
 function wheelSpotRestoreQuoteUsdt(g, groups) {
-  let spent = spotRestoreRealizedQuoteUsdt(g) ?? 0;
-  const kids = cashSecuredChildrenForParent(_groupsForSpotRestore(groups), g);
-  if (!looksLikeCoveredCallRow(g) && !kids.length) return spent;
-  for (const child of kids) {
-    spent += spotRestoreRealizedQuoteUsdt(child) ?? 0;
-  }
-  return spent;
+  return _wheelSpotRestoreTotals(g, groups).spent;
 }
 
 function _itmSpotRestorePlan(g, groups) {
@@ -2832,9 +2907,7 @@ function _itmSpotRestorePlan(g, groups) {
   const swap = _itmSpotExitSwapNative(g);
   const settle = Math.max(num(g?.spot_exit_settlement_loss) ?? 0, 0);
   const premium = Math.max(coinCollateralNetEntryCreditNative(g) ?? 0, 0);
-  let rawTarget = swap + settle - premium;
-  if (rawTarget < 0) rawTarget = 0;
-  const target = cover > 0 ? Math.min(rawTarget, cover) : rawTarget;
+  const target = _itmRestoreTargetNative(g);
   const restored = wheelSpotRestoreFilledNative(g, groups);
   const structuralWithPremium = Math.max(cover + premium - settle, 0);
   const structuralCoverOnly = Math.max(cover - settle, 0);
@@ -2933,6 +3006,9 @@ export function itmSpotExitNetUsdtForTotalProfit(g, groups) {
   if (exitU === null || exitU <= 0) return null;
   if (!itmSpotRoundTripComplete(g, groups)) return null;
   const restoreU = wheelSpotRestoreQuoteUsdt(g, groups);
+  const target = _itmRestoreTargetNative(g);
+  // Cover may already be back (USDC fill, no quote journal) — do not count raw exit.
+  if (target > 0 && !(restoreU > 0)) return null;
   let net = exitU - restoreU;
   const folded = itmFoldedPremiumUsdt(g);
   if (folded > 0) net -= folded;
@@ -2979,17 +3055,19 @@ function spotExitGroupRows(groups) {
 export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
   const fillStats = spotExitFillStatsByBook(status ?? STATE.status);
   const restoreStats = spotRestoreFillStatsByBook(status ?? STATE.status);
+  const rows = spotExitGroupRows(groups);
   const soldNative = { BTC: 0, ETH: 0 };
   const soldQuote = { BTC: 0, ETH: 0 };
   const soldAvg = {};
   const boughtNative = { BTC: 0, ETH: 0 };
   const boughtQuote = { BTC: 0, ETH: 0 };
+  const boughtQuotedNative = { BTC: 0, ETH: 0 };
   const boughtAvg = {};
   /** Folded premium peeled from ITM Sold (attributed to Profit swap instead). */
   const foldedNativeByBook = { BTC: 0, ETH: 0 };
   const foldedUsdtByBook = { BTC: 0, ETH: 0 };
   let any = false;
-  for (const g of spotExitGroupRows(groups)) {
+  for (const g of rows) {
     const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
     if (book !== "BTC" && book !== "ETH") continue;
     const exitStatus = String(g?.spot_exit_status || "").toLowerCase();
@@ -3025,15 +3103,16 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
         any = true;
       }
     }
-    if (String(g?.spot_restore_status || "").toLowerCase() === "filled") {
-      const native = num(g?.spot_restore_amount) ?? 0;
-      const quote = spotRestoreRealizedQuoteUsdt(g) ?? 0;
+    if (groupHasItmSpotExitFills(g)) {
+      const native = wheelSpotRestoreFilledNative(g, rows);
+      const quote = wheelSpotRestoreQuoteUsdt(g, rows);
       if (native > 0) {
         boughtNative[book] += native;
         any = true;
       }
       if (quote > 0) {
         boughtQuote[book] += quote;
+        boughtQuotedNative[book] += native;
         any = true;
       }
     }
@@ -3051,21 +3130,30 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
     const restore = restoreStats?.[book];
     const restoreNative = num(restore?.native_bought);
     const restoreUsdt = num(restore?.usdt_spent);
+    // Fill-stats often miss BTC_USDC / unlabeled manual restores. Never shrink
+    // per-wheel journal Bought back (Jack #0103). Only adopt stats when larger.
     if (restoreNative !== null && restoreNative > 0 && restoreUsdt !== null && restoreUsdt > 0) {
-      boughtNative[book] = restoreNative;
-      boughtQuote[book] = restoreUsdt;
+      if (restoreNative > (boughtNative[book] || 0) + 1e-8) {
+        boughtNative[book] = restoreNative;
+        boughtQuote[book] = restoreUsdt;
+        boughtQuotedNative[book] = restoreNative;
+      }
       any = true;
     }
     if (soldNative[book] > 0 && soldQuote[book] > 0) {
       soldAvg[book] = profitSwapDisplayAvg(book, soldQuote[book], soldNative[book]);
     }
     if (boughtNative[book] > 0 && boughtQuote[book] > 0) {
-      boughtAvg[book] = profitSwapDisplayAvg(book, boughtQuote[book], boughtNative[book]);
+      const avgBase = boughtQuotedNative[book] > 1e-8 ? boughtQuotedNative[book] : boughtNative[book];
+      boughtAvg[book] = profitSwapDisplayAvg(book, boughtQuote[book], avgBase);
     }
   }
   if (!any) return null;
   const usdtSold = PROFIT_SWEEP_BOOKS.reduce((sum, book) => sum + (soldQuote[book] || 0), 0);
   const usdtBought = PROFIT_SWEEP_BOOKS.reduce((sum, book) => sum + (boughtQuote[book] || 0), 0);
+  // Hero net = recognized per-group exit−restore only. Book-level fill stats mix
+  // multiple wheels (and unlabeled cover buys) and must not count as PnL.
+  const recognizedNet = sumItmSpotExitNetUsdtForTotalProfit(rows);
   return {
     soldNative,
     soldQuote,
@@ -3075,7 +3163,7 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
     boughtAvg,
     usdtSold,
     usdtBought,
-    usdtNet: usdtSold - usdtBought,
+    usdtNet: recognizedNet,
     usdtTotal: usdtSold,
   };
 }
@@ -3134,9 +3222,9 @@ export function fmtSpotExitPanel(summary) {
     (book) => (num(summary.soldNative?.[book]) ?? 0) > 0 || (num(summary.boughtNative?.[book]) ?? 0) > 0
   );
   if (!activeBooks.length) return "";
-  const net = num(summary.usdtNet) ?? (num(summary.usdtSold) ?? 0) - (num(summary.usdtBought) ?? 0);
-  const usdtHeroText = Math.abs(net) > 0.005 ? fmtProfitUsdt(net) : "—";
-  const usdtHeroClass = Math.abs(net) > 0.005 ? pnlClass(net) : "";
+  const net = num(summary.usdtNet);
+  const usdtHeroText = net !== null && Math.abs(net) > 0.005 ? fmtProfitUsdt(net) : "—";
+  const usdtHeroClass = net !== null && Math.abs(net) > 0.005 ? pnlClass(net) : "";
   const detailRows = [
     fmtProfitSwapColumnHtml(summary, i18n("Sold", "已賣出"), activeBooks, fmtSpotExitSoldSlot),
   ];
@@ -5380,6 +5468,40 @@ export function activityClosedRows(status, report, groups) {
   return mergedClosedRows(report, groups, 500, status).filter((g) =>
     isDashboardStrategy(strategyId(g))
   );
+}
+
+export const ACTIVITY_TAB_OPEN = "open";
+export const ACTIVITY_TAB_CLOSED = "closed";
+export const ACTIVITY_TAB_STORAGE_KEY = "dash:activity-tab";
+
+export function normalizeActivityTab(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (raw === "closed" || raw === "close") return ACTIVITY_TAB_CLOSED;
+  return ACTIVITY_TAB_OPEN;
+}
+
+export function readSavedActivityTab() {
+  try {
+    return normalizeActivityTab(globalThis.sessionStorage?.getItem(ACTIVITY_TAB_STORAGE_KEY));
+  } catch {
+    return ACTIVITY_TAB_OPEN;
+  }
+}
+
+export function saveActivityTab(tab) {
+  const next = normalizeActivityTab(tab);
+  try {
+    globalThis.sessionStorage?.setItem(ACTIVITY_TAB_STORAGE_KEY, next);
+  } catch {
+    /* private mode / quota */
+  }
+  return next;
+}
+
+export function activityRowsForTab(tab, status, report, groups) {
+  return normalizeActivityTab(tab) === ACTIVITY_TAB_CLOSED
+    ? activityClosedRows(status, report, groups)
+    : activityOpenRows(status, groups);
 }
 
 export function paginateRows(rows, page, pageSize) {

@@ -19,6 +19,8 @@ const UNIT_TESTS = [
   "test_profit_disposition.mjs",
   "test_open_group_dedupe.mjs",
   "test_overview_equity.mjs",
+  "test_book_card_splits.mjs",
+  "test_activity_tabs.mjs",
 ];
 
 let failed = 0;

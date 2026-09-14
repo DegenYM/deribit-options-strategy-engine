@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, adminGroupActionsHtml, activityOpenRows, activityPaginationHtml, aggregateMaintenanceHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bullPutSpreadWidth, cashSecuredMetaLine, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, exchangeOutageBannerHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, formatRiskTierSummary, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeRiskTier, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, riskTierChipHtml, riskTierForStrategy, riskTierLabel, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, summarizeCashSecuredDisposition, summarizeSpotExitDisposition, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, adminGroupActionsHtml, activityOpenRows, activityPaginationHtml, aggregateMaintenanceHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityBySubAccount, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bookSubAccountCountLabel, bookSubAccountSplitsHtml, bullPutSpreadWidth, cashSecuredMetaLine, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, exchangeOutageBannerHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, formatRiskTierSummary, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeActivityTab, normalizeRiskTier, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, riskTierChipHtml, riskTierForStrategy, riskTierLabel, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, summarizeCashSecuredDisposition, summarizeSpotExitDisposition, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumStrategyRealizedPnlUsdcAtSpot, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
@@ -340,6 +340,12 @@ export function bookCardHtml(book, status) {
     : "bar-ok";
 
   const nativePlaces = book === "BTC" ? 8 : book === "ETH" ? 8 : 4;
+  const splits = bookEquityBySubAccount(book, status);
+  const showSplit = splits.length >= 2;
+  const metaBits = [];
+  if (equityNative !== null) metaBits.push(`${fmtNum(equityNative, nativePlaces)} ${book}`);
+  if (showSplit) metaBits.push(bookSubAccountCountLabel(splits.length));
+  if (dayStartUsdc !== null) metaBits.push(`day-start ${fmtUsd(dayStartUsdc)}`);
 
   return `
     <div class="book-card-tile rounded-2xl border ${accentClass} bg-slate-900/60 p-4 shadow min-w-0">
@@ -348,10 +354,10 @@ export function bookCardHtml(book, status) {
         <div class="flex flex-wrap justify-end gap-1 min-w-0">${chips.join("")}</div>
       </div>
       <div class="text-2xl font-mono tabular-nums">${fmtUsd(equityUsdc)}</div>
-      <div class="book-card-meta text-xs text-slate-500 mb-3">
-        ${equityNative !== null ? fmtNum(equityNative, nativePlaces) + " " + book : ""}
-        ${dayStartUsdc !== null ? "· day-start " + fmtUsd(dayStartUsdc) : ""}
+      <div class="book-card-meta text-xs text-slate-500 ${showSplit ? "mb-1" : "mb-3"}">
+        ${metaBits.join(" · ")}
       </div>
+      ${showSplit ? bookSubAccountSplitsHtml(splits) : ""}
       <div class="kv"><span class="k">Day change</span><span class="v ${pnlClass(
         dayPnlUsdc
       )}">${fmtUsd(dayPnlUsdc)}</span></div>
@@ -621,6 +627,7 @@ export function renderAggregate(status, report) {
     windowApr,
     equityNativeByBook,
     equityUsdByBook,
+    status,
   };
   const contentHtml = overviewDesktopContentHtml(overviewCtx);
   const outageBanner = exchangeOutageBannerHtml();
@@ -1348,6 +1355,21 @@ export function renderRecentActivityList(root, rows, status, groups, emptyLabel)
     : `<li class="activity-empty">${escapeHtml(emptyLabel)}</li>`;
 }
 
+export function syncActivityTabUi(tab = STATE.activityTab) {
+  const next = normalizeActivityTab(tab);
+  const tabs = document.querySelectorAll("#activity-tabs button.activity-tab[data-activity-tab]");
+  tabs.forEach((btn) => {
+    const selected = normalizeActivityTab(btn.dataset.activityTab) === next;
+    btn.classList.toggle("is-active", selected);
+    btn.setAttribute("aria-selected", selected ? "true" : "false");
+    btn.tabIndex = selected ? 0 : -1;
+  });
+  const openPanel = document.getElementById("activity-panel-open");
+  const closedPanel = document.getElementById("activity-panel-closed");
+  if (openPanel) openPanel.hidden = next !== "open";
+  if (closedPanel) closedPanel.hidden = next !== "closed";
+}
+
 export function renderRecentActivity(status, report, groups) {
   const openRoot = document.getElementById("activity-open-list");
   const closedRoot = document.getElementById("activity-closed-list");
@@ -1360,6 +1382,10 @@ export function renderRecentActivity(status, report, groups) {
   STATE.activityOpenPage = openPage.page;
   STATE.activityClosedPage = closedPage.page;
 
+  const openCount = document.getElementById("activity-open-count");
+  const closedCount = document.getElementById("activity-closed-count");
+  if (openCount) openCount.textContent = String(openAll.length);
+  if (closedCount) closedCount.textContent = String(closedAll.length);
   setText(
     "activity-meta",
     i18n(
@@ -1367,6 +1393,7 @@ export function renderRecentActivity(status, report, groups) {
       `${openAll.length} 持倉中 · ${closedAll.length} 已平倉`
     )
   );
+  syncActivityTabUi(STATE.activityTab);
 
   renderRecentActivityList(
     openRoot,

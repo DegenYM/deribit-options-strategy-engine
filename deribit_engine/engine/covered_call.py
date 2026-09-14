@@ -315,6 +315,7 @@ class CoveredCallMixin:
         from ..cash_secured_ops import (
             cash_secured_child_is_open,
             cash_secured_hold_credit_dte_from_closed_roll,
+            cash_secured_hold_near_strike,
             cash_secured_last_active_roll_child,
             cash_secured_quantity,
             cash_secured_strike_bounds,
@@ -383,6 +384,29 @@ class CoveredCallMixin:
                             "action": "cash_secured_skipped",
                             "group_id": group.group_id,
                             "reason": "cover_restored",
+                        }
+                    )
+                continue
+            index_price = self._currency_index_price(group.currency, context.orderbook_cache)
+            if cash_secured_hold_near_strike(
+                index_price=index_price,
+                strike=group.short_strike,
+                band_pct=self.config.covered_call_csp_hold_near_strike_pct,
+            ):
+                LOGGER.info(
+                    "cash_secured: skip new put near strike (pause roll, no spot buy) group=%s index=%s strike=%s",
+                    group.group_id,
+                    index_price,
+                    group.short_strike,
+                )
+                if not live:
+                    actions.append(
+                        {
+                            "action": "cash_secured_skipped",
+                            "group_id": group.group_id,
+                            "reason": "near_strike",
+                            "index_price": format_decimal(index_price, 4),
+                            "strike": format_decimal(group.short_strike, 4),
                         }
                     )
                 continue
@@ -538,6 +562,8 @@ class CoveredCallMixin:
                 continue
             if instrument.strike < min_strike or instrument.strike > max_strike:
                 continue
+            # Cover-aligned lot (not available÷strike). Other-book IM must not
+            # shrink qty or push the scan toward a cheaper strike.
             quantity = cash_secured_quantity(
                 sold_native=sold_native,
                 usdc_available=usdc_available,
@@ -705,6 +731,7 @@ class CoveredCallMixin:
         strike_floor_pct: Decimal | None = None,
     ) -> dict[str, Any]:
         from ..cash_secured_ops import (
+            cash_secured_hold_near_strike,
             cash_secured_strike_bounds,
             cash_secured_target_native,
             itm_sold_ready_for_cash_secured,
@@ -771,6 +798,18 @@ class CoveredCallMixin:
             rows.append(payload)
         pick = rows[0] if rows else None
         csp_enabled = bool(self.config.covered_call_itm_to_cash_secured_enabled)
+        index_price = self._currency_index_price(parent.currency, context.orderbook_cache)
+        near_strike = cash_secured_hold_near_strike(
+            index_price=index_price,
+            strike=parent.short_strike,
+            band_pct=self.config.covered_call_csp_hold_near_strike_pct,
+        )
+        if near_strike:
+            scan_reason = "near_strike"
+        elif ranked:
+            scan_reason = ""
+        else:
+            scan_reason = "no_short_dated_put"
         return {
             "source_group_id": parent.group_id,
             "parent_note": parent_note,
@@ -785,8 +824,8 @@ class CoveredCallMixin:
             "hypothetical_usdc": hypothetical_usdc,
             "ready": ready,
             "ready_reason": ready_reason,
-            "would_place": bool(ready and pick and csp_enabled),
-            "reason": "" if ranked else "no_short_dated_put",
+            "would_place": bool(ready and pick and csp_enabled and not near_strike),
+            "reason": scan_reason,
             "candidate_count": len(ranked),
             "pick": pick,
             "candidates": rows,
@@ -850,9 +889,14 @@ class CoveredCallMixin:
             **first,
         }
         payload["would_place"] = any(row.get("would_place") for row in group_rows)
-        payload["reason"] = (
-            "" if any(row.get("pick") for row in group_rows) else (first.get("reason") or "no_short_dated_put")
-        )
+        if payload["would_place"]:
+            payload["reason"] = ""
+        elif first.get("reason"):
+            payload["reason"] = first["reason"]
+        elif first.get("pick"):
+            payload["reason"] = ""
+        else:
+            payload["reason"] = "no_short_dated_put"
         return payload
 
     def _cash_secured_entry_preview(self, candidate) -> dict[str, Any]:
@@ -1151,6 +1195,73 @@ class CoveredCallMixin:
         if not live:
             return payload
 
+        from ..cash_secured_ops import (
+            cash_secured_cover_complete,
+            cash_secured_hold_near_strike,
+            cash_secured_roll_blocked,
+        )
+
+        if cash_secured_cover_complete(parent, context.state.groups):
+            LOGGER.info("cash_secured: skip live entry, cover already restored group=%s", parent.group_id)
+            return {
+                "action": "cash_secured_skipped",
+                "source_group_id": parent.group_id,
+                "reason": "cover_restored",
+                "live": True,
+                "would_place": False,
+            }
+        blocked, block_why = cash_secured_roll_blocked(parent, context.state.groups)
+        if blocked:
+            LOGGER.info(
+                "cash_secured: skip live entry, roll blocked group=%s reason=%s",
+                parent.group_id,
+                block_why,
+            )
+            return {
+                "action": "cash_secured_skipped",
+                "source_group_id": parent.group_id,
+                "reason": block_why,
+                "live": True,
+                "would_place": False,
+            }
+        if str(parent.cash_secured_status or "").lower() == "skipped":
+            skip_why = str(parent.cash_secured_reason or "").lower()
+            if skip_why not in {"operator_cancelled", "ioc_unfilled", "not_enough_funds"}:
+                LOGGER.info(
+                    "cash_secured: skip live entry, parent already skipped group=%s reason=%s",
+                    parent.group_id,
+                    skip_why,
+                )
+                return {
+                    "action": "cash_secured_skipped",
+                    "source_group_id": parent.group_id,
+                    "reason": "already_skipped",
+                    "live": True,
+                    "would_place": False,
+                }
+
+        index_price = self._currency_index_price(parent.currency, context.orderbook_cache)
+        if cash_secured_hold_near_strike(
+            index_price=index_price,
+            strike=parent.short_strike,
+            band_pct=self.config.covered_call_csp_hold_near_strike_pct,
+        ):
+            LOGGER.info(
+                "cash_secured: skip live entry near strike (pause roll) group=%s index=%s strike=%s",
+                parent.group_id,
+                index_price,
+                parent.short_strike,
+            )
+            return {
+                "action": "cash_secured_skipped",
+                "source_group_id": parent.group_id,
+                "reason": "near_strike",
+                "live": True,
+                "would_place": False,
+                "index_price": format_decimal(index_price, 4),
+                "strike": format_decimal(parent.short_strike, 4),
+            }
+
         child_id = self._next_group_id(context.state)
         # First put keeps the parent label (existing fills / tests). Rolls use the new child id.
         label_id = child_id if str(parent.cash_secured_group_id or "").strip() else parent.group_id
@@ -1163,7 +1274,34 @@ class CoveredCallMixin:
         )
         self._mark_cash_secured_ioc_submitted(parent, candidate, preview)
         self.state_store.save(context.state)
-        response = self._place_entry_order(context, "sell", request)
+        try:
+            response = self._place_entry_order(context, "sell", request)
+        except Exception as exc:
+            from ..exceptions import ExchangeError
+
+            msg = str(exc)
+            if isinstance(exc, ExchangeError) and "not_enough_funds" in msg:
+                # Rank-equal ``skipped`` so state merge cannot resurrect the
+                # pre-place ``submitted`` lock. Retryable next cycle at the
+                # same cover-aligned qty — do not silently size down.
+                parent.cash_secured_status = "skipped"
+                parent.cash_secured_reason = "not_enough_funds"
+                parent.cash_secured_order_id = ""
+                parent.cash_secured_instrument_name = ""
+                parent.cash_secured_limit_price = Decimal("0")
+                self.state_store.save(context.state)
+                LOGGER.warning(
+                    "cash_secured: not_enough_funds, skip without shrinking qty group=%s qty=%s: %s",
+                    parent.group_id,
+                    candidate.quantity,
+                    msg,
+                )
+                payload["action"] = "cash_secured_skipped"
+                payload["reason"] = "not_enough_funds"
+                payload["would_place"] = False
+                payload["detail"] = msg[:240]
+                return payload
+            raise
         filled = self._response_filled_amount(response)
         trades = self._order_trades(response)
         order = self._response_order(response)
@@ -1386,8 +1524,11 @@ class CoveredCallMixin:
             try:
                 spot = _lookup_spot_instrument(self.client, instrument_name, group.currency.upper())
                 limit_px = _align_spot_limit_price(mid, spot)
-                # Leave a small buffer for fees / mark moves so Deribit does not
-                # reject with not_enough_funds_in_currency.
+                # Size to unrestored cover. This path runs after the CSP is
+                # already closed (self-assign / expiry / abort), so IM from that
+                # put is already free. Cap only on post-close free USDC vs the
+                # spot ask — never shrink the buy because a still-open CSP
+                # occupied margin.
                 affordable = (usdc_free * Decimal("0.995")) / limit_px if limit_px > 0 else Decimal("0")
                 qty = align_option_order_amount(
                     min(unrestored, affordable),
@@ -2390,8 +2531,13 @@ class CoveredCallMixin:
         *,
         live: bool,
     ) -> list[dict[str, Any]]:
-        """Wheel CSP: OTM may active-roll; ITM may self-assign. The two paths are exclusive."""
+        """Wheel CSP: OTM may active-roll; ITM may self-assign. The two paths are exclusive.
+
+        Near-strike (``cash_secured_hold_near_strike``) only pauses rolls. Cover
+        buys still require the existing ITM + thin-TV / near-expiry gates.
+        """
         from ..cash_secured_ops import (
+            cash_secured_cover_complete,
             cash_secured_self_assign_liquidity_ok,
             cash_secured_self_assign_ready,
         )
@@ -2403,6 +2549,13 @@ class CoveredCallMixin:
         if not self.config.covered_call_itm_to_cash_secured_enabled:
             return []
         if not self.config.covered_call_csp_self_assign_enabled:
+            return []
+        parent_id = str(group.cash_secured_from_group_id or "").strip()
+        parent = next(
+            (item for item in context.state.groups if str(item.group_id) == parent_id),
+            None,
+        )
+        if parent is not None and cash_secured_cover_complete(parent, context.state.groups):
             return []
 
         index_price = self._currency_index_price(group.currency, context.orderbook_cache)
@@ -2519,15 +2672,16 @@ class CoveredCallMixin:
         """OTM CSP: buy back before expiry and sell a higher daily-yield put.
 
         Same or earlier expiry is allowed. Gate order (first failure wins):
-        disabled → dte_too_short / dte_out_of_window → tv_too_thin →
-        illiquid_close → illiquid_replacement → daily_yield_not_higher.
-        ITM never enters this method.
+        disabled → dte_too_short / dte_out_of_window → near_strike (pause only) →
+        tv_too_thin → illiquid_close → illiquid_replacement → daily_yield_not_higher.
+        ITM never enters this method. Near-strike does not buy spot.
         """
         from ..cash_secured_ops import (
             cash_secured_active_roll_daily_usdc,
             cash_secured_active_roll_dte_reason,
             cash_secured_active_roll_fee_edge,
             cash_secured_active_roll_tv_ratio,
+            cash_secured_hold_near_strike,
             cash_secured_roll_blocked,
             cash_secured_self_assign_liquidity_ok,
             cash_secured_strike_bounds,
@@ -2573,6 +2727,20 @@ class CoveredCallMixin:
         index_price = self._currency_index_price(group.currency, context.orderbook_cache)
         if index_price <= 0:
             index_price = close_book.index_price
+        parent_id = str(group.cash_secured_from_group_id or "").strip()
+        parent = next((item for item in context.state.groups if str(item.group_id) == parent_id), None)
+        hold_strikes = [group.short_strike]
+        if parent is not None:
+            hold_strikes.append(parent.short_strike)
+        if any(
+            cash_secured_hold_near_strike(
+                index_price=index_price,
+                strike=strike,
+                band_pct=self.config.covered_call_csp_hold_near_strike_pct,
+            )
+            for strike in hold_strikes
+        ):
+            return [_payload(reason="near_strike", index_price=format_decimal(index_price, 4))]
         close_ask = close_book.best_ask_price
         if close_ask <= 0 or group.quantity <= 0:
             return [_payload(reason="illiquid_close")]
@@ -2598,8 +2766,6 @@ class CoveredCallMixin:
         if not liquid:
             return [_payload(reason="illiquid_close", liquidity=liq_why)]
 
-        parent_id = str(group.cash_secured_from_group_id or "").strip()
-        parent = next((item for item in context.state.groups if str(item.group_id) == parent_id), None)
         if parent is None:
             return [_payload(reason="parent_missing")]
         blocked, block_why = cash_secured_roll_blocked(parent, context.state.groups)

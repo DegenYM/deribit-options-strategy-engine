@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from ipaddress import ip_address
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,11 @@ ALLOWED_REQUEST_HOSTS = LOOPBACK_HOSTS | {"testserver"}
 # Peer addresses accepted without ``--allow-public``. ``testclient`` is what
 # Starlette's TestClient reports; it cannot appear on a real socket.
 LOOPBACK_CLIENT_HOSTS = frozenset({"127.0.0.1", "::1", "::ffff:127.0.0.1", "testclient"})
+# Tailscale Serve reports the tailnet address as the peer (not 127.0.0.1).
+TAILSCALE_CLIENT_NETWORKS = (
+    ip_network("100.64.0.0/10"),
+    ip_network("fd7a:115c:a1e0::/48"),
+)
 FRONTEND_ACTIONS = frozenset({"start", "stop", "restart"})
 
 # Files the admin origin may serve. ``admin.html`` loads ``src/admin.js``
@@ -68,6 +73,25 @@ def _client_is_loopback(request: Any) -> bool:
         return False
 
 
+def is_tailscale_client_host(host: str) -> bool:
+    normalized = str(host or "").strip().lower()
+    if normalized.startswith("::ffff:"):
+        normalized = normalized.removeprefix("::ffff:")
+    try:
+        addr = ip_address(normalized)
+    except ValueError:
+        return False
+    return any(addr in network for network in TAILSCALE_CLIENT_NETWORKS)
+
+
+def _client_is_allowed(request: Any, host: str, *, allow_public: bool) -> bool:
+    if allow_public or _client_is_loopback(request):
+        return True
+    client = getattr(request, "client", None)
+    peer = str(getattr(client, "host", "") or "").strip().lower()
+    return is_tailscale_magic_host(host) and is_tailscale_client_host(peer)
+
+
 def assert_admin_bind_host(host: str, *, allow_public: bool) -> None:
     normalized = str(host or "").strip().lower()
     if allow_public:
@@ -85,9 +109,31 @@ def assert_admin_bind_host(host: str, *, allow_public: bool) -> None:
     )
 
 
+def is_tailscale_magic_host(host: str) -> bool:
+    """True for MagicDNS names like ``m1-mac-mini.tailxxxx.ts.net``.
+
+    Tailscale Serve presents this Host while still proxying from loopback, so
+    the peer-address check stays the real gate. Public hostnames (Cloudflare
+    investor URLs, Funnel-free) stay rejected.
+    """
+    normalized = str(host or "").strip().lower().rstrip(".")
+    if not normalized.endswith(".ts.net"):
+        return False
+    labels = [part for part in normalized.split(".") if part]
+    return len(labels) >= 3
+
+
+def _request_host_allowed(host: str, *, allow_public: bool) -> bool:
+    if allow_public or not host:
+        return True
+    if host in ALLOWED_REQUEST_HOSTS:
+        return True
+    return is_tailscale_magic_host(host)
+
+
 def _request_host(request: Any) -> str:
     raw = str(request.headers.get("host") or "")
-    host = raw.split("%")[0].split(":")[0].strip().lower()
+    host = raw.split("%")[0].split(":")[0].strip().lower().rstrip(".")
     if host.startswith("[") and host.endswith("]"):
         return host
     return host
@@ -135,12 +181,12 @@ def create_admin_app(*, repo_root: Path | str | None = None, allow_public: bool 
         # ``Host`` alone is attacker-controlled (DNS rebinding, curl -H); the
         # peer address is what actually proves the request came from this box.
         host = _request_host(request)
-        if host and host not in ALLOWED_REQUEST_HOSTS and not allow_public:
+        if not _request_host_allowed(host, allow_public=allow_public):
             return JSONResponse(
                 {"detail": "admin console is loopback-only"},
                 status_code=403,
             )
-        if not allow_public and not _client_is_loopback(request):
+        if not _client_is_allowed(request, host, allow_public=allow_public):
             return JSONResponse(
                 {"detail": "admin console is loopback-only (client address rejected)"},
                 status_code=403,

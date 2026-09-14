@@ -19,6 +19,7 @@ from deribit_engine.spot_restore_ops import (
     resolve_spot_restore_order_size,
     spot_restore_fill_stats_for_currency,
     spot_restore_order_label,
+    spot_restore_spot_instrument_name,
     unrestored_spot_exit_native,
 )
 from deribit_engine.wallet_ops import spot_buy_quote_spent_from_trades
@@ -184,6 +185,64 @@ def test_csp_child_assignment_restore_counts_toward_parent_cover() -> None:
     assert cash_secured_target_native(parent, groups) == Decimal("0")
 
 
+def test_wheel_restore_ignores_child_overbuy_after_parent_filled() -> None:
+    from deribit_engine.spot_restore_ops import (
+        itm_spot_exit_net_usdt_for_total_profit,
+        wheel_spot_restore_filled_native,
+        wheel_spot_restore_realized_usdt,
+    )
+
+    parent = _group(
+        group_id="0022",
+        currency="BTC",
+        quantity="0.1",
+        covered_underlying_quantity="0.1",
+        spot_exit_amount="0.0965",
+        spot_exit_quote_proceeds="7688.8399",
+        spot_exit_quote_proceeds_lifetime="7688.8399",
+        spot_exit_settlement_loss="0.00340308",
+        spot_restore_status="filled",
+        spot_restore_amount="0.1",
+        spot_restore_instrument_name="BTC_USDC",
+        spot_restore_quote_spent="7856.6957",
+        spot_restore_quote_spent_lifetime="7856.6957",
+        cash_secured_group_id="0033",
+        cash_secured_group_ids=["0033"],
+        short_entry_average_price="0.0014",
+        entry_fee_collateral="0.00001575",
+    )
+    child = TradeGroup.from_dict(
+        {
+            "group_id": "0033",
+            "currency": "BTC",
+            "status": "closed",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "collateral_currency": "USDC",
+            "quantity": "0.02",
+            "entry_timestamp_ms": 1,
+            "expiration_timestamp_ms": 2,
+            "closed_timestamp_ms": 1_746_000_000_000,
+            "short_strike": "77000",
+            "entry_credit": "5.97",
+            "original_entry_credit": "5.97",
+            "max_loss": "1540",
+            "regime_at_entry": "normal",
+            "cash_secured_from_group_id": "0022",
+            "spot_restore_status": "filled",
+            "spot_restore_reason": "cash_secured_itm_assignment",
+            "spot_restore_amount": "0.02",
+            "spot_restore_quote_spent": "1539.26",
+            "spot_restore_quote_spent_lifetime": "1539.26",
+        }
+    )
+    groups = [parent, child]
+    assert wheel_spot_restore_filled_native(parent, groups) == Decimal("0.1")
+    assert wheel_spot_restore_realized_usdt(parent, groups) == Decimal("7856.6957")
+    net = itm_spot_exit_net_usdt_for_total_profit(parent, groups)
+    assert net == Decimal("7688.8399") - Decimal("7856.6957")
+
+
 def test_plan_spot_restore_is_swap_plus_settle_minus_premium() -> None:
     group = _group(
         spot_exit_amount="0.085",
@@ -272,9 +331,40 @@ def test_apply_spot_restore_quote_spent_records_lifetime() -> None:
     assert group.spot_restore_quote_spent_lifetime == Decimal("9101")
 
 
-def test_spot_restore_follows_usdc_exit_pair() -> None:
-    from deribit_engine.spot_restore_ops import spot_restore_spot_instrument_name
+def test_spot_restore_follows_usdc_csp_after_usdt_exit() -> None:
+    parent = _group(
+        spot_exit_instrument_name="BTC_USDT",
+        spot_restore_instrument_name="BTC_USDT",
+        cash_secured_status="entered",
+        cash_secured_group_id="0098",
+        cash_secured_instrument_name="BTC_USDC-11SEP26-77000-P",
+    )
+    child = TradeGroup.from_dict(
+        {
+            "group_id": "0098",
+            "currency": "BTC",
+            "status": "open",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "collateral_currency": "USDC",
+            "quantity": "0.1",
+            "short_instrument_name": "BTC_USDC-11SEP26-77000-P",
+            "short_strike": "77000",
+            "cash_secured_from_group_id": "0017",
+            "entry_timestamp_ms": 1,
+            "expiration_timestamp_ms": 2,
+            "entry_credit": "5",
+            "max_loss": "7700",
+            "regime_at_entry": "normal",
+        }
+    )
+    assert spot_restore_spot_instrument_name(parent) == "BTC_USDC"
+    assert spot_restore_spot_instrument_name(parent, [parent, child], child=child) == "BTC_USDC"
+    usdt_only = _group(spot_exit_instrument_name="BTC_USDT")
+    assert spot_restore_spot_instrument_name(usdt_only) == "BTC_USDT"
 
+
+def test_spot_restore_follows_usdc_exit_pair() -> None:
     parked = _group(
         spot_exit_instrument_name="BTC_USDC",
         spot_restore_instrument_name="BTC_USDT",

@@ -26,8 +26,9 @@ pip install -r requirements.txt
 `./bot admin` 會在 **本機** 開一個獨立控制台（預設 `http://127.0.0.1:8750`），從 `config/platform/registry.toml` 列出所有投資人，探活各自 dashboard，並可嵌入該人的 ops 頁（`/index.html`）。
 
 ```bash
-./bot admin                  # http://127.0.0.1:8750
+./bot admin                  # 前景：http://127.0.0.1:8750
 ./bot admin --port 8750
+./bot investor admin start   # macOS launchd 常駐（KeepAlive）
 ```
 
 - **只綁 127.0.0.1**。不要把這個埠寫進 Cloudflare Tunnel / Access；投資人頁維持各自 hostname。
@@ -86,13 +87,15 @@ Dashboard 預設**沒有**自己的認證，對外時依賴 Cloudflare Access �
 | `ADMIN_CONSOLE_TOKEN` | 空（停用） | 設定後所有 `/api/admin/*` 需 `X-Admin-Token: <token>` 或 `Authorization: Bearer`。`admin.html` 遇到 `401` 會跳出一次輸入框並存進 `localStorage.admin_console_token`。 |
 | `ADMIN_CONSOLE_TOKEN_EMBED` | `false` | `true` 時把 token 寫進 `admin.html` 的 `<meta name="admin-console-token">`。 |
 
-後台除了檢查 `Host` header，也會檢查 **實際連線來源位址** 必須是 loopback（`127.0.0.1` / `::1`），除非啟動時加 `--allow-public`。交易動作（panic-close / close-position / spot-restore / csp-abort-restore / frontend start|stop|restart）只接受 POST。若投資人 frontend 設了 `DASHBOARD_API_TOKEN`，請在跑 `./bot admin` 的環境也設同一個值，探活（`/api/health`）才會帶 token；嵌入的 ops iframe 則需該 frontend 開 `DASHBOARD_API_TOKEN_EMBED=true` 或在該 origin 的 `localStorage` 放 token。
+後台除了檢查 `Host` header（loopback 或 Tailscale MagicDNS `*.ts.net`），也會檢查 **實際連線來源位址**：loopback，或（Host 為 `*.ts.net` 時）Tailscale CGNAT / ULA。除非啟動時加 `--allow-public`。Serve 進來時 peer 常是 `100.x`，不是 `127.0.0.1`；安全邊界是 tailnet 成員。交易動作（panic-close / close-position / spot-restore / csp-abort-restore / frontend start|stop|restart）只接受 POST。若投資人 frontend 設了 `DASHBOARD_API_TOKEN`，請在跑 `./bot admin` 的環境也設同一個值，探活（`/api/health`）才會帶 token；嵌入的 ops iframe 則需該 frontend 開 `DASHBOARD_API_TOKEN_EMBED=true` 或在該 origin 的 `localStorage` 放 token。
 
 ## 多名投資人與對外存取
 
 **多名投資人**（各 `config/investors/<id>/` 一份資料）若需各自專屬對外網址：請為每位投資人各跑一個 `frontend`（例如不同 `--port`），再以 reverse proxy／Tunnel 將不同子網域指到對應埠；細節見 [cloudflare-tunnel-investor.md](cloudflare-tunnel-investor.md)。
 
 家用或無固定公網 IP 時，若要對投資人提供固定 **HTTPS** 連結，可使用 **Cloudflare Named Tunnel**（本機維持 `127.0.0.1` 即可）：步驟、`config.yml` 範例、launchd 與 Access 建議見同一份文件。
+
+自己要用手機／另一台已登入同一 Tailscale 帳號的裝置看本機 dashboard 或 admin：不要改 `--host 0.0.0.0`，用 **Tailscale Serve** 反代 `127.0.0.1`。見 [`tailscale-serve-zh-TW.md`](tailscale-serve-zh-TW.md)（`./scripts/tailscale_serve.sh start`）。投資人公開網址仍走 Cloudflare；不要對 frontend 或 admin 開 Funnel。
 
 ## macOS 常駐
 

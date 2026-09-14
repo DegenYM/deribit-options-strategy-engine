@@ -71,6 +71,7 @@ export INVESTOR=youming
 
 # macOS launchd 常駐（依 registry.toml）
 ./bot investor frontend start    # dashboard
+./bot investor admin start       # 本機 admin 控制台（:8750）
 ./bot investor tunnel start      # cloudflared tunnel run
 ./bot investor provision-tunnel  # sync local+remote ingress + DNS from registry
 ./bot investor live start        # 實單監督
@@ -84,7 +85,7 @@ python scripts/run_live_profiles.py \
   config/investors/$INVESTOR/accounts/.env.bull_put
 ```
 
-Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。Tunnel 手動 `run` 與對外設定見 [cloudflare-tunnel-investor.md](cloudflare-tunnel-investor.md)。
+Dashboard 詳細說明見 [本地 Dashboard](dashboard-zh-TW.md)。Tunnel 手動 `run` 與對外設定見 [cloudflare-tunnel-investor.md](cloudflare-tunnel-investor.md)。自己用手機走 Tailscale 見 [Tailscale Serve](tailscale-serve-zh-TW.md)（`./scripts/tailscale_serve.sh start`）。
 
 ## 舊版單一 `.env`（legacy，不建議）
 

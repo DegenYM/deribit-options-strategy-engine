@@ -6,7 +6,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from deribit_engine.admin_server.app import assert_admin_bind_host, create_admin_app
+from deribit_engine.admin_server.app import (
+    assert_admin_bind_host,
+    create_admin_app,
+    is_tailscale_client_host,
+    is_tailscale_magic_host,
+)
 from deribit_engine.admin_server.catalog import build_admin_catalog, probe_frontend_health
 from deribit_engine.exceptions import ConfigurationError
 from deribit_engine.investor_frontend_launchd import FrontendLaunchdResult
@@ -131,6 +136,8 @@ def test_admin_app_lists_investors_and_serves_page(tmp_path: Path) -> None:
     script = client.get("/src/admin.js")
     assert script.status_code == 200
     assert "api/admin/investors" in script.text
+    assert "cacheBust" in script.text
+    assert "nocache" in script.text
 
     catalog = client.get("/api/admin/investors?probe=false")
     assert catalog.status_code == 200
@@ -143,6 +150,48 @@ def test_admin_app_rejects_non_loopback_host(tmp_path: Path) -> None:
     client = TestClient(create_admin_app(repo_root=tmp_path))
     response = client.get("/api/admin/health", headers={"host": "admin.debopt.com"})
     assert response.status_code == 403
+
+
+def test_is_tailscale_magic_host() -> None:
+    assert is_tailscale_magic_host("m1-mac-mini.tailc25ed2.ts.net") is True
+    assert is_tailscale_magic_host("m1-mac-mini.tailc25ed2.ts.net.") is True
+    assert is_tailscale_magic_host("ts.net") is False
+    assert is_tailscale_magic_host("admin.debopt.com") is False
+    assert is_tailscale_magic_host("127.0.0.1") is False
+
+
+def test_is_tailscale_client_host() -> None:
+    assert is_tailscale_client_host("100.65.76.83") is True
+    assert is_tailscale_client_host("fd7a:115c:a1e0::2a30:4c54") is True
+    assert is_tailscale_client_host("10.0.0.5") is False
+    assert is_tailscale_client_host("127.0.0.1") is False
+
+
+def test_admin_app_allows_tailscale_magic_host(tmp_path: Path) -> None:
+    _write_registry(tmp_path)
+    client = TestClient(create_admin_app(repo_root=tmp_path))
+    response = client.get(
+        "/api/admin/health",
+        headers={"host": "m1-mac-mini.tailc25ed2.ts.net:8750"},
+    )
+    assert response.status_code == 200
+    script = client.get("/src/admin.js").text
+    assert "rewriteLocalUrl" in script
+    assert "isTrustedEmbedOrigin" in script
+
+
+def test_admin_app_allows_tailscale_serve_peer(tmp_path: Path) -> None:
+    _write_registry(tmp_path)
+    app = create_admin_app(repo_root=tmp_path)
+    via_serve = TestClient(app, client=("100.65.76.83", 1))
+    ok = via_serve.get(
+        "/api/admin/health",
+        headers={"host": "m1-mac-mini.tailc25ed2.ts.net:8750"},
+    )
+    assert ok.status_code == 200
+    denied = via_serve.get("/api/admin/health", headers={"host": "127.0.0.1:8750"})
+    assert denied.status_code == 403
+    assert "client address" in denied.json()["detail"]
 
 
 def test_admin_frontend_action_uses_launchd_helper(tmp_path: Path, monkeypatch) -> None:

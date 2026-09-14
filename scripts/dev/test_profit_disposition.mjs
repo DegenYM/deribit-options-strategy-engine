@@ -1311,4 +1311,193 @@ const partialRestore = group({
 assert.ok(unrestoredSpotExitNative(partialRestore) > 0.05);
 assert.equal(resolveAdminGroupActionKind(partialRestore, { closed: [partialRestore], open: [] }), "recover");
 
+// YM-style: ITM cover sold, restore skipped / new CC buy not journaled on the parent.
+// Book-level restore fill-stats (the later 0.1 BTC cover buy) must not become Profit composition USDT.
+const ym0095 = group({
+  group_id: "0095",
+  quantity: "0.1",
+  covered_underlying_quantity: "0.1",
+  short_instrument_name: "BTC-28AUG26-73000-C",
+  cash_secured_group_id: "0105",
+  cash_secured_group_ids: ["0099", "0105"],
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.0915",
+  spot_exit_instrument_name: "BTC_USDT",
+  spot_exit_quote_proceeds: "7294.5676",
+  spot_exit_quote_proceeds_lifetime: "7294.5676",
+  spot_exit_settlement_loss: "0.0084211",
+  spot_restore_status: "skipped",
+  spot_restore_reason: "auto_spot_restore_park;operator_cancelled",
+  realized_pnl: "-660.72",
+  realized_pnl_collateral_native: "-0.00828875",
+  short_entry_average_price: "0.0015",
+  entry_fee_collateral: "0.00001875",
+});
+const ym0096 = group({
+  group_id: "0096",
+  quantity: "0.1",
+  covered_underlying_quantity: "0.1",
+  short_instrument_name: "BTC-4SEP26-75000-C",
+  cash_secured_group_id: "0103",
+  cash_secured_group_ids: ["0098", "0102", "0103"],
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.0929",
+  spot_exit_instrument_name: "BTC_USDC",
+  spot_exit_quote_proceeds: "7491.5317",
+  spot_exit_quote_proceeds_lifetime: "7491.5317",
+  spot_exit_settlement_loss: "0.00703342",
+  realized_pnl: "-542.94",
+  realized_pnl_collateral_native: "-0.00673",
+  short_entry_average_price: "0.0045",
+  entry_fee_collateral: "0.00003",
+});
+const ym0104 = group({
+  group_id: "0104",
+  status: "open",
+  quantity: "0.1",
+  covered_underlying_quantity: "0.1",
+  short_instrument_name: "BTC-18SEP26-85000-C",
+  realized_pnl: null,
+  realized_pnl_collateral_native: null,
+  closed_timestamp_ms: null,
+});
+const ymGroups = { closed: [ym0095, ym0096], open: [ym0104] };
+const ymStatus = {
+  ...status,
+  underlying_index_usd: { BTC: 77014.57, ETH: 2468.31 },
+  spot_exit_fill_stats_by_book: {
+    BTC: { native_sold: "0.1844", usdt: "14786.0993" },
+  },
+  spot_restore_fill_stats_by_book: {
+    BTC: { native_bought: "0.1", usdt_spent: "7682.4581" },
+  },
+};
+assert.equal(itmSpotRoundTripComplete(ym0095, ymGroups), false);
+assert.equal(itmSpotRoundTripComplete(ym0096, ymGroups), false);
+assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0095, ymGroups), null);
+assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0096, ymGroups), null);
+const ymComp = profitCompositionByBook(report, ymGroups, ymStatus);
+assert.ok(Math.abs(ymComp.usdByBook?.USDT ?? 0) < 0.005, `ym usdt=${ymComp.usdByBook?.USDT}`);
+assert.ok(Math.abs(ymComp.earnedUsdByBook?.USDT ?? 0) < 0.005, `ym earned usdt=${ymComp.earnedUsdByBook?.USDT}`);
+const ymTotal = (ymComp.usdByBook?.BTC ?? 0) + (ymComp.usdByBook?.ETH ?? 0) + (ymComp.usdByBook?.USDC ?? 0) + (ymComp.usdByBook?.USDT ?? 0);
+assert.ok(Math.abs(ymTotal) < 50, `ym composition total ${ymTotal} must not include cover sale/restore notional`);
+const ymPanel = summarizeSpotExitDisposition(ymGroups, { status: ymStatus });
+assert.ok(ymPanel);
+assert.ok(Math.abs((ymPanel.usdtSold ?? 0) - 14786.0993) < 0.02, `ym sold=${ymPanel.usdtSold}`);
+assert.ok(Math.abs((ymPanel.usdtBought ?? 0) - 7682.4581) < 0.02, `ym bought=${ymPanel.usdtBought}`);
+assert.ok(Math.abs(ymPanel.usdtNet ?? 0) < 0.005, `ym panel net must be recognized-only, got ${ymPanel.usdtNet}`);
+
+// Jack #0103: BTC_USDC restore filled, no quote — cover is back, Total must not take $7676 exit.
+const jack0103 = group({
+  group_id: "0103",
+  currency: "BTC",
+  collateral_currency: "BTC",
+  quantity: "0.1",
+  covered_underlying_quantity: "0.1",
+  short_instrument_name: "BTC-28AUG26-77000-C",
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.0965",
+  spot_exit_instrument_name: "BTC_USDT",
+  spot_exit_quote_proceeds: "7676.4094",
+  spot_exit_quote_proceeds_lifetime: "7676.4094",
+  spot_exit_settlement_loss: "0.00340308",
+  spot_restore_status: "filled",
+  spot_restore_amount: "0.1",
+  spot_restore_instrument_name: "BTC_USDC",
+  spot_restore_reason: "operator_manual_spot_restore",
+  realized_pnl: "-260.88",
+  realized_pnl_collateral_native: "-0.00327275",
+  short_entry_average_price: "0.0014",
+  entry_fee_collateral: "0.00001575",
+});
+const jack0104 = group({
+  group_id: "0104",
+  currency: "BTC",
+  collateral_currency: "BTC",
+  quantity: "0.1",
+  covered_underlying_quantity: "0.1",
+  short_instrument_name: "BTC-28AUG26-78000-C",
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.0978",
+  spot_exit_instrument_name: "BTC_USDT",
+  spot_exit_quote_proceeds: "7797.3849",
+  spot_exit_quote_proceeds_lifetime: "7797.3849",
+  spot_exit_settlement_loss: "0.00214857",
+  spot_restore_status: "filled",
+  spot_restore_amount: "0.0998",
+  spot_restore_instrument_name: "BTC_USDT",
+  spot_restore_quote_spent: "7778.6879",
+  spot_restore_quote_spent_lifetime: "7778.6879",
+  realized_pnl: "-159.03",
+  realized_pnl_collateral_native: "-0.001995",
+  short_entry_average_price: "0.0016",
+  entry_fee_collateral: "0.000018",
+});
+assert.equal(itmSpotRoundTripComplete(jack0103), true);
+assert.equal(itmSpotExitNetUsdtForTotalProfit(jack0103), null);
+assert.equal(unrestoredSpotExitNative(jack0103), 0);
+const jack0104Net = itmSpotExitNetUsdtForTotalProfit(jack0104);
+assert.ok(jack0104Net !== null);
+assert.ok(Math.abs(jack0104Net - (7797.3849 - 7778.6879)) < 0.02);
+const jackGroups = { closed: [jack0103, jack0104], open: [] };
+const jackStatus = {
+  ...status,
+  underlying_index_usd: { BTC: 77000.07, ETH: 2463.35 },
+  spot_exit_fill_stats_by_book: {
+    BTC: { native_sold: "0.1943", usdt: "15473.7943" },
+  },
+  // Exchange stats miss the unlabeled BTC_USDC #0103 restore.
+  spot_restore_fill_stats_by_book: {
+    BTC: { native_bought: "0.1003", usdt_spent: "7817.5064" },
+  },
+};
+const jackComp = profitCompositionByBook(report, jackGroups, jackStatus);
+assert.ok(Math.abs((jackComp.usdByBook?.USDT ?? 0) - jack0104Net) < 0.05, `jack usdt=${jackComp.usdByBook?.USDT}`);
+assert.ok((jackComp.usdByBook?.USDT ?? 0) < 100, "Jack Total must not include #0103 exit notional");
+const jackPanel = summarizeSpotExitDisposition(jackGroups, { status: jackStatus });
+assert.ok(jackPanel);
+assert.ok(Math.abs((jackPanel.boughtNative?.BTC ?? 0) - 0.1998) < 1e-6, `jack bought=${jackPanel.boughtNative?.BTC}`);
+assert.ok((jackPanel.boughtNative?.BTC ?? 0) > 0.19, "Jack BTC Bought back must include #0103 0.1");
+assert.ok(Math.abs(jackPanel.usdtNet ?? 0) < 30, `jack panel net=${jackPanel.usdtNet}`);
+assert.ok(
+  (jackPanel.boughtAvg?.BTC ?? 0) > 70000,
+  `jack bought avg must ignore unquoted #0103, avg=${jackPanel.boughtAvg?.BTC}`,
+);
+
+// Eugene #0033 extra 0.02 self-assign must not change #0022 exit−restore net.
+const eugene0033Overbuy = group({
+  group_id: "0033",
+  currency: "BTC",
+  collateral_currency: "USDC",
+  strategy: "cash_secured",
+  option_type: "put",
+  quantity: "0.02",
+  cash_secured_from_group_id: "0022",
+  spot_restore_status: "filled",
+  spot_restore_amount: "0.02",
+  spot_restore_instrument_name: "BTC_USDC",
+  spot_restore_quote_spent: "1539.26",
+  spot_restore_quote_spent_lifetime: "1539.26",
+  spot_restore_reason: "cash_secured_itm_assignment",
+  realized_pnl: "-7.74017417",
+  realized_pnl_collateral_native: "-7.74017417",
+});
+const eugeneOverbuyGroups = { closed: [eugene0022, eugene0033Overbuy], open: [] };
+assert.ok(
+  Math.abs((itmSpotExitNetUsdtForTotalProfit(eugene0022, eugeneOverbuyGroups) ?? 0) - eugene0022Net) < 0.02,
+  "Eugene #0033 overbuy must not be subtracted from #0022 net",
+);
+const eugeneOverbuyComp = profitCompositionByBook(report, eugeneOverbuyGroups, eugeneCompStatus);
+assert.ok(Math.abs((eugeneOverbuyComp.usdByBook?.USDT ?? 0) - eugene0022Net) < 0.05);
+assert.ok(Math.abs((eugeneOverbuyComp.usdByBook?.USDT ?? 0) + 1707) > 1000, "must not use gross overbuy net");
+const eugeneOverbuyPanel = summarizeSpotExitDisposition(eugeneOverbuyGroups, {
+  status: {
+    ...eugeneCompStatus,
+    spot_exit_fill_stats_by_book: { BTC: { native_sold: "0.0965", usdt: "7688.8399" } },
+    spot_restore_fill_stats_by_book: { BTC: { native_bought: "0.1", usdt_spent: "7856.6957" } },
+  },
+});
+assert.ok(Math.abs((eugeneOverbuyPanel.boughtNative?.BTC ?? 0) - 0.1) < 1e-6, `eugene bought=${eugeneOverbuyPanel.boughtNative?.BTC}`);
+assert.ok(Math.abs((eugeneOverbuyPanel.usdtNet ?? 0) - eugene0022Net) < 0.05);
+
 console.log("test_profit_disposition: ok");

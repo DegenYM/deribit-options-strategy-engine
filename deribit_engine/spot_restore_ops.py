@@ -74,18 +74,64 @@ def spot_restore_filled_native(group: TradeGroup) -> Decimal:
     return Decimal("0")
 
 
+def spot_restore_target_native(
+    group: TradeGroup,
+    *,
+    settlement_loss: Decimal | None = None,
+) -> Decimal:
+    """Buy-to-cover target: ``swap + settle − premium``, capped at cover."""
+    cover = covered_call_cover_native(group)
+    swap = _spot_exit_swap_native(group)
+    if settlement_loss is None:
+        settlement_loss = group.spot_exit_settlement_loss
+    settle = max(settlement_loss or Decimal("0"), Decimal("0"))
+    premium = _spot_restore_premium_native(group)
+    raw_target = swap + settle - premium
+    if raw_target < 0:
+        raw_target = Decimal("0")
+    if cover > 0:
+        return min(raw_target, cover)
+    return raw_target
+
+
+def _wheel_spot_restore_totals(
+    group: TradeGroup,
+    groups: list[TradeGroup] | None = None,
+    *,
+    settlement_loss: Decimal | None = None,
+) -> tuple[Decimal, Decimal]:
+    """Parent restore plus CSP-child buys that still refill unrestored cover.
+
+    Children only count while the parent target is still open. Extra
+    self-assign / overbuy on an already-restored wheel is not cover restore.
+    """
+    restored = spot_restore_filled_native(group)
+    spent = spot_restore_realized_usdt(group)
+    if not groups or not group.is_covered_call_group():
+        return restored, spent
+    target = spot_restore_target_native(group, settlement_loss=settlement_loss)
+    remaining = max(target - restored, Decimal("0"))
+    from .cash_secured_ops import cash_secured_children
+
+    for child in cash_secured_children(groups, group):
+        if remaining <= 0:
+            break
+        child_n = spot_restore_filled_native(child)
+        child_u = spot_restore_realized_usdt(child)
+        if child_n <= 0 and child_u <= 0:
+            continue
+        restored += child_n
+        spent += child_u
+        remaining = max(target - restored, Decimal("0"))
+    return restored, spent
+
+
 def wheel_spot_restore_filled_native(
     group: TradeGroup,
     groups: list[TradeGroup] | None = None,
 ) -> Decimal:
     """Parent restore plus CSP-child assignment buys that refill the same cover."""
-    restored = spot_restore_filled_native(group)
-    if not groups or not group.is_covered_call_group():
-        return restored
-    from .cash_secured_ops import cash_secured_children
-
-    for child in cash_secured_children(groups, group):
-        restored += spot_restore_filled_native(child)
+    restored, _spent = _wheel_spot_restore_totals(group, groups)
     return restored
 
 
@@ -94,13 +140,7 @@ def wheel_spot_restore_realized_usdt(
     groups: list[TradeGroup] | None = None,
 ) -> Decimal:
     """Parent restore quote plus CSP-child assignment spend for the same cover."""
-    spent = spot_restore_realized_usdt(group)
-    if not groups or not group.is_covered_call_group():
-        return spent
-    from .cash_secured_ops import cash_secured_children
-
-    for child in cash_secured_children(groups, group):
-        spent += spot_restore_realized_usdt(child)
+    _restored, spent = _wheel_spot_restore_totals(group, groups)
     return spent
 
 
@@ -155,13 +195,7 @@ def plan_spot_restore_to_cover(
     settle = max(settlement_loss or Decimal("0"), Decimal("0"))
     premium = _spot_restore_premium_native(group)
     fee = _spot_restore_entry_fee_native(group)
-    raw_target = swap + settle - premium
-    if raw_target < 0:
-        raw_target = Decimal("0")
-    if cover > 0:
-        target = min(raw_target, cover)
-    else:
-        target = raw_target
+    target = spot_restore_target_native(group, settlement_loss=settlement_loss)
     # Heuristic: treat premium as folded into the exit when filled size is closer to
     # cover+premium−settle than to cover−settle (tolerates exchange rounding dust).
     structural_with_premium = max(cover + premium - settle, Decimal("0"))
@@ -188,12 +222,23 @@ def plan_spot_restore_to_cover(
     }
 
 
-def spot_restore_spot_instrument_name(group: TradeGroup) -> str:
-    """Spot pair used to buy cover back. Follows the ITM exit quote (USDC vs USDT).
+def spot_restore_spot_instrument_name(
+    group: TradeGroup,
+    groups: list[TradeGroup] | None = None,
+    *,
+    child: TradeGroup | None = None,
+) -> str:
+    """Spot pair used to buy cover back.
 
-    Prefer the exit instrument over a parked restore pair so a USDT auto-restore
-    GTC does not force a USDC wheel to buy the wrong quote.
+    A USDC CSP / converted wheel always buys ``BTC_USDC`` / ``ETH_USDC``, even
+    when the original ITM sale journalled ``*_USDT``. Otherwise follow the
+    exit instrument so a parked USDT GTC cannot force the wrong quote.
     """
+    from .cash_secured_ops import cash_secured_cover_spot_instrument
+
+    usdc_pair = cash_secured_cover_spot_instrument(group, groups, child=child)
+    if usdc_pair:
+        return usdc_pair
     exit_name = str(group.spot_exit_instrument_name or "").strip()
     if exit_name:
         return exit_name
@@ -458,6 +503,11 @@ def itm_spot_exit_net_usdt_for_total_profit(
     if not itm_spot_round_trip_complete(group, groups):
         return None
     restore_u = wheel_spot_restore_realized_usdt(group, groups)
+    target = spot_restore_target_native(group)
+    # Native restore without quote (e.g. operator BTC_USDC fill, no spent journal)
+    # is cover-complete for the panel, but must not count raw exit proceeds as PnL.
+    if target > 0 and restore_u <= 0:
+        return None
     net = exit_u - restore_u
     folded = itm_folded_premium_usdt(group)
     if folded > 0:
@@ -907,7 +957,7 @@ def list_spot_restore_candidates(
                 restored_quote_spent=wheel_spot_restore_realized_usdt(group, plan_pool),
                 unrestored_amount=unrestored,
                 spot_restore_status=str(group.spot_restore_status or ""),
-                instrument_name=spot_restore_spot_instrument_name(group),
+                instrument_name=spot_restore_spot_instrument_name(group, plan_pool),
             )
         )
     rows.sort(key=lambda row: row.group_id)
@@ -1764,7 +1814,7 @@ def execute_spot_restore_for_group(
             }
         instrument_name = override
     else:
-        instrument_name = spot_restore_spot_instrument_name(group)
+        instrument_name = spot_restore_spot_instrument_name(group, groups)
     label = spot_restore_order_label(group, bot.config.order_label_prefix)
     auto_restore = str(restore_reason or "").startswith("auto_spot_restore")
     if auto_restore:

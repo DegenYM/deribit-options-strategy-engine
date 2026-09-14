@@ -197,10 +197,43 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-function embedUrl(opsUrl) {
+function isLoopbackHostname(hostname) {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]";
+}
+
+function isLoopbackOrigin(origin) {
   try {
-    const url = new URL(opsUrl, window.location.href);
+    return isLoopbackHostname(new URL(origin).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Rewrite catalog ``http://127.0.0.1:<port>/…`` onto the current host when Admin is opened via Tailscale Serve. */
+function rewriteLocalUrl(localUrl) {
+  if (!localUrl || isLoopbackOrigin(window.location.origin)) return localUrl;
+  try {
+    const src = new URL(localUrl, window.location.href);
+    if (!isLoopbackHostname(src.hostname)) return localUrl;
+    const dest = new URL(window.location.origin);
+    dest.port = src.port;
+    dest.pathname = src.pathname;
+    dest.search = src.search;
+    dest.hash = src.hash;
+    return dest.toString();
+  } catch {
+    return localUrl;
+  }
+}
+
+function embedUrl(opsUrl, { cacheBust = false } = {}) {
+  try {
+    const url = new URL(rewriteLocalUrl(opsUrl), window.location.href);
     url.searchParams.set("embed", "1");
+    // Hashed app.js is immutable for a year. Re-assigning the same iframe src
+    // is a no-op in Chrome, so a long-lived Admin tab keeps yesterday's Profit
+    // composition. Bust the HTML URL whenever we intentionally reload.
+    if (cacheBust) url.searchParams.set("nocache", String(Date.now()));
     return url.toString();
   } catch {
     return opsUrl;
@@ -227,25 +260,24 @@ function showEmpty(message) {
 function showFrame(url, { reload = false } = {}) {
   if (els.empty) els.empty.hidden = true;
   if (!els.frame) return;
-  const src = embedUrl(url);
+  const src = embedUrl(url, { cacheBust: reload });
   els.frame.hidden = false;
-  if (reload || els.frame.getAttribute("src") !== src) {
-    resetFrameHeight();
-    els.frame.src = src;
-  }
+  if (!reload && els.frame.getAttribute("src") === src) return;
+  resetFrameHeight();
+  if (reload) els.frame.removeAttribute("src");
+  els.frame.src = src;
 }
 
-function isLoopbackOrigin(origin) {
+function isTrustedEmbedOrigin(origin) {
   try {
-    const parsed = new URL(origin);
-    return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
+    return new URL(origin).hostname === window.location.hostname;
   } catch {
     return false;
   }
 }
 
 function onEmbedMessage(event) {
-  if (!isLoopbackOrigin(event.origin)) return;
+  if (!isTrustedEmbedOrigin(event.origin)) return;
   const data = event.data || {};
   if (data.source !== "deribit-dashboard") return;
   if (data.type === "embed-height") {
@@ -308,8 +340,8 @@ function updateToolbar(row) {
   ].join(" · ");
   if (els.selectedName) els.selectedName.textContent = row.display_name || row.investor_id;
   if (els.selectedMeta) els.selectedMeta.textContent = `${row.investor_id} · ${port} · ${host} · ${flags}`;
-  setLink(els.openOps, row.ops_url);
-  setLink(els.openPortal, row.portal_url);
+  setLink(els.openOps, rewriteLocalUrl(row.ops_url));
+  setLink(els.openPortal, rewriteLocalUrl(row.portal_url));
   if (els.startBtn) els.startBtn.hidden = false;
   if (els.restartBtn) els.restartBtn.hidden = false;
   if (els.stopBtn) els.stopBtn.hidden = false;
@@ -779,10 +811,22 @@ async function postTrade({ live }) {
   }
 }
 
+function syncBindBadge() {
+  const badge = document.getElementById("admin-bind-badge");
+  if (!badge) return;
+  if (isLoopbackOrigin(window.location.origin)) {
+    badge.textContent = window.location.hostname || "127.0.0.1";
+    return;
+  }
+  badge.textContent = "tailnet";
+  badge.title = window.location.host;
+}
+
 function bind() {
+  syncBindBadge();
   window.addEventListener("message", onEmbedMessage);
   els.refresh?.addEventListener("click", () => {
-    loadCatalog({ keepFrame: true }).catch((err) => {
+    loadCatalog({ keepFrame: false }).catch((err) => {
       setActionStatus(`Refresh failed: ${err.message || err}`, "error");
     });
   });

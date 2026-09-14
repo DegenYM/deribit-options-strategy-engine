@@ -1401,6 +1401,44 @@ table tbody tr:hover {
   line-height: 1.4;
 }
 
+.book-card-splits,
+.overview-breakdown-splits {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.book-card-splits {
+  margin: 0.125rem 0 0.75rem;
+}
+
+.overview-breakdown-splits {
+  margin-top: 0.25rem;
+}
+
+.book-card-split,
+.overview-breakdown-split {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}
+
+.book-card-split-name,
+.overview-breakdown-split-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.book-card-split-value,
+.overview-breakdown-split-value {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+}
+
 .book-card-tile .kv {
   min-width: 0;
 }
@@ -2044,13 +2082,86 @@ table tbody tr:hover {
 .activity-empty {
   color: var(--color-text-muted);
   font-size: 13px;
-  padding: 8px 4px;
+  padding: 28px 12px;
+  text-align: center;
 }
 
-.activity-zone + .activity-zone {
-  margin-top: 20px;
-  padding-top: 18px;
-  border-top: 1px solid color-mix(in srgb, var(--color-border-default) 35%, transparent);
+.activity-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 0 0 16px;
+  padding: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border-default) 45%, transparent);
+}
+
+.activity-tab {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 0 -1px;
+  padding: 10px 12px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition:
+    color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.activity-tab:hover {
+  color: var(--color-text-primary);
+  background: color-mix(in srgb, var(--color-bg-surface-elevated) 55%, transparent);
+}
+
+.activity-tab:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+.activity-tab.is-active,
+.activity-tab[aria-selected="true"] {
+  color: var(--color-accent-soft);
+  border-bottom-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.activity-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.4em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--color-text-secondary);
+  background: var(--surface-pill);
+  border: 1px solid color-mix(in srgb, var(--color-border-default) 55%, transparent);
+}
+
+.activity-tab.is-active .activity-tab-count,
+.activity-tab[aria-selected="true"] .activity-tab-count {
+  color: var(--color-accent-soft);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+}
+
+.activity-zone[hidden] {
+  display: none;
 }
 
 .activity-zone-head {
@@ -2067,6 +2178,13 @@ table tbody tr:hover {
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.02em;
+}
+
+@media (max-width: 720px) {
+  .activity-tab {
+    min-height: 44px;
+    padding: 12px 8px 14px;
+  }
 }
 
 .activity-pagination {

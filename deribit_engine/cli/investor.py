@@ -161,6 +161,20 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         )
         p.add_argument("--json", action="store_true", help="Emit JSON")
 
+    inv_admin = investor_sub.add_parser(
+        "admin",
+        help="Start/stop/restart/status the local admin console via launchd (macOS)",
+    )
+    inv_admin_sub = inv_admin.add_subparsers(dest="admin_command", required=True)
+    for action in ("start", "stop", "restart", "status"):
+        p = inv_admin_sub.add_parser(action, help=f"{action} admin LaunchAgent")
+        p.add_argument(
+            "--no-health",
+            action="store_true",
+            help="Skip local http://127.0.0.1:8750/api/admin/health probe",
+        )
+        p.add_argument("--json", action="store_true", help="Emit JSON")
+
     inv_provision = investor_sub.add_parser(
         "provision-tunnel",
         help=(
@@ -389,6 +403,27 @@ def dispatch(args: argparse.Namespace) -> int | None:
                 mark = "ok" if row.ok else "FAIL"
                 print(f"[{mark}] {row.investor_id} {row.state} — {row.message}{supervisor}")
         return 0 if all(row.ok for row in results) else 1
+
+    if args.investor_command == "admin":
+        from ..admin_launchd import manage_admin_launchd
+
+        result = manage_admin_launchd(
+            args.admin_command,
+            repo_root=repo_root,
+            check_health=not args.no_health,
+        )
+        payload = {
+            "action": f"investor-admin-{args.admin_command}",
+            "result": result.to_dict(),
+        }
+        render(payload, args.json)
+        if not args.json:
+            health = ""
+            if result.health_ok is not None:
+                health = " health=" + ("ok" if result.health_ok else "fail")
+            mark = "ok" if result.ok else "FAIL"
+            print(f"[{mark}] {result.label} {result.state} — {result.message}{health}")
+        return 0 if result.ok else 1
 
     if args.investor_command == "tunnel":
         from ..cloudflared_launchd import manage_tunnel_launchd

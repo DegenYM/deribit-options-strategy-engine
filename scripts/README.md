@@ -14,6 +14,8 @@
 | `repair_double_profit_sweep.py` | 修復重複 profit sweep 並買回多賣的原幣 |
 | `run_e2e_dashboard.py` | Playwright E2E 啟動 mock dashboard |
 | `live_launchd_all.sh` / `frontend_launchd_all.sh` | 批次 launchd 操作 |
+| `tailscale_serve.sh` | 把本機 `127.0.0.1` frontend + admin 掛上 Tailscale Serve（手機／tailnet；不開 Funnel） |
+| `admin_launchd.sh` | 本機 admin 控制台 launchd（`./bot investor admin start`） |
 | `generate_investor_onboarding_pdf.py` | 投資人 onboarding PDF |
 | `generate_investor_fee_disclosure_pdf.py` | 績效費披露 PDF |
 | `generate_investor_strategy_pdf.py` | 策略說明 PDF |

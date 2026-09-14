@@ -79,3 +79,4 @@ pytest
 - [設定與環境變數](configuration-zh-TW.md)
 - [CLI 指令](cli-zh-TW.md)
 - [本地 Dashboard](dashboard-zh-TW.md)
+- [Tailscale Serve（手機看本機 dashboard）](tailscale-serve-zh-TW.md)

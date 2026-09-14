@@ -4,7 +4,10 @@ from conftest import FakeClient, future_expiry, make_config
 
 from deribit_engine.cash_secured_ops import (
     cash_secured_cover_complete,
+    cash_secured_cover_spot_instrument,
     cash_secured_cover_unrestored,
+    cash_secured_desired_quantity,
+    cash_secured_hold_near_strike,
     cash_secured_put_intrinsic_usdc,
     cash_secured_put_is_itm,
     cash_secured_put_time_value_usdc,
@@ -130,6 +133,15 @@ def test_itm_sold_ready_accepts_usdt_journal_as_usdc() -> None:
     )
     assert retry is True
     assert retry_why == ""
+
+    funds_retry, funds_why = itm_sold_ready_for_cash_secured(
+        _itm_sold_group(
+            cash_secured_status="skipped",
+            cash_secured_reason="not_enough_funds",
+        )
+    )
+    assert funds_retry is True
+    assert funds_why == ""
 
     still_skipped, still_why = itm_sold_ready_for_cash_secured(
         _itm_sold_group(cash_secured_status="skipped", cash_secured_reason="no_short_dated_put")
@@ -267,6 +279,56 @@ def test_itm_sold_ready_stops_when_cover_restored_or_operator_closed() -> None:
     assert ready_later is False
     assert why_later == "operator_closed_child"
 
+    external = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_reason="csp_otm_roll",
+        cash_secured_group_id="0099",
+        cash_secured_group_ids=["0099"],
+        spot_restore_status="skipped",
+    )
+    closed_external = _csp_child(
+        group_id="0099",
+        short_instrument_name="BTC_USDC-11SEP26-72000-P",
+        short_strike="72000",
+        close_reason="reconciled_external",
+        close_index_usd="73000",
+        closed_timestamp_ms=1_746_200_000_000,
+    )
+    ready_ext, why_ext = itm_sold_ready_for_cash_secured(external, [external, closed_external])
+    assert ready_ext is False
+    assert why_ext == "operator_closed_child"
+    blocked_ext, block_ext = cash_secured_roll_blocked(external, [external, closed_external])
+    assert blocked_ext is True
+    assert block_ext == "operator_closed_child"
+
+    later_roll = _csp_child(
+        group_id="0105",
+        short_instrument_name="BTC_USDC-14SEP26-72000-P",
+        short_strike="72000",
+        close_reason="reconciled_expiry",
+        close_index_usd="80674",
+        closed_timestamp_ms=1_746_400_000_000,
+    )
+    external.cash_secured_group_id = "0105"
+    external.cash_secured_group_ids = ["0099", "0105"]
+    ready_old, why_old = itm_sold_ready_for_cash_secured(external, [external, closed_external, later_roll])
+    assert ready_old is False
+    assert why_old == "operator_closed_child"
+    blocked_old, block_old = cash_secured_roll_blocked(external, [external, closed_external, later_roll])
+    assert blocked_old is True
+    assert block_old == "operator_closed_child"
+
+    expiry_only = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_group_id="0097",
+        cash_secured_group_ids=["0097"],
+        spot_restore_status="skipped",
+    )
+    closed_expiry = _csp_child(close_reason="reconciled_expiry", close_index_usd="80674")
+    ready_exp, why_exp = itm_sold_ready_for_cash_secured(expiry_only, [expiry_only, closed_expiry])
+    assert ready_exp is True
+    assert why_exp == ""
+
 
 def test_manage_skips_csp_when_child_assignment_restored(tmp_path) -> None:
     client = FakeClient(btc_book_equity="0.2")
@@ -285,6 +347,35 @@ def test_manage_skips_csp_when_child_assignment_restored(tmp_path) -> None:
         spot_restore_amount="0.1",
         spot_restore_order_id="restore-1",
         spot_restore_quote_spent="7100",
+    )
+    state = StrategyState()
+    state.groups.extend([parent, child])
+    engine.state_store.save(state)
+
+    result = engine.manage(live=True)
+    assert not any(a.get("action") == "cash_secured_entered" for a in result["actions"])
+    assert not any(
+        o.get("direction") == "sell" and "P" in str(o.get("instrument_name") or "") for o in client.placed_orders
+    )
+
+
+def test_manage_skips_csp_after_reconciled_external_child(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    engine = _csp_engine(tmp_path, client)
+    parent = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_reason="csp_otm_roll",
+        cash_secured_group_id="0099",
+        cash_secured_group_ids=["0099"],
+        spot_restore_status="skipped",
+        spot_restore_reason="auto_spot_restore_park;operator_cancelled",
+    )
+    child = _csp_child(
+        group_id="0099",
+        short_instrument_name="BTC_USDC-11SEP26-72000-P",
+        short_strike="72000",
+        close_reason="reconciled_external",
+        close_index_usd="73000",
     )
     state = StrategyState()
     state.groups.extend([parent, child])
@@ -347,6 +438,47 @@ def test_scan_cash_secured_skips_when_child_restored(tmp_path) -> None:
     assert Decimal(str(result["sold_native"])) == Decimal("0")
 
 
+def test_cash_secured_hold_near_strike() -> None:
+    band = Decimal("0.01")
+    assert cash_secured_hold_near_strike(index_price=Decimal("76905"), strike=Decimal("77000"), band_pct=band) is True
+    assert cash_secured_hold_near_strike(index_price=Decimal("77500"), strike=Decimal("77000"), band_pct=band) is True
+    assert cash_secured_hold_near_strike(index_price=Decimal("78000"), strike=Decimal("77000"), band_pct=band) is False
+    assert cash_secured_hold_near_strike(index_price=Decimal("0"), strike=Decimal("77000"), band_pct=band) is False
+    assert cash_secured_hold_near_strike(index_price=Decimal("76905"), strike=Decimal("77000"), band_pct=Decimal("0")) is False
+
+
+def test_cash_secured_cover_spot_instrument_prefers_usdc_csp() -> None:
+    parent = _itm_sold_group(
+        spot_exit_instrument_name="BTC_USDT",
+        cash_secured_status="entered",
+        cash_secured_group_id="0097",
+        cash_secured_instrument_name="BTC_USDC-11SEP26-73000-P",
+    )
+    child = TradeGroup.from_dict(
+        {
+            "group_id": "0097",
+            "currency": "BTC",
+            "status": "open",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "collateral_currency": "USDC",
+            "quantity": "0.1",
+            "short_instrument_name": "BTC_USDC-11SEP26-73000-P",
+            "short_strike": "73000",
+            "cash_secured_from_group_id": "0095",
+            "entry_timestamp_ms": 1,
+            "expiration_timestamp_ms": 2,
+            "entry_credit": "5",
+            "max_loss": "7300",
+            "regime_at_entry": "normal",
+        }
+    )
+    assert cash_secured_cover_spot_instrument(parent, child=child) == "BTC_USDC"
+    assert cash_secured_cover_spot_instrument(parent, [parent, child]) == "BTC_USDC"
+    usdt_only = _itm_sold_group(spot_exit_instrument_name="BTC_USDT")
+    assert cash_secured_cover_spot_instrument(usdt_only) is None
+
+
 def test_resolve_csp_abort_restore_pair() -> None:
     parent = _itm_sold_group(cash_secured_status="entered", cash_secured_group_id="0097")
     child = TradeGroup.from_dict(
@@ -391,14 +523,24 @@ def test_cash_secured_strike_and_quantity() -> None:
     )
     assert qty == Decimal("0.1")
 
-    tiny = cash_secured_quantity(
+    # Available << strike×qty must not shrink cover size (Deribit IM is notional).
+    tiny_available = cash_secured_quantity(
         sold_native=Decimal("0.1"),
         usdc_available=Decimal("500"),
         strike=Decimal("63000"),
         contract_size=Decimal("0.01"),
         min_trade_amount=Decimal("0.01"),
     )
-    assert tiny == Decimal("0")
+    assert tiny_available == Decimal("0.1")
+
+    no_usdc = cash_secured_quantity(
+        sold_native=Decimal("0.1"),
+        usdc_available=Decimal("0"),
+        strike=Decimal("63000"),
+        contract_size=Decimal("0.01"),
+        min_trade_amount=Decimal("0.01"),
+    )
+    assert no_usdc == Decimal("0")
 
     short_at_original = cash_secured_quantity(
         sold_native=Decimal("0.0998"),
@@ -408,7 +550,7 @@ def test_cash_secured_strike_and_quantity() -> None:
         min_trade_amount=Decimal("0.01"),
         cap=Decimal("0.1"),
     )
-    assert short_at_original == Decimal("0.09")
+    assert short_at_original == Decimal("0.1")
 
     lower_strike = cash_secured_quantity(
         sold_native=Decimal("0.0998"),
@@ -419,16 +561,57 @@ def test_cash_secured_strike_and_quantity() -> None:
         cap=Decimal("0.1"),
     )
     assert lower_strike == Decimal("0.1")
+    # Highest strike wins even if a lower strike could open more under an available cap.
     assert cash_secured_scan_rank(
-        quantity=lower_strike,
-        strike=Decimal("72000"),
-        dte=Decimal("6"),
-        net_apr=Decimal("0.4"),
-    ) < cash_secured_scan_rank(
-        quantity=short_at_original,
+        quantity=Decimal("0.1"),
         strike=Decimal("73000"),
         dte=Decimal("6"),
         net_apr=Decimal("0.5"),
+    ) < cash_secured_scan_rank(
+        quantity=Decimal("0.09"),
+        strike=Decimal("72000"),
+        dte=Decimal("6"),
+        net_apr=Decimal("0.4"),
+    )
+
+
+def test_jack_eth_cover_aligned_quantity_ignores_available_notional() -> None:
+    """Jack ETH #0095: sold 1.8416 → desired 1.9, cap cover 2. Available 3970 < 2300×1.9."""
+    desired = cash_secured_desired_quantity(
+        target_native=Decimal("1.8416"),
+        contract_size=Decimal("0.1"),
+        min_trade_amount=Decimal("0.1"),
+        cap=Decimal("2"),
+    )
+    assert desired == Decimal("1.9")
+    qty_2300 = cash_secured_quantity(
+        sold_native=Decimal("1.8416"),
+        usdc_available=Decimal("3970"),
+        strike=Decimal("2300"),
+        contract_size=Decimal("0.1"),
+        min_trade_amount=Decimal("0.1"),
+        cap=Decimal("2"),
+    )
+    qty_2250 = cash_secured_quantity(
+        sold_native=Decimal("1.8416"),
+        usdc_available=Decimal("3970"),
+        strike=Decimal("2250"),
+        contract_size=Decimal("0.1"),
+        min_trade_amount=Decimal("0.1"),
+        cap=Decimal("2"),
+    )
+    assert qty_2300 == Decimal("1.9")
+    assert qty_2250 == Decimal("1.9")
+    assert cash_secured_scan_rank(
+        quantity=qty_2300,
+        strike=Decimal("2300"),
+        dte=Decimal("6"),
+        net_apr=Decimal("0.3"),
+    ) < cash_secured_scan_rank(
+        quantity=Decimal("1.8"),
+        strike=Decimal("2200"),
+        dte=Decimal("6"),
+        net_apr=Decimal("0.4"),
     )
 
 
@@ -794,6 +977,20 @@ def test_scan_cash_secured_rolls_after_otm_child(tmp_path) -> None:
     assert cash_secured_wheel_realized_pnl(parent, [parent, child]) == Decimal("34.47")
 
 
+def test_scan_cash_secured_pauses_when_near_strike(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    client.get_index_price = lambda name: {"index_price": Decimal("63200")}
+    engine = _csp_scan_engine(tmp_path, client)
+    state = StrategyState()
+    state.groups.append(_itm_sold_group())
+    engine.state_store.save(state)
+
+    result = engine.scan_cash_secured(from_group_id="0095")
+    assert result["would_place"] is False
+    assert result["reason"] == "near_strike"
+    assert not any(row.get("would_place") for row in result["groups"])
+
+
 def test_scan_cash_secured_previews_open_covered_call_without_csp(tmp_path) -> None:
     engine = _csp_scan_engine(tmp_path)
     state = StrategyState()
@@ -910,7 +1107,7 @@ def test_scan_cash_secured_strike_floor_pct_widens_window(tmp_path) -> None:
 
 
 class _ShortUsdcClient(FakeClient):
-    """USDT/fee shortfall: enough for 0.1 at 62000, not at 63000."""
+    """USDT/fee shortfall vs cash-secured notional at 63000; cover size must still hold."""
 
     def get_account_summaries(self, *, extended=False):
         rows = super().get_account_summaries(extended=extended)
@@ -964,7 +1161,7 @@ class _ShortUsdcClient(FakeClient):
         return super().get_order_book(instrument_name, depth=depth)
 
 
-def test_manage_drops_strike_when_usdc_just_short_of_cover(tmp_path) -> None:
+def test_manage_keeps_cover_strike_when_available_short_of_notional(tmp_path) -> None:
     client = _ShortUsdcClient(btc_book_equity="0.2")
     config = make_config(
         tmp_path,
@@ -992,8 +1189,175 @@ def test_manage_drops_strike_when_usdc_just_short_of_cover(tmp_path) -> None:
     previews = [a for a in result["actions"] if a.get("action") == "cash_secured_preview"]
     assert len(previews) == 1
     candidate = previews[0]["candidate"]
-    assert Decimal(str(candidate["short_strike"])) == Decimal("62000")
+    assert Decimal(str(candidate["short_strike"])) == Decimal("63000")
     assert Decimal(str(candidate["quantity"])) == Decimal("0.1")
+
+
+class _JackEthCspClient(FakeClient):
+    """Jack ETH wheel: other-book IM leaves available 3970; window 2200/2250/2300."""
+
+    STRIKES = ("2300", "2250", "2200")
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        for days in (14, 21):
+            for strike in self.STRIKES:
+                name = f"ETH_USDC-{days:02d}APR30-{strike}-P"
+                bid = {"2300": "35", "2250": "28", "2200": "22"}[strike]
+                ask = {"2300": "36", "2250": "29", "2200": "23"}[strike]
+                self.order_book_overrides[name] = {
+                    "instrument_name": name,
+                    "best_bid_price": bid,
+                    "best_bid_amount": "20",
+                    "best_ask_price": ask,
+                    "best_ask_amount": "20",
+                    "mark_price": str((Decimal(bid) + Decimal(ask)) / 2),
+                    "index_price": "3500",
+                    "mark_iv": "0.55",
+                    "open_interest": "80",
+                    "greeks": {"delta": "-0.35"},
+                }
+
+    def get_account_summaries(self, *, extended=False):
+        rows = super().get_account_summaries(extended=extended)
+        for row in rows:
+            if row["currency"] == "USDC":
+                row["balance"] = "4906"
+                row["equity"] = "4906"
+                row["available_funds"] = "3970"
+                row["available_withdrawal_funds"] = "3970"
+                row["initial_margin"] = "936"
+        return rows
+
+    def get_instruments(self, currency, *, kind="option", expired=False):
+        rows = super().get_instruments(currency, kind=kind, expired=expired)
+        if currency == "ETH" and kind == "option":
+            # FakeClient ETH 3850 calls are only ~10% OTM vs 3500; covered-call
+            # regime requires ≥12% so bump the call strike for a valid ETH book.
+            patched = []
+            for row in rows:
+                if str(row.get("option_type") or "").lower() == "call":
+                    item = dict(row)
+                    item["strike"] = "4000"
+                    item["instrument_name"] = str(item["instrument_name"]).replace("3850", "4000")
+                    patched.append(item)
+                else:
+                    patched.append(row)
+            rows = patched
+        if currency != "USDC" or kind != "option":
+            return rows
+        extra = []
+        for days in (14, 21):
+            for strike in self.STRIKES:
+                extra.append(
+                    {
+                        "instrument_name": f"ETH_USDC-{days:02d}APR30-{strike}-P",
+                        "base_currency": "ETH",
+                        "quote_currency": "USDC",
+                        "settlement_currency": "USDC",
+                        "instrument_type": "linear",
+                        "tick_size": "0.5",
+                        "tick_size_steps": [],
+                        "min_trade_amount": "0.1",
+                        "contract_size": "0.1",
+                        "option_type": "put",
+                        "expiration_timestamp": future_expiry(days),
+                        "strike": strike,
+                        "instrument_state": "open",
+                    }
+                )
+        return rows + extra
+
+    def get_order_book(self, instrument_name, *, depth=1):
+        if str(instrument_name).startswith("ETH-") and str(instrument_name).endswith("-C"):
+            book = dict(super().get_order_book(instrument_name, depth=depth))
+            book["greeks"] = {"delta": "0.08"}
+            return book
+        return super().get_order_book(instrument_name, depth=depth)
+
+
+def _jack_eth_itm_parent() -> TradeGroup:
+    return _eth_itm_sold_group(
+        "0095",
+        short_strike="2300",
+        short_instrument_name="ETH-28AUG26-2300-C",
+        quantity="2",
+        covered_underlying_quantity="2",
+        spot_exit_amount="1.8416",
+        spot_exit_instrument_name="ETH_USDC",
+        spot_exit_quote_proceeds="4500",
+        spot_exit_quote_proceeds_lifetime="4500",
+    )
+
+
+def test_manage_jack_eth_picks_cover_strike_not_available_capped_qty(tmp_path) -> None:
+    client = _JackEthCspClient(btc_book_equity="0.2", eth_book_equity="2")
+    engine = _csp_engine(tmp_path, client)
+    state = StrategyState()
+    state.groups.append(_jack_eth_itm_parent())
+    engine.state_store.save(state)
+
+    result = engine.manage(live=False)
+    previews = [a for a in result["actions"] if a.get("action") == "cash_secured_preview"]
+    assert len(previews) == 1
+    candidate = previews[0]["candidate"]
+    assert Decimal(str(candidate["short_strike"])) == Decimal("2300")
+    assert Decimal(str(candidate["quantity"])) == Decimal("1.9")
+
+
+def test_manage_csp_qty_stays_cover_aligned_when_other_im_consumes_available(tmp_path) -> None:
+    client = _JackEthCspClient(btc_book_equity="0.2", eth_book_equity="2")
+    engine = _csp_engine(tmp_path, client)
+    state = StrategyState()
+    state.groups.append(_jack_eth_itm_parent())
+    engine.state_store.save(state)
+
+    scanned = engine.scan_cash_secured(from_group_id="0095", top_n=8)
+    pick = scanned["pick"]
+    assert Decimal(str(pick["short_strike"])) == Decimal("2300")
+    assert Decimal(str(pick["quantity"])) == Decimal("1.9")
+    names = [row["instrument_name"] for row in scanned["candidates"]]
+    assert any("2300" in name for name in names)
+    # Lower strikes remain eligible but must not outrank 2300 via available-capped size.
+    assert Decimal(str(scanned["strike_min"])) == Decimal("2185")
+    assert Decimal(str(scanned["strike_max"])) == Decimal("2300")
+
+
+def test_manage_skips_csp_not_enough_funds_without_shrinking(tmp_path) -> None:
+    from deribit_engine.exceptions import ExchangeError
+
+    class _RejectFunds(_JackEthCspClient):
+        def place_order(self, *, direction, instrument_name, amount, label, order_type="limit", price=None, **kwargs):
+            if direction == "sell" and str(instrument_name).endswith("-P"):
+                raise ExchangeError("private/sell failed: code=10009 message=not_enough_funds data=None")
+            return super().place_order(
+                direction=direction,
+                instrument_name=instrument_name,
+                amount=amount,
+                label=label,
+                order_type=order_type,
+                price=price,
+                **kwargs,
+            )
+
+    client = _RejectFunds(btc_book_equity="0.2", eth_book_equity="2")
+    engine = _csp_engine(tmp_path, client)
+    state = StrategyState()
+    state.groups.append(_jack_eth_itm_parent())
+    engine.state_store.save(state)
+
+    result = engine.manage(live=True)
+    skipped = [a for a in result["actions"] if a.get("action") == "cash_secured_skipped"]
+    hit = next(a for a in skipped if a.get("reason") == "not_enough_funds")
+    assert Decimal(str(hit["candidate"]["quantity"])) == Decimal("1.9")
+    assert not any(a.get("action") == "cash_secured_entered" for a in result["actions"])
+    parent = engine.state_store.load().groups[0]
+    assert parent.cash_secured_status == "skipped"
+    assert parent.cash_secured_reason == "not_enough_funds"
+    assert not any(
+        o.get("direction") == "sell" and str(o.get("instrument_name") or "").endswith("-P")
+        for o in client.placed_orders
+    )
 
 
 def _csp_engine(tmp_path, client, **overrides):
@@ -1792,6 +2156,239 @@ def test_manage_csp_self_assigns_when_itm_and_time_value_thin(tmp_path) -> None:
     # streak becomes 2 on this cycle; confirm needs 2, so should fire.
     assert any(a.get("reason") == "csp_self_assign" for a in first["actions"])
     assert any(a.get("action") == "cash_secured_self_assign_preview" for a in first["actions"])
+
+
+def test_near_strike_band_does_not_block_itm_self_assign(tmp_path) -> None:
+    """Spot within 1% of strike but truly ITM still uses existing self-assign gates."""
+    client = FakeClient(btc_book_equity="0.2")
+    client.get_index_price = lambda name: {"index_price": Decimal("62900")}
+    client.positions = [
+        {
+            "instrument_name": "BTC_USDC-14APR30-63000-P",
+            "direction": "sell",
+            "kind": "option",
+            "size": "-0.1",
+            "size_currency": "-0.1",
+            "mark_price": "160",
+            "average_price": "200",
+            "floating_profit_loss": "0",
+            "delta": "-0.55",
+        }
+    ]
+    client.order_book_overrides["BTC_USDC-14APR30-63000-P"] = {
+        "instrument_name": "BTC_USDC-14APR30-63000-P",
+        "best_bid_price": "140",
+        "best_bid_amount": "0.2",
+        "best_ask_price": "160",
+        "best_ask_amount": "0.2",
+        "mark_price": "150",
+        "index_price": "62900",
+        "mark_iv": "0.5",
+        "open_interest": "80",
+        "greeks": {"delta": "-0.55"},
+    }
+    engine = _csp_engine(
+        tmp_path,
+        client,
+        covered_call_csp_self_assign_enabled=True,
+        covered_call_csp_self_assign_confirm_cycles=1,
+        covered_call_csp_self_assign_max_dte=Decimal("2"),
+        covered_call_csp_self_assign_max_tv_pct=Decimal("0.12"),
+    )
+    state = StrategyState()
+    state.groups.append(
+        TradeGroup.from_dict(
+            {
+                "group_id": "0100",
+                "currency": "BTC",
+                "collateral_currency": "USDC",
+                "status": "open",
+                "strategy": "cash_secured",
+                "option_type": "put",
+                "quantity": "0.1",
+                "short_strike": "63000",
+                "short_instrument_name": "BTC_USDC-14APR30-63000-P",
+                "short_label": "trial-csp-btc-0100-short",
+                "entry_credit": "20",
+                "original_entry_credit": "20",
+                "max_loss": "6300",
+                "entry_timestamp_ms": utc_now_ms() - 86400000,
+                "expiration_timestamp_ms": utc_now_ms() + 86400000,
+                "cash_secured_from_group_id": "0095",
+                "itm_defense_streak": 1,
+            }
+        )
+    )
+    engine.state_store.save(state)
+
+    result = engine.manage(live=False)
+    assert any(a.get("reason") == "csp_self_assign" for a in result["actions"])
+    assert any(a.get("action") == "cash_secured_self_assign_preview" for a in result["actions"])
+
+
+def test_manage_skips_csp_entry_when_near_strike(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    client.get_index_price = lambda name: {"index_price": Decimal("63200")}
+    engine = _csp_engine(tmp_path, client)
+    state = StrategyState()
+    state.groups.append(_itm_sold_group())
+    engine.state_store.save(state)
+
+    result = engine.manage(live=False)
+    assert any(a.get("action") == "cash_secured_skipped" and a.get("reason") == "near_strike" for a in result["actions"])
+    assert not any(a.get("action") == "cash_secured_preview" for a in result["actions"])
+    assert not any(a.get("reason") == "csp_self_assign" for a in result["actions"])
+
+
+def test_near_strike_otm_does_not_self_assign(tmp_path) -> None:
+    """Within 1% of strike but still OTM: pause roll only, do not buy spot."""
+    client = FakeClient(btc_book_equity="0.2")
+    client.get_index_price = lambda name: {"index_price": Decimal("63200")}
+    client.positions = [
+        {
+            "instrument_name": "BTC_USDC-14APR30-63000-P",
+            "direction": "sell",
+            "kind": "option",
+            "size": "-0.1",
+            "size_currency": "-0.1",
+            "mark_price": "90",
+            "average_price": "200",
+            "floating_profit_loss": "0",
+            "delta": "-0.12",
+        }
+    ]
+    client.order_book_overrides["BTC_USDC-14APR30-63000-P"] = {
+        "instrument_name": "BTC_USDC-14APR30-63000-P",
+        "best_bid_price": "80",
+        "best_bid_amount": "0.2",
+        "best_ask_price": "90",
+        "best_ask_amount": "0.2",
+        "mark_price": "85",
+        "index_price": "63200",
+        "mark_iv": "0.55",
+        "open_interest": "80",
+        "greeks": {"delta": "-0.12"},
+    }
+    engine = _csp_engine(
+        tmp_path,
+        client,
+        covered_call_csp_self_assign_enabled=True,
+        covered_call_csp_self_assign_confirm_cycles=1,
+        covered_call_csp_active_roll_enabled=True,
+        covered_call_csp_active_roll_min_dte=2,
+        covered_call_csp_active_roll_max_dte=21,
+    )
+    parent = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_group_id="0100",
+        cash_secured_group_ids=["0100"],
+    )
+    child = TradeGroup.from_dict(
+        {
+            "group_id": "0100",
+            "currency": "BTC",
+            "collateral_currency": "USDC",
+            "status": "open",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "quantity": "0.1",
+            "short_strike": "63000",
+            "short_instrument_name": "BTC_USDC-14APR30-63000-P",
+            "short_label": "trial-csp-btc-0100-short",
+            "entry_credit": "20",
+            "original_entry_credit": "20",
+            "max_loss": "6300",
+            "entry_timestamp_ms": utc_now_ms() - 86400000,
+            "expiration_timestamp_ms": utc_now_ms() + 14 * 86400000,
+            "cash_secured_from_group_id": "0095",
+            "itm_defense_streak": 3,
+        }
+    )
+    state = StrategyState()
+    state.groups.extend([parent, child])
+    engine.state_store.save(state)
+
+    result = engine.manage(live=False)
+    assert not any(a.get("reason") == "csp_self_assign" for a in result["actions"])
+    assert not any(a.get("action") == "cash_secured_self_assign_preview" for a in result["actions"])
+    rolls = [a for a in result["actions"] if a.get("action") == "cash_secured_active_roll"]
+    assert rolls and rolls[0]["would_place"] is False
+    assert rolls[0]["reason"] == "near_strike"
+
+
+def test_manage_skips_self_assign_when_parent_cover_restored(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    client.get_index_price = lambda name: {"index_price": Decimal("60000")}
+    client.positions = [
+        {
+            "instrument_name": "BTC_USDC-14APR30-63000-P",
+            "direction": "sell",
+            "kind": "option",
+            "size": "-0.1",
+            "size_currency": "-0.1",
+            "mark_price": "3020",
+            "average_price": "200",
+            "floating_profit_loss": "0",
+            "delta": "-0.75",
+        }
+    ]
+    client.order_book_overrides["BTC_USDC-14APR30-63000-P"] = {
+        "instrument_name": "BTC_USDC-14APR30-63000-P",
+        "best_bid_price": "3000",
+        "best_bid_amount": "0.1",
+        "best_ask_price": "3050",
+        "best_ask_amount": "0.1",
+        "mark_price": "3020",
+        "index_price": "60000",
+        "mark_iv": "0.5",
+        "open_interest": "80",
+        "greeks": {"delta": "-0.75"},
+    }
+    engine = _csp_engine(
+        tmp_path,
+        client,
+        covered_call_csp_self_assign_enabled=True,
+        covered_call_csp_self_assign_confirm_cycles=1,
+        covered_call_csp_self_assign_max_dte=Decimal("0"),
+        covered_call_csp_self_assign_max_tv_pct=Decimal("0.12"),
+    )
+    parent = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_group_id="0100",
+        cash_secured_group_ids=["0100"],
+        spot_restore_status="filled",
+        spot_restore_amount="0.1",
+        spot_restore_quote_spent="7000",
+        spot_restore_instrument_name="BTC_USDC",
+    )
+    child = TradeGroup.from_dict(
+        {
+            "group_id": "0100",
+            "currency": "BTC",
+            "collateral_currency": "USDC",
+            "status": "open",
+            "strategy": "cash_secured",
+            "option_type": "put",
+            "quantity": "0.1",
+            "short_strike": "63000",
+            "short_instrument_name": "BTC_USDC-14APR30-63000-P",
+            "short_label": "trial-csp-btc-0100-short",
+            "entry_credit": "20",
+            "original_entry_credit": "20",
+            "max_loss": "6300",
+            "entry_timestamp_ms": utc_now_ms() - 86400000,
+            "expiration_timestamp_ms": utc_now_ms() + 86400000,
+            "cash_secured_from_group_id": "0095",
+            "itm_defense_streak": 2,
+        }
+    )
+    state = StrategyState()
+    state.groups.extend([parent, child])
+    engine.state_store.save(state)
+
+    result = engine.manage(live=False)
+    assert not any(a.get("reason") == "csp_self_assign" for a in result["actions"])
+    assert not any(a.get("action") == "cash_secured_self_assign_preview" for a in result["actions"])
 
 
 def test_manage_csp_skips_self_assign_when_time_value_fat(tmp_path) -> None:

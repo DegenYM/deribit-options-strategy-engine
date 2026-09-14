@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Deribit Strategy Dashboard</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app.js?v=8a0f01c4b2" as="script" />
+    <link rel="preload" href="/app.js?v=f1306e7556" as="script" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Non-blocking web fonts: the sheet is third-party, so a slow fonts.googleapis.com
@@ -22,9 +22,9 @@
         rel="stylesheet"
       />
     </noscript>
-    <link rel="stylesheet" href="/tailwind.css?v=e2d8a218f7" />
+    <link rel="stylesheet" href="/tailwind.css?v=18a66fb398" />
     <link rel="stylesheet" href="/tokens.css?v=ds003" />
-    <link rel="stylesheet" href="/styles.css?v=a06ef38a6b" />
+    <link rel="stylesheet" href="/styles.css?v=266a52b26c" />
   </head>
   <body class="app-body">
     <a class="skip-link" href="#dashboard-main">Skip to content</a>
@@ -180,21 +180,53 @@
               One card per position: entry context on the left, exit or still-open status on the right.
             </p>
           </div>
-          <span class="open-meta-pill" id="activity-meta">—</span>
         </div>
-        <div class="activity-zone">
-          <div class="activity-zone-head">
-            <h3 class="activity-zone-title">Open positions</h3>
-          </div>
+        <div class="activity-tabs" id="activity-tabs" role="tablist" aria-label="Open or closed trades">
+          <button
+            type="button"
+            class="activity-tab is-active"
+            role="tab"
+            id="activity-tab-open"
+            data-activity-tab="open"
+            aria-selected="true"
+            aria-controls="activity-panel-open"
+            tabindex="0"
+          >
+            <span class="activity-tab-label">OPEN</span>
+            <span class="activity-tab-count" id="activity-open-count">—</span>
+          </button>
+          <button
+            type="button"
+            class="activity-tab"
+            role="tab"
+            id="activity-tab-closed"
+            data-activity-tab="closed"
+            aria-selected="false"
+            aria-controls="activity-panel-closed"
+            tabindex="-1"
+          >
+            <span class="activity-tab-label">CLOSE</span>
+            <span class="activity-tab-count" id="activity-closed-count">—</span>
+          </button>
+        </div>
+        <div
+          id="activity-panel-open"
+          class="activity-zone"
+          role="tabpanel"
+          aria-labelledby="activity-tab-open"
+        >
           <ul id="activity-open-list" class="activity-list activity-list-unified">
             <li class="activity-empty">Loading…</li>
           </ul>
           <div id="activity-open-pagination" class="activity-pagination" hidden></div>
         </div>
-        <div class="activity-zone">
-          <div class="activity-zone-head">
-            <h3 class="activity-zone-title">Closed trades</h3>
-          </div>
+        <div
+          id="activity-panel-closed"
+          class="activity-zone"
+          role="tabpanel"
+          aria-labelledby="activity-tab-closed"
+          hidden
+        >
           <ul id="activity-closed-list" class="activity-list activity-list-unified">
             <li class="activity-empty">Loading…</li>
           </ul>
@@ -329,7 +361,7 @@
       class="hidden"
     ></div>
 
-    <script defer src="/app.js?v=8a0f01c4b2"></script>
+    <script defer src="/app.js?v=f1306e7556"></script>
     <script>
       (function () {
         var embedded =

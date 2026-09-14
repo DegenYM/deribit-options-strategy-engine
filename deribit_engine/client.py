@@ -157,7 +157,8 @@ class DeribitClient:
       meters them per IP; private methods pace per client_id.
     """
 
-    RETRYABLE_STATUS_CODES = {408, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+    # 409 is Cloudflare Error 1001 (DNS resolution); HTML body, not a Deribit JSON-RPC conflict.
+    RETRYABLE_STATUS_CODES = {408, 409, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524}
     RATE_LIMIT_STATUS = 429
     IDEMPOTENT_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
     AUTH_RETRY_BACKOFF_SECONDS = (1.0, 2.0, 4.0)

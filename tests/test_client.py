@@ -176,6 +176,26 @@ def test_idempotent_request_retries_on_retryable_http(tmp_path, monkeypatch):
     assert len(session.calls) == 2
 
 
+def test_idempotent_request_retries_cloudflare_409_dns_error(tmp_path, monkeypatch):
+    monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
+    session = FakeSession(
+        [
+            FakeResponse(
+                {},
+                status_code=409,
+                text="<!DOCTYPE html><title>DNS resolution error | www.deribit.com | Cloudflare</title>",
+            ),
+            FakeResponse(_ok_body({"ok": True})),
+        ]
+    )
+    client = _make_client(tmp_path, session)
+
+    result = client.get_order_book("BTC-PERPETUAL")
+
+    assert result == {"ok": True}
+    assert len(session.calls) == 2
+
+
 def test_idempotent_request_raises_after_retry_exhaustion(tmp_path, monkeypatch):
     monkeypatch.setattr("deribit_engine.client.time.sleep", lambda _s: None)
     session = FakeSession([FakeResponse({}, status_code=522, text="timeout")] * 5)

@@ -284,3 +284,92 @@ def test_save_preserves_concurrent_spot_exit_skipped_from_disk(tmp_path: Path) -
     assert reloaded.groups[0].spot_exit_status == "skipped"
     assert reloaded.groups[0].spot_exit_amount == Decimal("0")
     assert reloaded.groups[0].spot_exit_reason == "manual_withdrawal"
+
+
+def test_merge_keeps_operator_manual_restore_over_live_skipped() -> None:
+    from deribit_engine.state import merge_concurrent_group_updates
+
+    memory = _sample_state()
+    memory.groups[0].group_id = "0103"
+    memory.groups[0].spot_restore_status = "skipped"
+    memory.groups[0].spot_restore_amount = Decimal("0")
+    memory.groups[0].cash_secured_status = "entered"
+    memory.groups[0].cash_secured_reason = "csp_otm_roll"
+
+    disk = _sample_state()
+    disk.groups[0].group_id = "0103"
+    disk.groups[0].spot_restore_status = "filled"
+    disk.groups[0].spot_restore_amount = Decimal("0.1")
+    disk.groups[0].spot_restore_instrument_name = "BTC_USDC"
+    disk.groups[0].spot_restore_reason = "operator_manual_spot_restore"
+    disk.groups[0].cash_secured_status = "skipped"
+    disk.groups[0].cash_secured_reason = "operator_csp_abort_restore"
+
+    merged = merge_concurrent_group_updates(memory, disk)
+    assert merged == ["0103"]
+    assert memory.groups[0].spot_restore_status == "filled"
+    assert memory.groups[0].spot_restore_amount == Decimal("0.1")
+    assert memory.groups[0].spot_restore_instrument_name == "BTC_USDC"
+    assert memory.groups[0].spot_restore_reason == "operator_manual_spot_restore"
+    assert memory.groups[0].cash_secured_status == "skipped"
+    assert memory.groups[0].cash_secured_reason == "operator_csp_abort_restore"
+
+
+def test_merge_keeps_in_memory_operator_manual_restore_over_disk_skipped() -> None:
+    from deribit_engine.state import merge_concurrent_group_updates
+
+    memory = _sample_state()
+    memory.groups[0].group_id = "0103"
+    memory.groups[0].spot_restore_status = "filled"
+    memory.groups[0].spot_restore_amount = Decimal("0.1")
+    memory.groups[0].spot_restore_instrument_name = "BTC_USDC"
+    memory.groups[0].spot_restore_reason = "operator_manual_spot_restore"
+    memory.groups[0].cash_secured_status = "skipped"
+    memory.groups[0].cash_secured_reason = "operator_csp_abort_restore"
+
+    disk = _sample_state()
+    disk.groups[0].group_id = "0103"
+    disk.groups[0].spot_restore_status = "skipped"
+    disk.groups[0].spot_restore_amount = Decimal("0")
+    disk.groups[0].spot_restore_instrument_name = "BTC_USDT"
+    disk.groups[0].spot_restore_reason = "auto_spot_restore_park;operator_cancelled"
+    disk.groups[0].cash_secured_status = "entered"
+    disk.groups[0].cash_secured_reason = "csp_otm_roll"
+
+    merged = merge_concurrent_group_updates(memory, disk)
+    assert merged == ["0103"]
+    assert memory.groups[0].spot_restore_status == "filled"
+    assert memory.groups[0].spot_restore_amount == Decimal("0.1")
+    assert memory.groups[0].spot_restore_instrument_name == "BTC_USDC"
+    assert memory.groups[0].cash_secured_status == "skipped"
+    assert memory.groups[0].cash_secured_reason == "operator_csp_abort_restore"
+
+
+def test_save_preserves_operator_csp_abort_skip_over_live_entered(tmp_path: Path) -> None:
+    """Concurrent live ``entered`` / ``csp_otm_roll`` must not clobber abort skip."""
+    store = StrategyStateStore(tmp_path / "state.json")
+    base = _sample_state()
+    base.groups[0].group_id = "0095"
+    base.groups[0].status = "closed"
+    base.groups[0].cash_secured_status = "entered"
+    base.groups[0].cash_secured_reason = "csp_otm_roll"
+    base.groups[0].cash_secured_group_id = "0099"
+    store.save(base)
+
+    live_memory = store.load()
+    assert live_memory.groups[0].cash_secured_status == "entered"
+
+    cli = store.load()
+    cli.groups[0].cash_secured_status = "skipped"
+    cli.groups[0].cash_secured_reason = "operator_csp_abort_restore"
+    store.save(cli)
+
+    live_memory.last_equity_usdc = Decimal("1")
+    live_memory.groups[0].cash_secured_status = "entered"
+    live_memory.groups[0].cash_secured_reason = "csp_otm_roll"
+    store.save(live_memory)
+
+    reloaded = store.load()
+    assert reloaded.groups[0].cash_secured_status == "skipped"
+    assert reloaded.groups[0].cash_secured_reason == "operator_csp_abort_restore"
+    assert reloaded.last_equity_usdc == Decimal("1")

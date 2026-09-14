@@ -297,6 +297,66 @@ def test_itm_spot_exit_net_not_counted_before_restore() -> None:
     assert total is None or abs(total) < Decimal("0.01")
 
 
+def test_ym_style_unrestored_cover_sale_not_in_total_profit() -> None:
+    """Two ITM cover sales with skipped/missing restore must not dominate Total profit."""
+    rows = [
+        {
+            "group_id": "0095",
+            "status": "closed",
+            "strategy": "covered_call",
+            "collateral_currency": "BTC",
+            "currency": "BTC",
+            "quantity": "0.1",
+            "covered_underlying_quantity": "0.1",
+            "realized_pnl": "-660.72",
+            "realized_pnl_collateral_native": "-0.00828875",
+            "spot_exit_status": "filled",
+            "spot_exit_amount": "0.0915",
+            "spot_exit_instrument_name": "BTC_USDT",
+            "spot_exit_quote_proceeds": "7294.5676",
+            "spot_exit_quote_proceeds_lifetime": "7294.5676",
+            "spot_exit_settlement_loss": "0.0084211",
+            "spot_restore_status": "skipped",
+            "short_entry_average_price": "0.0015",
+            "entry_fee_collateral": "0.00001875",
+            "closed_timestamp_ms": 1_700_000_000_000,
+            "entry_timestamp_ms": 1_699_000_000_000,
+        },
+        {
+            "group_id": "0096",
+            "status": "closed",
+            "strategy": "covered_call",
+            "collateral_currency": "BTC",
+            "currency": "BTC",
+            "quantity": "0.1",
+            "covered_underlying_quantity": "0.1",
+            "realized_pnl": "-542.94",
+            "realized_pnl_collateral_native": "-0.00673",
+            "spot_exit_status": "filled",
+            "spot_exit_amount": "0.0929",
+            "spot_exit_instrument_name": "BTC_USDC",
+            "spot_exit_quote_proceeds": "7491.5317",
+            "spot_exit_quote_proceeds_lifetime": "7491.5317",
+            "spot_exit_settlement_loss": "0.00703342",
+            "short_entry_average_price": "0.0045",
+            "entry_fee_collateral": "0.00003",
+            "closed_timestamp_ms": 1_700_100_000_000,
+            "entry_timestamp_ms": 1_699_100_000_000,
+        },
+    ]
+    g95 = TradeGroup.from_dict(rows[0])
+    g96 = TradeGroup.from_dict(rows[1])
+    parsed = [g95, g96]
+    assert itm_spot_exit_net_usdt_for_total_profit(g95, parsed) is None
+    assert itm_spot_exit_net_usdt_for_total_profit(g96, parsed) is None
+    total = total_realized_usdc_from_swap_disposition(
+        rows,
+        spot_index={"BTC": Decimal("77014.57")},
+    )
+    assert total is None or abs(total) < Decimal("50")
+    assert total is None or abs(total) < Decimal("7000")
+
+
 def test_itm_spot_exit_net_when_both_legs_filled_despite_plan_gap() -> None:
     """Incomplete SWAP journals may overstate spot_exit_amount after restore."""
     from deribit_engine.spot_restore_ops import itm_spot_exit_net_usdt_for_total_profit
@@ -583,6 +643,114 @@ def test_jack_0070_fold_stays_in_sold_not_remaining() -> None:
     assert summary["spot_held"]["ETH"] == Decimal("0")
     net = itm_spot_exit_net_usdt_for_total_profit(group)
     assert net == Decimal("3839.52123") - Decimal("3809.60951") - folded_usdt
+
+
+def test_jack_0103_usdc_restore_without_quote_not_in_total() -> None:
+    """Jack #0103: operator BTC_USDC restore is cover-complete but has no quote journal.
+
+    Must not treat the USDT exit notional as Total profit.
+    """
+    from deribit_engine.spot_restore_ops import itm_spot_round_trip_complete
+
+    row = {
+        "group_id": "0103",
+        "status": "closed",
+        "strategy": "covered_call",
+        "collateral_currency": "BTC",
+        "currency": "BTC",
+        "quantity": "0.1",
+        "covered_underlying_quantity": "0.1",
+        "realized_pnl": "-260.88",
+        "realized_pnl_collateral_native": "-0.00327275",
+        "spot_exit_status": "filled",
+        "spot_exit_amount": "0.0965",
+        "spot_exit_instrument_name": "BTC_USDT",
+        "spot_exit_quote_proceeds": "7676.4094",
+        "spot_exit_quote_proceeds_lifetime": "7676.4094",
+        "spot_exit_settlement_loss": "0.00340308",
+        "spot_restore_status": "filled",
+        "spot_restore_amount": "0.1",
+        "spot_restore_instrument_name": "BTC_USDC",
+        "spot_restore_reason": "operator_manual_spot_restore",
+        "short_entry_average_price": "0.0014",
+        "entry_fee_collateral": "0.00001575",
+        "closed_timestamp_ms": 1_700_000_000_000,
+        "entry_timestamp_ms": 1_699_000_000_000,
+    }
+    group = TradeGroup.from_dict(row)
+    assert itm_spot_round_trip_complete(group) is True
+    assert itm_spot_exit_net_usdt_for_total_profit(group) is None
+    total = total_realized_usdc_from_swap_disposition(
+        [row],
+        spot_index={"BTC": Decimal("77000")},
+    )
+    assert total is None or abs(total) < Decimal("300")
+    assert total is None or abs(total) < Decimal("7000")
+
+
+def test_eugene_0033_overbuy_not_in_parent_exit_restore_net() -> None:
+    """Eugene #0022 already restored 0.1; #0033 extra 0.02 must not hit Total."""
+    parent = {
+        "group_id": "0022",
+        "status": "closed",
+        "strategy": "covered_call",
+        "collateral_currency": "BTC",
+        "currency": "BTC",
+        "quantity": "0.1",
+        "covered_underlying_quantity": "0.1",
+        "realized_pnl": "-261.12",
+        "realized_pnl_collateral_native": "-0.00327575",
+        "spot_exit_status": "filled",
+        "spot_exit_amount": "0.0965",
+        "spot_exit_instrument_name": "BTC_USDT",
+        "spot_exit_quote_proceeds": "7688.8399",
+        "spot_exit_quote_proceeds_lifetime": "7688.8399",
+        "spot_exit_settlement_loss": "0.00340308",
+        "spot_restore_status": "filled",
+        "spot_restore_amount": "0.1",
+        "spot_restore_instrument_name": "BTC_USDC",
+        "spot_restore_quote_spent": "7856.6957",
+        "spot_restore_quote_spent_lifetime": "7856.6957",
+        "cash_secured_group_id": "0033",
+        "cash_secured_group_ids": ["0032", "0033"],
+        "short_entry_average_price": "0.0014",
+        "entry_fee_collateral": "0.00001575",
+        "closed_timestamp_ms": 1_700_000_000_000,
+        "entry_timestamp_ms": 1_699_000_000_000,
+    }
+    child = {
+        "group_id": "0033",
+        "status": "closed",
+        "strategy": "cash_secured",
+        "collateral_currency": "USDC",
+        "currency": "BTC",
+        "quantity": "0.02",
+        "realized_pnl": "-7.74017417",
+        "realized_pnl_collateral_native": "-7.74017417",
+        "spot_restore_status": "filled",
+        "spot_restore_amount": "0.02",
+        "spot_restore_instrument_name": "BTC_USDC",
+        "spot_restore_quote_spent": "1539.26",
+        "spot_restore_quote_spent_lifetime": "1539.26",
+        "spot_restore_reason": "cash_secured_itm_assignment",
+        "cash_secured_from_group_id": "0022",
+        "closed_timestamp_ms": 1_700_100_000_000,
+        "entry_timestamp_ms": 1_699_100_000_000,
+    }
+    g22 = TradeGroup.from_dict(parent)
+    g33 = TradeGroup.from_dict(child)
+    parsed = [g22, g33]
+    net = itm_spot_exit_net_usdt_for_total_profit(g22, parsed)
+    assert net is not None
+    assert abs(net - (Decimal("7688.8399") - Decimal("7856.6957"))) < Decimal("0.02")
+    assert abs(net) < Decimal("200")
+    total = total_realized_usdc_from_swap_disposition(
+        [parent, child],
+        spot_index={"BTC": Decimal("77000")},
+    )
+    assert total is not None
+    assert abs(total + Decimal("1707")) > Decimal("1000")
+    assert abs(total) < Decimal("400")
 
 
 def test_csp_premium_split_goes_to_spot_remaining_and_leftover_usdc() -> None:

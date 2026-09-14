@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>投資組合總覽 · Deribit 選擇權策略</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preload" href="/app-investor.js?v=cdf1244e2a" as="script" />
+    <link rel="preload" href="/app-investor.js?v=d179529a70" as="script" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Non-blocking web fonts: the sheet is third-party, so a slow fonts.googleapis.com
@@ -22,9 +22,9 @@
         rel="stylesheet"
       />
     </noscript>
-    <link rel="stylesheet" href="/tailwind.css?v=e2d8a218f7" />
+    <link rel="stylesheet" href="/tailwind.css?v=18a66fb398" />
     <link rel="stylesheet" href="/tokens.css?v=ds003" />
-    <link rel="stylesheet" href="/styles.css?v=a06ef38a6b" />
+    <link rel="stylesheet" href="/styles.css?v=266a52b26c" />
     <script>
       (function () {
         var m = document.querySelector('meta[name="dashboard-api-base"]');
@@ -167,21 +167,53 @@
               每張卡片對應一筆策略群組：左側為進場脈絡，右側為出場或持倉狀態。
             </p>
           </div>
-          <span class="open-meta-pill" id="activity-meta">—</span>
         </div>
-        <div class="activity-zone">
-          <div class="activity-zone-head">
-            <h3 class="activity-zone-title">持倉中</h3>
-          </div>
+        <div class="activity-tabs" id="activity-tabs" role="tablist" aria-label="持倉或已平倉">
+          <button
+            type="button"
+            class="activity-tab is-active"
+            role="tab"
+            id="activity-tab-open"
+            data-activity-tab="open"
+            aria-selected="true"
+            aria-controls="activity-panel-open"
+            tabindex="0"
+          >
+            <span class="activity-tab-label">OPEN</span>
+            <span class="activity-tab-count" id="activity-open-count">—</span>
+          </button>
+          <button
+            type="button"
+            class="activity-tab"
+            role="tab"
+            id="activity-tab-closed"
+            data-activity-tab="closed"
+            aria-selected="false"
+            aria-controls="activity-panel-closed"
+            tabindex="-1"
+          >
+            <span class="activity-tab-label">CLOSE</span>
+            <span class="activity-tab-count" id="activity-closed-count">—</span>
+          </button>
+        </div>
+        <div
+          id="activity-panel-open"
+          class="activity-zone"
+          role="tabpanel"
+          aria-labelledby="activity-tab-open"
+        >
           <ul id="activity-open-list" class="activity-list activity-list-unified">
             <li class="activity-empty">載入中…</li>
           </ul>
           <div id="activity-open-pagination" class="activity-pagination" hidden></div>
         </div>
-        <div class="activity-zone">
-          <div class="activity-zone-head">
-            <h3 class="activity-zone-title">已平倉</h3>
-          </div>
+        <div
+          id="activity-panel-closed"
+          class="activity-zone"
+          role="tabpanel"
+          aria-labelledby="activity-tab-closed"
+          hidden
+        >
           <ul id="activity-closed-list" class="activity-list activity-list-unified">
             <li class="activity-empty">載入中…</li>
           </ul>
@@ -322,6 +354,6 @@
       class="hidden"
     ></div>
 
-    <script defer src="/app-investor.js?v=cdf1244e2a"></script>
+    <script defer src="/app-investor.js?v=d179529a70"></script>
   </body>
 </html>

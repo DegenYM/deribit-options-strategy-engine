@@ -6,9 +6,13 @@ from decimal import Decimal
 
 from .models import TradeGroup
 from .spot_exit_ops import spot_exit_filled_native, spot_exit_quote_currency, spot_exit_realized_usdt
-from .utils import align_option_order_amount, ceil_option_order_amount
+from .utils import ceil_option_order_amount
 
 CSP_ABORT_RESTORE_REASON = "operator_csp_abort_restore"
+# Operator / off-exchange closes. Do not include ``reconciled_expiry`` — that is
+# the legitimate OTM-expiry path to sell another put, unless an earlier child
+# on the same wheel was already operator-closed.
+OPERATOR_CLOSED_CHILD_REASONS = frozenset({"manual_close", "reconciled_external"})
 
 
 def cash_secured_strike_bounds(
@@ -93,13 +97,16 @@ def cash_secured_quantity(
     min_trade_amount: Decimal,
     cap: Decimal | None = None,
 ) -> Decimal:
-    """Size a USDC linear put so cash covers ``strike × qty`` and the cover target.
+    """Size a USDC linear put to the cover target (ceil to lot, cap at cover).
 
-    Desired qty is ceiled to the option lot (refill cover). If fees / settlement
-    leave slightly too little USDC at this strike, size down instead — the
-    scanner should then pick a lower strike that still funds the full lot.
+    Do **not** shrink from whole-account ``available_funds ≥ qty × strike``.
+    That treats cash-secured notional as a cash gate; Deribit IM is much
+    smaller, and other open positions already consume available. Restore /
+    abort close the put first and free IM. A zero USDC book (cannot pay even
+    min-lot IM) still returns 0 so the scanner skips rather than silently
+    cutting cover size. Live ``not_enough_funds`` is a hard skip/partial.
     """
-    if sold_native <= 0 or usdc_available <= 0 or strike <= 0:
+    if sold_native <= 0 or strike <= 0:
         return Decimal("0")
     desired = cash_secured_desired_quantity(
         target_native=sold_native,
@@ -109,13 +116,9 @@ def cash_secured_quantity(
     )
     if desired <= 0:
         return Decimal("0")
-    if usdc_available >= desired * strike:
-        return desired
-    return align_option_order_amount(
-        usdc_available / strike,
-        contract_size,
-        min_trade_amount,
-    )
+    if usdc_available <= 0:
+        return Decimal("0")
+    return desired
 
 
 def cash_secured_scan_rank(
@@ -125,8 +128,12 @@ def cash_secured_scan_rank(
     dte: Decimal,
     net_apr: Decimal,
 ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
-    """Prefer full cover qty, then the highest (closest) strike, then shorter DTE / APR."""
-    return (-quantity, -strike, dte, -net_apr)
+    """Prefer the highest compliant strike at cover-aligned qty, then shorter DTE / APR.
+
+    Strike is first so an available-funds cap cannot make a lower strike win
+    just because it could open more contracts. Quantity is only a tie-breaker.
+    """
+    return (-strike, -quantity, dte, -net_apr)
 
 
 def itm_group_sold_to_usdc(group: TradeGroup) -> bool:
@@ -165,7 +172,7 @@ def itm_sold_ready_for_cash_secured(
     status_csp = str(group.cash_secured_status or "").lower()
     if status_csp == "skipped":
         reason = str(group.cash_secured_reason or "").lower()
-        if reason not in {"operator_cancelled", "ioc_unfilled"}:
+        if reason not in {"operator_cancelled", "ioc_unfilled", "not_enough_funds"}:
             return False, "already_skipped"
     if status_csp == "submitted":
         return False, "already_submitted"
@@ -211,6 +218,26 @@ def cash_secured_put_is_itm(
         return False
     floor = max(Decimal("0"), min(buffer_pct, Decimal("1")))
     return index_price < strike * (Decimal("1") - floor)
+
+
+def cash_secured_hold_near_strike(
+    *,
+    index_price: Decimal,
+    strike: Decimal,
+    band_pct: Decimal,
+) -> bool:
+    """True when spot is near strike / approaching ITM — pause rolls only.
+
+    ``band_pct=0.01`` is true while ``index < strike × 1.01``. Callers must use
+    this to skip active roll and new CSP entry, never to trigger self-assign
+    or a spot buy. Missing prices or a zero band never pause.
+    """
+    if index_price <= 0 or strike <= 0:
+        return False
+    band = max(Decimal("0"), min(band_pct, Decimal("1")))
+    if band <= 0:
+        return False
+    return index_price < strike * (Decimal("1") + band)
 
 
 def cash_secured_put_intrinsic_usdc(
@@ -521,10 +548,24 @@ def cash_secured_child_expired_itm(child: TradeGroup) -> bool:
     return index_price < strike
 
 
+def cash_secured_child_was_operator_closed(child: TradeGroup) -> bool:
+    """True when this CSP was closed by an operator or vanished off-exchange.
+
+    Looks at this child only. Callers must walk the whole wheel — a later OTM
+    ``reconciled_expiry`` must not clear an earlier operator/external close.
+    """
+    if str(child.status or "").lower() != "closed":
+        return False
+    return str(child.close_reason or "").lower() in OPERATOR_CLOSED_CHILD_REASONS
+
+
 def cash_secured_roll_blocked(parent: TradeGroup, groups: list[TradeGroup]) -> tuple[bool, str]:
-    """Stop selling/rolling puts once cover is back, or the operator closed the last put.
+    """Stop selling/rolling puts once cover is back, or any child was operator-closed.
 
     Also stop after an ITM CSP expiry (assignment path owns the cover buy).
+    ``reconciled_external`` counts as operator-closed (live often tags an admin
+    abort that way). ``reconciled_expiry`` does not — unless an earlier child
+    on the same wheel was already operator-closed.
     """
     children = cash_secured_children(groups, parent)
     for child in children:
@@ -537,7 +578,7 @@ def cash_secured_roll_blocked(parent: TradeGroup, groups: list[TradeGroup]) -> t
             return True, "child_expired_itm"
     if cash_secured_cover_complete(parent, groups):
         return True, "cover_restored"
-    if any(str(child.close_reason or "").lower() == "manual_close" for child in children):
+    if any(cash_secured_child_was_operator_closed(child) for child in children):
         return True, "operator_closed_child"
     return False, ""
 
@@ -560,6 +601,54 @@ def cash_secured_wheel_realized_pnl(parent: TradeGroup, groups: list[TradeGroup]
 def cash_secured_cover_restore_order_label(group: TradeGroup, order_label_prefix: str) -> str:
     prefix = str(order_label_prefix or "trial").strip() or "trial"
     return f"{prefix}-csp-restore-{group.currency.lower()}-{group.group_id}"
+
+
+def _instrument_uses_usdc_quote(name: str) -> bool:
+    n = str(name or "").upper()
+    return "_USDC-" in n or n.endswith("_USDC")
+
+
+def cash_secured_cover_spot_instrument(
+    group: TradeGroup,
+    groups: list[TradeGroup] | None = None,
+    *,
+    child: TradeGroup | None = None,
+) -> str | None:
+    """``BTC_USDC`` / ``ETH_USDC`` when this wheel funded a USDC CSP.
+
+    Legacy ITM sales still journal ``*_USDT``. After proceeds are converted and
+    a USDC put is sold, cover must be bought with USDC — that is the wallet
+    that still has cash.
+    """
+    currency = str(group.currency or "").upper() or "BTC"
+    usdc_pair = f"{currency}_USDC"
+
+    def _hits(item: TradeGroup | None) -> bool:
+        if item is None:
+            return False
+        if _instrument_uses_usdc_quote(item.short_instrument_name):
+            return True
+        if _instrument_uses_usdc_quote(getattr(item, "cash_secured_instrument_name", "") or ""):
+            return True
+        if str(item.collateral_currency or "").upper() == "USDC" and (
+            item.is_cash_secured_group() or bool(str(item.cash_secured_from_group_id or "").strip())
+        ):
+            return True
+        return False
+
+    if _hits(group) or _hits(child):
+        return usdc_pair
+    if not groups:
+        return None
+    parent = group if group.is_covered_call_group() else None
+    if parent is None and (group.is_cash_secured_group() or str(group.cash_secured_from_group_id or "").strip()):
+        parent_id = str(group.cash_secured_from_group_id or "").strip()
+        parent = next((item for item in groups if _same_group_id(item.group_id, parent_id)), None)
+    if parent is None:
+        return None
+    if _hits(parent) or any(_hits(item) for item in cash_secured_children(groups, parent)):
+        return usdc_pair
+    return None
 
 
 def cash_secured_child_is_open(state_groups: list[TradeGroup], parent: TradeGroup) -> bool:

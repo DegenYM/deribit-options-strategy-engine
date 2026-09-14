@@ -38,6 +38,11 @@ export function renderDashboard() {
   }
 }
 
+function setActivityTab(tab) {
+  STATE.activityTab = domain.saveActivityTab(tab);
+  render.syncActivityTabUi(STATE.activityTab);
+}
+
 function setBookFilter(book) {
   STATE.bookFilter = book;
   const filterRoot = document.querySelector("#book-filter");
@@ -130,7 +135,15 @@ function attachControls() {
       /* ignore */
     }
   });
-  document.getElementById("activity-section")?.addEventListener("click", (e) => {
+  STATE.activityTab = domain.readSavedActivityTab();
+  render.syncActivityTabUi(STATE.activityTab);
+  const activitySection = document.getElementById("activity-section");
+  activitySection?.addEventListener("click", (e) => {
+    const tabBtn = e.target.closest("button.activity-tab[data-activity-tab]");
+    if (tabBtn) {
+      setActivityTab(tabBtn.dataset.activityTab);
+      return;
+    }
     const btn = e.target.closest("button.activity-page-btn");
     if (!btn || btn.disabled) return;
     const section = btn.dataset.activitySection;
@@ -138,6 +151,23 @@ function attachControls() {
     if (section === "open") STATE.activityOpenPage += dir;
     else if (section === "closed") STATE.activityClosedPage += dir;
     render.renderRecentActivity(STATE.status, STATE.report, STATE.groups);
+  });
+  document.getElementById("activity-tabs")?.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") {
+      return;
+    }
+    const tabs = [...e.currentTarget.querySelectorAll("button.activity-tab[data-activity-tab]")];
+    if (!tabs.length) return;
+    const current = tabs.findIndex((t) => t.getAttribute("aria-selected") === "true");
+    let nextIdx = current < 0 ? 0 : current;
+    if (e.key === "ArrowLeft") nextIdx = (current - 1 + tabs.length) % tabs.length;
+    else if (e.key === "ArrowRight") nextIdx = (current + 1) % tabs.length;
+    else if (e.key === "Home") nextIdx = 0;
+    else if (e.key === "End") nextIdx = tabs.length - 1;
+    e.preventDefault();
+    const next = tabs[nextIdx];
+    setActivityTab(next.dataset.activityTab);
+    next.focus();
   });
   const reloadAprSeries = async () => {
     try {

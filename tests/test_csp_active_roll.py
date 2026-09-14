@@ -223,6 +223,22 @@ def test_active_roll_helpers_tv_dte_fee_and_later_expiry() -> None:
     )
 
 
+def test_near_strike_does_not_active_roll(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    _roll_books(client)
+    client.get_index_price = lambda name: {"index_price": Decimal("63200")}
+    client.order_book_overrides[CURRENT]["index_price"] = "63200"
+    client.positions = [_short_position()]
+    engine = _roll_engine(tmp_path, client)
+    _seed(engine, _parent(), _open_csp())
+    result = engine.manage(live=False)
+    rolls = _roll_actions(result)
+    assert len(rolls) == 1
+    assert rolls[0]["would_place"] is False
+    assert rolls[0]["reason"] == "near_strike"
+    assert not any(a.get("reason") == "csp_active_roll" for a in result["actions"] if a.get("action") == "close_group_preview")
+
+
 def test_active_roll_config_defaults_off(tmp_path: Path) -> None:
     env_file = tmp_path / ".env"
     env_file.write_text("OPTION_STRATEGY=covered_call\nCOVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=true\n")
@@ -232,6 +248,7 @@ def test_active_roll_config_defaults_off(tmp_path: Path) -> None:
     assert config.covered_call_csp_active_roll_max_dte == 10
     assert config.covered_call_csp_active_roll_min_tv_ratio == Decimal("0.25")
     assert config.covered_call_csp_active_roll_min_net_usdc == Decimal("5")
+    assert config.covered_call_csp_hold_near_strike_pct == Decimal("0.01")
 
 
 def test_flag_off_never_rolls(tmp_path) -> None:
@@ -494,6 +511,29 @@ def test_active_roll_skips_when_sibling_manual_close(tmp_path) -> None:
     closed.group_id = "0099"
     closed.status = "closed"
     closed.close_reason = "manual_close"
+    closed.closed_timestamp_ms = utc_now_ms() - 60_000
+    closed.close_index_usd = Decimal("80674")
+    _seed(engine, parent, closed, _open_csp())
+    result = engine.manage(live=False)
+    rolls = _roll_actions(result)
+    assert len(rolls) == 1
+    assert rolls[0]["would_place"] is False
+    assert rolls[0]["reason"] == "operator_closed_child"
+    opened = [g for g in engine.state_store.load().groups if g.group_id == "0100"]
+    assert opened[0].status == "open"
+
+
+def test_active_roll_skips_when_sibling_reconciled_external(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    _roll_books(client)
+    client.positions = [_short_position()]
+    engine = _roll_engine(tmp_path, client)
+    parent = _parent()
+    parent.cash_secured_group_ids = ["0099", "0100"]
+    closed = _open_csp()
+    closed.group_id = "0099"
+    closed.status = "closed"
+    closed.close_reason = "reconciled_external"
     closed.closed_timestamp_ms = utc_now_ms() - 60_000
     closed.close_index_usd = Decimal("80674")
     _seed(engine, parent, closed, _open_csp())

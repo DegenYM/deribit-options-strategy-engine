@@ -387,7 +387,47 @@ def test_preview_does_not_build_bot(tmp_path: Path, monkeypatch) -> None:
     assert abort["plan"]["action"] == "csp-abort-restore"
     assert abort["plan"]["csp_group_id"] == "0098"
     assert abort["plan"]["restore"]["spot_instrument_name"] == "BTC_USDC"
+    assert abort["plan"]["restore"]["quote_currency"] == "USDC"
     assert abort["plan"]["close"]["short_instrument_name"] == "BTC_USDC-11SEP26-73000-P"
+
+
+def test_csp_abort_restore_usdt_exit_parent_buys_usdc(tmp_path: Path, monkeypatch) -> None:
+    account = _account(tmp_path)
+    parent = _restore_group()
+    parent.spot_exit_instrument_name = "BTC_USDT"
+    parent.spot_restore_instrument_name = "BTC_USDT"
+    parent.cash_secured_status = "entered"
+    parent.cash_secured_group_id = "0098"
+    parent.cash_secured_instrument_name = "BTC_USDC-11SEP26-73000-P"
+    child = _csp_child()
+    state = StrategyState(groups=[parent, child])
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.load_manifest",
+        lambda *_a, **_k: _manifest(tmp_path, account),
+    )
+    monkeypatch.setattr("deribit_engine.config.has_private_creds_for_env", lambda *_a, **_k: True)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._load_state", lambda *_a, **_k: state)
+    abort = run_csp_abort_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="0098",
+        live=False,
+        confirm=None,
+    )
+    restore = abort["plan"]["restore"]
+    assert restore["spot_instrument_name"] == "BTC_USDC"
+    assert restore["quote_currency"] == "USDC"
+    recover = run_spot_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="0043",
+        live=False,
+        confirm=None,
+    )
+    assert recover["plan"]["spot_instrument_name"] == "BTC_USDC"
+    assert recover["plan"]["quote_currency"] == "USDC"
 
 
 def test_csp_abort_restore_skips_then_closes_then_restores(tmp_path: Path, monkeypatch) -> None:
@@ -451,12 +491,133 @@ def test_csp_abort_restore_skips_then_closes_then_restores(tmp_path: Path, monke
     assert closes[0]["order_type"] == "market"
     assert restores[0]["group"] == "0043"
     assert restores[0]["order_type"] == "market"
+    assert restores[0]["instrument_name"] == "BTC_USDC"
     assert restores[0]["restore_reason"] == "emergency_csp_abort_restore"
     assert parent.cash_secured_status == "skipped"
     assert parent.cash_secured_reason == CSP_ABORT_RESTORE_REASON
+    assert child.close_reason == "manual_close"
     assert saves[0] == CSP_ABORT_RESTORE_REASON
+    assert CSP_ABORT_RESTORE_REASON in saves
+    assert result["ok"] is True
     assert result["result"]["action"] == "csp_abort_restore"
     assert result["cancelled_resting"]["cancelled_order_id"] == "parked-1"
+
+
+def test_csp_abort_restore_partial_when_close_stays_open(tmp_path: Path, monkeypatch) -> None:
+    account = _account(tmp_path)
+    parent = _wheel_parent()
+    child = _csp_child()
+    state = StrategyState(groups=[parent, child])
+    restores: list[dict] = []
+
+    class _Bot:
+        client = SimpleNamespace(cancel_order=lambda order_id: {"cancelled": order_id})
+        state_store = SimpleNamespace(save=lambda st: None)
+
+        def _load_runtime(self, live=False):
+            del live
+            return SimpleNamespace(state=state)
+
+        def close_positions(self, **kwargs):
+            del kwargs
+            return {
+                "action": "close-position",
+                "actions": [{"action": "close_group_incomplete", "group_id": "0098"}],
+                "skipped": [],
+            }
+
+        def _persist_trade_journal_actions(self, actions):
+            del actions
+
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.load_manifest",
+        lambda *_a, **_k: _manifest(tmp_path, account),
+    )
+    monkeypatch.setattr("deribit_engine.config.has_private_creds_for_env", lambda *_a, **_k: True)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._load_state", lambda *_a, **_k: state)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._build_bot", lambda *_a, **_k: _Bot())
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.execute_spot_restore_for_group",
+        lambda *_a, **kwargs: restores.append(kwargs) or {"action": "spot_restore"},
+    )
+
+    result = run_csp_abort_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="0098",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is False
+    assert result["result"]["action"] == "csp_abort_restore_partial"
+    assert result["result"]["reason"] == "csp_close_failed"
+    assert restores == []
+    assert parent.cash_secured_status == "skipped"
+    assert parent.cash_secured_reason == CSP_ABORT_RESTORE_REASON
+    assert child.status == "open"
+
+
+def test_csp_abort_restore_rewrites_skip_after_reload_entered(tmp_path: Path, monkeypatch) -> None:
+    account = _account(tmp_path)
+    parent = _wheel_parent()
+    child = _csp_child()
+    state = StrategyState(groups=[parent, child])
+    loads = {"n": 0}
+
+    class _Bot:
+        client = SimpleNamespace(cancel_order=lambda order_id: {"cancelled": order_id})
+        state_store = SimpleNamespace(save=lambda st: None)
+
+        def _load_runtime(self, live=False):
+            del live
+            loads["n"] += 1
+            if loads["n"] > 1:
+                parent.cash_secured_status = "entered"
+                parent.cash_secured_reason = "csp_otm_roll"
+            return SimpleNamespace(state=state)
+
+        def close_positions(self, **kwargs):
+            del kwargs
+            child.status = "closed"
+            child.close_reason = "reconciled_external"
+            return {
+                "action": "close-position",
+                "actions": [{"action": "close_group", "reason": "manual_close"}],
+                "skipped": [],
+            }
+
+        def _persist_trade_journal_actions(self, actions):
+            del actions
+
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.load_manifest",
+        lambda *_a, **_k: _manifest(tmp_path, account),
+    )
+    monkeypatch.setattr("deribit_engine.config.has_private_creds_for_env", lambda *_a, **_k: True)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._load_state", lambda *_a, **_k: state)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._build_bot", lambda *_a, **_k: _Bot())
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions._spot_restore_order_is_open",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.execute_spot_restore_for_group",
+        lambda *_a, **kwargs: {"action": "spot_restore", "order_type": kwargs.get("order_type")},
+    )
+
+    result = run_csp_abort_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="0098",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is True
+    assert parent.cash_secured_status == "skipped"
+    assert parent.cash_secured_reason == CSP_ABORT_RESTORE_REASON
+    assert child.close_reason == "manual_close"
 
 
 def test_admin_trade_routes(tmp_path: Path, monkeypatch) -> None:

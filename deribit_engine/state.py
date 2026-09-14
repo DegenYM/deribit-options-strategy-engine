@@ -314,6 +314,7 @@ def select_archivable_closed_groups(
 
 # CSP ``skipped`` (operator cancel of an old mid park) is retryable; ``entered``
 # must outrank it so a live fill is not merged back to skipped on save.
+# Terminal ``operator_csp_abort_restore`` is applied after this table.
 _CASH_SECURED_STATUS_RANK = {
     "": 0,
     "pending": 1,
@@ -321,6 +322,39 @@ _CASH_SECURED_STATUS_RANK = {
     "skipped": 2,
     "entered": 3,
 }
+_OPERATOR_CSP_ABORT_REASON = "operator_csp_abort_restore"
+_OPERATOR_RESTORE_REASON_MARKERS = ("manual", "operator")
+
+
+def _merge_operator_manual_cover_restore(memory: TradeGroup, disk: TradeGroup) -> bool:
+    """Prefer a filled operator/manual cover buy on disk over live ``skipped``."""
+    if str(disk.spot_restore_status or "").lower() != "filled":
+        return False
+    if disk.spot_restore_amount <= 0:
+        return False
+    reason = str(disk.spot_restore_reason or "").lower()
+    if not any(marker in reason for marker in _OPERATOR_RESTORE_REASON_MARKERS):
+        return False
+    mem_status = str(memory.spot_restore_status or "").lower()
+    if mem_status == "filled" and memory.spot_restore_amount >= disk.spot_restore_amount:
+        return False
+    _copy_group_fields(memory, disk, _SPOT_RESTORE_FIELDS)
+    return True
+
+
+def _merge_operator_csp_abort(memory: TradeGroup, disk: TradeGroup) -> bool:
+    """Prefer disk ``operator_csp_abort_restore`` over live ``entered``."""
+    if str(disk.cash_secured_status or "").lower() != "skipped":
+        return False
+    if str(disk.cash_secured_reason or "").lower() != _OPERATOR_CSP_ABORT_REASON:
+        return False
+    if (
+        str(memory.cash_secured_status or "").lower() == "skipped"
+        and str(memory.cash_secured_reason or "").lower() == _OPERATOR_CSP_ABORT_REASON
+    ):
+        return False
+    _copy_group_fields(memory, disk, _CASH_SECURED_FIELDS)
+    return True
 
 
 def _status_rank(status: str | None, ranks: dict[str, int] | None = None) -> int:
@@ -372,6 +406,38 @@ def _merge_journal_cluster(
     return changed
 
 
+def _operator_manual_restore_snapshot(group: TradeGroup) -> dict[str, object] | None:
+    if str(group.spot_restore_status or "").lower() != "filled":
+        return None
+    if group.spot_restore_amount <= 0:
+        return None
+    reason = str(group.spot_restore_reason or "").lower()
+    if not any(marker in reason for marker in _OPERATOR_RESTORE_REASON_MARKERS):
+        return None
+    return {name: getattr(group, name) for name in _SPOT_RESTORE_FIELDS}
+
+
+def _operator_csp_abort_snapshot(group: TradeGroup) -> dict[str, object] | None:
+    if str(group.cash_secured_status or "").lower() != "skipped":
+        return None
+    if str(group.cash_secured_reason or "").lower() != _OPERATOR_CSP_ABORT_REASON:
+        return None
+    return {name: getattr(group, name) for name in _CASH_SECURED_FIELDS}
+
+
+def _restore_snapshot(group: TradeGroup, snapshot: dict[str, object] | None, fields: tuple[str, ...]) -> bool:
+    if not snapshot:
+        return False
+    changed = False
+    for name in fields:
+        current = getattr(group, name)
+        wanted = snapshot[name]
+        if current != wanted:
+            setattr(group, name, wanted)
+            changed = True
+    return changed
+
+
 def merge_concurrent_group_updates(memory: StrategyState, disk: StrategyState) -> list[str]:
     """Merge CLI/operator journal fields from ``disk`` into ``memory``.
 
@@ -384,6 +450,9 @@ def merge_concurrent_group_updates(memory: StrategyState, disk: StrategyState) -
         other = disk_by_id.get(gid)
         if other is None:
             continue
+        restore_snap = _operator_manual_restore_snapshot(group)
+        csp_mem = _operator_csp_abort_snapshot(group)
+        csp_disk = _operator_csp_abort_snapshot(other)
         touched = False
         touched |= _merge_journal_cluster(
             group,
@@ -421,14 +490,27 @@ def merge_concurrent_group_updates(memory: StrategyState, disk: StrategyState) -
                 "spot_exit_settlement_loss",
             ),
         )
-        touched |= _merge_journal_cluster(
-            group,
-            other,
-            status_attr="cash_secured_status",
-            fields=_CASH_SECURED_FIELDS,
-            amount_attrs=(),
-            ranks=_CASH_SECURED_STATUS_RANK,
-        )
+        # Terminal abort skip outranks live ``entered`` / ``csp_otm_roll``.
+        # Skip the generic rank table so entered cannot clobber the skip.
+        if csp_mem or csp_disk:
+            touched |= _restore_snapshot(group, csp_mem or csp_disk, _CASH_SECURED_FIELDS)
+        else:
+            touched |= _merge_journal_cluster(
+                group,
+                other,
+                status_attr="cash_secured_status",
+                fields=_CASH_SECURED_FIELDS,
+                amount_attrs=(),
+                ranks=_CASH_SECURED_STATUS_RANK,
+            )
+        # Operator journal on disk must survive a live cycle that still has
+        # skipped restore / entered CSP in memory (ranks would otherwise lose).
+        touched |= _merge_operator_manual_cover_restore(group, other)
+        touched |= _merge_operator_csp_abort(group, other)
+        # CLI save is the opposite direction: memory is the operator write and
+        # disk still has skipped/entered. Keep the in-memory operator marks.
+        touched |= _restore_snapshot(group, restore_snap, _SPOT_RESTORE_FIELDS)
+        touched |= _restore_snapshot(group, csp_mem, _CASH_SECURED_FIELDS)
         if touched:
             merged_ids.append(gid)
 

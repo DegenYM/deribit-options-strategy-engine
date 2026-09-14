@@ -55,6 +55,8 @@ export const STATE = {
   ivRankLookbackDays: null,
   activityOpenPage: 1,
   activityClosedPage: 1,
+  /** Activity section tab: "open" | "closed". Restored from sessionStorage. */
+  activityTab: "open",
   /** Set by refresh.registerRenderDashboard for late async API completions. */
   dashboardRenderHook: null,
   wsConnected: false,
