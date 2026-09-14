@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from conftest import FakeClient, make_config
 
 from deribit_engine.engine import DeribitOptionTrialBot
+from deribit_engine.models import TradeGroup
 
 
 def _engine(tmp_path):
@@ -64,3 +65,54 @@ def test_groups_are_tracked_separately(tmp_path):
     engine = _engine(tmp_path)
     assert engine._cash_secured_skip(SimpleNamespace(group_id="a"), "crisis_regime", live=True) is not None
     assert engine._cash_secured_skip(SimpleNamespace(group_id="b"), "crisis_regime", live=True) is not None
+
+
+def _closed_covered_call(group_id: str, **overrides) -> TradeGroup:
+    payload = {
+        "group_id": group_id,
+        "currency": "BTC",
+        "short_instrument_name": "BTC-28AUG26-77000-C",
+        "status": "closed",
+        "strategy": "covered_call",
+        "option_type": "call",
+        "collateral_currency": "BTC",
+        "quantity": "0.1",
+        "covered_underlying_quantity": "0.1",
+        "entry_timestamp_ms": 1,
+        "expiration_timestamp_ms": 2,
+        "short_strike": "77000",
+        "entry_credit": "0.001",
+        "original_entry_credit": "0.001",
+        "max_loss": "0",
+        "regime_at_entry": "normal",
+    }
+    payload.update(overrides)
+    return TradeGroup.from_dict(payload)
+
+
+def test_a_covered_call_that_was_never_called_away_is_not_reported(tmp_path):
+    """Seen on the first live cycle after a restart: one skip line per closed call, ~90 on a busy account.
+
+    Only a spot exit that exists and is still selling is a reason the put is waiting.
+    """
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        managed_currencies=("BTC",),
+        enable_short_put=False,
+        enable_short_call=True,
+        covered_call_itm_to_cash_secured_enabled=True,
+    )
+    engine = DeribitOptionTrialBot(config, FakeClient())
+    never_called_away = _closed_covered_call("0001")
+    still_selling = _closed_covered_call("0002", spot_exit_status="pending")
+    context = SimpleNamespace(
+        state=SimpleNamespace(groups=[never_called_away, still_selling]),
+        summaries={},
+        snapshot=SimpleNamespace(hard_derisk_by_book={}),
+        regime_by_currency={},
+        orderbook_cache={},
+    )
+    actions = engine._pending_itm_cash_secured_actions(context, live=False)
+    assert [(row["group_id"], row["reason"]) for row in actions] == [("0002", "spot_exit_not_filled")]

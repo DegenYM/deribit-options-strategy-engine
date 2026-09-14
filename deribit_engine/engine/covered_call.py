@@ -365,7 +365,11 @@ class CoveredCallMixin:
         for group in context.state.groups:
             ready, reason = itm_sold_ready_for_cash_secured(group, context.state.groups)
             if not ready:
-                if reason in {"spot_exit_not_usdc", "spot_exit_not_filled"}:
+                # Only a spot exit that exists and has not finished selling is worth reporting. A
+                # covered call that was never called away has no spot exit, and reporting it put one
+                # line per closed call into the live log after every restart.
+                spot_exit_started = bool(str(group.spot_exit_status or "").strip())
+                if reason in {"spot_exit_not_usdc", "spot_exit_not_filled"} and spot_exit_started:
                     skip = self._cash_secured_skip(group, reason, live=live)
                     if skip:
                         actions.append(skip)
