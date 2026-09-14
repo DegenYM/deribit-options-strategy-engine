@@ -132,23 +132,25 @@ CLI 用法見 [CLI 指令](cli-zh-TW.md)。
 
 **Covered call 獲利兌 USDT（可選）**：在 `.env.investor` 設 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`（預設 false）。啟用後，covered_call 子帳在 income exit（take profit / time exit / early exit）獲利平倉時，會將該筆 native premium profit 自動 market 賣成 **USDT**；僅賣該筆 realized PnL，不動約定備兌現貨。修改後需**重啟**該子帳 live bot。Dashboard 會唯讀顯示開關狀態與每筆 sweep 紀錄。季末付費時若 profit 已在 USDT，通常只需兌剩餘 BTC/ETH 獲利。
 
-**Covered call ITM spot exit**：tier profile 預設 `COVERED_CALL_SPOT_EXIT_ENABLED=true`。ITM **結算後** pending spot 會 market 賣 **BTC_USDT / ETH_USDT**（若開啟下方 cash-secured 則改賣 **BTC_USDC / ETH_USDC**），數量固定為 **`cover − settlement_loss`**（僅清算 cover）。該幣別 SPOT SELL 尚未賣完前不會再開新 covered call。權利金留在 native，顯示於 **Profit swap**；若 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`，exit 完成後會另排程 profit sweep 兌 USDT。
+**Covered call ITM spot exit**：共用 covered_call 設定（`config/shared/strategies/.env.covered_call`）預設 `COVERED_CALL_SPOT_EXIT_ENABLED=true`，三個 tier 相同（2026-09-14 起從各 tier 檔移到共用設定，值不變）。ITM **結算後** pending spot 會 market 賣 **BTC_USDT / ETH_USDT**（下方 cash-secured 在共用 covered_call 設定預設開啟，此時賣 **BTC_USDC / ETH_USDC**；帳戶關閉接回才賣 BTC_USDT / ETH_USDT），數量固定為 **`cover − settlement_loss`**（僅清算 cover）。該幣別 SPOT SELL 尚未賣完前不會再開新 covered call。權利金留在 native，顯示於 **Profit swap**；若 `COVERED_CALL_PROFIT_SWEEP_ENABLED=true`，exit 完成後會另排程 profit sweep 兌 USDT。
 
-**Covered call ITM → cash-secured put（可選）**：在 `.env.investor` 設 `COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=true`（**預設 false**）。啟用後：
+**Covered call ITM → cash-secured put**：共用 covered_call 設定（`config/shared/strategies/.env.covered_call`）**預設開啟**（引擎程式預設仍是 false）。要關閉，在**子帳** `.env.covered_call` 設 `COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=false`——`.env.investor` 的值會被共用設定蓋過，設在那裡不會生效。啟用後：
 
 - ITM spot exit **改賣 USDC**（`BTC_USDC` / `ETH_USDC`）。舊的 USDT journal 在 CSP 開啟時也視為已換成 USDC（手動換匯後可掃 put）；進行中的買回單仍會擋住。
 - 賣完後 live `manage` 會掃 **短天期** USDC linear put，履約價在原 ITM 行權價或略低（`COVERED_CALL_CSP_STRIKE_FLOOR_PCT`，預設 5%），DTE 預設 **2–10 天**。合格後 **IOC 打 bid**（不成交下個 cycle 重試，不掛 GTC mid）。OI／名目仍用 CSP 門檻（BTC 0.5／ETH 5／名目 3000）；**不**用價差當進場門、也不改裸賣門檻。先前取消 mid 掛單的 `operator_cancelled` 會再掃一次。
 - 張數以 unrestored cover **進位**到合約最小單位（目標補回 cover）。手續費／結算讓 USDC 在原履約價剛好不夠滿張時，會在 `COVERED_CALL_CSP_STRIKE_FLOOR_PCT` 窗內**往下抓 strike**，優先鎖滿張再選最接近原價的履約價。
 - CSP 開啟時，ITM cover 賣出（含舊 USDT journal）**不會**再走自動買回，改掃 cash-secured put。USDT 帳本回撤（例如手動換成 USDC）**不**觸發 hard derisk、也不擋 CSP。
 - CSP **預設持有至到期**。put **OTM** 到期後，同一 ITM 母倉會再用剩餘 USDC 掃下一輪短天期 put（輪轉）；put **ITM** 或已補回 cover 則停止。母倉累計 call 權利金＋各輪 CSP realized PnL。到期若 put **ITM**（現貨低於履約價），live `manage` 用剩餘 USDC 掛 **GTC mid** 買回 cover（`BTC_USDC` / `ETH_USDC`）。OTM 到期不買現貨。你取消買回單不會重掛。
-- **CSP self-assign**（`COVERED_CALL_CSP_SELF_ASSIGN_ENABLED`，wheel 開啟時預設 **true**）：歐式 put 不會在盤中跌破就指派。當 put **確認 ITM**（`COVERED_CALL_CSP_SELF_ASSIGN_CONFIRM_CYCLES`，未設則跟 ITM／defense confirm），且 **DTE ≤ `COVERED_CALL_CSP_SELF_ASSIGN_MAX_DTE`（預設 2）** 或 **時間價值 ≤ 內在價值 × `COVERED_CALL_CSP_SELF_ASSIGN_MAX_TV_PCT`（預設 12%）**，**並且** order book 流動性過關（雙邊報價、`spread_ratio ≤ COVERED_CALL_CSP_SELF_ASSIGN_MAX_SPREAD_RATIO` 預設 **0.25**、ask size ≥ 平倉數量）時，live `manage` 會 **買回 put（taker）並排程買 spot 補 cover**。短 DTE 價差常極寬：流動性不過關就**等到期指派**，不硬抬 ask。時間價值仍肥且離到期遠時也不動作。
+- **CSP self-assign**（`COVERED_CALL_CSP_SELF_ASSIGN_ENABLED`，wheel 開啟時預設 **true**）：歐式 put 不會在盤中跌破就指派。當 put **確認 ITM**（`COVERED_CALL_CSP_SELF_ASSIGN_CONFIRM_CYCLES`，未設則跟 ITM／defense confirm；共用設定 **4** 輪），且 **DTE ≤ `COVERED_CALL_CSP_SELF_ASSIGN_MAX_DTE`（引擎預設 2；共用設定 1）** 或 **時間價值 ≤ 內在價值 × `COVERED_CALL_CSP_SELF_ASSIGN_MAX_TV_PCT`（預設 12%）**，**並且** order book 流動性過關（雙邊報價、`spread_ratio ≤ COVERED_CALL_CSP_SELF_ASSIGN_MAX_SPREAD_RATIO` 引擎預設 **0.25**、共用設定 **0.10**、ask size ≥ 平倉數量）時，live `manage` 會 **買回 put（taker）並排程買 spot 補 cover**。短 DTE 價差常極寬：流動性不過關就**等到期指派**，不硬抬 ask。時間價值仍肥且離到期遠時也不動作。
 - **CSP 主動 roll**（`COVERED_CALL_CSP_ACTIVE_ROLL_ENABLED`，**預設 false**）：OTM 未到期可買回再賣窗內**日收益更高**的 put（同一張或更早到期也可以，只要換算日收益嚴格比較高）。DTE 窗 `MIN_DTE=2` / `MAX_DTE=10`；`MIN_TV_RATIO=0.25`（剩餘 TV／`max(原權利金, 內在+TV)`）；平倉流動性重用 self-assign 價差上限；替換約走既有 CSP picker。比較式是 `(新 bid − 換倉手續費) / 新 DTE > 平倉 ask / 剩餘 DTE`。日收益沒有更高就持有。ITM 不走這條路。
-- **CSP 權利金去向**（`COVERED_CALL_CSP_PREMIUM_TARGET`，預設 `usdc`）：`usdc` 讓權利金留在 USDC；`spot` 在 CSP **平倉／到期後**（不是進場當下），依**實收權利金** `max(0, entry_credit − close_debit − close_fee)` market 換成 native 現貨（`BTC_USDC` / `ETH_USDC`）。OTM 到期通常 close_debit≈0，換整筆淨 credit；若曾買回 put 則只換剩餘。若同時有 ITM **補 cover**（`spot_restore` pending／submitted），會先等補完再 swap，避免搶 USDC。可用資金不足時保持 pending，下個 cycle **只補剩餘未換額度**。狀態顯示於 group 的 `csp_premium_swap_*` 欄位。
+- **CSP 權利金去向**（`COVERED_CALL_CSP_PREMIUM_TARGET`，引擎預設 `usdc`，共用 covered_call 設定也明確設 `usdc`）：`usdc` 讓權利金留在 USDC；`spot` 在 CSP **平倉／到期後**（不是進場當下），依**實收權利金** `max(0, entry_credit − close_debit − close_fee)` market 換成 native 現貨（`BTC_USDC` / `ETH_USDC`）。OTM 到期通常 close_debit≈0，換整筆淨 credit；若曾買回 put 則只換剩餘。若同時有 ITM **補 cover**（`spot_restore` pending／submitted），會先等補完再 swap，避免搶 USDC。可用資金不足時保持 pending，下個 cycle **只補剩餘未換額度**。狀態顯示於 group 的 `csp_premium_swap_*` 欄位。
+- **權利金階梯**（`CSP_PREMIUM_LADDER`，引擎預設 false，共用 covered_call 設定 **true**）：接回賣權的履約價上限不再釘死在原行權價 K，而是 `K + 這一組已平倉 CSP 的淨權利金（entry_credit − close_debit − close_fee）÷ 張數`，窗口為 `[上限 × (1 − COVERED_CALL_CSP_STRIKE_FLOOR_PCT), 上限]`。現貨漲離 K 之後，窗口跟著收到的權利金往上爬，不會在現貨高出 K 約 20%（BTC）／30%（ETH）時變空；代價是接回價也跟著變高——這是風險取捨，不是多賺。還開著的 put 權利金不算（已經是擔保），主動 roll 虧損的會往下扣。live 進場、`scan --cash-secured` 預覽、主動 roll 用同一個窗口。**與 `COVERED_CALL_CSP_PREMIUM_TARGET=spot` 互斥**：兩者花同一筆權利金，同時設定 config 直接拒絕載入；子帳要換現貨必須同時設 `CSP_PREMIUM_LADDER=false`。
+- **跳過原因**：put 沒送出時（例如 USDC 不足、crisis、窗口內找不到短天期 put），live 會發出 `cash_secured_skipped` 動作並寫日誌，同一 group 原因改變才再記一次；dry-run 每輪都列。這些不會寫進交易日誌。
 - 修改後需**重啟**該子帳 live bot。
 
 **Covered call 自動買回 cover（可選）**：在 `.env.investor` 或子帳 `.env` 設 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED=true`（**預設 false**）。啟用後，ITM spot exit **賣完**就掛一張 **GTC 限價買單**，價位 = 損益兩平 × `(1 − COVERED_CALL_AUTO_SPOT_RESTORE_MIN_EDGE_PCT)`（預設 0.1%），數量是 **native unrestored**（進位到 **USDC linear 最小下單量**，BTC `0.01` / ETH `0.1`，不超過 cover）。之後 cycle 只對帳，**不會改下市價單、也不會在你取消後重掛**。`submitted` 或已有 restore `order_id` 且交易所單還在時，不會再下第二張；單被取消／已不在則記 `operator_cancelled` 並停止自動買回。現價若已低於上限，限價會立刻成交（仍是限價、固定數量）。`spot_exit_status=skipped` 不會掛。修改後需**重啟**該子帳 live bot。
 
-settlement 優先讀 Deribit **transaction log**，否則 intrinsic。若改走 **robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=true`），會先買回 short call 再賣 spot cover（不扣 settlement）。
+是否 ITM（要不要賣 cover、要不要買回）以該到期日的 Deribit **結算價**判斷，查不到才看對帳當下指數；settlement 損失優先讀 Deribit **transaction log**，否則 intrinsic。若改走 **robust exit**（`COVERED_CALL_ROBUST_EXIT_ENABLED=true`），會先買回 short call 再賣 spot cover（不扣 settlement）。
 
 啟用 `COVERED_CALL_SPOT_EXIT_ENABLED`、`COVERED_CALL_PROFIT_SWEEP_ENABLED` 或 `COVERED_CALL_AUTO_SPOT_RESTORE_ENABLED` 時，config 會**自動**把 **USDT** 加入 `TRADED_COLLATERALS`，無需手動改 strategy env。啟用 `COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED` 時會再把 **USDC** 加入 `TRADED_COLLATERALS`。
 
@@ -336,7 +338,7 @@ bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json       
 |------|--------|------|
 | `naked_short` | [`.env.naked_short`](../config/shared/strategies/.env.naked_short) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`）；`DEFENSE_CONFIRM_CYCLES=2`；連續下跌停開（`NAKED_ENTRY_DOWN_STREAK_DAYS=2`） |
 | `bull_put_spread` | [`.env.bull_put_spread`](../config/shared/strategies/.env.bull_put_spread) | `linear_usdc`；`TRADED_COLLATERALS=USDC`；`SHORT_OPTION_SIDE=put` |
-| `covered_call` | [`.env.covered_call`](../config/shared/strategies/.env.covered_call) | `inverse_native`；`TRADED_COLLATERALS=BTC,ETH`；`SHORT_OPTION_SIDE=call`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`） |
+| `covered_call` | [`.env.covered_call`](../config/shared/strategies/.env.covered_call) | `inverse_native`；`TRADED_COLLATERALS=BTC,ETH`；`SHORT_OPTION_SIDE=call`；IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，`MIN_IV_MINUS_RV=0`）；ITM 退場與輪動（現貨賣出、CSP 接回、權利金階梯、權利金留 USDC）所有 tier 共用 |
 
 各 tier 的 delta、APR、IM 白話對照見 [風險分級與 APR 說明](investor-risk-tiers-apr-zh-TW.md)；**以 tier 檔為準**，勿沿用下方 legacy 單檔範例中的舊數字。
 
@@ -344,9 +346,16 @@ bull_put_spread:  STATE_FILE=.state/investors/<investor_id>/bull_put.json       
 
 三個 tier 目前皆：
 
-- `COVERED_CALL_SPOT_EXIT_ENABLED=true`
-- `COVERED_CALL_ROBUST_EXIT_ENABLED=false`（主路徑為 settlement pending → spot；robust 需另行開啟）
 - `PUT_DTE_MIN=7`、`PUT_DTE_MAX=35`
+
+ITM 退場與輪動不在 tier 檔，統一寫在共用 [`.env.covered_call`](../config/shared/strategies/.env.covered_call)，每個 tier 都一樣：
+
+- `COVERED_CALL_SPOT_EXIT_ENABLED=true`、`COVERED_CALL_ROBUST_EXIT_ENABLED=false`（主路徑為 settlement pending → spot；robust 需另行開啟）、`COVERED_CALL_ITM_BUFFER_PCT=0`、`COVERED_CALL_SPOT_ORDER_TYPE=market`、`COVERED_CALL_SPOT_MAX_SLIPPAGE_PCT=0.001`
+- `COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=true`（CSP 接回）
+- `CSP_PREMIUM_LADDER=true`（權利金階梯）
+- `COVERED_CALL_CSP_PREMIUM_TARGET=usdc`（CSP 權利金不換現貨）
+
+tier 檔在共用設定之後載入，在 tier 檔重設這些 key 會蓋掉共用值，`tests/test_covered_call_profile_guards.py` 會擋下來。要讓單一帳戶不同，設在子帳 `accounts/.env.covered_call`。
 
 進場 spread：low 為 `INVERSE_MAX_SPREAD_RATIO=0.18`（18%）；medium／high 仍為 **0.15**。上漲週期只放寬 bid-ask 閘門，**不動** OTM／delta（保留現貨的核心仍是 strike 距離）。
 
