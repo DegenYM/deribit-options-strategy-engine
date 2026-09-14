@@ -82,7 +82,7 @@ def _book() -> list[TradeGroup]:
         # Three rounds in, waiting for the next put; one round's premium was swapped into coin.
         _called_away("0102", cash_secured_status="entered", cash_secured_group_id="0203"),
         _put("0201", "0102", credit="900"),
-        _put("0202", "0102", credit="1100", realized_close_fee="50"),
+        _put("0202", "0102", credit="1100", realized_close_debit="50", realized_close_fee="50"),
         _put("0203", "0102", credit="500", csp_premium_swap_amount="200", csp_premium_swap_status="filled"),
         # Auto-restore left a buy order resting.
         _called_away(

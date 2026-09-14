@@ -161,9 +161,16 @@ def test_the_ledger_sums_closed_children_net_of_costs():
     groups = [
         parent,
         _child("C1", credit="100"),  # expired worthless
-        _child("C2", credit="120", debit="20", fee="2"),  # bought back
+        _child("C2", credit="120", debit="22", fee="2"),  # bought back
     ]
     assert cash_secured_premium_ledger(parent, groups) == Decimal("198")
+
+
+def test_the_close_fee_is_not_counted_twice():
+    """The close debit already includes the close fee: bought back at 20.00 + 2.33 fee is 22.33, not 24.66."""
+    parent = _parent()
+    rolled = _child("C1", credit="20.6176331", debit="22.3293686", fee="2.3293686")
+    assert cash_secured_premium_ledger(parent, [parent, rolled]) == Decimal("20.6176331") - Decimal("22.3293686")
 
 
 def test_an_open_child_is_not_in_the_ledger():
@@ -208,7 +215,7 @@ def test_premium_already_swapped_into_coin_does_not_lift_the_strike():
 def test_ledger_and_window_together_walk_the_strike_up():
     """Called away -> two puts expire worthless -> the strike climbs by what they banked, no more."""
     parent = _parent()
-    groups = [parent, _child("C1", credit="900"), _child("C2", credit="1100", fee="50")]
+    groups = [parent, _child("C1", credit="900"), _child("C2", credit="1100", debit="50", fee="50")]
     banked = cash_secured_premium_ledger(parent, groups)
     assert banked == Decimal("1950")
     _low, high = cash_secured_strike_bounds(
@@ -253,7 +260,7 @@ def _context(*groups: TradeGroup):
 
 def test_the_engine_window_follows_the_switch(tmp_path):
     parent = _parent()
-    context = _context(parent, _child("C1", credit="900"), _child("C2", credit="1100", fee="50"))
+    context = _context(parent, _child("C1", credit="900"), _child("C2", credit="1100", debit="50", fee="50"))
     on = _engine(tmp_path, ladder=True)._cash_secured_strike_window(context, parent, quantity=Decimal("1"))
     off = _engine(tmp_path, ladder=False)._cash_secured_strike_window(context, parent, quantity=Decimal("1"))
     assert on == (Decimal("101950") * Decimal("0.95"), Decimal("101950"))

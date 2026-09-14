@@ -60,6 +60,10 @@ def cash_secured_premium_ledger(
     recorded credit is skipped rather than counted as a loss: missing bookkeeping
     must not quietly shrink the strike the coin comes back at.
 
+    ``realized_close_debit`` is the all-in cost of closing: every close and reconcile path
+    adds the fee into it (a roll bought back at 20.00 with a 2.33 fee records 22.33), so
+    ``realized_close_fee`` is not subtracted a second time.
+
     Premium already swapped into coin (``COVERED_CALL_CSP_PREMIUM_TARGET=spot``, Canopy's
     ``CSP_PREMIUM_SWEEP``) is no longer collateral and does not count. The two switches
     cannot be on together, but an account may have run the swap before the ladder.
@@ -74,8 +78,7 @@ def cash_secured_premium_ledger(
         if credit <= 0:
             continue
         debit = max(child.realized_close_debit or Decimal("0"), Decimal("0"))
-        fee = max(child.realized_close_fee or Decimal("0"), Decimal("0"))
-        total += credit - debit - fee - csp_premium_swap_spent_usdc(child)
+        total += credit - debit - csp_premium_swap_spent_usdc(child)
     return total
 
 
