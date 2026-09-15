@@ -29,6 +29,13 @@ from .context import (
     RuntimeContext,
 )
 
+# OTM income-exit skips that env cannot express. Near-strike holds the call;
+# halt / trend pause skip TP because the next scan cannot rewrite; leftover TV
+# that cannot cover close fees is not worth buying back.
+_COVERED_CALL_NEAR_STRIKE_OTM_PCT = Decimal("0.03")
+_COVERED_CALL_NEAR_STRIKE_DELTA = Decimal("0.20")
+_COVERED_CALL_RESIDUAL_TV_FEE_MULT = Decimal("2")
+
 
 class CoveredCallMixin:
     """Covered-call lifecycle: ITM spot exits, profit sweeps, collateral/cooldown helpers."""
@@ -48,18 +55,139 @@ class CoveredCallMixin:
             if robust_exit_actions is not None:
                 return robust_exit_actions
             return []
+        if self._covered_call_near_strike(group, context):
+            LOGGER.debug("covered_call: skip income exit near strike group=%s", group.group_id)
+            return []
+        if self._covered_call_residual_tv_too_thin(context, group):
+            LOGGER.debug("covered_call: skip income exit residual TV too thin group=%s", group.group_id)
+            return []
+        rewrite_blocked = self._covered_call_new_entry_blocked(context, group)
         actions: list[dict[str, Any]] = []
-        if self._take_profit_triggered(context, group):
+        if not rewrite_blocked and self._take_profit_triggered(context, group):
             actions.extend(self._close_group(context, group, reason="take_profit", live=live))
             return actions
         early_exit_reason = self._maybe_early_exit_reason(context, group)
-        if early_exit_reason is not None:
+        if early_exit_reason is not None and not rewrite_blocked:
             actions.extend(self._close_group(context, group, reason=early_exit_reason, live=live))
             return actions
         if self._time_exit_triggered(context, group):
             actions.extend(self._close_group(context, group, reason="time_exit", live=live))
             return actions
         return actions
+
+    def _covered_call_index_price(self, group: TradeGroup, context: RuntimeContext) -> Decimal:
+        index_price = self._currency_index_price(group.currency, context.orderbook_cache)
+        if index_price <= 0:
+            try:
+                index_price = self._get_orderbook(group.short_instrument_name, context.orderbook_cache).index_price
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.debug("covered_call index: no index for %s: %s", group.short_instrument_name, exc)
+                index_price = Decimal("0")
+        return index_price if index_price > 0 else Decimal("0")
+
+    def _covered_call_near_strike(self, group: TradeGroup, context: RuntimeContext) -> bool:
+        """True when the call is close enough that buying it back gives up the hold."""
+        strike = group.short_strike
+        index_price = self._covered_call_index_price(group, context)
+        if strike > 0 and index_price > 0:
+            band = strike * (Decimal("1") - _COVERED_CALL_NEAR_STRIKE_OTM_PCT)
+            if index_price >= band:
+                return True
+        delta = abs(group.short_delta or Decimal("0"))
+        try:
+            book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
+            delta = max(delta, abs(book.delta or Decimal("0")))
+        except Exception:
+            pass
+        return delta >= _COVERED_CALL_NEAR_STRIKE_DELTA
+
+    def _covered_call_new_entry_blocked(self, context: RuntimeContext, group: TradeGroup) -> bool:
+        """True when the next scan could not open a replacement call (halt / trend pause)."""
+        snapshot = getattr(context, "snapshot", None)
+        currency = (group.currency or "").upper()
+        book = (group.collateral_currency or currency).upper()
+        if snapshot is not None:
+            if bool(getattr(snapshot, "halt_new_entries", False)):
+                return True
+            if bool(getattr(snapshot, "portfolio_wide_entry_halt", False)):
+                return True
+            halted_by_ccy = getattr(snapshot, "halt_new_entries_by_currency", None) or {}
+            if currency and bool(halted_by_ccy.get(currency, False)):
+                return True
+            halted_by_book = getattr(snapshot, "halt_entries_by_book", None) or {}
+            if book and bool(halted_by_book.get(book, False)):
+                return True
+        reason_fn = getattr(getattr(self, "strategy", None), "trend_pause_reason_zh", None)
+        if callable(reason_fn) and currency and reason_fn(currency):
+            return True
+        return False
+
+    def _covered_call_residual_tv_too_thin(self, context: RuntimeContext, group: TradeGroup) -> bool:
+        """True when leftover premium cannot cover close fees (ask×qty ≤ 2×fee or bid×qty ≤ fee)."""
+        try:
+            book = self._get_orderbook(group.short_instrument_name, context.orderbook_cache)
+        except Exception:
+            return False
+        ask = book.best_ask_price
+        bid = book.best_bid_price
+        qty = group.quantity
+        if qty <= 0:
+            return False
+        close_fee = self._covered_call_notional_close_fee(context, group, book)
+        if close_fee <= 0:
+            return False
+        if ask > 0 and ask * qty <= _COVERED_CALL_RESIDUAL_TV_FEE_MULT * close_fee:
+            return True
+        if bid > 0 and bid * qty <= close_fee:
+            return True
+        return False
+
+    def _covered_call_notional_close_fee(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        book: OrderBookSnapshot,
+    ) -> Decimal:
+        """Deribit close commission for leftover-TV checks (notional fee_rate × qty, not the 12.5% cap).
+
+        Comparing remaining premium to ``min(fee_rate, cap × premium)`` never fires on cheap
+        options, because the cap is 12.5% of the same premium. Operators mean the 0.03%
+        underlying commission: do not buy back when leftover TV cannot cover that fee.
+        """
+        quote, settlement, idx = self._covered_call_fee_quote_settlement(context, group, book)
+        try:
+            return self._option_fee_native(
+                premium=Decimal("1"),
+                quantity=group.quantity,
+                index_price=idx,
+                quote_currency=quote,
+                settlement_currency=settlement,
+            )
+        except Exception:
+            return Decimal("0")
+
+    def _covered_call_fee_quote_settlement(
+        self,
+        context: RuntimeContext,
+        group: TradeGroup,
+        book: OrderBookSnapshot,
+    ) -> tuple[str, str, Decimal]:
+        markets = getattr(context, "markets_by_currency", None) or {}
+        instrument = None
+        name = group.short_instrument_name
+        for instruments in markets.values():
+            for inst in instruments or []:
+                if getattr(inst, "instrument_name", None) == name:
+                    instrument = inst
+                    break
+            if instrument is not None:
+                break
+        idx = book.index_price if book.index_price > 0 else Decimal("1")
+        if instrument is not None:
+            return instrument.quote_currency, instrument.settlement_currency, idx
+        quote = (group.currency or "BTC").upper()
+        settlement = (group.collateral_currency or quote).upper()
+        return quote, settlement, idx
 
     def _defense_delta_thresholds(self, group: TradeGroup) -> tuple[Decimal, Decimal]:
         if (group.option_type or "").lower() == "call":
@@ -2589,13 +2717,7 @@ class CoveredCallMixin:
         return group.is_covered_call_group()
 
     def _covered_call_itm(self, group: TradeGroup, context: RuntimeContext) -> bool:
-        index_price = self._currency_index_price(group.currency, context.orderbook_cache)
-        if index_price <= 0:
-            try:
-                index_price = self._get_orderbook(group.short_instrument_name, context.orderbook_cache).index_price
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.debug("covered_call itm: no index for %s: %s", group.short_instrument_name, exc)
-                index_price = Decimal("0")
+        index_price = self._covered_call_index_price(group, context)
         if index_price <= 0 or group.short_strike <= 0:
             return False
         trigger = group.short_strike * (Decimal("1") + self.config.covered_call_itm_buffer_pct)

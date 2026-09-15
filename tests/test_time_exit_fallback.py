@@ -7,11 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from conftest import FakeClient, future_expiry, make_config
+from test_engine import _covered_call_group
 
 from deribit_engine.engine import DeribitOptionTrialBot
 from deribit_engine.exit_eval import exit_eval_context_from_config, time_exit_triggered
 from deribit_engine.models import OrderBookSnapshot, TradeGroup
-from tests.test_engine import _covered_call_group
 
 
 def _time_exit_group(*, dte_days: int, profit_capture: Decimal) -> TradeGroup:

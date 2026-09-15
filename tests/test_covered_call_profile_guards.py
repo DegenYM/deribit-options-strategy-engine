@@ -88,6 +88,20 @@ def test_every_tier_runs_the_same_wheel(tier):
     assert config.covered_call_csp_premium_target == "usdc"
 
 
+@pytest.mark.parametrize("tier", TIERS)
+def test_every_tier_uses_the_same_otm_tp_table(tier):
+    config = _covered_call_config(tier)
+    assert config.enable_dynamic_tp is True
+    assert config.tp_dte_long_threshold == Decimal("14")
+    assert config.tp_dte_short_threshold == Decimal("7")
+    assert config.tp_capture_pct_dte_long == Decimal("0.75")
+    assert config.tp_capture_pct == Decimal("0.70")
+    assert config.tp_capture_pct_dte_short == Decimal("0.70")
+    assert config.enable_early_exit is False
+    assert config.time_exit_dte == 4
+    assert config.time_exit_min_profit_capture == Decimal("0.10")
+
+
 def test_the_tier_files_do_not_redefine_the_itm_exit_or_the_wheel():
     """A tier file is applied after the shared profile, so any of these keys there would silently win."""
     for tier in TIERS:

@@ -61,6 +61,7 @@ def make_config(tmp_path: Path, **overrides) -> BotConfig:
         halt_open_max_loss_pct=Decimal("0.45"),
         tp_capture_pct=Decimal("0.60"),
         enable_early_exit=True,
+        enable_dynamic_tp=False,
         early_exit_remaining_apr=Decimal("0.08"),
         early_exit_min_profit_capture=Decimal("0.25"),
         early_exit_max_spread_ratio=Decimal("0.05"),

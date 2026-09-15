@@ -1271,7 +1271,7 @@ def test_covered_call_coin_native_time_exit_ignores_usdc_index_pump(tmp_path):
         income_exit_max_spread_ratio=Decimal("0.50"),
     )
     engine = DeribitOptionTrialBot(config, FakeClient(eth_book_equity="5"))
-    group = _covered_call_group(dte_days=1, strike=Decimal("1900"))
+    group = _covered_call_group(dte_days=1, strike=Decimal("5000"))
     group.currency = "ETH"
     group.collateral_currency = "ETH"
     group.short_instrument_name = "ETH-31JUL26-1900-C"

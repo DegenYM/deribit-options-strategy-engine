@@ -341,9 +341,9 @@ class BotConfig:
     #: Long moving average defining that regime, in days.
     trend_regime_ma_days: int = 100
     # Dynamic take-profit thresholds by DTE.
-    enable_dynamic_tp: bool = False
-    tp_capture_pct_dte_long: Decimal = Decimal("0.40")
-    tp_capture_pct_dte_short: Decimal = Decimal("0.60")
+    enable_dynamic_tp: bool = True
+    tp_capture_pct_dte_long: Decimal = Decimal("0.75")
+    tp_capture_pct_dte_short: Decimal = Decimal("0.70")
     tp_dte_long_threshold: Decimal = Decimal("14")
     tp_dte_short_threshold: Decimal = Decimal("7")
     # How often to cancel+requote unfilled entry orders.
@@ -1325,8 +1325,8 @@ def load_config(
         put_otm_max=to_decimal(_optional(values, "PUT_OTM_MAX", "0.18")),
         min_liquid_expiries_required=max(1, int(_optional(values, "MIN_LIQUID_EXPIRIES_REQUIRED", "2"))),
         halt_open_max_loss_pct=to_decimal(_optional(values, "OPEN_MAX_LOSS_HALT_RATIO", str(book_im_hard_value))),
-        tp_capture_pct=to_decimal(_optional(values, "TP_CAPTURE_PCT", "0.60")),
-        enable_early_exit=_to_bool(_optional(values, "ENABLE_EARLY_EXIT", "true"), default=True),
+        tp_capture_pct=to_decimal(_optional(values, "TP_CAPTURE_PCT", "0.70")),
+        enable_early_exit=_to_bool(_optional(values, "ENABLE_EARLY_EXIT", "false"), default=False),
         early_exit_remaining_apr=to_decimal(_optional(values, "EARLY_EXIT_REMAINING_APR", "0.08")),
         early_exit_min_profit_capture=to_decimal(_optional(values, "EARLY_EXIT_MIN_PROFIT_CAPTURE", "0.25")),
         early_exit_max_spread_ratio=to_decimal(_optional(values, "EARLY_EXIT_MAX_SPREAD_RATIO", "0.05")),
@@ -1337,8 +1337,8 @@ def load_config(
         .strip()
         .lower(),
         income_exit_order_ttl_minutes=max(1, int(_optional(values, "INCOME_EXIT_ORDER_TTL_MINUTES", "3"))),
-        time_exit_dte=int(_optional(values, "TIME_EXIT_DTE", "5")),
-        time_exit_min_profit_capture=to_decimal(_optional(values, "TIME_EXIT_MIN_PROFIT_CAPTURE", "0")),
+        time_exit_dte=int(_optional(values, "TIME_EXIT_DTE", "4")),
+        time_exit_min_profit_capture=to_decimal(_optional(values, "TIME_EXIT_MIN_PROFIT_CAPTURE", "0.10")),
         soft_defense_delta=to_decimal(_optional(values, "SOFT_DEFENSE_DELTA", "0.25")),
         hard_defense_delta=to_decimal(_optional(values, "HARD_DEFENSE_DELTA", "0.35")),
         soft_defense_loss_pct=to_decimal(_optional(values, "SOFT_DEFENSE_LOSS_PCT", "0.35")),
@@ -1495,9 +1495,9 @@ def load_config(
         ),
         score_weight_trend=to_decimal(_optional(values, "SCORE_WEIGHT_TREND", "3")),
         **_parse_trend_adaptive_fields(values),
-        enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "false"), default=False),
-        tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.40")),
-        tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.60")),
+        enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "true"), default=True),
+        tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.75")),
+        tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.70")),
         tp_dte_long_threshold=to_decimal(_optional(values, "TP_DTE_LONG_THRESHOLD", "14")),
         tp_dte_short_threshold=to_decimal(_optional(values, "TP_DTE_SHORT_THRESHOLD", "7")),
         reprice_minutes=int(_optional(values, "REPRICE_MINUTES", "3")),
