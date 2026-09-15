@@ -446,6 +446,7 @@ class CoveredCallMixin:
                     summary_maintenance_margin=usdc.maintenance_margin,
                     quantity_cap=retry_qty_cap,
                 )
+                reject: list[str] = []
                 picked = self._pick_csp_daily_yield_candidate(
                     context,
                     ranked,
@@ -454,13 +455,16 @@ class CoveredCallMixin:
                     close_fee=Decimal("0"),
                     index_price=self._currency_index_price(group.currency, context.orderbook_cache),
                     amortize_close_fee=False,
+                    reject_reason=reject,
                 )
                 if picked is None:
+                    why = reject[0] if reject else "daily_yield_not_higher"
                     LOGGER.info(
-                        "cash_secured: skip retry after active roll, daily yield not higher group=%s",
+                        "cash_secured: skip retry after active roll, %s group=%s",
+                        why,
                         group.group_id,
                     )
-                    skip = self._cash_secured_skip(group, "daily_yield_not_higher", live=live)
+                    skip = self._cash_secured_skip(group, why, live=live)
                     if skip:
                         actions.append(skip)
                     continue
@@ -670,14 +674,36 @@ class CoveredCallMixin:
         close_fee: Decimal,
         index_price: Decimal,
         amortize_close_fee: bool,
+        close_bid: Decimal = Decimal("0"),
+        close_ask: Decimal = Decimal("0"),
+        close_quantity: Decimal = Decimal("0"),
+        reject_reason: list[str] | None = None,
     ) -> tuple[Any, dict[str, str]] | None:
-        """Best window candidate whose daily yield beats holding remaining TV."""
+        """Best window candidate whose taker daily yield clears the roll hurdle.
+
+        Prices are IOC: close at ask, open at bid. Mid/mark is never a fill.
+        Both option fees and half-spreads must leave enough leftover (see
+        ``covered_call_csp_active_roll_min_yield_edge`` and
+        ``covered_call_csp_active_roll_min_net_edge_mult``).
+        """
         from ..cash_secured_ops import (
             cash_secured_active_roll_daily_beats_hold,
+            cash_secured_active_roll_fee_edge,
+            cash_secured_active_roll_taker_spread_usdc,
             cash_secured_self_assign_liquidity_ok,
         )
 
+        def _reject(why: str) -> None:
+            if reject_reason is None:
+                return
+            reject_reason.clear()
+            reject_reason.append(why)
+
+        min_yield_edge = self.config.covered_call_csp_active_roll_min_yield_edge
+        min_net_usdc = self.config.covered_call_csp_active_roll_min_net_usdc
+        min_net_edge_mult = self.config.covered_call_csp_active_roll_min_net_edge_mult
         best: tuple[Any, dict[str, str], Decimal] | None = None
+        yield_ok_net_fail = False
         for candidate in ranked:
             try:
                 repl_book = self._get_orderbook(candidate.short_leg.instrument_name, context.orderbook_cache)
@@ -693,36 +719,65 @@ class CoveredCallMixin:
             )
             if not repl_liquid:
                 continue
-            new_credit = max(candidate.short_leg.best_bid_price, Decimal("0")) * candidate.quantity
+            new_bid = max(repl_book.best_bid_price, Decimal("0"))
+            new_ask = max(repl_book.best_ask_price, Decimal("0"))
+            new_credit = new_bid * candidate.quantity
             open_fee = self._csp_linear_option_fee(
                 index_price=repl_book.index_price if repl_book.index_price > 0 else index_price,
-                premium=candidate.short_leg.best_bid_price,
+                premium=new_bid,
                 quantity=candidate.quantity,
                 currency=str(candidate.currency or "BTC"),
             )
-            switch_fees = open_fee + (close_fee if amortize_close_fee else Decimal("0"))
+            charged_close_fee = close_fee if amortize_close_fee else Decimal("0")
+            switch_fees = open_fee + charged_close_fee
             hold_daily, roll_daily, beats = cash_secured_active_roll_daily_beats_hold(
                 hold_credit=hold_credit,
                 hold_dte=hold_dte,
                 new_credit=new_credit,
                 new_dte=candidate.dte_days,
                 switch_fees=switch_fees,
+                min_yield_edge=min_yield_edge,
             )
             if not beats:
+                continue
+            spread_usdc = cash_secured_active_roll_taker_spread_usdc(
+                close_bid=close_bid if amortize_close_fee else Decimal("0"),
+                close_ask=close_ask if amortize_close_fee else Decimal("0"),
+                new_bid=new_bid,
+                new_ask=new_ask,
+                close_quantity=close_quantity if amortize_close_fee else Decimal("0"),
+                new_quantity=candidate.quantity,
+            )
+            net, net_ok = cash_secured_active_roll_fee_edge(
+                new_credit=new_credit,
+                close_debit=hold_credit,
+                close_fee=charged_close_fee,
+                open_fee=open_fee,
+                min_net_usdc=min_net_usdc,
+                spread_usdc=spread_usdc,
+                min_net_edge_mult=min_net_edge_mult,
+            )
+            if not net_ok:
+                yield_ok_net_fail = True
                 continue
             numbers = {
                 "replacement_instrument": candidate.short_leg.instrument_name,
                 "close_debit": format_decimal(hold_credit, 8),
                 "new_credit": format_decimal(new_credit, 8),
-                "close_fee": format_decimal(close_fee, 8),
+                "close_fee": format_decimal(charged_close_fee, 8),
                 "open_fee": format_decimal(open_fee, 8),
+                "spread_usdc": format_decimal(spread_usdc, 8),
+                "net_edge": format_decimal(net, 8),
                 "hold_daily": format_decimal(hold_daily, 8),
                 "roll_daily": format_decimal(roll_daily, 8),
+                "min_yield_edge": format_decimal(min_yield_edge, 4),
+                "min_net_edge_mult": format_decimal(min_net_edge_mult, 4),
                 "quantity": format_decimal(candidate.quantity, 8),
             }
             if best is None or roll_daily > best[2]:
                 best = (candidate, numbers, roll_daily)
         if best is None:
+            _reject("net_edge_too_small" if yield_ok_net_fail else "daily_yield_not_higher")
             return None
         return best[0], best[1]
 
@@ -2765,13 +2820,14 @@ class CoveredCallMixin:
 
         Same or earlier expiry is allowed. Gate order (first failure wins):
         disabled → dte_too_short / dte_out_of_window → near_strike (pause only) →
-        tv_too_thin → illiquid_close → illiquid_replacement → daily_yield_not_higher.
+        tv_too_thin → illiquid_close → illiquid_replacement →
+        daily_yield_not_higher / net_edge_too_small.
+        Pricing is IOC taker: close at ask, open at bid, plus both option fees.
         ITM never enters this method. Near-strike does not buy spot.
         """
         from ..cash_secured_ops import (
             cash_secured_active_roll_daily_usdc,
             cash_secured_active_roll_dte_reason,
-            cash_secured_active_roll_fee_edge,
             cash_secured_active_roll_tv_ratio,
             cash_secured_hold_near_strike,
             cash_secured_roll_blocked,
@@ -2833,6 +2889,7 @@ class CoveredCallMixin:
         ):
             return [_payload(reason="near_strike", index_price=format_decimal(index_price, 4))]
         close_ask = close_book.best_ask_price
+        close_bid = close_book.best_bid_price
         if close_ask <= 0 or group.quantity <= 0:
             return [_payload(reason="illiquid_close")]
         close_debit = close_ask * group.quantity
@@ -2923,6 +2980,7 @@ class CoveredCallMixin:
         if not ranked:
             return [_payload(reason="illiquid_replacement")]
 
+        reject: list[str] = []
         picked = self._pick_csp_daily_yield_candidate(
             context,
             ranked,
@@ -2931,27 +2989,21 @@ class CoveredCallMixin:
             close_fee=close_fee,
             index_price=index_price,
             amortize_close_fee=True,
+            close_bid=close_bid,
+            close_ask=close_ask,
+            close_quantity=group.quantity,
+            reject_reason=reject,
         )
         hold_daily = cash_secured_active_roll_daily_usdc(credit=close_debit, dte_days=group.dte_days)
         if picked is None:
             return [
                 _payload(
-                    reason="daily_yield_not_higher",
+                    reason=reject[0] if reject else "daily_yield_not_higher",
                     hold_daily=format_decimal(hold_daily, 8),
                     tv_ratio=format_decimal(tv_ratio, 4),
                 )
             ]
         candidate, numbers = picked
-        new_credit = Decimal(str(numbers["new_credit"]))
-        open_fee = Decimal(str(numbers["open_fee"]))
-        net, _edge_ok = cash_secured_active_roll_fee_edge(
-            new_credit=new_credit,
-            close_debit=close_debit,
-            close_fee=close_fee,
-            open_fee=open_fee,
-            min_net_usdc=self.config.covered_call_csp_active_roll_min_net_usdc,
-        )
-        numbers["net_edge"] = format_decimal(net, 8)
         numbers["tv_ratio"] = format_decimal(tv_ratio, 4)
 
         if not live:

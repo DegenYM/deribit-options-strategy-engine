@@ -500,6 +500,11 @@ class BotConfig:
     covered_call_csp_active_roll_max_dte: int = 10
     covered_call_csp_active_roll_min_tv_ratio: Decimal = Decimal("0.25")
     covered_call_csp_active_roll_min_net_usdc: Decimal = Decimal("5")
+    # 0.25 = new taker daily yield must be ≥ 25% above holding remaining TV.
+    covered_call_csp_active_roll_min_yield_edge: Decimal = Decimal("0.25")
+    # Net leftover after ask-close + bid-open + fees must cover this many
+    # times (fees + half-spreads). 2 = leftover ≥ 2× round-trip friction.
+    covered_call_csp_active_roll_min_net_edge_mult: Decimal = Decimal("2")
     # Hold (do not roll / do not sell a new put) when spot is inside this band
     # above strike. 0.01 = wait for assignment until the put is ≥ 1% OTM.
     covered_call_csp_hold_near_strike_pct: Decimal = Decimal("0.01")
@@ -1227,6 +1232,16 @@ def load_config(
     )
     if covered_call_csp_active_roll_min_net_usdc < 0:
         raise ConfigurationError("COVERED_CALL_CSP_ACTIVE_ROLL_MIN_NET_USDC must be >= 0")
+    covered_call_csp_active_roll_min_yield_edge = to_decimal(
+        _optional(values, "COVERED_CALL_CSP_ACTIVE_ROLL_MIN_YIELD_EDGE", "0.25")
+    )
+    if covered_call_csp_active_roll_min_yield_edge < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_ACTIVE_ROLL_MIN_YIELD_EDGE must be >= 0")
+    covered_call_csp_active_roll_min_net_edge_mult = to_decimal(
+        _optional(values, "COVERED_CALL_CSP_ACTIVE_ROLL_MIN_NET_EDGE_MULT", "2")
+    )
+    if covered_call_csp_active_roll_min_net_edge_mult < 0:
+        raise ConfigurationError("COVERED_CALL_CSP_ACTIVE_ROLL_MIN_NET_EDGE_MULT must be >= 0")
     covered_call_csp_hold_near_strike_pct = to_decimal(
         _optional(values, "COVERED_CALL_CSP_HOLD_NEAR_STRIKE_PCT", "0.01")
     )
@@ -1560,6 +1575,8 @@ def load_config(
         covered_call_csp_active_roll_max_dte=covered_call_csp_active_roll_max_dte,
         covered_call_csp_active_roll_min_tv_ratio=covered_call_csp_active_roll_min_tv_ratio,
         covered_call_csp_active_roll_min_net_usdc=covered_call_csp_active_roll_min_net_usdc,
+        covered_call_csp_active_roll_min_yield_edge=covered_call_csp_active_roll_min_yield_edge,
+        covered_call_csp_active_roll_min_net_edge_mult=covered_call_csp_active_roll_min_net_edge_mult,
         covered_call_csp_hold_near_strike_pct=covered_call_csp_hold_near_strike_pct,
         covered_call_robust_exit_enabled=_to_bool(_optional(values, "COVERED_CALL_ROBUST_EXIT_ENABLED", "false")),
         covered_call_robust_exit_dte=to_decimal(_optional(values, "COVERED_CALL_ROBUST_EXIT_DTE", "0.5")),

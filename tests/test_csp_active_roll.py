@@ -12,6 +12,7 @@ from deribit_engine.cash_secured_ops import (
     cash_secured_active_roll_daily_beats_hold,
     cash_secured_active_roll_dte_reason,
     cash_secured_active_roll_fee_edge,
+    cash_secured_active_roll_taker_spread_usdc,
     cash_secured_active_roll_tv_ratio,
     cash_secured_later_expiry_in_window,
 )
@@ -172,6 +173,27 @@ def test_active_roll_helpers_tv_dte_fee_and_later_expiry() -> None:
     )
     assert edge_off is False
 
+    spread = cash_secured_active_roll_taker_spread_usdc(
+        close_bid=Decimal("80"),
+        close_ask=Decimal("90"),
+        new_bid=Decimal("100"),
+        new_ask=Decimal("120"),
+        close_quantity=Decimal("0.1"),
+        new_quantity=Decimal("0.1"),
+    )
+    assert spread == Decimal("1.5")
+    eaten_net, eaten_ok = cash_secured_active_roll_fee_edge(
+        new_credit=Decimal("10"),
+        close_debit=Decimal("9"),
+        close_fee=Decimal("1.125"),
+        open_fee=Decimal("1.25"),
+        min_net_usdc=Decimal("5"),
+        spread_usdc=spread,
+        min_net_edge_mult=Decimal("2"),
+    )
+    assert eaten_net < 0
+    assert eaten_ok is False
+
     hold_daily, roll_daily, beats = cash_secured_active_roll_daily_beats_hold(
         hold_credit=Decimal("20"),
         hold_dte=Decimal("2.75"),
@@ -196,6 +218,43 @@ def test_active_roll_helpers_tv_dte_fee_and_later_expiry() -> None:
         switch_fees=Decimal("3"),
     )
     assert earlier_ok is True
+    _hold, _roll, hurdle_off = cash_secured_active_roll_daily_beats_hold(
+        hold_credit=Decimal("9"),
+        hold_dte=Decimal("14"),
+        new_credit=Decimal("13"),
+        new_dte=Decimal("14"),
+        switch_fees=Decimal("3"),
+        min_yield_edge=Decimal("0.25"),
+    )
+    assert hurdle_off is False
+    _hold, _roll, hurdle_on = cash_secured_active_roll_daily_beats_hold(
+        hold_credit=Decimal("9"),
+        hold_dte=Decimal("14"),
+        new_credit=Decimal("40"),
+        new_dte=Decimal("21"),
+        switch_fees=Decimal("3"),
+        min_yield_edge=Decimal("0.25"),
+    )
+    assert hurdle_on is True
+    mid_hold, mid_roll, mid_beats = cash_secured_active_roll_daily_beats_hold(
+        hold_credit=Decimal("8.5"),
+        hold_dte=Decimal("14"),
+        new_credit=Decimal("20"),
+        new_dte=Decimal("21"),
+        switch_fees=Decimal("0"),
+        min_yield_edge=Decimal("0.25"),
+    )
+    assert mid_beats is True
+    assert mid_roll > mid_hold
+    _taker_hold, _taker_roll, taker_beats = cash_secured_active_roll_daily_beats_hold(
+        hold_credit=Decimal("9"),
+        hold_dte=Decimal("14"),
+        new_credit=Decimal("18"),
+        new_dte=Decimal("21"),
+        switch_fees=Decimal("3.225"),
+        min_yield_edge=Decimal("0.25"),
+    )
+    assert taker_beats is False
 
     assert cash_secured_later_expiry_in_window(
         expiration_timestamp_ms=2,
@@ -236,7 +295,9 @@ def test_near_strike_does_not_active_roll(tmp_path) -> None:
     assert len(rolls) == 1
     assert rolls[0]["would_place"] is False
     assert rolls[0]["reason"] == "near_strike"
-    assert not any(a.get("reason") == "csp_active_roll" for a in result["actions"] if a.get("action") == "close_group_preview")
+    assert not any(
+        a.get("reason") == "csp_active_roll" for a in result["actions"] if a.get("action") == "close_group_preview"
+    )
 
 
 def test_active_roll_config_defaults_off(tmp_path: Path) -> None:
@@ -248,6 +309,8 @@ def test_active_roll_config_defaults_off(tmp_path: Path) -> None:
     assert config.covered_call_csp_active_roll_max_dte == 10
     assert config.covered_call_csp_active_roll_min_tv_ratio == Decimal("0.25")
     assert config.covered_call_csp_active_roll_min_net_usdc == Decimal("5")
+    assert config.covered_call_csp_active_roll_min_yield_edge == Decimal("0.25")
+    assert config.covered_call_csp_active_roll_min_net_edge_mult == Decimal("2")
     assert config.covered_call_csp_hold_near_strike_pct == Decimal("0.01")
 
 
@@ -285,7 +348,8 @@ def test_otm_liquid_next_dte_positive_edge_would_place(tmp_path) -> None:
         a.get("action") == "close_group_preview" and a.get("reason") == "csp_active_roll" for a in result["actions"]
     )
     assert Decimal(str(rolls[0]["net_edge"])) > 0
-    assert Decimal(str(rolls[0]["roll_daily"])) > Decimal(str(rolls[0]["hold_daily"]))
+    assert Decimal(str(rolls[0]["roll_daily"])) > Decimal(str(rolls[0]["hold_daily"])) * Decimal("1.25")
+    assert Decimal(str(rolls[0]["min_yield_edge"])) == Decimal("0.25")
     assert engine.state_store.load().groups[-1].status == "open"
 
 
@@ -372,7 +436,7 @@ def test_earlier_expiry_higher_daily_would_place(tmp_path) -> None:
     assert len(rolls) == 1
     assert rolls[0]["would_place"] is True
     assert rolls[0]["replacement_instrument"] == CURRENT
-    assert Decimal(str(rolls[0]["roll_daily"])) > Decimal(str(rolls[0]["hold_daily"]))
+    assert Decimal(str(rolls[0]["roll_daily"])) >= Decimal(str(rolls[0]["hold_daily"])) * Decimal("1.25")
 
 
 def test_itm_csp_does_not_take_active_roll_path(tmp_path) -> None:
@@ -474,9 +538,75 @@ def test_retry_skips_worse_same_contract(tmp_path) -> None:
     assert next(g for g in loaded.groups if g.group_id == "0100").status == "closed"
 
 
+def test_taker_spread_and_fees_eat_net_no_roll(tmp_path) -> None:
+    """Earlier-dated bid can look like a yield bump; ask-close + fees wipe the cash."""
+    client = FakeClient(btc_book_equity="0.2")
+    _roll_books(client, current_bid="110", current_ask="130", next_bid="80", next_ask="90")
+    client.positions = [_short_position(LAST)]
+    engine = _roll_engine(tmp_path, client)
+    _seed(engine, _parent(), _open_csp(instrument=LAST, expiration_ms=future_expiry(21)))
+    result = engine.manage(live=False)
+    rolls = _roll_actions(result)
+    assert len(rolls) == 1
+    assert rolls[0]["would_place"] is False
+    assert rolls[0]["reason"] == "net_edge_too_small"
+    assert engine.state_store.load().groups[-1].status == "open"
+
+
+def test_mid_looks_better_taker_hurdle_blocks_roll(tmp_path) -> None:
+    """Mid (no fees) would clear the 25% hurdle; IOC bid/ask + fees do not."""
+    client = FakeClient(btc_book_equity="0.2")
+    _roll_books(client, current_bid="80", current_ask="90", next_bid="180", next_ask="220")
+    client.positions = [_short_position()]
+    engine = _roll_engine(tmp_path, client)
+    _seed(engine, _parent(), _open_csp())
+    result = engine.manage(live=False)
+    rolls = _roll_actions(result)
+    assert len(rolls) == 1
+    assert rolls[0]["would_place"] is False
+    assert rolls[0]["reason"] == "daily_yield_not_higher"
+    assert engine.state_store.load().groups[-1].status == "open"
+
+
+def test_enough_taker_net_and_yield_edge_would_place(tmp_path) -> None:
+    client = FakeClient(btc_book_equity="0.2")
+    _roll_books(client, current_bid="80", current_ask="90", next_bid="400", next_ask="420")
+    client.positions = [_short_position()]
+    engine = _roll_engine(tmp_path, client)
+    _seed(engine, _parent(), _open_csp())
+    result = engine.manage(live=False)
+    rolls = _roll_actions(result)
+    assert len(rolls) == 1
+    assert rolls[0]["would_place"] is True
+    assert Decimal(str(rolls[0]["net_edge"])) > Decimal("9")
+    assert Decimal(str(rolls[0]["spread_usdc"])) > 0
+    assert Decimal(str(rolls[0]["close_fee"])) > 0
+    assert Decimal(str(rolls[0]["open_fee"])) > 0
+
+
+def test_active_roll_hurdle_env_overrides(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPTION_STRATEGY=covered_call",
+                "COVERED_CALL_ITM_TO_CASH_SECURED_ENABLED=true",
+                "COVERED_CALL_CSP_ACTIVE_ROLL_MIN_YIELD_EDGE=0.3",
+                "COVERED_CALL_CSP_ACTIVE_ROLL_MIN_NET_EDGE_MULT=3",
+                "",
+            ]
+        )
+    )
+    config = load_config(env_file, require_private=False)
+    assert config.covered_call_csp_active_roll_min_yield_edge == Decimal("0.3")
+    assert config.covered_call_csp_active_roll_min_net_edge_mult == Decimal("3")
+
+
 def test_make_config_default_active_roll_false(tmp_path) -> None:
     config = make_config(tmp_path, option_strategy="covered_call")
     assert config.covered_call_csp_active_roll_enabled is False
+    assert config.covered_call_csp_active_roll_min_yield_edge == Decimal("0.25")
+    assert config.covered_call_csp_active_roll_min_net_edge_mult == Decimal("2")
 
 
 def test_active_roll_skips_when_parent_cover_restored(tmp_path) -> None:

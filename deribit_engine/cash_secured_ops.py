@@ -458,6 +458,27 @@ def cash_secured_active_roll_dte_reason(
     return ""
 
 
+def cash_secured_active_roll_taker_spread_usdc(
+    *,
+    close_bid: Decimal,
+    close_ask: Decimal,
+    new_bid: Decimal,
+    new_ask: Decimal,
+    close_quantity: Decimal,
+    new_quantity: Decimal,
+) -> Decimal:
+    """IOC half-spread vs mid on both legs. Never use mid as a fill price.
+
+    Close is a buy at ask; open is a sell at bid. The tax vs the midpoint is
+    half the quoted spread on each book × that leg's size.
+    """
+    close_qty = max(close_quantity, Decimal("0"))
+    new_qty = max(new_quantity, Decimal("0"))
+    close_half = max(close_ask - close_bid, Decimal("0")) * close_qty / Decimal("2")
+    open_half = max(new_ask - new_bid, Decimal("0")) * new_qty / Decimal("2")
+    return close_half + open_half
+
+
 def cash_secured_active_roll_fee_edge(
     *,
     new_credit: Decimal,
@@ -465,17 +486,26 @@ def cash_secured_active_roll_fee_edge(
     close_fee: Decimal,
     open_fee: Decimal,
     min_net_usdc: Decimal,
+    spread_usdc: Decimal = Decimal("0"),
+    min_net_edge_mult: Decimal = Decimal("0"),
 ) -> tuple[Decimal, bool]:
-    """Net USDC vs holding: ``new_credit − close_debit − close_fee − open_fee``.
+    """Net USDC vs holding at taker prices, after fees and a cost-multiple floor.
 
-    Caller prices the close at the **ask** (buy-to-close) and the replacement
-    at the **bid** (IOC sell, same as CSP entry). ``ok`` iff
-    ``net − min_net_usdc ≥ 0`` (strictly non-negative after the dust floor).
-    Live active-roll now gates on daily yield instead; this helper remains for
-    tests and diagnostics.
+    ``new_credit`` is bid × qty (IOC sell). ``close_debit`` is ask × qty
+    (buy-to-close). ``ok`` iff ``net >= max(min_net_usdc, min_net_edge_mult ×
+    (close_fee + open_fee + spread_usdc))``. Default live ``min_net_edge_mult``
+    is 2 so leftover after the switch still covers round-trip friction twice.
     """
+    close_fee = max(close_fee, Decimal("0"))
+    open_fee = max(open_fee, Decimal("0"))
+    spread = max(spread_usdc, Decimal("0"))
     net = new_credit - close_debit - close_fee - open_fee
-    return net, net >= max(min_net_usdc, Decimal("0"))
+    round_trip = close_fee + open_fee + spread
+    need = max(min_net_usdc, Decimal("0"))
+    mult = max(min_net_edge_mult, Decimal("0"))
+    if mult > 0:
+        need = max(need, mult * round_trip)
+    return net, net >= need
 
 
 def cash_secured_active_roll_daily_usdc(*, credit: Decimal, dte_days: Decimal) -> Decimal:
@@ -492,19 +522,23 @@ def cash_secured_active_roll_daily_beats_hold(
     new_credit: Decimal,
     new_dte: Decimal,
     switch_fees: Decimal = Decimal("0"),
+    min_yield_edge: Decimal = Decimal("0"),
 ) -> tuple[Decimal, Decimal, bool]:
-    """Whether replacement daily yield beats holding remaining TV.
+    """Whether replacement daily yield beats holding remaining TV by a hurdle.
 
     Hold daily = close-ask remaining / remaining DTE. Roll daily =
     (new bid credit − switch fees) / new DTE. Same or earlier expiry is
-    allowed; the only economic gate is ``roll_daily > hold_daily``.
+    allowed. ``min_yield_edge`` 0.25 means roll_daily must be at least 25%
+    above hold_daily; 0 keeps the old strict ``roll_daily > hold_daily``.
     """
     hold_daily = cash_secured_active_roll_daily_usdc(credit=hold_credit, dte_days=hold_dte)
     roll_daily = cash_secured_active_roll_daily_usdc(
         credit=new_credit - max(switch_fees, Decimal("0")),
         dte_days=new_dte,
     )
-    return hold_daily, roll_daily, roll_daily > hold_daily
+    hurdle = max(min_yield_edge, Decimal("0"))
+    need = hold_daily * (Decimal("1") + hurdle)
+    return hold_daily, roll_daily, roll_daily > hold_daily and roll_daily >= need
 
 
 def cash_secured_last_active_roll_child(

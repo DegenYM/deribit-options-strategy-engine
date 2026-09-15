@@ -100,9 +100,9 @@
 
 ### CSP 主動 roll（預設關）
 
-`COVERED_CALL_CSP_ACTIVE_ROLL_ENABLED` 預設 **false**。打開後，**開倉中且 OTM** 的 cash-secured put 可在到期前買回，再賣一張仍在既有 CSP DTE／母倉履約價窗（`COVERED_CALL_CSP_STRIKE_FLOOR_PCT`）內、**換算日收益更高**的 USDC put。同一張或更早到期都可以，只要 `(新 bid − 換倉手續費) / 新 DTE > 平倉 ask / 剩餘 DTE`。ITM 仍走 self-assign／到期，不會跟主動 roll 同一 cycle 搶路徑。
+`COVERED_CALL_CSP_ACTIVE_ROLL_ENABLED` 預設 **false**。打開後，**開倉中且 OTM** 的 cash-secured put 可在到期前買回，再賣一張仍在既有 CSP DTE／母倉履約價窗（`COVERED_CALL_CSP_STRIKE_FLOOR_PCT`）內、**換算日收益明顯更高**的 USDC put。同一張或更早到期都可以。吃單價用 **平倉 ask、開倉 bid**（不要 mid），並扣開＋平 Deribit option fee。必須 `新日收益 ≥ 舊日收益 × (1 + MIN_YIELD_EDGE)`（預設 0.25）且 `淨額 = 新bid − 舊ask − 開費 − 平費 ≥ max(MIN_NET_USDC, MIN_NET_EDGE_MULT × (費 + 半價差))`（預設 5 USDC 與 2 倍）。ITM 仍走 self-assign／到期，不會跟主動 roll 同一 cycle 搶路徑。
 
-閘門（任一失敗就持有）：剩餘 DTE 須 **> `COVERED_CALL_CSP_ACTIVE_ROLL_MIN_DTE`（2）且 ≤ MAX_DTE（10）**；剩餘時間價值／`max(原權利金, 內在價值+TV)` 須 ≥ `MIN_TV_RATIO`（0.25）；平倉盤口重用 self-assign 流動性（雙邊、`MAX_SPREAD_RATIO` 0.25、ask ≥ 平倉量）；替換約須通過與 `scan --cash-secured` 相同的 OI／名目，且價差不過寬；日收益沒有嚴格更高就 `daily_yield_not_higher`、抱到到期。Live 先 reduce_only 買回，成交後才 IOC 打 bid 開新約；新約失敗則 USDC 停泊、下個 cycle **只重試進場**、不再平第二次，且重試仍須日收益高於剛買回那張的剩餘 TV（不會把同一張用更差的 bid 再賣回去）。不打市價傾銷。
+閘門（任一失敗就持有）：剩餘 DTE 須 **> `COVERED_CALL_CSP_ACTIVE_ROLL_MIN_DTE`（2）且 ≤ MAX_DTE（10）**；剩餘時間價值／`max(原權利金, 內在價值+TV)` 須 ≥ `MIN_TV_RATIO`（0.25）；平倉盤口重用 self-assign 流動性（雙邊、`MAX_SPREAD_RATIO` 0.25、ask ≥ 平倉量）；替換約須通過與 `scan --cash-secured` 相同的 OI／名目，且價差不過寬；日收益沒過 hurdle 是 `daily_yield_not_higher`、扣完價差＋費後淨額不夠是 `net_edge_too_small`、抱到到期。Live 先 reduce_only 買回，成交後才 IOC 打 bid 開新約；新約失敗則 USDC 停泊、下個 cycle **只重試進場**、不再平第二次，且重試仍須通過同一套日收益／淨額閘門（不會把同一張用更差的 bid 再賣回去）。不打市價傾銷。
 
 ### 營運 playbook（觀察後再開，不要默默改 live 資金檔）
 
