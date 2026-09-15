@@ -46,7 +46,40 @@ def spot_restore_order_label(group: TradeGroup, order_label_prefix: str) -> str:
 
 
 def is_spot_restore_label(label: str) -> bool:
-    return "spot-restore" in str(label or "")
+    """Cover restore / abort-restore buys — not premium-swap or leftover CC cover."""
+    text = str(label or "").lower()
+    if "premium-swap" in text or "profit-sweep" in text:
+        return False
+    return "spot-restore" in text or "csp-restore" in text or "abort-restore" in text
+
+
+def spot_restore_group_id_from_label(label: str) -> str | None:
+    """Parse parent group id from a restore / abort-restore order label."""
+    if not is_spot_restore_label(label):
+        return None
+    parts = [p for p in str(label or "").split("-") if p]
+    restore_tails = {
+        "spot-restore",
+        "short-spot-restore",
+        "csp-restore",
+        "short-csp-restore",
+        "abort-restore",
+        "short-abort-restore",
+    }
+    for i, part in enumerate(parts):
+        if not (part.isdigit() and 3 <= len(part) <= 5):
+            continue
+        tail = "-".join(parts[i + 1 :]).lower()
+        if tail in restore_tails or tail.startswith("spot-restore") or tail.startswith("short-spot-restore"):
+            return part.zfill(4) if len(part) <= 4 else part
+        if tail.startswith("csp-restore") or tail.startswith("short-csp-restore"):
+            return part.zfill(4) if len(part) <= 4 else part
+        if tail.startswith("abort-restore") or tail.startswith("short-abort-restore"):
+            return part.zfill(4) if len(part) <= 4 else part
+    last = parts[-1] if parts else ""
+    if last.isdigit() and 3 <= len(last) <= 5:
+        return last.zfill(4) if len(last) <= 4 else last
+    return None
 
 
 def spot_restore_realized_usdt(group: TradeGroup) -> Decimal:
@@ -1017,7 +1050,7 @@ def spot_restore_buy_trades_for_currency(client: DeribitClient, currency: str) -
     return [t for t in _iter_spot_buy_trades(client, currency) if is_spot_restore_label(str(t.get("label") or ""))]
 
 
-def spot_restore_fill_stats_for_currency(client: DeribitClient, currency: str) -> dict[str, str]:
+def spot_restore_fill_stats_for_currency(client: DeribitClient, currency: str) -> dict[str, Any]:
     trades = spot_restore_buy_trades_for_currency(client, currency)
     native = sum((to_decimal(t.get("amount")) for t in trades), Decimal("0"))
     usdt = spot_buy_quote_spent_from_trades(trades, quote_currency="USDT")
@@ -1027,15 +1060,44 @@ def spot_restore_fill_stats_for_currency(client: DeribitClient, currency: str) -
             return "0"
         return format_decimal(quote / bought, 2)
 
-    return {
+    by_group: dict[str, dict[str, Decimal | str]] = {}
+    for trade in trades:
+        gid = spot_restore_group_id_from_label(str(trade.get("label") or ""))
+        if not gid:
+            continue
+        row = by_group.setdefault(
+            gid,
+            {"native": Decimal("0"), "spent": Decimal("0"), "instrument_name": "", "label": ""},
+        )
+        row["native"] = to_decimal(row["native"]) + to_decimal(trade.get("amount"))
+        row["spent"] = to_decimal(row["spent"]) + spot_buy_quote_spent_from_trades([trade], quote_currency="USDT")
+        inst = str(trade.get("instrument_name") or "").strip()
+        if inst:
+            row["instrument_name"] = inst
+        lab = str(trade.get("label") or "").strip()
+        if lab:
+            row["label"] = lab
+
+    payload: dict[str, Any] = {
         "native_bought": format_decimal(native, 8),
         "usdt_spent": format_decimal(usdt, 4),
         "avg_price_usd": _avg(usdt, native),
     }
+    if by_group:
+        payload["by_group"] = {
+            gid: {
+                "native_bought": format_decimal(to_decimal(row["native"]), 8),
+                "usdt_spent": format_decimal(to_decimal(row["spent"]), 4),
+                "instrument_name": str(row.get("instrument_name") or "") or None,
+                "label": str(row.get("label") or "") or None,
+            }
+            for gid, row in by_group.items()
+        }
+    return payload
 
 
-def spot_restore_fill_stats_by_book(client: DeribitClient) -> dict[str, dict[str, str]]:
-    out: dict[str, dict[str, str]] = {}
+def spot_restore_fill_stats_by_book(client: DeribitClient) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
     for currency in ("BTC", "ETH"):
         stats = spot_restore_fill_stats_for_currency(client, currency)
         if to_decimal(stats["native_bought"]) > 0 or to_decimal(stats["usdt_spent"]) > 0:

@@ -552,10 +552,12 @@ def _aggregate_spot_exit_fill_stats(
 
 def _aggregate_spot_restore_fill_stats(
     statuses: list[dict[str, Any]],
-) -> dict[str, dict[str, str]] | None:
+) -> dict[str, dict[str, Any]] | None:
     from ..utils import format_decimal
 
     merged: dict[str, dict[str, Decimal]] = {}
+    merged_groups: dict[str, dict[str, dict[str, Decimal]]] = {}
+    group_meta: dict[str, dict[str, dict[str, str]]] = {}
     for payload in statuses:
         for book, row in (payload.get("spot_restore_fill_stats_by_book") or {}).items():
             book_key = str(book).upper()
@@ -563,17 +565,53 @@ def _aggregate_spot_restore_fill_stats(
                 merged[book_key] = {key: Decimal("0") for key in _SPOT_RESTORE_FILL_STAT_SUM_KEYS}
             for key in _SPOT_RESTORE_FILL_STAT_SUM_KEYS:
                 merged[book_key][key] += _dec(row.get(key))
+            by_group = row.get("by_group") if isinstance(row, dict) else None
+            if not isinstance(by_group, dict):
+                continue
+            book_groups = merged_groups.setdefault(book_key, {})
+            book_meta = group_meta.setdefault(book_key, {})
+            for gid, gstat in by_group.items():
+                gid_key = str(gid or "").strip()
+                if not gid_key or not isinstance(gstat, dict):
+                    continue
+                acc = book_groups.setdefault(gid_key, {key: Decimal("0") for key in _SPOT_RESTORE_FILL_STAT_SUM_KEYS})
+                for key in _SPOT_RESTORE_FILL_STAT_SUM_KEYS:
+                    acc[key] += _dec(gstat.get(key))
+                meta = book_meta.setdefault(gid_key, {})
+                inst = str(gstat.get("instrument_name") or "").strip()
+                lab = str(gstat.get("label") or "").strip()
+                if inst:
+                    meta["instrument_name"] = inst
+                if lab:
+                    meta["label"] = lab
     if not merged:
         return None
-    out: dict[str, dict[str, str]] = {}
+    out: dict[str, dict[str, Any]] = {}
     for book, totals in merged.items():
         native = totals["native_bought"]
         usdt = totals["usdt_spent"]
-        out[book] = {
+        row_out: dict[str, Any] = {
             "native_bought": format_decimal(native, 8),
             "usdt_spent": format_decimal(usdt, 4),
             "avg_price_usd": format_decimal(usdt / native, 2) if native > 0 else "0",
         }
+        grouped = merged_groups.get(book) or {}
+        if grouped:
+            meta_book = group_meta.get(book) or {}
+            row_out["by_group"] = {
+                gid: {
+                    "native_bought": format_decimal(vals["native_bought"], 8),
+                    "usdt_spent": format_decimal(vals["usdt_spent"], 4),
+                    **(
+                        {"instrument_name": meta_book[gid]["instrument_name"]}
+                        if meta_book.get(gid, {}).get("instrument_name")
+                        else {}
+                    ),
+                    **({"label": meta_book[gid]["label"]} if meta_book.get(gid, {}).get("label") else {}),
+                }
+                for gid, vals in grouped.items()
+            }
+        out[book] = row_out
     return out
 
 

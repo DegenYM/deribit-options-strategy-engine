@@ -2338,14 +2338,48 @@ export function premiumSweepFillStatsByBook(status) {
   return status?.premium_sweep_fill_stats_by_book ?? null;
 }
 
+/** Non-empty book→stats map; `{}` from a light refresh must not wipe prior stats. */
+function nonEmptyBookStats(stats) {
+  if (!stats || typeof stats !== "object") return null;
+  return Object.keys(stats).length ? stats : null;
+}
+
 /** Exchange VWAP stats from status (ITM / settlement spot-exit fills). */
 export function spotExitFillStatsByBook(status) {
-  return status?.spot_exit_fill_stats_by_book ?? null;
+  return nonEmptyBookStats(status?.spot_exit_fill_stats_by_book);
 }
 
 /** Exchange VWAP stats from status (cover restore buys after ITM exit). */
 export function spotRestoreFillStatsByBook(status) {
-  return status?.spot_restore_fill_stats_by_book ?? null;
+  return nonEmptyBookStats(status?.spot_restore_fill_stats_by_book);
+}
+
+function labeledRestoreFillFromBookStats(restoreStats, book, gid) {
+  const byGroup = restoreStats?.[book]?.by_group;
+  if (!byGroup || typeof byGroup !== "object") return null;
+  const key = String(gid || "").trim();
+  if (!key) return null;
+  const padded = key.padStart(4, "0");
+  const fill = byGroup[key] || (padded !== key ? byGroup[padded] : null);
+  if (!fill || typeof fill !== "object") return null;
+  const native = num(fill.native_bought) ?? 0;
+  const spent = num(fill.usdt_spent) ?? 0;
+  if (!(native > spotRestoreLotThreshold(book))) return null;
+  return { native, spent };
+}
+
+/** Labeled restore / abort-restore fill for one parent group (never leftover CC cover). */
+function labeledRestoreFillForGroup(g, status) {
+  const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
+  const gid = String(g?.group_id || "").trim();
+  if (!gid || (book !== "BTC" && book !== "ETH")) return null;
+  return labeledRestoreFillFromBookStats(spotRestoreFillStatsByBook(status ?? STATE.status), book, gid);
+}
+
+function journalRestoreAlreadyFilled(g, groups) {
+  const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
+  if (String(g?.spot_restore_status || "").toLowerCase() === "filled") return true;
+  return wheelSpotRestoreFilledNative(g, groups) > spotRestoreLotThreshold(book);
 }
 
 /** Merge live status; retain exchange fill stats when a fast refresh omits them. */
@@ -3000,16 +3034,25 @@ export function itmSpotRoundTripComplete(g, groups) {
  * only after restore-to-cover is complete (do not count raw cover sale as profit).
  * Legacy folded premium USDT is attributed to Profit swap instead.
  */
-export function itmSpotExitNetUsdtForTotalProfit(g, groups) {
+export function itmSpotExitNetUsdtForTotalProfit(g, groups, status) {
   if (!groupHasItmSpotExitFills(g)) return null;
   const exitU = spotExitRealizedQuoteUsdt(g);
   if (exitU === null || exitU <= 0) return null;
-  if (!itmSpotRoundTripComplete(g, groups)) return null;
-  const restoreU = wheelSpotRestoreQuoteUsdt(g, groups);
-  const target = _itmRestoreTargetNative(g);
-  // Cover may already be back (USDC fill, no quote journal) — do not count raw exit.
-  if (target > 0 && !(restoreU > 0)) return null;
-  let net = exitU - restoreU;
+  if (itmSpotRoundTripComplete(g, groups)) {
+    const restoreU = wheelSpotRestoreQuoteUsdt(g, groups);
+    const target = _itmRestoreTargetNative(g);
+    // Cover may already be back (USDC fill, no quote journal) — do not count raw exit.
+    if (target > 0 && !(restoreU > 0)) return null;
+    let net = exitU - restoreU;
+    const folded = itmFoldedPremiumUsdt(g);
+    if (folded > 0) net -= folded;
+    return net;
+  }
+  // Journal skipped but exchange has a labeled restore / abort-restore fill for this parent.
+  if (journalRestoreAlreadyFilled(g, groups)) return null;
+  const fill = labeledRestoreFillForGroup(g, status);
+  if (!fill) return null;
+  let net = exitU - (fill.spent || 0);
   const folded = itmFoldedPremiumUsdt(g);
   if (folded > 0) net -= folded;
   return net;
@@ -3019,9 +3062,9 @@ export function itmSpotExitNetUsdtForTotalProfit(g, groups) {
  * Closed-trade card ITM PnL: exit − restore once restore has quote spend
  * (or round-trip is complete for fee recognition).
  */
-export function itmSpotExitDisplayNetUsdt(g, groups) {
+export function itmSpotExitDisplayNetUsdt(g, groups, status) {
   if (!groupHasItmSpotExitFills(g)) return null;
-  const feeNet = itmSpotExitNetUsdtForTotalProfit(g, groups);
+  const feeNet = itmSpotExitNetUsdtForTotalProfit(g, groups, status);
   if (feeNet !== null) return feeNet;
   const exitU = spotExitRealizedQuoteUsdt(g);
   const restoreU = wheelSpotRestoreQuoteUsdt(g, groups);
@@ -3030,11 +3073,11 @@ export function itmSpotExitDisplayNetUsdt(g, groups) {
   return exitU - restoreU;
 }
 
-export function sumItmSpotExitNetUsdtForTotalProfit(rows) {
+export function sumItmSpotExitNetUsdtForTotalProfit(rows, status) {
   let total = 0;
   let any = false;
   for (const g of rows || []) {
-    const net = itmSpotExitNetUsdtForTotalProfit(g, rows);
+    const net = itmSpotExitNetUsdtForTotalProfit(g, rows, status);
     if (net === null) continue;
     total += net;
     any = true;
@@ -3123,20 +3166,29 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
     const displayUsdt = num(exchange?.usdt);
     if (displayNative !== null && displayNative > 0 && displayUsdt !== null && displayUsdt > 0) {
       // Exchange fill-stats include folded premium; peel it so Sold stays cover-only.
-      soldNative[book] = Math.max(0, displayNative - (foldedNativeByBook[book] || 0));
-      soldQuote[book] = Math.max(0, displayUsdt - (foldedUsdtByBook[book] || 0));
-      any = true;
+      // Never shrink journal Sold: stats that peel to ~0 (or omit a USDC leg)
+      // must not hide an incomplete ITM round-trip.
+      const peeledNative = Math.max(0, displayNative - (foldedNativeByBook[book] || 0));
+      const peeledQuote = Math.max(0, displayUsdt - (foldedUsdtByBook[book] || 0));
+      if (peeledNative > (soldNative[book] || 0) + 1e-8) {
+        soldNative[book] = peeledNative;
+        soldQuote[book] = peeledQuote;
+      }
+      if (peeledNative > 0 || peeledQuote > 0) any = true;
     }
     const restore = restoreStats?.[book];
     const restoreNative = num(restore?.native_bought);
     const restoreUsdt = num(restore?.usdt_spent);
     // Fill-stats often miss BTC_USDC / unlabeled manual restores. Never shrink
     // per-wheel journal Bought back (Jack #0103). Only adopt stats when larger.
-    if (restoreNative !== null && restoreNative > 0 && restoreUsdt !== null && restoreUsdt > 0) {
+    // USDC restores may have native without USDT spend — still count Bought back.
+    if (restoreNative !== null && restoreNative > 0) {
       if (restoreNative > (boughtNative[book] || 0) + 1e-8) {
         boughtNative[book] = restoreNative;
-        boughtQuote[book] = restoreUsdt;
-        boughtQuotedNative[book] = restoreNative;
+        if (restoreUsdt !== null && restoreUsdt > 0) {
+          boughtQuote[book] = restoreUsdt;
+          boughtQuotedNative[book] = restoreNative;
+        }
       }
       any = true;
     }
@@ -3151,9 +3203,29 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
   if (!any) return null;
   const usdtSold = PROFIT_SWEEP_BOOKS.reduce((sum, book) => sum + (soldQuote[book] || 0), 0);
   const usdtBought = PROFIT_SWEEP_BOOKS.reduce((sum, book) => sum + (boughtQuote[book] || 0), 0);
-  // Hero net = recognized per-group exit−restore only. Book-level fill stats mix
-  // multiple wheels (and unlabeled cover buys) and must not count as PnL.
-  const recognizedNet = sumItmSpotExitNetUsdtForTotalProfit(rows);
+  const wheels = spotExitWheelNotes(rows);
+  applyLabeledRestoreOverlay(wheels, restoreStats);
+  const stillOutNative = { BTC: 0, ETH: 0 };
+  const unrestoredNative = { BTC: 0, ETH: 0 };
+  for (const wheel of wheels) {
+    const remain = wheelPanelStillOutNative(wheel);
+    if (remain > spotRestoreLotThreshold(wheel.book)) {
+      stillOutNative[wheel.book] += remain;
+      unrestoredNative[wheel.book] += remain;
+    }
+  }
+  const recognizedNet = sumItmSpotExitNetUsdtForTotalProfit(rows, status);
+  const overlayPartial = wheels.some(
+    (w) =>
+      (w.overlayMatchedNative || 0) > spotRestoreLotThreshold(w.book) &&
+      wheelPanelStillOutNative(w) > spotRestoreLotThreshold(w.book)
+  );
+  const pending = PROFIT_SWEEP_BOOKS.some(
+    (book) =>
+      stillOutNative[book] > spotRestoreLotThreshold(book) ||
+      unrestoredNative[book] > spotRestoreLotThreshold(book)
+  );
+  const panelNet = recognizedNet;
   return {
     soldNative,
     soldQuote,
@@ -3161,17 +3233,126 @@ export function summarizeSpotExitDisposition(groups, { status = null } = {}) {
     boughtNative,
     boughtQuote,
     boughtAvg,
+    stillOutNative,
+    unrestoredNative,
+    wheels,
+    pending,
+    partial: overlayPartial,
     usdtSold,
     usdtBought,
-    usdtNet: recognizedNet,
+    usdtNet: Math.abs(panelNet) < 0.005 ? null : panelNet,
     usdtTotal: usdtSold,
   };
 }
 
+function spotExitQuoteAsset(g) {
+  const inst = String(g?.spot_exit_instrument_name || "").toUpperCase();
+  const idx = inst.lastIndexOf("_");
+  if (idx >= 0) {
+    const quote = inst.slice(idx + 1);
+    if (quote === "USDT" || quote === "USDC" || quote === "USDE") return quote;
+  }
+  return "";
+}
+
+function spotExitWheelSoldNative(g) {
+  let native = _itmSpotExitSwapNative(g);
+  if (itmSpotExitPremiumFolded(g)) {
+    native = Math.max(0, native - itmFoldedPremiumNative(g));
+  }
+  return native;
+}
+
+function spotExitWheelSoldQuote(g) {
+  let quote = spotExitRealizedQuoteUsdt(g) ?? 0;
+  if (quote > 0 && itmSpotExitPremiumFolded(g)) {
+    quote = Math.max(0, quote - itmFoldedPremiumUsdt(g));
+  }
+  return quote;
+}
+
+/**
+ * Cover still to buy back (restore-to-cover), not sold − bought.
+ * ITM settlement can sell less than cover; restore buys the cover target.
+ * Overlay labeled fills count as already restored on that wheel only.
+ */
+function wheelPanelStillOutNative(w) {
+  const lot = spotRestoreLotThreshold(w.book);
+  const overlay = Math.max(w.overlayMatchedNative || 0, 0);
+  const unrestored = Math.max(w.unrestored ?? 0, 0);
+  const remainCover = subtractDecimals(unrestored, overlay, 8);
+  return remainCover > lot ? remainCover : 0;
+}
+
+/**
+ * Hang labeled restore / abort-restore fills on the parent group id only.
+ * Do not dump leftover book-level BTC buys onto the next unrestored wheel.
+ */
+function applyLabeledRestoreOverlay(wheels, restoreStats) {
+  for (const w of wheels) {
+    const fill = labeledRestoreFillFromBookStats(restoreStats, w.book, w.groupId);
+    if (!fill) continue;
+    w.overlayMatchedNative = fill.native;
+    w.overlaySpend = fill.spent;
+  }
+}
+
+/** Per-wheel ITM exit notes for the compact still-out footnote (not a ledger table). */
+function spotExitWheelNotes(rows) {
+  const wheels = [];
+  for (const g of rows || []) {
+    if (!groupHasItmSpotExitFills(g)) continue;
+    const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
+    if (book !== "BTC" && book !== "ETH") continue;
+    const groupId = String(g?.group_id || "").trim();
+    if (!groupId) continue;
+    const unrestored = unrestoredSpotExitNative(g, rows);
+    wheels.push({
+      groupId,
+      book,
+      quoteAsset: spotExitQuoteAsset(g) || "USDT",
+      soldNative: spotExitWheelSoldNative(g),
+      soldQuote: spotExitWheelSoldQuote(g),
+      unrestored,
+      restored: wheelSpotRestoreFilledNative(g, rows),
+      restoreSpend: wheelSpotRestoreQuoteUsdt(g, rows),
+      overlayMatchedNative: 0,
+      overlaySpend: 0,
+      complete: itmSpotRoundTripComplete(g, rows),
+      restoreSkipped: String(g?.spot_restore_status || "").toLowerCase() === "skipped",
+      openCsp: cashSecuredChildrenForParent(rows, g).some(
+        (child) => String(child?.status || "").toLowerCase() === "open"
+      ),
+    });
+  }
+  wheels.sort((a, b) => a.groupId.localeCompare(b.groupId, undefined, { numeric: true }));
+  return wheels;
+}
+
+function spotExitDisplayStillOut(summary, book) {
+  const lot = spotRestoreLotThreshold(book);
+  const ledger = num(summary?.stillOutNative?.[book]) ?? 0;
+  if (ledger > lot) return ledger;
+  const journal = num(summary?.unrestoredNative?.[book]) ?? 0;
+  return journal > lot ? journal : 0;
+}
+
+function spotExitBookHasSold(summary, book) {
+  return (num(summary?.soldNative?.[book]) ?? 0) > 0 || (num(summary?.soldQuote?.[book]) ?? 0) > 0;
+}
+
+function spotExitBookHasBought(summary, book) {
+  return (num(summary?.boughtNative?.[book]) ?? 0) > 0 || (num(summary?.boughtQuote?.[book]) ?? 0) > 0;
+}
+
+function spotExitBookHasStillOut(summary, book) {
+  return spotExitDisplayStillOut(summary, book) > spotRestoreLotThreshold(book);
+}
+
 function fmtSpotExitSoldSlot(summary, book) {
   const sold = num(summary.soldNative?.[book]);
-  if (sold === null || sold <= 0) return fmtProfitSwapEmptySlot();
   const quote = num(summary.soldQuote?.[book]);
+  if ((sold === null || sold <= 0) && (quote === null || quote <= 0)) return fmtProfitSwapEmptySlot();
   const subParts = [];
   if (quote !== null && quote > 0) {
     subParts.push(`<span class="font-mono tabular-nums pnl-pos">${fmtProfitUsdt(quote)} USDT</span>`);
@@ -3184,16 +3365,20 @@ function fmtSpotExitSoldSlot(summary, book) {
       `<span class="profit-sweep-avg-price font-mono tabular-nums">${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}</span>`
     );
   }
+  const soldMain =
+    sold !== null && sold > 0
+      ? `-${fmtProfitNative(book, sold)}`
+      : "";
   return `<div class="profit-swap-book-slot">
-    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums pnl-neg">-${fmtProfitNative(book, sold)}</span></div>
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)}${soldMain ? ` <span class="font-mono tabular-nums pnl-neg">${soldMain}</span>` : ""}</div>
     <div class="profit-swap-book-slot-sub">${subParts.join('<span class="profit-swap-book-slot-sep" aria-hidden="true">·</span>')}</div>
   </div>`;
 }
 
 function fmtSpotExitBoughtSlot(summary, book) {
   const bought = num(summary.boughtNative?.[book]);
-  if (bought === null || bought <= 0) return fmtProfitSwapEmptySlot();
   const quote = num(summary.boughtQuote?.[book]);
+  if ((bought === null || bought <= 0) && (quote === null || quote <= 0)) return fmtProfitSwapEmptySlot();
   const subParts = [];
   if (quote !== null && quote > 0) {
     subParts.push(`<span class="font-mono tabular-nums pnl-neg">${fmtProfitUsdt(quote)} USDT</span>`);
@@ -3206,39 +3391,103 @@ function fmtSpotExitBoughtSlot(summary, book) {
       `<span class="profit-sweep-avg-price font-mono tabular-nums">${i18n("avg", "均價")} ${fmtProfitAvgUsd(book, avg)}</span>`
     );
   }
+  const nativeMain =
+    bought !== null && bought > 0
+      ? `+${fmtProfitNative(book, bought)}`
+      : "";
   return `<div class="profit-swap-book-slot">
-    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums pnl-pos">+${fmtProfitNative(book, bought)}</span></div>
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)}${nativeMain ? ` <span class="font-mono tabular-nums pnl-pos">${nativeMain}</span>` : ""}</div>
     <div class="profit-swap-book-slot-sub">${subParts.join('<span class="profit-swap-book-slot-sep" aria-hidden="true">·</span>')}</div>
   </div>`;
+}
+
+function fmtSpotExitStillOutSlot(summary, book) {
+  const stillOut = spotExitDisplayStillOut(summary, book);
+  if (!(stillOut > spotRestoreLotThreshold(book))) return fmtProfitSwapEmptySlot();
+  return `<div class="profit-swap-book-slot">
+    <div class="profit-swap-book-slot-main">${bookNativeSymbolHtml(book)} <span class="font-mono tabular-nums text-amber-200/90">${fmtProfitNative(book, stillOut)}</span></div>
+    <div class="profit-swap-book-slot-sub"><span class="profit-disposition-pending-arrow">${i18n("pending", "未完成")}</span></div>
+  </div>`;
+}
+
+function fmtSpotExitWheelFootnote(summary) {
+  const wheels = Array.isArray(summary?.wheels) ? summary.wheels : [];
+  const incomplete = wheels.some((w) => wheelPanelStillOutNative(w) > spotRestoreLotThreshold(w.book));
+  if (!incomplete) return "";
+  const parts = wheels.map((w) => {
+    const id = `#${escapeHtml(w.groupId)}`;
+    const quote = escapeHtml(w.quoteAsset || "USDT");
+    const stillOut = wheelPanelStillOutNative(w);
+    if (stillOut <= spotRestoreLotThreshold(w.book)) {
+      return `<span>${id} → ${quote} · ${i18n("bought back", "已買回")}</span>`;
+    }
+    const amt = fmtDecimalLiteral(stillOut, 4) || "—";
+    const extra = w.openCsp ? ` · ${i18n("CSP open", "CSP 仍開")}` : "";
+    return `<span>${id} → ${quote} · ${i18n("still out", "尚未買回")} ${amt}${extra}</span>`;
+  });
+  return `<p class="profit-swap-wallet-footnote spot-exit-footnote text-slate-500">${parts.join(
+    '<span class="spot-exit-footnote-sep" aria-hidden="true"> · </span>'
+  )}</p>`;
 }
 
 /** ITM / settlement spot-exit panel — collateral liquidation, not premium Profit swap. */
 export function fmtSpotExitPanel(summary) {
   if (!summary) return "";
-  const hasSold = PROFIT_SWEEP_BOOKS.some((book) => (num(summary?.soldNative?.[book]) ?? 0) > 0);
-  const hasBought = PROFIT_SWEEP_BOOKS.some((book) => (num(summary?.boughtNative?.[book]) ?? 0) > 0);
+  const hasSold = PROFIT_SWEEP_BOOKS.some((book) => spotExitBookHasSold(summary, book));
+  const hasBought = PROFIT_SWEEP_BOOKS.some((book) => spotExitBookHasBought(summary, book));
+  const hasStillOut = PROFIT_SWEEP_BOOKS.some((book) => spotExitBookHasStillOut(summary, book));
   if (!hasSold && !hasBought) return "";
   const activeBooks = PROFIT_SWEEP_BOOKS.filter(
-    (book) => (num(summary.soldNative?.[book]) ?? 0) > 0 || (num(summary.boughtNative?.[book]) ?? 0) > 0
+    (book) =>
+      spotExitBookHasSold(summary, book) ||
+      spotExitBookHasBought(summary, book) ||
+      spotExitBookHasStillOut(summary, book)
   );
   if (!activeBooks.length) return "";
   const net = num(summary.usdtNet);
+  const pending = Boolean(summary.pending) && !(net !== null && Math.abs(net) > 0.005);
   const usdtHeroText = net !== null && Math.abs(net) > 0.005 ? fmtProfitUsdt(net) : "—";
-  const usdtHeroClass = net !== null && Math.abs(net) > 0.005 ? pnlClass(net) : "";
-  const detailRows = [
-    fmtProfitSwapColumnHtml(summary, i18n("Sold", "已賣出"), activeBooks, fmtSpotExitSoldSlot),
-  ];
+  const usdtHeroClass =
+    net !== null && Math.abs(net) > 0.005
+      ? pnlClass(net)
+      : pending
+        ? "profit-swap-hero-pending"
+        : "";
+  const pendingNote = pending
+    ? `<span class="profit-disposition-pending-arrow">${i18n("pending", "未完成")}</span>`
+    : Boolean(summary.partial) && net !== null && Math.abs(net) > 0.005
+      ? `<span class="profit-disposition-pending-arrow">${i18n("recovered slice", "已買回部分")}</span>`
+      : "";
+  const detailRows = [];
+  if (hasSold) {
+    detailRows.push(
+      fmtProfitSwapColumnHtml(summary, i18n("Sold", "已賣出"), activeBooks, fmtSpotExitSoldSlot)
+    );
+  }
   if (hasBought) {
     detailRows.push(
       fmtProfitSwapColumnHtml(summary, i18n("Bought back", "已買回"), activeBooks, fmtSpotExitBoughtSlot)
     );
   }
+  if (hasStillOut) {
+    detailRows.push(
+      fmtProfitSwapColumnHtml(summary, i18n("Still out", "尚未買回"), activeBooks, fmtSpotExitStillOutSlot)
+    );
+  }
+  const colsClass =
+    detailRows.length === 2
+      ? " profit-swap-detail--cols-2"
+      : detailRows.length === 3
+        ? " profit-swap-detail--cols-3"
+        : "";
   return `<div class="profit-disposition-panel profit-swap-panel spot-exit-panel">
     <div class="profit-swap-kpi">
       <span class="profit-swap-kpi-label">${i18n("Net USDT (exit − restore)", "淨 USDT（賣出 − 買回）")}</span>
       <span class="profit-swap-kpi-value font-mono tabular-nums ${usdtHeroClass}">${usdtHeroText}</span>
+      ${pendingNote}
     </div>
-    <div class="profit-swap-detail">${detailRows.join("")}</div>
+    <div class="profit-swap-detail${colsClass}">${detailRows.join("")}</div>
+    ${fmtSpotExitWheelFootnote(summary)}
   </div>`;
 }
 
@@ -4452,10 +4701,14 @@ export function groupHasFilledSpotRestore(g) {
  */
 export function adminGroupNeedsMarketRecover(g, groups = STATE.groups) {
   const unrestored = unrestoredSpotExitNative(g, groups);
-  if (unrestored <= ADMIN_RECOVER_EPS) return false;
+  const fill = labeledRestoreFillForGroup(g);
+  const remain = fill ? Math.max(0, unrestored - fill.native) : unrestored;
+  if (remain <= ADMIN_RECOVER_EPS) return false;
   const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
-  const dust = unrestored < spotRestoreLotThreshold(book);
-  if (dust && (itmSpotRoundTripComplete(g, groups) || groupHasFilledSpotRestore(g))) return false;
+  const dust = remain < spotRestoreLotThreshold(book);
+  if (dust && (itmSpotRoundTripComplete(g, groups) || groupHasFilledSpotRestore(g) || Boolean(fill))) {
+    return false;
+  }
   return true;
 }
 
@@ -4857,7 +5110,7 @@ export function realizedPnlDisplayUsdc(g, status, groups) {
   if (groupHasItmSpotExitFills(g)) {
     const disp = profitDispositionForGroup(g, status);
     const sweptUsdt = num(disp?.sweptUsdt) ?? 0;
-    const itm = itmSpotExitDisplayNetUsdt(g, groups);
+    const itm = itmSpotExitDisplayNetUsdt(g, groups, status);
     if (itm !== null) return itm + sweptUsdt;
     if (sweptUsdt > 0) return sweptUsdt;
     // Cover still sold: do not show assignment settlement as Realized PnL.
@@ -4895,11 +5148,11 @@ export function realizedPnlInAprBookNative(g, status) {
 }
 
 /** ITM exit−restore net USDT rolled up by collateral book (for composition / Total profit). */
-export function sumItmSpotExitNetUsdtByBook(rows) {
+export function sumItmSpotExitNetUsdtByBook(rows, status) {
   const out = { BTC: 0, ETH: 0 };
   let any = false;
   for (const g of rows || []) {
-    const net = itmSpotExitNetUsdtForTotalProfit(g, rows);
+    const net = itmSpotExitNetUsdtForTotalProfit(g, rows, status);
     if (net === null) continue;
     const book = tradeGroupAprBook(g);
     if (book !== "BTC" && book !== "ETH") continue;

@@ -741,6 +741,18 @@ html.is-embedded .app-header {
   line-height: 1.35;
 }
 
+.spot-exit-footnote {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.2rem;
+  margin: 0.45rem 0 0;
+}
+
+.spot-exit-footnote-sep {
+  color: color-mix(in srgb, var(--color-text-muted) 65%, transparent);
+}
+
 .profit-swap-hero-pending {
   color: var(--color-semantic-warning-text);
   font-size: 1.125rem;
@@ -779,6 +791,14 @@ html.is-embedded .app-header {
   .profit-swap-col + .profit-swap-col {
     padding-left: 0.85rem;
     border-left: 1px solid color-mix(in srgb, var(--color-border-default) 38%, transparent);
+  }
+
+  .spot-exit-panel .profit-swap-detail--cols-2 {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .spot-exit-panel .profit-swap-detail--cols-3 {
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) minmax(0, 0.9fr);
   }
 }
 

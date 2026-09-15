@@ -24,6 +24,8 @@ import {
   groupHasFilledSpotRestore,
   resolveAdminGroupActionKind,
   fmtRealizedPnlDisplay,
+  fmtSpotExitPanel,
+  overviewSpotExitSectionHtml,
   profitDispositionForGroup,
   profitSweepHasExchangeFill,
   profitSweepExchangeNativeSold,
@@ -1311,8 +1313,58 @@ const partialRestore = group({
 assert.ok(unrestoredSpotExitNative(partialRestore) > 0.05);
 assert.equal(resolveAdminGroupActionKind(partialRestore, { closed: [partialRestore], open: [] }), "recover");
 
-// YM-style: ITM cover sold, restore skipped / new CC buy not journaled on the parent.
-// Book-level restore fill-stats (the later 0.1 BTC cover buy) must not become Profit composition USDT.
+// ITM sold < cover (intrinsic taken at settlement). Pending is unrestored cover, not sold leftover.
+const soldLessThanCover = group({
+  group_id: "sold-lt-cover",
+  quantity: "0.1",
+  covered_underlying_quantity: "0.1",
+  spot_exit_status: "filled",
+  spot_exit_amount: "0.0915",
+  spot_exit_quote_proceeds: "7294.5676",
+  spot_exit_quote_proceeds_lifetime: "7294.5676",
+  spot_exit_settlement_loss: "0.0084211",
+  short_entry_average_price: "0.0015",
+  entry_fee_collateral: "0.00001875",
+});
+const soldLtCoverUnrestored = unrestoredSpotExitNative(soldLessThanCover);
+assert.ok(
+  soldLtCoverUnrestored > 0.09 && soldLtCoverUnrestored <= 0.1 + 1e-12,
+  `unrestored cover=${soldLtCoverUnrestored}`,
+);
+assert.ok(
+  Math.abs(soldLtCoverUnrestored - 0.0915) > 1e-4,
+  "cover pending must not equal sold native",
+);
+const soldLtCoverPanel = summarizeSpotExitDisposition({ closed: [soldLessThanCover], open: [] });
+assert.ok(
+  Math.abs((soldLtCoverPanel.stillOutNative?.BTC ?? 0) - soldLtCoverUnrestored) < 1e-8,
+  `pending=${soldLtCoverPanel.stillOutNative?.BTC}`,
+);
+assert.ok(soldLtCoverPanel.pending, "unrestored cover stays pending");
+const soldLtCoverRestored = {
+  ...soldLessThanCover,
+  group_id: "sold-lt-cover-restored",
+  spot_restore_status: "filled",
+  spot_restore_amount: "0.1",
+  spot_restore_quote_spent: "7682.4581",
+  spot_restore_quote_spent_lifetime: "7682.4581",
+};
+assert.ok(
+  unrestoredSpotExitNative(soldLtCoverRestored) < 1e-8,
+  `restored unrestored=${unrestoredSpotExitNative(soldLtCoverRestored)}`,
+);
+const soldLtCoverRestoredPanel = summarizeSpotExitDisposition({
+  closed: [soldLtCoverRestored],
+  open: [],
+});
+assert.ok(
+  (soldLtCoverRestoredPanel.stillOutNative?.BTC ?? 0) < 1e-8,
+  `sold 0.0915 restore 0.1 cover pending=${soldLtCoverRestoredPanel.stillOutNative?.BTC}`,
+);
+assert.equal(soldLtCoverRestoredPanel.pending, false);
+
+// YM: #0095 ITM exit journaled, restore skipped; #0104 is a leftover CC, not the restore.
+// Book-level 0.1 BTC buys must not mint Net. Labeled *-spot-restore hangs on #0095 as a loss.
 const ym0095 = group({
   group_id: "0095",
   quantity: "0.1",
@@ -1362,7 +1414,7 @@ const ym0104 = group({
   closed_timestamp_ms: null,
 });
 const ymGroups = { closed: [ym0095, ym0096], open: [ym0104] };
-const ymStatus = {
+const ymStatusUnlabeled = {
   ...status,
   underlying_index_usd: { BTC: 77014.57, ETH: 2468.31 },
   spot_exit_fill_stats_by_book: {
@@ -1374,18 +1426,141 @@ const ymStatus = {
 };
 assert.equal(itmSpotRoundTripComplete(ym0095, ymGroups), false);
 assert.equal(itmSpotRoundTripComplete(ym0096, ymGroups), false);
-assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0095, ymGroups), null);
-assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0096, ymGroups), null);
+assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0095, ymGroups, ymStatusUnlabeled), null);
+assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0096, ymGroups, ymStatusUnlabeled), null);
+const ymCompUnlabeled = profitCompositionByBook(report, ymGroups, ymStatusUnlabeled);
+assert.ok(Math.abs(ymCompUnlabeled.usdByBook?.USDT ?? 0) < 0.005, `ym unlabeled usdt=${ymCompUnlabeled.usdByBook?.USDT}`);
+assert.ok(Math.abs(ymCompUnlabeled.earnedUsdByBook?.USDT ?? 0) < 0.005, `ym unlabeled earned usdt=${ymCompUnlabeled.earnedUsdByBook?.USDT}`);
+const ymTotalUnlabeled =
+  (ymCompUnlabeled.usdByBook?.BTC ?? 0) +
+  (ymCompUnlabeled.usdByBook?.ETH ?? 0) +
+  (ymCompUnlabeled.usdByBook?.USDC ?? 0) +
+  (ymCompUnlabeled.usdByBook?.USDT ?? 0);
+assert.ok(Math.abs(ymTotalUnlabeled) < 50, `ym unlabeled total ${ymTotalUnlabeled} must not include cover sale/restore notional`);
+const ymPanelUnlabeled = summarizeSpotExitDisposition(ymGroups, { status: ymStatusUnlabeled });
+assert.ok(ymPanelUnlabeled);
+assert.ok(Math.abs((ymPanelUnlabeled.usdtSold ?? 0) - 14786.0993) < 0.02, `ym sold=${ymPanelUnlabeled.usdtSold}`);
+assert.ok(Math.abs((ymPanelUnlabeled.usdtBought ?? 0) - 7682.4581) < 0.02, `ym bought=${ymPanelUnlabeled.usdtBought}`);
+assert.ok(
+  ymPanelUnlabeled.usdtNet === null || Math.abs(ymPanelUnlabeled.usdtNet) < 0.005,
+  `unlabeled book-level buy must not mint Net, got ${ymPanelUnlabeled.usdtNet}`,
+);
+assert.ok(ymPanelUnlabeled.pending, "YM unlabeled remainder stays pending");
+const ym0095Unrestored = unrestoredSpotExitNative(ym0095, ymGroups);
+const ym0096Unrestored = unrestoredSpotExitNative(ym0096, ymGroups);
+assert.ok(ym0095Unrestored > 0.09 && ym0095Unrestored <= 0.1 + 1e-12, `ym #0095 unrestored=${ym0095Unrestored}`);
+assert.ok(ym0096Unrestored > 0.09 && ym0096Unrestored <= 0.1 + 1e-12, `ym #0096 unrestored=${ym0096Unrestored}`);
+assert.ok(
+  Math.abs((ymPanelUnlabeled.stillOutNative?.BTC ?? 0) - (ym0095Unrestored + ym0096Unrestored)) < 1e-8,
+  `ym unlabeled still-out=${ymPanelUnlabeled.stillOutNative?.BTC}`,
+);
+assert.ok(
+  Math.abs((ymPanelUnlabeled.stillOutNative?.BTC ?? 0) - (0.1844 - 0.1)) > 1e-3,
+  "unlabeled pending must not be sold − bought 0.0844",
+);
+assert.equal(ymPanelUnlabeled.wheels?.[0]?.overlayMatchedNative ?? 0, 0);
+assert.equal(ymPanelUnlabeled.wheels?.[1]?.overlayMatchedNative ?? 0, 0);
+const ymUnlabeledHtml = fmtSpotExitPanel(ymPanelUnlabeled);
+assert.ok(!/\$297/.test(ymUnlabeledHtml), "greedy leftover split +$297 must not appear");
+assert.ok(!/\$7,?10[34]/.test(ymUnlabeledHtml), "raw exit−buy must not appear as profit");
+
+const ymRestoreNet = 7294.5676 - 7682.4581;
+const ymStatus = {
+  ...ymStatusUnlabeled,
+  spot_restore_fill_stats_by_book: {
+    BTC: {
+      native_bought: "0.1",
+      usdt_spent: "7682.4581",
+      by_group: {
+        "0095": {
+          native_bought: "0.1",
+          usdt_spent: "7682.4581",
+          instrument_name: "BTC_USDC",
+          label: "covered_call-spread-btc-0095-short-spot-restore",
+        },
+      },
+    },
+  },
+};
+assert.ok(
+  Math.abs((itmSpotExitNetUsdtForTotalProfit(ym0095, ymGroups, ymStatus) ?? 0) - ymRestoreNet) < 0.02,
+  `ym #0095 labeled net=${itmSpotExitNetUsdtForTotalProfit(ym0095, ymGroups, ymStatus)}`,
+);
+assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0096, ymGroups, ymStatus), null);
+assert.ok(ymRestoreNet < 0, "YM #0095 recover is a loss");
 const ymComp = profitCompositionByBook(report, ymGroups, ymStatus);
-assert.ok(Math.abs(ymComp.usdByBook?.USDT ?? 0) < 0.005, `ym usdt=${ymComp.usdByBook?.USDT}`);
-assert.ok(Math.abs(ymComp.earnedUsdByBook?.USDT ?? 0) < 0.005, `ym earned usdt=${ymComp.earnedUsdByBook?.USDT}`);
-const ymTotal = (ymComp.usdByBook?.BTC ?? 0) + (ymComp.usdByBook?.ETH ?? 0) + (ymComp.usdByBook?.USDC ?? 0) + (ymComp.usdByBook?.USDT ?? 0);
-assert.ok(Math.abs(ymTotal) < 50, `ym composition total ${ymTotal} must not include cover sale/restore notional`);
+assert.ok(Math.abs((ymComp.usdByBook?.USDT ?? 0) - ymRestoreNet) < 0.05, `ym labeled usdt=${ymComp.usdByBook?.USDT}`);
+assert.ok(Math.abs((ymComp.earnedUsdByBook?.USDT ?? 0) - ymRestoreNet) < 0.05, `ym labeled earned usdt=${ymComp.earnedUsdByBook?.USDT}`);
+assert.ok((ymComp.usdByBook?.USDT ?? 0) < 0, "composition USDT must be the recover loss");
 const ymPanel = summarizeSpotExitDisposition(ymGroups, { status: ymStatus });
 assert.ok(ymPanel);
 assert.ok(Math.abs((ymPanel.usdtSold ?? 0) - 14786.0993) < 0.02, `ym sold=${ymPanel.usdtSold}`);
 assert.ok(Math.abs((ymPanel.usdtBought ?? 0) - 7682.4581) < 0.02, `ym bought=${ymPanel.usdtBought}`);
-assert.ok(Math.abs(ymPanel.usdtNet ?? 0) < 0.005, `ym panel net must be recognized-only, got ${ymPanel.usdtNet}`);
+assert.ok(Math.abs((ymPanel.usdtNet ?? 0) - ymRestoreNet) < 0.05, `ym panel net=${ymPanel.usdtNet}`);
+assert.ok(ymPanel.usdtNet < 0, "panel Net must be negative");
+assert.equal(ymPanel.partial, false);
+const ymSection = overviewSpotExitSectionHtml({ spotExitSummary: ymPanel });
+assert.ok(ymSection.includes("ITM spot exit"), "YM incomplete restore must still render ITM spot exit");
+assert.ok(ymSection.includes("spot-exit-panel"));
+assert.ok(ymSection.includes("Sold"));
+assert.ok(ymSection.includes("Bought back"));
+const ymKpi = ymSection.match(/profit-swap-kpi-value[^>]*>([^<]*)/);
+assert.ok(ymKpi, "YM net KPI missing");
+assert.equal(ymKpi[1].trim(), fmtProfitUsdt(ymPanel.usdtNet), `YM labeled net KPI=${ymKpi[1]}`);
+assert.ok(ymPanel.pending, "YM #0096 remainder must stay pending / still out");
+assert.ok(
+  Math.abs((ymPanel.stillOutNative?.BTC ?? 0) - ym0096Unrestored) < 1e-8,
+  `ym still-out ledger=${ymPanel.stillOutNative?.BTC}`,
+);
+assert.ok(
+  Math.abs((ymPanel.stillOutNative?.BTC ?? 0) - 0.0929) > 1e-4,
+  "still out must be unrestored cover, not #0096 sold 0.0929",
+);
+assert.ok(
+  Math.abs((ymPanel.stillOutNative?.BTC ?? 0) - (0.1844 - 0.1)) > 1e-3,
+  "still out must not be book sold − bought 0.0844",
+);
+assert.ok(Math.abs((ymPanel.usdtNet ?? 0) + 387.89) < 0.02, `ym net must stay −$387.89, got ${ymPanel.usdtNet}`);
+assert.ok(ymSection.includes("Still out"), "YM panel must show Still out");
+const ym0096StillOutText = fmtProfitNative("BTC", ym0096Unrestored);
+assert.ok(ymSection.includes(ym0096StillOutText), `YM still-out column must show #0096 cover ${ym0096StillOutText}`);
+assert.ok(ymSection.includes("#0095"), "YM footnote must name #0095");
+assert.ok(ymSection.includes("#0096"), "YM footnote must name #0096");
+assert.ok(ymSection.includes("USDT"), "YM footnote must split USDT sale");
+assert.ok(ymSection.includes("USDC"), "YM footnote must split USDC sale");
+assert.ok(/#0095[^<]*(bought back|已買回)/.test(ymSection), "YM #0095 overlay must show bought back");
+assert.ok(
+  new RegExp(`#0096[^<]*(still out|尚未買回)[^<]*${ym0096StillOutText.slice(0, 6)}`).test(ymSection),
+  `YM #0096 must stay still out cover ${ym0096StillOutText}`,
+);
+assert.ok(!/#0096[^<]*(still out|尚未買回)[^<]*0\.0929/.test(ymSection), "YM #0096 still out must not be sold 0.0929");
+assert.ok(!/\$297/.test(ymSection), "greedy leftover split +$297 must not appear");
+assert.ok(!/\$7,?10[34]/.test(ymSection), "YM Net must not show raw exit−buy as profit");
+const ymWheels = ymPanel.wheels || [];
+assert.equal(ymWheels.length, 2, `ym wheels=${ymWheels.length}`);
+assert.equal(ymWheels[0].groupId, "0095");
+assert.equal(ymWheels[0].quoteAsset, "USDT");
+assert.equal(ymWheels[0].complete, false);
+assert.ok(Math.abs((ymWheels[0].overlayMatchedNative ?? 0) - 0.1) < 1e-8, `ym #0095 overlay=${ymWheels[0].overlayMatchedNative}`);
+assert.equal(ymWheels[1].groupId, "0096");
+assert.equal(ymWheels[1].quoteAsset, "USDC");
+assert.equal(ymWheels[1].complete, false);
+assert.equal(ymWheels[1].overlayMatchedNative ?? 0, 0);
+assert.ok((ymWheels[0].unrestored ?? 0) > 0.09, `ym #0095 unrestored=${ymWheels[0].unrestored}`);
+assert.ok((ymWheels[1].unrestored ?? 0) > 0.09, `ym #0096 unrestored=${ymWheels[1].unrestored}`);
+
+// Fill-stats must not zero journal Sold (would hide the panel).
+const ymShrunkStats = summarizeSpotExitDisposition(ymGroups, {
+  status: {
+    ...ymStatus,
+    spot_exit_fill_stats_by_book: { BTC: { native_sold: "0.0002", usdt: "16" } },
+    spot_restore_fill_stats_by_book: {},
+  },
+});
+assert.ok((ymShrunkStats.soldNative?.BTC ?? 0) > 0.18, `journal sold must survive tiny fill-stats, got ${ymShrunkStats.soldNative?.BTC}`);
+assert.ok(fmtSpotExitPanel(ymShrunkStats).includes("spot-exit-panel"));
+const ymNoSummary = fmtSpotExitPanel(summarizeSpotExitDisposition(ymGroups, { status: ymStatus }));
+assert.ok(ymNoSummary.includes("Sold"));
 
 // Jack #0103: BTC_USDC restore filled, no quote — cover is back, Total must not take $7676 exit.
 const jack0103 = group({
@@ -1463,6 +1638,11 @@ assert.ok(
   (jackPanel.boughtAvg?.BTC ?? 0) > 70000,
   `jack bought avg must ignore unquoted #0103, avg=${jackPanel.boughtAvg?.BTC}`,
 );
+assert.ok((jackPanel.stillOutNative?.BTC ?? 0) < 1e-8, `jack still-out=${jackPanel.stillOutNative?.BTC}`);
+assert.equal(jackPanel.pending, false);
+const jackHtml = fmtSpotExitPanel(jackPanel);
+assert.ok(!jackHtml.includes("Still out"), "complete Jack round-trips must not show Still out");
+assert.ok(!jackHtml.includes("#0103") && !jackHtml.includes("#0104"), "complete Jack must not dump wheel footnote");
 
 // Eugene #0033 extra 0.02 self-assign must not change #0022 exit−restore net.
 const eugene0033Overbuy = group({

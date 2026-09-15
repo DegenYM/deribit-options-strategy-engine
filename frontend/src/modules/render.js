@@ -589,9 +589,7 @@ export function renderAggregate(status, report) {
   const windowProfitDisposition = summary
     ? aggregateProfitDisposition(report, STATE.groups, status, { windowDays: windowLabelDays })
     : null;
-  const spotExitSummary = summary
-    ? summarizeSpotExitDisposition(STATE.groups, { status })
-    : null;
+  const spotExitSummary = summarizeSpotExitDisposition(STATE.groups, { status });
   const cashSecuredSummary = summary
     ? summarizeCashSecuredDisposition(STATE.groups)
     : null;

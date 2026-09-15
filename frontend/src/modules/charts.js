@@ -356,7 +356,7 @@ function sumRealizedPnlUsdcFromRows(rows, status) {
         status
       )
     : null;
-  const itmNet = sumItmSpotExitNetUsdtForTotalProfit(rows);
+  const itmNet = sumItmSpotExitNetUsdtForTotalProfit(rows, status);
   if (fromDisposition !== null || Math.abs(itmNet) >= 0.005) {
     return (fromDisposition ?? 0) + itmNet;
   }
@@ -399,14 +399,14 @@ function _emptyUsdByBook() {
 }
 
 /** Recognized ITM exit−restore nets belong on the USDT book, not coin premium / leftover USDC. */
-function _itmSpotExitNetUsdtTotal(rows) {
-  const itmByBook = sumItmSpotExitNetUsdtByBook(rows);
+function _itmSpotExitNetUsdtTotal(rows, status) {
+  const itmByBook = sumItmSpotExitNetUsdtByBook(rows, status);
   if (!itmByBook) return 0;
   return (num(itmByBook.BTC) ?? 0) + (num(itmByBook.ETH) ?? 0);
 }
 
-function _mergeItmNetIntoUsdByBook(usdByBook, rows) {
-  const itmTotal = _itmSpotExitNetUsdtTotal(rows);
+function _mergeItmNetIntoUsdByBook(usdByBook, rows, status) {
+  const itmTotal = _itmSpotExitNetUsdtTotal(rows, status);
   if (Math.abs(itmTotal) < 0.005) return usdByBook;
   const out = usdByBook ? { ..._emptyUsdByBook(), ...usdByBook } : _emptyUsdByBook();
   out.USDT = (num(out.USDT) ?? 0) + itmTotal;
@@ -431,7 +431,7 @@ export function sumLifetimeRealizedPnlUsdcByBook(report, groups, status) {
   const rows = lifetimeRealizedClosedRows(report, groups, status);
   const disposition = aggregateProfitDisposition(report, groups, status);
   const fromDisposition = realizedUsdByBookFromProfitDisposition(disposition, status);
-  if (fromDisposition) return _mergeItmNetIntoUsdByBook(fromDisposition, rows);
+  if (fromDisposition) return _mergeItmNetIntoUsdByBook(fromDisposition, rows, status);
   const out = _emptyUsdByBook();
   let any = false;
   for (const g of rows) {
@@ -443,7 +443,7 @@ export function sumLifetimeRealizedPnlUsdcByBook(report, groups, status) {
     out[book] += pnl;
     any = true;
   }
-  const merged = _mergeItmNetIntoUsdByBook(any ? out : null, rows);
+  const merged = _mergeItmNetIntoUsdByBook(any ? out : null, rows, status);
   return merged;
 }
 
@@ -489,7 +489,7 @@ export function sumLifetimeEarnedUsdByBook(report, groups, status) {
     out[book] += usd;
     any = true;
   }
-  const itmTotal = _itmSpotExitNetUsdtTotal(rows);
+  const itmTotal = _itmSpotExitNetUsdtTotal(rows, status);
   if (Math.abs(itmTotal) >= 0.005) {
     out.USDT += itmTotal;
     any = true;
@@ -517,7 +517,7 @@ export function profitCompositionByBook(report, groups, status) {
   const swappedNativeByBook = { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
   const nativeByBook = { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
   const rows = lifetimeRealizedClosedRows(report, groups, status);
-  const itmTotal = _itmSpotExitNetUsdtTotal(rows);
+  const itmTotal = _itmSpotExitNetUsdtTotal(rows, status);
   if (Math.abs(itmTotal) >= 0.005) {
     nativeByBook.USDT = itmTotal;
     earnedNativeByBook.USDT = itmTotal;

@@ -10,6 +10,7 @@ from deribit_engine.spot_restore_ops import (
     apply_spot_restore_quote_spent,
     execute_spot_restore_for_group,
     format_spot_restore_human_report,
+    is_spot_restore_label,
     itm_spot_exit_net_usdt_for_total_profit,
     itm_spot_round_trip_complete,
     list_spot_restore_candidates,
@@ -18,6 +19,7 @@ from deribit_engine.spot_restore_ops import (
     reconcile_spot_restore_from_exchange,
     resolve_spot_restore_order_size,
     spot_restore_fill_stats_for_currency,
+    spot_restore_group_id_from_label,
     spot_restore_order_label,
     spot_restore_spot_instrument_name,
     unrestored_spot_exit_native,
@@ -443,6 +445,61 @@ def test_spot_restore_fill_stats_only_restore_buys() -> None:
     stats = spot_restore_fill_stats_for_currency(client, "BTC")
     assert Decimal(stats["native_bought"]) == Decimal("0.1")
     assert Decimal(stats["usdt_spent"]) == Decimal("9100")
+    assert "0017" in stats["by_group"]
+    assert Decimal(stats["by_group"]["0017"]["native_bought"]) == Decimal("0.1")
+    assert Decimal(stats["by_group"]["0017"]["usdt_spent"]) == Decimal("9100")
+
+
+def test_spot_restore_group_id_from_label() -> None:
+    assert is_spot_restore_label("covered_call-spread-btc-0095-short-spot-restore")
+    assert spot_restore_group_id_from_label("covered_call-spread-btc-0095-short-spot-restore") == "0095"
+    assert spot_restore_group_id_from_label("cc-btc-0017-spot-restore") == "0017"
+    assert spot_restore_group_id_from_label("covered_call-spot-restore-btc-0095") == "0095"
+    assert spot_restore_group_id_from_label("covered_call-csp-restore-btc-0095") == "0095"
+    assert not is_spot_restore_label("covered_call-spread-btc-0104-short")
+    assert spot_restore_group_id_from_label("covered_call-spread-btc-0104-short") is None
+    assert is_spot_restore_label("covered_call-csp-btc-0099-abort-restore")
+    assert spot_restore_group_id_from_label("covered_call-csp-btc-0099-abort-restore") == "0099"
+    assert not is_spot_restore_label("covered_call-csp-premium-swap-btc-0103")
+    assert not is_spot_restore_label("cc-profit-sweep-buyback-btc")
+
+
+def test_spot_restore_fill_stats_groups_parent_not_leftover_cc() -> None:
+    client = MagicMock()
+    trades = {
+        "trades": [
+            {
+                "trade_id": "r95",
+                "label": "covered_call-spread-btc-0095-short-spot-restore",
+                "direction": "buy",
+                "instrument_name": "BTC_USDC",
+                "amount": "0.1",
+                "price": "76824.581",
+                "timestamp": 1_789_044_925_468,
+            },
+            {
+                "trade_id": "cc104",
+                "label": "covered_call-spread-btc-0104-short",
+                "direction": "buy",
+                "instrument_name": "BTC_USDC",
+                "amount": "0.1",
+                "price": "77000",
+                "timestamp": 1_789_045_050_700,
+            },
+        ],
+        "has_more": False,
+    }
+
+    def _fetch(currency: str, **kwargs):
+        if kwargs.get("historical") is False:
+            return {"trades": [], "has_more": False}
+        return trades if currency == "BTC" else {"trades": [], "has_more": False}
+
+    client.get_user_trades_by_currency.side_effect = _fetch
+    stats = spot_restore_fill_stats_for_currency(client, "BTC")
+    assert Decimal(stats["native_bought"]) == Decimal("0.1")
+    assert list(stats["by_group"]) == ["0095"]
+    assert Decimal(stats["by_group"]["0095"]["usdt_spent"]) == Decimal("7682.4581")
 
 
 def test_reconcile_spot_restore_from_exchange_by_order_id() -> None:
