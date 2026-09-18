@@ -14,6 +14,7 @@ from deribit_engine.cash_secured_ops import (
     cash_secured_active_roll_fee_edge,
     cash_secured_active_roll_taker_spread_usdc,
     cash_secured_active_roll_tv_ratio,
+    cash_secured_last_active_roll_child,
     cash_secured_later_expiry_in_window,
 )
 from deribit_engine.config import load_config
@@ -674,3 +675,72 @@ def test_active_roll_skips_when_sibling_reconciled_external(tmp_path) -> None:
     assert rolls[0]["reason"] == "operator_closed_child"
     opened = [g for g in engine.state_store.load().groups if g.group_id == "0100"]
     assert opened[0].status == "open"
+
+
+def _closed_child(group_id: str, *, close_reason: str, entered_days_ago: int, **overrides) -> TradeGroup:
+    day = 86_400_000
+    return _open_csp(
+        group_id=group_id,
+        status="closed",
+        close_reason=close_reason,
+        entry_timestamp_ms=utc_now_ms() - entered_days_ago * day,
+        closed_timestamp_ms=utc_now_ms() - (entered_days_ago - 1) * day,
+        close_index_usd="70000",
+        **overrides,
+    )
+
+
+def test_active_roll_child_is_the_hurdle_only_while_it_is_newest() -> None:
+    """The buyback gates the replacement it was priced against, and nothing later."""
+    parent = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_group_id="0111",
+        cash_secured_group_ids=["0109", "0111"],
+    )
+    rolled = _closed_child("0109", close_reason="csp_active_roll", entered_days_ago=5)
+
+    # Entry failed right after the buyback: it is still the newest child, so the
+    # retry prices the replacement against holding it.
+    assert cash_secured_last_active_roll_child(parent, [parent, rolled]) is rolled
+
+    # The retry filled and that put has since expired. The buyback is history —
+    # reviving its close price would hurdle every later put against a contract
+    # that has not existed for days.
+    expired = _closed_child("0111", close_reason="reconciled_expiry", entered_days_ago=3)
+    assert cash_secured_last_active_roll_child(parent, [parent, rolled, expired]) is None
+
+
+def test_active_roll_child_ignored_while_a_later_put_is_open() -> None:
+    parent = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_group_id="0111",
+        cash_secured_group_ids=["0109", "0111"],
+    )
+    rolled = _closed_child("0109", close_reason="csp_active_roll", entered_days_ago=5)
+    live = _open_csp(group_id="0111", entry_timestamp_ms=utc_now_ms() - 86_400_000)
+    assert cash_secured_last_active_roll_child(parent, [parent, rolled, live]) is None
+
+
+def test_expired_put_after_a_roll_writes_the_next_put(tmp_path) -> None:
+    """The wheel re-enters after expiry instead of hurdling against a stale buyback."""
+    client = FakeClient(btc_book_equity="0.2")
+    _roll_books(client)
+    engine = _roll_engine(tmp_path, client)
+    parent = _itm_sold_group(
+        cash_secured_status="entered",
+        cash_secured_group_id="0111",
+        cash_secured_group_ids=["0109", "0111"],
+    )
+    # Bought back at 1420 on a near-the-money put: a hurdle no OTM put can clear.
+    rolled = _closed_child(
+        "0109",
+        close_reason="csp_active_roll",
+        entered_days_ago=5,
+        short_close_average_price="1420",
+    )
+    expired = _closed_child("0111", close_reason="reconciled_expiry", entered_days_ago=3)
+    _seed(engine, parent, rolled, expired, next_group_id=200)
+
+    result = engine.manage(live=True)
+    assert any(a.get("action") == "cash_secured_entered" for a in result["actions"])
+    assert not any(a.get("reason") == "daily_yield_not_higher" for a in result["actions"])

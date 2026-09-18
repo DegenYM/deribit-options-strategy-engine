@@ -206,6 +206,23 @@ class RegimeMixin:
         if not ok:
             return RiskRegime.CRISIS, ["core_entry_liquidity_check_failed", *liq_notes]
 
+        return self._macro_regime_with_detail(currency)
+
+    def _macro_regime_with_detail(self, currency: str) -> tuple[RiskRegime, list[str]]:
+        """Regime from macro feeds only, for an entry that probes its own book.
+
+        The currency regime's liquidity leg probes the side in
+        ``regime_entry_option_sides`` — calls only, for a covered call. The
+        wheel's cash-secured put writes a different book entirely (linear USDC
+        puts, its own DTE and strike window, its own two-sided/spread/size
+        checks), so a dry call book was putting the currency in crisis and
+        vetoing a put the put book could still price. Macro crisis — drawdown,
+        DVOL, the naked down streak — still blocks; only the liquidity leg is
+        dropped, and the caller answers that from the book it actually writes.
+
+        Both feeds are read through the client's macro cache, so a second call
+        in the same cycle costs nothing.
+        """
         drawdown = self._index_drawdown_24h(currency)
         dvol_ratio = self._dvol_ratio(currency)
         regime, detail = self._regime_from_macro_feeds(

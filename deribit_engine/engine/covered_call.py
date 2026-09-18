@@ -427,6 +427,20 @@ class CoveredCallMixin:
                 )
         return actions
 
+    def _cash_secured_regime(self, currency: str) -> RiskRegime:
+        """Regime for the wheel's cash-secured put — macro feeds, no call book.
+
+        ``context.regime_by_currency`` carries the covered call's own regime,
+        whose liquidity leg probes the *call* book. The put this wheel writes
+        lives on the linear USDC book and is judged by
+        :meth:`_rank_itm_cash_secured_candidates`, which walks that book with
+        the CSP DTE and strike window and its own spread/size checks. Reading
+        the call verdict here let a dry call book veto a writable put; a real
+        macro crisis still blocks.
+        """
+        regime, _ = self._macro_regime_with_detail(currency)
+        return regime
+
     def _cash_secured_skip_memory(self) -> dict[str, str]:
         memory = getattr(self, "_cash_secured_skip_reason_by_group", None)
         if memory is None:
@@ -501,7 +515,7 @@ class CoveredCallMixin:
                 continue
             if cash_secured_child_is_open(context.state.groups, group):
                 continue
-            regime = context.regime_by_currency.get(group.currency, RiskRegime.CRISIS)
+            regime = self._cash_secured_regime(group.currency)
             if regime is RiskRegime.CRISIS:
                 skip = self._cash_secured_skip(group, "crisis_regime", live=live)
                 if skip:
@@ -708,7 +722,7 @@ class CoveredCallMixin:
 
         dte_min = self.config.covered_call_csp_dte_min
         dte_max = self.config.covered_call_csp_dte_max
-        regime = context.regime_by_currency.get(group.currency, RiskRegime.NORMAL)
+        regime = self._cash_secured_regime(group.currency)
         markets = self._load_linear_usdc_puts(group.currency)
         if markets:
             context.markets_by_currency.setdefault(group.currency, [])
@@ -1381,7 +1395,7 @@ class CoveredCallMixin:
         usdc = context.summaries.get("USDC")
         if usdc is None:
             return None
-        regime = context.regime_by_currency.get(parent.currency, RiskRegime.NORMAL)
+        regime = self._cash_secured_regime(parent.currency)
         candidate, _fail = self.strategy.refresh_cash_secured_put_candidate(
             instrument=instrument,
             book=book,
@@ -3042,7 +3056,7 @@ class CoveredCallMixin:
         if blocked:
             return [_payload(reason=block_why)]
 
-        if context.regime_by_currency.get(group.currency, RiskRegime.NORMAL) is RiskRegime.CRISIS:
+        if self._cash_secured_regime(group.currency) is RiskRegime.CRISIS:
             return []
         if self._cash_secured_blocked_by_hard_derisk(context):
             return []

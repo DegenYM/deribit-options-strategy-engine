@@ -541,21 +541,33 @@ def cash_secured_active_roll_daily_beats_hold(
     return hold_daily, roll_daily, roll_daily > hold_daily and roll_daily >= need
 
 
+def _cash_secured_child_order_key(child: TradeGroup) -> tuple[int, str]:
+    """Chain order for a parent's CSP children: when each one was opened."""
+    return (int(child.entry_timestamp_ms or 0), str(child.group_id or ""))
+
+
 def cash_secured_last_active_roll_child(
     parent: TradeGroup,
     groups: list[TradeGroup],
 ) -> TradeGroup | None:
-    """Most recently closed CSP child that was bought back for an active roll."""
-    closed: list[TradeGroup] = []
-    for child in cash_secured_children(groups, parent):
-        if str(child.status or "").lower() != "closed":
-            continue
-        if str(child.close_reason or "").lower() != "csp_active_roll":
-            continue
-        closed.append(child)
-    if not closed:
+    """The active-roll buyback still waiting for its replacement, else None.
+
+    Only the newest child counts. A roll that closed the old put but failed to
+    open the new one leaves that buyback newest, and the retry gate prices the
+    replacement against holding it — the comparison it was written for. Once any
+    later child exists (the retry that filled, or the put that has since
+    expired) the buyback is history, and matching ``close_reason`` alone would
+    revive its close price as a yield hurdle for every later put.
+    """
+    children = cash_secured_children(groups, parent)
+    if not children:
         return None
-    return max(closed, key=lambda item: int(item.closed_timestamp_ms or 0))
+    newest = max(children, key=_cash_secured_child_order_key)
+    if str(newest.status or "").lower() != "closed":
+        return None
+    if str(newest.close_reason or "").lower() != "csp_active_roll":
+        return None
+    return newest
 
 
 def cash_secured_hold_credit_dte_from_closed_roll(child: TradeGroup) -> tuple[Decimal, Decimal]:
