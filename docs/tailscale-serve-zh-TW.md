@@ -23,15 +23,15 @@
 
 | 投資人 | 網址 |
 |--------|------|
-| youming | `https://m1-mac-mini.tailc25ed2.ts.net/` 或 `:8765`（admin iframe 用這埠） |
-| jack | `https://m1-mac-mini.tailc25ed2.ts.net:8766/` |
-| pat | `https://m1-mac-mini.tailc25ed2.ts.net:8767/` |
-| an | `https://m1-mac-mini.tailc25ed2.ts.net:8768/` |
-| ma | `https://m1-mac-mini.tailc25ed2.ts.net:8770/` |
-| eugene | `https://m1-mac-mini.tailc25ed2.ts.net:8771/` |
-| **admin** | `https://m1-mac-mini.tailc25ed2.ts.net:8750/` |
+| youming | `https://minim1.tailc25ed2.ts.net/` 或 `:8765`（admin iframe 用這埠） |
+| jack | `https://minim1.tailc25ed2.ts.net:8766/` |
+| pat | `https://minim1.tailc25ed2.ts.net:8767/` |
+| an | `https://minim1.tailc25ed2.ts.net:8768/` |
+| ma | `https://minim1.tailc25ed2.ts.net:8770/` |
+| eugene | `https://minim1.tailc25ed2.ts.net:8771/` |
+| **admin** | `https://minim1.tailc25ed2.ts.net:8750/` |
 
-投資人摘要頁在同一主機加路徑，例如 `https://m1-mac-mini.tailc25ed2.ts.net/investor.html`。
+投資人摘要頁在同一主機加路徑，例如 `https://minim1.tailc25ed2.ts.net/investor.html`。
 
 別的帳號裝置（例如 `774jynvt86@` 的 iPhone）進不來，除非你在 Tailscale admin 分享這台機器或把裝置加進同一個 tailnet。
 
@@ -42,13 +42,13 @@
 在 **15m4**（或任何連不上的 Mac）做這一步，強制只用 IPv4，然後重開瀏覽器：
 
 ```bash
-sudo /bin/sh -c 'grep -q "m1-mac-mini.tailc25ed2.ts.net" /etc/hosts || echo "100.65.76.83 m1-mac-mini.tailc25ed2.ts.net" >> /etc/hosts'
+sudo /bin/sh -c 'grep -q "minim1.tailc25ed2.ts.net" /etc/hosts || echo "100.65.76.83 minim1.tailc25ed2.ts.net" >> /etc/hosts'
 ```
 
 然後開（必須 `https://`，admin 要帶埠）：
 
-- youming：`https://m1-mac-mini.tailc25ed2.ts.net/`
-- admin：`https://m1-mac-mini.tailc25ed2.ts.net:8750/`
+- youming：`https://minim1.tailc25ed2.ts.net/`
+- admin：`https://minim1.tailc25ed2.ts.net:8750/`
 
 另外確認：
 

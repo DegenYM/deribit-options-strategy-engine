@@ -60,7 +60,11 @@ PY
 
 case "$ACTION" in
   start)
-    mapfile -t LINES < <(list_ports)
+    # bash 3.2 (macOS /bin/bash) has no mapfile.
+    LINES=()
+    while IFS= read -r line; do
+      LINES+=("$line")
+    done < <(list_ports)
     root_port="${LINES[0]}"
     echo "Serving https://$(dns_name)/ → 127.0.0.1:${root_port} (${ROOT_INVESTOR})"
     tailscale serve --bg --yes "$root_port"
@@ -69,7 +73,10 @@ case "$ACTION" in
     # Also publish the root investor on its registry port. Admin iframes
     # rewrite 127.0.0.1:<frontend_port> → https://<magicdns>:<frontend_port>,
     # so youming (8765) must exist there, not only on :443.
-    for line in "${LINES[@]:1}"; do
+    idx=1
+    while [ "$idx" -lt "${#LINES[@]}" ]; do
+      line="${LINES[$idx]}"
+      idx=$((idx + 1))
       inv="${line%%$'\t'*}"
       port="${line#*$'\t'}"
       echo "Serving https://$(dns_name):${port}/ → 127.0.0.1:${port} (${inv})"
