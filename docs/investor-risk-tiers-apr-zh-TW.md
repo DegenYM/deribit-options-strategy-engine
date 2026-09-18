@@ -80,12 +80,12 @@
 | 分級 | 適合對象 | Strike 選擇 | 保證金紀律 | 進場 APR 門檻 |
 |------|----------|-------------|------------|---------------|
 | **Low** | 最保守的 premium selling | BTC delta 約 0.06–0.11（偏好 0.07–0.09）；OTM 地板約 10%（ETH 12%）；DTE 10–35 | 單腿 IM cap 10%；最多 2 組／幣 | 最低 **3.5%**，偏好 **4.5–8%** |
-| **Medium** | 標準裸賣 | BTC delta 約 0.08–0.15（偏好 0.09–0.12）；OTM 地板約 7%（ETH 9%）；DTE 10–35 | 單腿 IM cap 14% | 最低 **5%**，偏好 **6–11%** |
+| **Medium** | 標準裸賣（YM live 無對沖） | BTC delta 約 0.07–0.12（偏好 0.08–0.10）；OTM 地板約 10%（ETH 12%）；DTE 14–28 | 單腿 IM cap 10%；IM 目標 22%／硬 40%；最多 1 組／幣、同時 2 組 | 最低 **5%**，偏好 **6–11%** |
 | **High** | 進攻型收權利金 | BTC delta 約 0.10–0.18（偏好 0.11–0.15）；OTM 地板約 5%（ETH 6%）；DTE 10–35 | 單腿 IM cap 18%；IM 硬上限 80% | 最低 **7%**，偏好 **8–14%** |
 
 **選約原則**：排序為 **delta → 更深 OTM → TARGET APR（軟）**；硬門檻只有 delta 帶與 `*_PUT_OTM_MIN`（無 OTM max）。骨架 IV 閘門較寬鬆（`MIN_IV_RANK=0.05`，關閉 `MIN_IV_MINUS_RV`）。
 
-**風險重點**：尾部風險最高；極端行情可能觸發 soft roll、hard stop。Low tier 限制同時最多 2 組倉位（`MAX_GROUPS_PER_CURRENCY=2`）；loss 防禦為 soft ＜ hard 階梯（low：35% → 50%；medium：40% → 55%；high：50% → 60%）。骨架 `DEFENSE_CONFIRM_CYCLES=2`，並在連續 2 日各自跌 ≥ 1.5% 時升為 elevated、不開新倉。
+**風險重點**：尾部風險最高；極端行情觸發 soft／hard **平倉**（無對沖 naked 不 roll）。Low tier 限制同時最多 2 組倉位（`MAX_GROUPS_PER_CURRENCY=2`）；medium live 為 1 組／幣。loss 防禦為 soft ＜ hard 階梯（low：35% → 50%；medium：**22% → 32%**；high：50% → 60%）。骨架 `DEFENSE_CONFIRM_CYCLES=2`，並在連續 2 日各自跌 ≥ 1.5% 時升為 elevated、不開新倉。DTE≤4 走 `time_flatten` taker。
 
 ---
 

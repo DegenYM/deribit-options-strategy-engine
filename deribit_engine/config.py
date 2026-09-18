@@ -37,7 +37,8 @@ Field groups
   ``max_groups_per_book``, ``min_book_equity_usdc``, ``halt_open_max_loss_pct``,
   ``halt_drawdown_pct``, ``hard_derisk_*``, ``index_drawdown_*``, ``dvol_*``,
   ``cooldown_hours``, ``entry_cooldown_minutes``, ``recovery_normal_cycles``,
-  ``cash_flow_query_interval_seconds``, ``naked_entry_down_*``.
+  ``cash_flow_query_interval_seconds``, ``naked_entry_down_*``,
+  ``naked_entry_below_ma_pct``, ``naked_block_second_ccy_on_mark_loss``.
 - **exits / defense**: ``tp_capture_pct``, ``enable_dynamic_tp``, ``tp_*``,
   ``enable_early_exit``, ``early_exit_*``, ``time_exit_*``, ``soft_/hard_defense_*``,
   ``soft_defense_loss_pct``, ``hard_stop_loss_pct``, ``defense_confirm_cycles``,
@@ -538,6 +539,10 @@ class BotConfig:
     # OPTION_STRATEGY=naked_short and ENABLE_SHORT_PUT is on.
     naked_entry_down_streak_days: int = 0
     naked_entry_down_day_pct: Decimal = Decimal("0.015")
+    # Skip new shorts on a coin when spot is this far below its MA20. 0 = off.
+    naked_entry_below_ma_pct: Decimal = Decimal("0")
+    # When any open naked group is at mark loss, do not open a second underlying.
+    naked_block_second_ccy_on_mark_loss: bool = False
     # --- State persistence ------------------------------------------------------
     # ``STATE_JSON_PRETTY=true`` writes indented state JSON (default compact: the
     # file is rewritten every cycle and grows with closed-group history).
@@ -1135,6 +1140,9 @@ def load_config(
     naked_entry_down_day_pct = to_decimal(_optional(values, "NAKED_ENTRY_DOWN_DAY_PCT", "0.015"))
     if naked_entry_down_day_pct < 0 or naked_entry_down_day_pct >= 1:
         raise ConfigurationError("NAKED_ENTRY_DOWN_DAY_PCT must be in [0, 1)")
+    naked_entry_below_ma_pct = to_decimal(_optional(values, "NAKED_ENTRY_BELOW_MA_PCT", "0"))
+    if naked_entry_below_ma_pct < 0 or naked_entry_below_ma_pct >= 1:
+        raise ConfigurationError("NAKED_ENTRY_BELOW_MA_PCT must be in [0, 1)")
     spot_restore_order_type = _optional(values, "SPOT_RESTORE_ORDER_TYPE", "limit").lower()
     if spot_restore_order_type not in {"limit", "market"}:
         raise ConfigurationError("SPOT_RESTORE_ORDER_TYPE must be one of: limit, market")
@@ -1527,6 +1535,10 @@ def load_config(
         defense_confirm_cycles=max(1, int(_optional(values, "DEFENSE_CONFIRM_CYCLES", "1"))),
         naked_entry_down_streak_days=max(0, int(_optional(values, "NAKED_ENTRY_DOWN_STREAK_DAYS", "0"))),
         naked_entry_down_day_pct=naked_entry_down_day_pct,
+        naked_entry_below_ma_pct=naked_entry_below_ma_pct,
+        naked_block_second_ccy_on_mark_loss=_to_bool(
+            _optional(values, "NAKED_BLOCK_SECOND_CCY_ON_MARK_LOSS", "false"), default=False
+        ),
         covered_call_itm_confirm_cycles=(
             max(1, int(values["COVERED_CALL_ITM_CONFIRM_CYCLES"]))
             if str(values.get("COVERED_CALL_ITM_CONFIRM_CYCLES") or "").strip()

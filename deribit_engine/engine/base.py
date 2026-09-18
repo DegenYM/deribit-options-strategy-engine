@@ -1502,6 +1502,9 @@ class EngineBase:
                 ccy = (candidate.currency or "").upper()
                 if ccy and self._covered_call_spot_exit_blocks_entry(context.state, ccy):
                     continue
+            skip = self._naked_currency_entry_skip_reason(context, candidate.currency or "")
+            if skip:
+                continue
             kept.append(candidate)
         return kept
 
@@ -1514,7 +1517,11 @@ class EngineBase:
             or self.config.enable_dynamic_target_delta
             or self.config.enable_dynamic_min_net_apr
         )
-        need_trend = self.config.enable_trend_side_bias or self.config.enable_trend_adaptive_selection
+        need_trend = (
+            self.config.enable_trend_side_bias
+            or self.config.enable_trend_adaptive_selection
+            or (self.config.option_strategy == "naked_short" and self.config.naked_entry_below_ma_pct > 0)
+        )
         if not need_vol and not need_trend:
             self.strategy.update_vol_entry_context()
             return
@@ -1596,6 +1603,38 @@ class EngineBase:
             iv_minus_rv_by_currency=iv_minus_rv_by_currency,
             trend_by_currency=trend_by_currency,
         )
+
+    def _naked_blocks_second_currency(self, state: StrategyState, currency: str) -> bool:
+        """True when a mark-losing naked group is open and ``currency`` is a new underlying."""
+        if not self.config.naked_block_second_ccy_on_mark_loss:
+            return False
+        if self.config.option_strategy != "naked_short":
+            return False
+        target = (currency or "").upper()
+        if not target:
+            return False
+        open_naked = [
+            group
+            for group in self._open_groups(state)
+            if self._group_strategy_key(group) == "naked_short" and not group.is_cash_secured_group()
+        ]
+        if not any(group.mark_loss_amount > 0 for group in open_naked):
+            return False
+        open_ccys = {(group.currency or "").upper() for group in open_naked}
+        return target not in open_ccys
+
+    def _naked_currency_entry_skip_reason(self, context: RuntimeContext, currency: str) -> str | None:
+        if self.config.option_strategy != "naked_short":
+            return None
+        ccy = (currency or "").upper()
+        if not ccy:
+            return None
+        ma_reason = self.strategy.naked_below_ma_reason_zh(ccy)
+        if ma_reason:
+            return f"{ccy} [naked_short]: {ma_reason}"
+        if self._naked_blocks_second_currency(context.state, ccy):
+            return f"{ccy} [naked_short]: 既有部位 mark 虧損中，不開第二標的"
+        return None
 
     def _reserved_covered_call_quantity(self, state: StrategyState, currency: str) -> Decimal:
         ccy = currency.upper()

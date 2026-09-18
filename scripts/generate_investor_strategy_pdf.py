@@ -752,7 +752,7 @@ def build_pdf(out_path: Path, repo_root: Path) -> None:
             "The engine scans linear USDC and inverse BTC/ETH-settled options, typically targeting roughly "
             "<b>10-21 days to expiration (DTE)</b>, with filters on delta, OTM, liquidity, spread ratio, "
             "APR, and margin. A regime framework (normal / elevated / crisis) pauses new risk in crisis; "
-            "circuit breakers include hard stops, soft triggers (roll preferred), take-profit, and "
+            "circuit breakers include hard stops, soft triggers (close, not roll), take-profit, and "
             "time-based exits. "
             "<b>Naked short</b> is introduced below on this page with an illustrative payoff; "
             "<b>bull put spread</b> and <b>covered call</b> follow on the next pages. "

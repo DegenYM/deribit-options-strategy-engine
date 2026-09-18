@@ -245,6 +245,11 @@ class ScannerMixin:
                     reason = self.strategy.trend_pause_reason_zh(currency)
                     if reason:
                         blockers.append(f"{currency} [covered_call]: {reason}")
+            if self.config.option_strategy == "naked_short":
+                for currency in selected_currencies:
+                    reason = self._naked_currency_entry_skip_reason(context, currency)
+                    if reason:
+                        blockers.append(reason)
             cooled_books = [
                 book
                 for book in sorted({(c.collateral_currency or c.currency or "").upper() for c in candidates})
@@ -285,6 +290,11 @@ class ScannerMixin:
                     reason = self.strategy.trend_pause_reason_zh(currency)
                     if reason:
                         blockers.append(f"{currency} [covered_call]: {reason}")
+            if self.config.option_strategy == "naked_short":
+                for currency in selected_currencies:
+                    reason = self._naked_currency_entry_skip_reason(context, currency)
+                    if reason:
+                        blockers.append(reason)
             if not blockers:
                 blockers.append("no_candidates: run `./bot scan --diagnostics` for rejection detail")
             return blockers
@@ -316,6 +326,10 @@ class ScannerMixin:
             if regime is RiskRegime.CRISIS:
                 detail = snap.regime_detail_by_currency.get(currency, ())
                 blockers.append(f"{currency}: regime=crisis — {'; '.join(detail)}")
+                continue
+            naked_pause = self._naked_currency_entry_skip_reason(context, currency)
+            if naked_pause:
+                blockers.append(naked_pause)
                 continue
             loader = lambda instrument_name: self._get_orderbook(instrument_name, orderbook_cache)
             naked_markets_by_collateral: dict[str, list[OptionInstrument]] = {}
@@ -702,6 +716,10 @@ class ScannerMixin:
                 # week is just a bad one to hand away upside in. The entry-blockers
                 # report asks the strategy the same question, so the reason shows there.
                 LOGGER.info("covered_call entry paused currency=%s reason=%s", currency, trend_pause)
+                continue
+            naked_pause = self._naked_currency_entry_skip_reason(context, currency)
+            if naked_pause:
+                LOGGER.info("naked_short entry paused currency=%s reason=%s", currency, naked_pause)
                 continue
             elevated = regime is RiskRegime.ELEVATED
             threshold = self.strategy.effective_min_net_apr(currency)

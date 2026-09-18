@@ -76,7 +76,11 @@ class StrategySelector:
         self._iv_minus_rv_by_currency = dict(iv_minus_rv_by_currency or {})
         if trend_by_currency is not None:
             self._trend_by_currency = {ccy: self._as_trend_reading(value) for ccy, value in trend_by_currency.items()}
-        elif not (self.config.enable_trend_side_bias or self.config.enable_trend_adaptive_selection):
+        elif not (
+            self.config.enable_trend_side_bias
+            or self.config.enable_trend_adaptive_selection
+            or (self.config.option_strategy == "naked_short" and self.config.naked_entry_below_ma_pct > 0)
+        ):
             self._trend_by_currency = {}
 
     def _as_trend_reading(self, value: TrendReading | Decimal) -> TrendReading:
@@ -321,6 +325,20 @@ class StrategySelector:
             f"{currency.upper()} 現價高於 {self.config.trend_ma_days} 日均線約 "
             f"{above.quantize(Decimal('0.1'))}%，且 {self.config.trend_ma_days} 日均線仍在 "
             f"{self.config.trend_regime_ma_days} 日均線之上，賣出的買權容易被 call 走，暫緩開新倉。"
+        )
+
+    def naked_below_ma_reason_zh(self, currency: str) -> str | None:
+        """Chinese reason when spot is far enough below MA20 to skip a new short put."""
+        threshold = self.config.naked_entry_below_ma_pct
+        if threshold <= 0 or self.config.option_strategy != "naked_short":
+            return None
+        reading = self._trend_by_currency.get(currency.upper())
+        if reading is None or reading.deviation > -threshold:
+            return None
+        below = (-reading.deviation) * Decimal("100")
+        return (
+            f"{currency.upper()} 現價低於 {self.config.trend_ma_days} 日均線約 "
+            f"{below.quantize(Decimal('0.1'))}%，暫緩開新倉。"
         )
 
     def effective_call_otm_min(self, currency: str) -> Decimal:

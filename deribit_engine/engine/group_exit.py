@@ -108,7 +108,7 @@ class GroupExitMixin:
         if robust_exit_actions is not None:
             return robust_exit_actions
         if self._time_exit_triggered(context, group):
-            actions.extend(self._close_group(context, group, reason="time_exit", live=live))
+            actions.extend(self._close_group(context, group, reason=self._time_exit_close_reason(group), live=live))
             return actions
         if soft_trigger and not hold_on_hard:
             if per_position:
@@ -124,6 +124,12 @@ class GroupExitMixin:
             else:
                 actions.extend(self._close_group(context, group, reason="soft_stop", live=live))
         return actions
+
+    def _time_exit_close_reason(self, group: TradeGroup) -> str:
+        """Naked DTE flatten uses defense taker (``time_flatten``), not income GTC."""
+        if self.config.option_strategy == "naked_short" and not group.is_cash_secured_group():
+            return "time_flatten"
+        return "time_exit"
 
     def _hedge_giveup_breached(self, group: TradeGroup) -> bool:
         """True when a hedged hard-stop position has lost enough to force a close."""
