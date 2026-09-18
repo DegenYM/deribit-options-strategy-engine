@@ -42,6 +42,15 @@ DEFAULT_MAX_ROWS = 5_000
 _EVICT_EVERY_N_WRITES = 50
 _write_counter = 0
 
+# WAL size. Every process on this host keeps its connection open for its whole
+# life, so there is almost always an active reader and SQLite's automatic
+# checkpoints can only ever run in PASSIVE mode -- they copy pages into the db
+# but never reset the log. The WAL therefore only grew: it reached 8.7 GB on the
+# Mac mini, whose page cache then evicted real memory to keep it mapped. The
+# journal size limit truncates the log back after any checkpoint that does reset
+# it, and the eviction pass asks for such a checkpoint explicitly.
+DEFAULT_WAL_LIMIT_BYTES = 64 * 1024 * 1024
+
 
 def enabled() -> bool:
     """Off switch: ``DERIBIT_PUBLIC_CACHE=0`` restores per-process-only caching."""
@@ -67,6 +76,24 @@ def max_rows() -> int:
     return _env_int("PUBLIC_CACHE_MAX_ROWS", DEFAULT_MAX_ROWS, minimum=100)
 
 
+def wal_limit_bytes() -> int:
+    return _env_int("PUBLIC_CACHE_WAL_LIMIT_BYTES", DEFAULT_WAL_LIMIT_BYTES, minimum=1 << 20)
+
+
+def checkpoint(conn: sqlite3.Connection) -> None:
+    """Best-effort WAL reset so ``journal_size_limit`` can truncate the log.
+
+    TRUNCATE needs every other reader to be out of the log, so on a busy host it
+    usually returns busy and leaves the WAL alone -- that is fine, the next pass
+    tries again. Errors are swallowed for the same reason writes are: the cache
+    must never break a read.
+    """
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception as exc:  # noqa: BLE001 -- checkpointing is best-effort.
+        LOGGER.debug("public cache wal checkpoint skipped: %s", exc)
+
+
 def evict(conn: sqlite3.Connection, *, now_ms: int | None = None) -> int:
     """Drop expired rows, then trim to the row cap. Returns rows deleted.
 
@@ -89,6 +116,7 @@ def evict(conn: sqlite3.Connection, *, now_ms: int | None = None) -> int:
         )
         deleted += cur.rowcount
     conn.commit()
+    checkpoint(conn)
     return int(deleted)
 
 
@@ -113,6 +141,7 @@ def _connect() -> sqlite3.Connection | None:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=2000")
+        conn.execute(f"PRAGMA journal_size_limit={wal_limit_bytes()}")
         conn.execute(
             "CREATE TABLE IF NOT EXISTS public_reads ("
             "  key TEXT PRIMARY KEY,"

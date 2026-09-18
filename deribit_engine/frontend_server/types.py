@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -430,6 +431,21 @@ class SingleFlightRunner:
         return True
 
 
+# Several dashboard caches are keyed by a *content fingerprint* — the mtimes and
+# sizes of the state, journal and ledger files behind the payload — so the key
+# changes every time the live bot writes. Without a bound the store kept one full
+# payload (~1-2 MB in Python objects) per warm cycle forever: a frontend up three
+# days held a couple of thousand of them, and the six investors on the Mac mini
+# between them held some 14 GB that the compressor then had to swap out.
+#
+# The bound can be small because a superseded fingerprint is dead by
+# construction — mtimes only move forward, so that key can never be asked for
+# again. What does get re-read is the handful of fixed keys ("status", "spot",
+# the fill-stat keys), and LRU keeps those: they are touched every cycle, so the
+# fingerprint churn is what falls off the cold end.
+DEFAULT_TTL_CACHE_MAX_ENTRIES = 16
+
+
 class _TtlCache:
     """Trivial TTL cache — just enough to avoid hammering Deribit.
 
@@ -447,13 +463,31 @@ class _TtlCache:
         *,
         stale_while_revalidate: bool = False,
         executor: ThreadPoolExecutor | None = None,
+        max_entries: int = DEFAULT_TTL_CACHE_MAX_ENTRIES,
     ) -> None:
         self._ttl = ttl_seconds
         self._swr = stale_while_revalidate
         self._executor = executor
+        self._max_entries = max(1, int(max_entries))
         self._lock = threading.Lock()
-        self._store: dict[Any, tuple[float, Any]] = {}
+        self._store: OrderedDict[Any, tuple[float, Any]] = OrderedDict()
         self._inflight: dict[Any, threading.Event] = {}
+
+    # ---- store access (caller holds ``self._lock``) ----------------------------
+
+    def _remember(self, key: Any, value: Any) -> None:
+        """Store ``value``, mark it most-recently-used, drop the coldest overflow."""
+        self._store[key] = (time.monotonic(), value)
+        self._store.move_to_end(key)
+        while len(self._store) > self._max_entries:
+            self._store.popitem(last=False)
+
+    def _touch(self, key: Any) -> tuple[float, Any] | None:
+        """Look ``key`` up, marking it most-recently-used on a hit."""
+        cached = self._store.get(key)
+        if cached is not None:
+            self._store.move_to_end(key)
+        return cached
 
     def _spawn_refresh(self, key: Any, factory: Callable[[], Any], event: threading.Event) -> None:
         if self._executor is not None:
@@ -474,7 +508,7 @@ class _TtlCache:
     def get_or_set(self, key: Any, factory: Callable[[], Any]) -> Any:
         now = time.monotonic()
         with self._lock:
-            cached = self._store.get(key)
+            cached = self._touch(key)
             if cached is not None and (now - cached[0]) < self._ttl:
                 return cached[1]
             # Expired but present: serve stale and refresh in the background so the
@@ -495,14 +529,14 @@ class _TtlCache:
         if not leader:
             event.wait(timeout=120)
             with self._lock:
-                cached = self._store.get(key)
+                cached = self._touch(key)
                 if cached is not None:
                     return cached[1]
             return factory()
         try:
             value = factory()
             with self._lock:
-                self._store[key] = (time.monotonic(), value)
+                self._remember(key, value)
             return value
         finally:
             with self._lock:
@@ -514,7 +548,7 @@ class _TtlCache:
         try:
             value = factory()
             with self._lock:
-                self._store[key] = (time.monotonic(), value)
+                self._remember(key, value)
         except Exception as exc:  # noqa: BLE001 — keep serving stale on refresh failure.
             LOGGER.warning("ttl cache background refresh failed for %r: %s", key, exc)
         finally:
@@ -526,7 +560,7 @@ class _TtlCache:
         """Return cached value when present and fresh; otherwise ``None``."""
         now = time.monotonic()
         with self._lock:
-            cached = self._store.get(key)
+            cached = self._touch(key)
             if cached is not None and (now - cached[0]) < self._ttl:
                 return cached[1]
         return None
@@ -534,7 +568,7 @@ class _TtlCache:
     def get_stale(self, key: Any) -> Any | None:
         """Return last stored value for ``key`` even when TTL expired."""
         with self._lock:
-            cached = self._store.get(key)
+            cached = self._touch(key)
             if cached is not None:
                 return cached[1]
         return None
@@ -551,4 +585,4 @@ class _TtlCache:
     def seed(self, key: Any, value: Any) -> None:
         """Store ``value`` under ``key`` as if freshly computed (for cross-endpoint cache warm-up)."""
         with self._lock:
-            self._store[key] = (time.monotonic(), value)
+            self._remember(key, value)

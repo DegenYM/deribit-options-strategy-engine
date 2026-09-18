@@ -257,3 +257,32 @@ def test_non_inverse_profile_still_loads_the_usdc_chain(tmp_path, monkeypatch):
     engine._load_supported_option_markets()
 
     assert ("USDC", "option") in client.instrument_calls
+
+
+def test_connection_sets_a_journal_size_limit(tmp_path, monkeypatch):
+    """Without the limit a checkpoint leaves the WAL at its high-water mark."""
+    monkeypatch.setenv("DERIBIT_PUBLIC_CACHE_PATH", str(tmp_path / "public.db"))
+    monkeypatch.setenv("PUBLIC_CACHE_WAL_LIMIT_BYTES", str(4 * 1024 * 1024))
+    public_cache.reset_for_tests(str(tmp_path / "public.db"))
+
+    conn = public_cache._connect()
+    assert conn.execute("PRAGMA journal_size_limit").fetchone()[0] == 4 * 1024 * 1024
+
+
+def test_eviction_truncates_the_wal(tmp_path, monkeypatch):
+    from deribit_engine.public_cache import _EVICT_EVERY_N_WRITES
+
+    monkeypatch.setenv("DERIBIT_PUBLIC_CACHE_PATH", str(tmp_path / "public.db"))
+    public_cache.reset_for_tests(str(tmp_path / "public.db"))
+
+    # Stay under _EVICT_EVERY_N_WRITES so the log is still at its high-water
+    # mark when measured -- an automatic eviction would already have reset it.
+    wal = tmp_path / "public.db-wal"
+    for i in range(_EVICT_EVERY_N_WRITES - 10):
+        public_cache.write(f"key-{i}", {"payload": "x" * 4096})
+    grown = wal.stat().st_size if wal.exists() else 0
+
+    public_cache.evict(public_cache._connect())
+
+    assert grown > 0
+    assert wal.stat().st_size < grown
