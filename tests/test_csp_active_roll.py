@@ -743,4 +743,10 @@ def test_expired_put_after_a_roll_writes_the_next_put(tmp_path) -> None:
 
     result = engine.manage(live=True)
     assert any(a.get("action") == "cash_secured_entered" for a in result["actions"])
-    assert not any(a.get("reason") == "daily_yield_not_higher" for a in result["actions"])
+    # The stale hurdle showed up as a skip on the parent. An active-roll verdict of
+    # the same name on the put just opened is the roll deciding to hold it, which is
+    # what it should do.
+    assert not any(
+        a.get("action") == "cash_secured_skipped" and a.get("reason") == "daily_yield_not_higher"
+        for a in result["actions"]
+    )

@@ -444,7 +444,10 @@ def test_cash_secured_hold_near_strike() -> None:
     assert cash_secured_hold_near_strike(index_price=Decimal("77500"), strike=Decimal("77000"), band_pct=band) is True
     assert cash_secured_hold_near_strike(index_price=Decimal("78000"), strike=Decimal("77000"), band_pct=band) is False
     assert cash_secured_hold_near_strike(index_price=Decimal("0"), strike=Decimal("77000"), band_pct=band) is False
-    assert cash_secured_hold_near_strike(index_price=Decimal("76905"), strike=Decimal("77000"), band_pct=Decimal("0")) is False
+    assert (
+        cash_secured_hold_near_strike(index_price=Decimal("76905"), strike=Decimal("77000"), band_pct=Decimal("0"))
+        is False
+    )
 
 
 def test_cash_secured_cover_spot_instrument_prefers_usdc_csp() -> None:
@@ -572,6 +575,44 @@ def test_cash_secured_strike_and_quantity() -> None:
         strike=Decimal("72000"),
         dte=Decimal("6"),
         net_apr=Decimal("0.4"),
+    )
+
+
+def test_scan_rank_takes_the_daily_yield_not_the_nearest_expiry() -> None:
+    """YM 0096, 2026-09-18: same strike, same size, 4.8x apart on what it banks."""
+    from deribit_engine.fees import net_apr_linear_usdc_short_put_per_contract
+
+    def _apr(premium: str, dte: str) -> Decimal:
+        return net_apr_linear_usdc_short_put_per_contract(
+            premium_per_contract=Decimal(premium),
+            strike=Decimal("75000"),
+            dte_days=Decimal(dte),
+            index_price=Decimal("78068"),
+            fee_rate=Decimal("0.0003"),
+            fee_cap_rate=Decimal("0.125"),
+        )
+
+    near = dict(quantity=Decimal("0.1"), strike=Decimal("75000"), dte=Decimal("2.92"))
+    far = dict(quantity=Decimal("0.1"), strike=Decimal("75000"), dte=Decimal("6.92"))
+    # 21SEP bid 30 nets 2.63 USDC; 25SEP bid 325 nets 30.16. Round-trip fees are
+    # near-flat per trade, so the short-dated contract pays them out of far less.
+    assert _apr("30", "2.92") < _apr("325", "6.92")
+    assert cash_secured_scan_rank(**far, net_apr=_apr("325", "6.92")) < cash_secured_scan_rank(
+        **near, net_apr=_apr("30", "2.92")
+    )
+
+
+def test_scan_rank_still_prefers_sooner_on_a_true_tie() -> None:
+    assert cash_secured_scan_rank(
+        quantity=Decimal("0.1"),
+        strike=Decimal("75000"),
+        dte=Decimal("2.92"),
+        net_apr=Decimal("0.2"),
+    ) < cash_secured_scan_rank(
+        quantity=Decimal("0.1"),
+        strike=Decimal("75000"),
+        dte=Decimal("6.92"),
+        net_apr=Decimal("0.2"),
     )
 
 
@@ -2235,7 +2276,9 @@ def test_manage_skips_csp_entry_when_near_strike(tmp_path) -> None:
     engine.state_store.save(state)
 
     result = engine.manage(live=False)
-    assert any(a.get("action") == "cash_secured_skipped" and a.get("reason") == "near_strike" for a in result["actions"])
+    assert any(
+        a.get("action") == "cash_secured_skipped" and a.get("reason") == "near_strike" for a in result["actions"]
+    )
     assert not any(a.get("action") == "cash_secured_preview" for a in result["actions"])
     assert not any(a.get("reason") == "csp_self_assign" for a in result["actions"])
 

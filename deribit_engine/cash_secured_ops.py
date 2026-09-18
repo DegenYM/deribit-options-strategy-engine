@@ -188,12 +188,22 @@ def cash_secured_scan_rank(
     dte: Decimal,
     net_apr: Decimal,
 ) -> tuple[Decimal, Decimal, Decimal, Decimal]:
-    """Prefer the highest compliant strike at cover-aligned qty, then shorter DTE / APR.
+    """Prefer the highest compliant strike at cover-aligned qty, then net APR / shorter DTE.
 
     Strike is first so an available-funds cap cannot make a lower strike win
     just because it could open more contracts. Quantity is only a tie-breaker.
+
+    Among expiries at that same strike and size the collateral is identical, so
+    ``net_apr`` — net of round-trip fees, annualized over DTE — is exactly net
+    USDC per day, and ranks them by what the wheel actually banks. DTE used to
+    come first and quietly bought the nearest expiry at any price: for YM's 0096
+    on 2026-09-18 that was 21SEP26-75000-P at 2.63 USDC net over 2.92 days, when
+    25SEP26-75000-P paid 30.16 over 6.92 — the same strike at 4.8x the daily
+    rate. Fees are the reason the gap is so wide; they are a flat-ish cost per
+    trade, so a short-dated contract pays them out of a much smaller premium.
+    DTE stays as the last tie-breaker, where "sooner" is free.
     """
-    return (-strike, -quantity, dte, -net_apr)
+    return (-strike, -quantity, -net_apr, dte)
 
 
 def itm_group_sold_to_usdc(group: TradeGroup) -> bool:
