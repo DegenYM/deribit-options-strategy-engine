@@ -44,17 +44,17 @@ def test_naked_medium_profile_loads_unhedged_thresholds():
     assert config.option_strategy == "naked_short"
     assert config.risk_tier == "medium"
     assert config.entry_dte_min == 14
-    assert config.entry_dte_max == 28
+    assert config.entry_dte_max == 45
     assert config.btc_put_delta_min == Decimal("0.07")
-    assert config.btc_put_delta_max == Decimal("0.12")
+    assert config.btc_put_delta_max == Decimal("0.20")
     assert config.btc_preferred_put_delta_min == Decimal("0.08")
-    assert config.btc_preferred_put_delta_max == Decimal("0.10")
-    assert config.btc_put_otm_min == Decimal("0.10")
+    assert config.btc_preferred_put_delta_max == Decimal("0.15")
+    assert config.btc_put_otm_min == Decimal("0.08")
     assert config.eth_put_delta_min == Decimal("0.06")
-    assert config.eth_put_delta_max == Decimal("0.10")
+    assert config.eth_put_delta_max == Decimal("0.16")
     assert config.eth_preferred_put_delta_min == Decimal("0.07")
-    assert config.eth_preferred_put_delta_max == Decimal("0.09")
-    assert config.eth_put_otm_min == Decimal("0.12")
+    assert config.eth_preferred_put_delta_max == Decimal("0.13")
+    assert config.eth_put_otm_min == Decimal("0.10")
     assert config.min_net_apr == Decimal("0.05")
     assert config.linear_min_open_interest == Decimal("8")
     assert config.linear_min_book_notional_usdc == Decimal("4000")
@@ -68,7 +68,7 @@ def test_naked_medium_profile_loads_unhedged_thresholds():
     assert config.book_mm_target == Decimal("0.18")
     assert config.book_mm_hard == Decimal("0.32")
     assert config.halt_open_max_loss_pct == Decimal("0.40")
-    assert config.naked_allow_elevated_entry is False
+    assert config.naked_allow_elevated_entry is True
     assert config.enable_naked_topup is False
     assert config.tp_capture_pct_dte_long == Decimal("0.50")
     assert config.tp_capture_pct == Decimal("0.55")
@@ -86,6 +86,20 @@ def test_naked_medium_profile_loads_unhedged_thresholds():
     assert config.defense_trigger_use_mark is True
     assert config.naked_entry_below_ma_pct == Decimal("0.02")
     assert config.naked_block_second_ccy_on_mark_loss is True
+
+    # Preferred bands must sit inside the hard bands, or the ranking target is
+    # unreachable and every candidate is rejected on delta.
+    for coin in ("btc", "eth"):
+        dmin = getattr(config, f"{coin}_put_delta_min")
+        dmax = getattr(config, f"{coin}_put_delta_max")
+        pmin = getattr(config, f"{coin}_preferred_put_delta_min")
+        pmax = getattr(config, f"{coin}_preferred_put_delta_max")
+        assert dmin <= pmin <= pmax <= dmax, coin
+        omin = getattr(config, f"{coin}_put_otm_min")
+        omax = getattr(config, f"{coin}_put_otm_max")
+        pomin = getattr(config, f"{coin}_preferred_otm_min")
+        pomax = getattr(config, f"{coin}_preferred_otm_max")
+        assert omin <= pomin <= pomax <= omax, coin
 
 
 def test_jack_style_investor_hedge_survives_naked_skeleton():

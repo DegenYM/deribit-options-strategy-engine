@@ -13,7 +13,7 @@
 ## 掃描與風控
 
 - 掃描 `Deribit Linear USDC Options` 與 `BTC/ETH-settled reversed options`
-- 進場 DTE 由策略 **tier profile** 的 `PUT_DTE_MIN` / `PUT_DTE_MAX` 決定（covered call 多為 **7–35 天**；naked short **medium 14–28 天**、low／high 仍 **10–35 天**；bull put spread low tier 為 **12–21 天**）。`.env.example` 的 10–21 僅作 legacy 單檔 fallback
+- 進場 DTE 由策略 **tier profile** 的 `PUT_DTE_MIN` / `PUT_DTE_MAX` 決定（covered call 多為 **7–35 天**；naked short **medium 14–45 天**（Deribit 未平倉量集中在月選，14／21 天的週選 OI 僅 0–2，不到門檻 8）、low／high 仍 **10–35 天**；bull put spread low tier 為 **12–21 天**）。`.env.example` 的 10–21 僅作 legacy 單檔 fallback
 - short leg 會先過 delta、OTM、OI、book notional、spread ratio、APR 與 book IM/MM 門檻
 - `bull_put_spread` 的 long put 以 `BULL_PUT_LONG_DELTA_MIN/MAX` 選擇，同到期且 strike 低於 short put
 - `covered_call` 只使用 BTC/ETH 本位 book 的既有可用庫存作 cover，不會自動買現貨或用 perp 補 cover；共用 covered_call 設定預設 **`COVERED_CALL_SPOT_EXIT_ENABLED=true`**（ITM 結算後賣 Deribit spot；所有 tier 相同）
@@ -21,7 +21,7 @@
 - 只做流動性足夠的 short leg：`OI`、`book notional`、`spread ratio` 都要過門檻
 - `MIN_LIQUID_EXPIRIES_REQUIRED` 可控制 DTE 視窗內至少需要幾個可交易 expiry 才允許開倉
 - regime 分為 `normal / elevated / crisis`
-- `crisis` 仍**完全停開新倉**。`elevated`（含 24h 指數回撤與 DVOL 放大）對 **`covered_call`** 不停開：仍可進場，但把有效 `*_DELTA_MAX` 收緊 `ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.02**，絕不低於既有 `*_DELTA_MIN`）。**`naked_short` 預設停開**（無底倉的 short put 是下跌尾部，elevated／連續下跌正是最不該新賣保險的時候）；要改走「收緊後仍可賣」須設 `NAKED_ALLOW_ELEVATED_ENTRY=true`，此時用較大的 `NAKED_ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.04**）。Naked 連續下跌（兩個交易日各自 ≥ `NAKED_ENTRY_DOWN_DAY_PCT`）升為 elevated 後走同一條停開路徑。`data_unavailable` 一律停開。`hard stop` 直接平倉；`soft trigger` **直接平倉**（無對沖 naked 不 roll）；`TP` 與 `time exit` 都會主動退場。naked short 到期前 DTE≤4 走 **`time_flatten`（defense taker / IOC）**，虧單也能買回，不是 income GTC。naked short 防守需連續 **2** 個 manage cycle 確認（`DEFENSE_CONFIRM_CYCLES=2`）。現貨低於 MA20 ≥2% 該幣不開新倉；任一口 mark 虧損時不開第二標的。
+- `crisis` 仍**完全停開新倉**。`elevated`（含 24h 指數回撤與 DVOL 放大）對 **`covered_call`** 不停開：仍可進場，但把有效 `*_DELTA_MAX` 收緊 `ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.02**，絕不低於既有 `*_DELTA_MIN`）。**`naked_short` 預設停開**（無底倉的 short put 是下跌尾部，elevated／連續下跌正是最不該新賣保險的時候）；要改走「收緊後仍可賣」須設 `NAKED_ALLOW_ELEVATED_ENTRY=true`，此時用較大的 `NAKED_ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.04**）。Naked 連續下跌（兩個交易日各自 ≥ `NAKED_ENTRY_DOWN_DAY_PCT`）升為 elevated 後走同一條停開路徑。`data_unavailable` 一律停開。`hard stop` 直接平倉；`soft trigger` **直接平倉**（無對沖 naked 不 roll）；`TP` 與 `time exit` 都會主動退場。naked short 到期前 DTE≤4 走 **`time_flatten`（defense taker / IOC）**，虧單也能買回，不是 income GTC。naked short 防守需連續 **2** 個 manage cycle 確認（`DEFENSE_CONFIRM_CYCLES=2`）。現貨低於 MA20 ≥2% 該幣不開新倉；任一口 mark 虧損時不開第二標的。**medium tier（YM live）設 `NAKED_ALLOW_ELEVATED_ENTRY=true`**：elevated 收緊後仍可賣，crisis 仍全停，下跌連續日與 MA20 兩道剎車不變。
 
 ## 策略比較
 
@@ -90,7 +90,7 @@
 | `ELEVATED_DELTA_MAX_TIGHTEN` | `0.02` | `0.02` | 僅 CC 路徑 | elevated 時 CC 有效 delta_max 減量 |
 | `NAKED_ELEVATED_DELTA_MAX_TIGHTEN` | `0.04` | n/a | `0.04` | 僅在 naked 選擇 elevated 仍可賣時使用 |
 | `ELEVATED_MAX_GROUPS_TIGHTEN` | `0`（關） | `0` | `0` | elevated 時 `MAX_GROUPS_PER_CURRENCY` 減 N；0 = 本波不啟用 |
-| `NAKED_ALLOW_ELEVATED_ENTRY` | **`false`** | n/a | **`false`** | `true` 時 naked elevated 收緊後仍可賣 |
+| `NAKED_ALLOW_ELEVATED_ENTRY` | **`false`**（medium tier 設 **`true`**） | n/a | **`false`** | `true` 時 naked elevated 收緊後仍可賣 |
 
 `naked_short` **不是** covered_call 的複製品：同樣開動態 target delta 與 MIN_NET_APR scaler，但只往更安全的方向動（OTM-only、tighten-only），elevated／down-streak 預設停開。**youming** naked medium 為 **live、無對沖**；**jack** naked 維持 tracking-only、investor 層 **perp hedge-first**（不 live）。`bull_put` **未啟用**。
 
