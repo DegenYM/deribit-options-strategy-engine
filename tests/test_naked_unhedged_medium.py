@@ -46,21 +46,23 @@ def test_naked_medium_profile_loads_unhedged_thresholds():
     assert config.entry_dte_min == 14
     assert config.entry_dte_max == 45
     assert config.btc_put_delta_min == Decimal("0.07")
-    assert config.btc_put_delta_max == Decimal("0.20")
-    assert config.btc_preferred_put_delta_min == Decimal("0.08")
-    assert config.btc_preferred_put_delta_max == Decimal("0.15")
+    assert config.btc_put_delta_max == Decimal("0.24")
+    assert config.btc_preferred_put_delta_min == Decimal("0.10")
+    assert config.btc_preferred_put_delta_max == Decimal("0.18")
     assert config.btc_put_otm_min == Decimal("0.08")
     assert config.eth_put_delta_min == Decimal("0.06")
-    assert config.eth_put_delta_max == Decimal("0.16")
-    assert config.eth_preferred_put_delta_min == Decimal("0.07")
-    assert config.eth_preferred_put_delta_max == Decimal("0.13")
+    assert config.eth_put_delta_max == Decimal("0.20")
+    assert config.eth_preferred_put_delta_min == Decimal("0.09")
+    assert config.eth_preferred_put_delta_max == Decimal("0.16")
     assert config.eth_put_otm_min == Decimal("0.10")
     assert config.min_net_apr == Decimal("0.05")
-    assert config.linear_min_open_interest == Decimal("8")
+    assert config.linear_min_open_interest == Decimal("3")
     assert config.linear_min_book_notional_usdc == Decimal("4000")
     assert config.linear_max_spread_ratio == Decimal("0.10")
-    assert config.max_groups_per_currency == 1
-    assert config.max_concurrent_groups == 2
+    assert config.max_groups_per_currency == 2
+    assert config.max_concurrent_groups == 3
+    # unset in the profile: it inherits the per-currency slot count
+    assert config.max_groups_per_book == 2
     assert config.per_leg_im_cap_put == Decimal("0.10")
     assert config.expiry_im_cap_per_book == Decimal("0.20")
     assert config.book_im_target == Decimal("0.22")
@@ -70,10 +72,10 @@ def test_naked_medium_profile_loads_unhedged_thresholds():
     assert config.halt_open_max_loss_pct == Decimal("0.40")
     assert config.naked_allow_elevated_entry is True
     assert config.enable_naked_topup is False
-    assert config.tp_capture_pct_dte_long == Decimal("0.50")
-    assert config.tp_capture_pct == Decimal("0.55")
-    assert config.tp_capture_pct_dte_short == Decimal("0.60")
-    assert config.enable_early_exit is True
+    assert config.tp_capture_pct_dte_long == Decimal("0.65")
+    assert config.tp_capture_pct == Decimal("0.70")
+    assert config.tp_capture_pct_dte_short == Decimal("0.75")
+    assert config.enable_early_exit is False
     assert config.early_exit_min_profit_capture == Decimal("0.4")
     assert config.early_exit_remaining_apr == Decimal("0.04")
     assert config.time_exit_dte == 4
