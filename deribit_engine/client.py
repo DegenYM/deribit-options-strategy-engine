@@ -32,9 +32,15 @@ _AUTH_CACHE_LOCK = threading.Lock()
 # These are queried many times per cycle (e.g. ``_currency_index_price`` is hit
 # 20+ times) and are identical for all clients, so a process-global TTL cache
 # both de-duplicates redundant HTTP within a cycle and keeps valuations within a
-# single snapshot consistent.
-_PUBLIC_READ_CACHE: dict[str, tuple[float, Any]] = {}
+# single snapshot consistent. Entries are ``(stored_monotonic, value, ttl)``.
+_PUBLIC_READ_CACHE: dict[str, tuple[float, Any, float]] = {}
 _PUBLIC_READ_CACHE_LOCK = threading.Lock()
+# An expired entry is never served again, and a key that is not asked for twice
+# (a past DVOL window, the order book of an expired option) is never overwritten,
+# so without a sweep such entries stay for the life of the process. Writes drop
+# expired entries, at most once per interval. Guarded by ``_PUBLIC_READ_CACHE_LOCK``.
+_PUBLIC_READ_PRUNE_INTERVAL_SEC = 60.0
+_public_read_last_prune = 0.0
 # Per-key single-flight: the first thread to miss on ``key`` loads it while
 # concurrent misses wait on the same lock and then re-read the cache. Guarded by
 # ``_PUBLIC_READ_CACHE_LOCK``.
@@ -111,12 +117,10 @@ def _cached_public_read(key: str, ttl: float, loader: Callable[[], Any]) -> Any:
                 return _copy_cached(cached[1])
             hit, shared = public_cache.read(key, ttl)
             if hit:
-                with _PUBLIC_READ_CACHE_LOCK:
-                    _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(shared))
+                _public_read_cache_put(key, _copy_cached(shared), ttl)
                 return _copy_cached(shared)
             value = loader()
-            with _PUBLIC_READ_CACHE_LOCK:
-                _PUBLIC_READ_CACHE[key] = (time.monotonic(), _copy_cached(value))
+            _public_read_cache_put(key, _copy_cached(value), ttl)
             public_cache.write(key, value)
             return value
         finally:
@@ -127,13 +131,31 @@ def _cached_public_read(key: str, ttl: float, loader: Callable[[], Any]) -> Any:
                     _PUBLIC_READ_INFLIGHT.pop(key, None)
 
 
-def _public_read_cache_get(key: str, ttl: float) -> tuple[float, Any] | None:
+def _public_read_cache_get(key: str, ttl: float) -> tuple[float, Any, float] | None:
     now = time.monotonic()
     with _PUBLIC_READ_CACHE_LOCK:
         cached = _PUBLIC_READ_CACHE.get(key)
     if cached is not None and (now - cached[0]) < ttl:
         return cached
     return None
+
+
+def _public_read_cache_put(key: str, value: Any, ttl: float) -> None:
+    """Store ``value``; at most once per interval, drop every entry past its TTL.
+
+    An entry is dropped exactly when ``_public_read_cache_get`` with the TTL it
+    was stored under would treat it as a miss, so no hit is ever lost.
+    """
+    global _public_read_last_prune
+    with _PUBLIC_READ_CACHE_LOCK:
+        now = time.monotonic()
+        _PUBLIC_READ_CACHE[key] = (now, value, ttl)
+        if now - _public_read_last_prune < _PUBLIC_READ_PRUNE_INTERVAL_SEC:
+            return
+        _public_read_last_prune = now
+        expired = [k for k, (stored, _v, k_ttl) in _PUBLIC_READ_CACHE.items() if not (now - stored) < k_ttl]
+        for k in expired:
+            del _PUBLIC_READ_CACHE[k]
 
 
 def _copy_cached(value: Any) -> Any:
@@ -146,9 +168,11 @@ def _copy_cached(value: Any) -> Any:
 
 def reset_public_read_cache() -> None:
     """Clear process-global read caches (intended for tests)."""
+    global _public_read_last_prune
     with _PUBLIC_READ_CACHE_LOCK:
         _PUBLIC_READ_CACHE.clear()
         _PUBLIC_READ_INFLIGHT.clear()
+        _public_read_last_prune = 0.0
 
 
 class DeribitClient:
@@ -813,6 +837,7 @@ class DeribitClient:
         (BTC: 2016), so a 100-day average exists on a freshly deployed bot.
         Paged at 1000 per request; ``days`` bounds how far back to walk.
         """
+
         def _load() -> list[list[Any]]:
             out: list[list[Any]] = []
             offset = 0

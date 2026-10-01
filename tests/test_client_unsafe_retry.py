@@ -304,6 +304,34 @@ def test_cached_public_read_different_keys_do_not_block_each_other(monkeypatch):
     assert out.get("a") == "a"
 
 
+def test_cached_public_read_drops_expired_entries(monkeypatch):
+    """Keys asked for once (old DVOL windows, expired options' books) must not pile up."""
+    monkeypatch.setattr(client_module.public_cache, "read", lambda key, ttl: (False, None))
+    monkeypatch.setattr(client_module.public_cache, "write", lambda key, value: None)
+
+    class _Clock:
+        now = 0.0
+
+        @classmethod
+        def monotonic(cls):
+            return cls.now
+
+    monkeypatch.setattr(client_module, "time", _Clock)
+
+    def read_at(now, key, ttl):
+        _Clock.now = now
+        return client_module._cached_public_read(key, ttl, lambda: {"key": key, "loaded_at": now})
+
+    read_at(1_000.0, "dvol:old", 60.0)
+    read_at(1_030.0, "order_book:expired", 3.0)
+    read_at(1_059.0, "dvol:fresh", 60.0)
+    read_at(1_070.0, "index_price:btc_usd", 5.0)  # first write a full sweep interval later
+
+    assert set(client_module._PUBLIC_READ_CACHE) == {"dvol:fresh", "index_price:btc_usd"}
+    # Nothing still inside its TTL was dropped: this is a hit, not a reload.
+    assert read_at(1_070.0, "dvol:fresh", 60.0) == {"key": "dvol:fresh", "loaded_at": 1_059.0}
+
+
 # ------------------------------------------------------------------
 # FIX 10 — get_instrument uses the TTL cache
 # ------------------------------------------------------------------
