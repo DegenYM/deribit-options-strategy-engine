@@ -317,9 +317,9 @@ def classify_macro_regime(
 ) -> tuple[RiskRegime, list[str]]:
     """Map index return + DVOL ratio to ``normal`` / ``elevated`` / ``crisis``.
 
-    Rapid upside (24h / 48h rally) is ``elevated`` only — it pauses new entries
-    via the existing non-NORMAL halt, and must never become ``crisis`` (which can
-    hard-derisk open winners).
+    Rapid upside (24h / 48h rally) is ``elevated`` only and must never become
+    ``crisis`` (which can hard-derisk open winners). Entry gates still full-halt
+    on rally notes even when Wave 2 allows dump/DVOL elevated entry.
 
     Dump / DVOL mapping can be skipped (``enable_index_dump_entry_halt=False``)
     so covered-call books still open into a red day; rally halt is unchanged.

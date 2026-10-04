@@ -2255,6 +2255,26 @@ def test_regime_48h_rally_halts_when_24h_is_quiet(tmp_path):
     assert any("index_48h_rally" in note for note in detail)
 
 
+def test_regime_missing_48h_history_fails_open(tmp_path):
+    config = make_config(tmp_path, option_markets_profile="linear_usdc")
+
+    class ThinWeekClient(FakeClient):
+        def get_index_chart_data(self, index_name, *, range_name="1d"):
+            if range_name in ("1w", "7d"):
+                now_ms = 1_800_000_000_000
+                return [[now_ms - 12 * 3600 * 1000, Decimal("100")], [now_ms, Decimal("110")]]
+            return super().get_index_chart_data(index_name, range_name=range_name)
+
+    engine = DeribitOptionTrialBot(
+        config,
+        ThinWeekClient(drawdowns={"BTC": Decimal("0.02"), "ETH": Decimal("-0.02")}),
+    )
+    assert engine._index_return_48h("BTC") is None
+    regime, detail = engine._determine_regime_with_detail("BTC", markets=_btc_instruments(engine), orderbook_cache={})
+    assert regime is RiskRegime.NORMAL
+    assert detail == ["market_conditions_normal"]
+
+
 def test_regime_rally_halt_can_be_disabled(tmp_path):
     config = make_config(
         tmp_path,

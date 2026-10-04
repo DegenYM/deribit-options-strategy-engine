@@ -36,6 +36,7 @@ Field groups
   ``book_mm_*``, ``max_concurrent_groups``, ``max_groups_per_currency``,
   ``max_groups_per_book``, ``min_book_equity_usdc``, ``halt_open_max_loss_pct``,
   ``halt_drawdown_pct``, ``hard_derisk_*``, ``index_drawdown_*``, ``dvol_*``,
+  ``enable_index_rally_entry_halt``, ``index_rally_*``, ``enable_index_dump_entry_halt``,
   ``cooldown_hours``, ``entry_cooldown_minutes``, ``recovery_normal_cycles``,
   ``cash_flow_query_interval_seconds``, ``naked_entry_down_*``.
 - **exits / defense**: ``tp_capture_pct``, ``enable_dynamic_tp``, ``tp_*``,

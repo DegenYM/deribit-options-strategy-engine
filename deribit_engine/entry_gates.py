@@ -52,6 +52,11 @@ def open_group_count_for_book(
     return count
 
 
+def _is_index_rally_detail(regime_detail: tuple[str, ...]) -> bool:
+    """True when macro notes mark a 24h/48h squeeze (never a dump/DVOL elevated)."""
+    return any("index_24h_rally" in note or "index_48h_rally" in note for note in regime_detail)
+
+
 def regime_blocks_new_entries(
     regime: RiskRegime,
     *,
@@ -61,12 +66,17 @@ def regime_blocks_new_entries(
     """True when this underlying's regime must skip new entries.
 
     ``crisis`` always blocks. ``data_unavailable`` always blocks (we do not
-    open risk while blind). ``elevated`` blocks unless ``allow_elevated_entry``
-    is set — covered_call uses that path and tightens delta instead of halting.
+    open risk while blind). A 24h/48h index rally is ``elevated`` only (never
+    ``crisis``) but still full-halts — even when ``allow_elevated_entry`` is
+    set — so covered-call books do not sell into a squeeze. Other ``elevated``
+    reasons (dump / DVOL) block unless ``allow_elevated_entry`` is set;
+    covered_call uses that path and tightens delta instead of halting.
     """
     if any(note.startswith("data_unavailable") for note in regime_detail):
         return True
     if regime is RiskRegime.CRISIS:
+        return True
+    if _is_index_rally_detail(regime_detail):
         return True
     if regime is RiskRegime.NORMAL:
         return False
