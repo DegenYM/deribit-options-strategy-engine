@@ -36,6 +36,7 @@ Field groups
   ``book_mm_*``, ``max_concurrent_groups``, ``max_groups_per_currency``,
   ``max_groups_per_book``, ``min_book_equity_usdc``, ``halt_open_max_loss_pct``,
   ``halt_drawdown_pct``, ``hard_derisk_*``, ``index_drawdown_*``, ``dvol_*``,
+  ``enable_index_rally_entry_halt``, ``index_rally_*``, ``enable_index_dump_entry_halt``,
   ``cooldown_hours``, ``entry_cooldown_minutes``, ``recovery_normal_cycles``,
   ``cash_flow_query_interval_seconds``, ``naked_entry_down_*``,
   ``naked_entry_below_ma_pct``, ``naked_block_second_ccy_on_mark_loss``.
@@ -341,6 +342,13 @@ class BotConfig:
     trend_pause_requires_bull_regime: bool = True
     #: Long moving average defining that regime, in days.
     trend_regime_ma_days: int = 100
+    # Pause new entries after a fast index squeeze. Elevated only — never crisis.
+    enable_index_rally_entry_halt: bool = True
+    index_rally_24h_pct: Decimal = Decimal("0.05")
+    index_rally_48h_pct: Decimal = Decimal("0.07")
+    # Pause new entries on 24h dump / DVOL elevated+crisis. Covered call turns
+    # this off: spot is already held, and a dump makes short calls safer.
+    enable_index_dump_entry_halt: bool = True
     # Dynamic take-profit thresholds by DTE.
     enable_dynamic_tp: bool = True
     tp_capture_pct_dte_long: Decimal = Decimal("0.75")
@@ -1503,6 +1511,12 @@ def load_config(
         ),
         score_weight_trend=to_decimal(_optional(values, "SCORE_WEIGHT_TREND", "3")),
         **_parse_trend_adaptive_fields(values),
+        enable_index_rally_entry_halt=_to_bool(
+            _optional(values, "ENABLE_INDEX_RALLY_ENTRY_HALT", "true"), default=True
+        ),
+        index_rally_24h_pct=to_decimal(_optional(values, "INDEX_RALLY_24H_PCT", "0.05")),
+        index_rally_48h_pct=to_decimal(_optional(values, "INDEX_RALLY_48H_PCT", "0.07")),
+        enable_index_dump_entry_halt=_to_bool(_optional(values, "ENABLE_INDEX_DUMP_ENTRY_HALT", "true"), default=True),
         enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "true"), default=True),
         tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.75")),
         tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.70")),

@@ -82,6 +82,22 @@ def test_regime_blocks_crisis_always_and_elevated_only_when_disallowed():
         )
         is True
     )
+    assert (
+        regime_blocks_new_entries(
+            RiskRegime.ELEVATED,
+            regime_detail=("index_24h_rally >= index_rally_24h_pct (0.08000000 >= 0.050000)",),
+            allow_elevated_entry=True,
+        )
+        is True
+    )
+    assert (
+        regime_blocks_new_entries(
+            RiskRegime.ELEVATED,
+            regime_detail=("index_48h_rally >= index_rally_48h_pct (0.09000000 >= 0.070000)",),
+            allow_elevated_entry=True,
+        )
+        is True
+    )
 
 
 def test_entry_gates_elevated_not_halt_when_allowed():
@@ -177,6 +193,24 @@ def test_covered_call_snapshot_does_not_halt_elevated(tmp_path):
     )
     assert snapshot.halt_new_entries_by_currency["BTC"] is False
     assert snapshot.halt_new_entries_by_currency["ETH"] is False
+
+
+def test_covered_call_snapshot_halts_index_rally(tmp_path):
+    config = make_config(tmp_path, option_strategy="covered_call")
+    engine = DeribitOptionTrialBot(config, FakeClient())
+    snapshot = engine._build_portfolio_snapshot(
+        state=StrategyState(),
+        summaries={"BTC": _summary("BTC", "0.2"), "ETH": _summary("ETH", "3")},
+        regime_by_currency={"BTC": RiskRegime.ELEVATED, "ETH": RiskRegime.ELEVATED},
+        regime_detail_by_currency={
+            "BTC": ("index_24h_rally >= index_rally_24h_pct (0.08000000 >= 0.050000)",),
+            "ETH": ("index_48h_rally >= index_rally_48h_pct (0.09000000 >= 0.070000)",),
+        },
+        future_positions=[],
+        orderbook_cache={},
+    )
+    assert snapshot.halt_new_entries_by_currency["BTC"] is True
+    assert snapshot.halt_new_entries_by_currency["ETH"] is True
 
 
 def test_elevated_tightens_call_delta_max_and_still_builds(tmp_path):
