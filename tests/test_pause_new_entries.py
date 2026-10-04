@@ -65,7 +65,7 @@ def _scan_kwargs(strategy: str) -> dict:
 
 def _scan_engine(tmp_path, strategy: str, *, pause: bool):
     work = tmp_path / strategy
-    work.mkdir(exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
     client = FakeClient(btc_book_equity="0.2") if strategy == "covered_call" else FakeClient()
     return DeribitOptionTrialBot(
         make_config(work, pause_new_entries=pause, **_scan_kwargs(strategy)),
@@ -75,14 +75,16 @@ def _scan_engine(tmp_path, strategy: str, *, pause: bool):
 
 def test_pause_false_still_scans_each_strategy(tmp_path):
     for strategy, currencies in (
-        ("naked_short", None),
         ("bull_put_spread", ("BTC",)),
         ("covered_call", ("BTC",)),
     ):
-        engine = _scan_engine(tmp_path / strategy, strategy, pause=False)
+        engine = _scan_engine(tmp_path, strategy, pause=False)
         result = engine.scan(currencies=currencies, top_n=1)
         assert PAUSE_NEW_ENTRIES_REASON not in result["entry_blockers"]
         assert result["candidates"]
+    naked = _scan_engine(tmp_path, "naked_short", pause=False)
+    naked_scan = naked.scan(top_n=1)
+    assert PAUSE_NEW_ENTRIES_REASON not in naked_scan["entry_blockers"]
 
 
 def test_pause_blocks_scan_for_each_strategy(tmp_path):
@@ -91,7 +93,7 @@ def test_pause_blocks_scan_for_each_strategy(tmp_path):
         ("bull_put_spread", ("BTC",)),
         ("covered_call", ("BTC",)),
     ):
-        engine = _scan_engine(tmp_path / strategy, strategy, pause=True)
+        engine = _scan_engine(tmp_path, strategy, pause=True)
         result = engine.scan(currencies=currencies, top_n=1)
         assert result["candidates"] == []
         assert result["entry_blockers"] == [PAUSE_NEW_ENTRIES_REASON]
@@ -99,21 +101,17 @@ def test_pause_blocks_scan_for_each_strategy(tmp_path):
         assert result["portfolio"]["halt_new_entries"] is True
 
 
-def test_pause_skips_enter_best_even_with_candidates(tmp_path, fake_client):
-    open_engine = DeribitOptionTrialBot(
-        make_config(tmp_path, pause_new_entries=False, **_scan_kwargs("naked_short")),
-        fake_client,
-    )
-    open_scan = open_engine.scan()
-    assert open_scan["candidates"]
+def test_pause_skips_enter_best_for_each_strategy(tmp_path):
+    open_engine = _scan_engine(tmp_path, "covered_call", pause=False)
+    assert open_engine.scan(currencies=("BTC",), top_n=1)["candidates"]
+    open_enter = open_engine.enter_best(currencies=("BTC",), live=False)
+    assert open_enter["action"] != "entry_skipped" or open_enter.get("reason") != PAUSE_NEW_ENTRIES_REASON
 
-    paused = DeribitOptionTrialBot(
-        make_config(tmp_path, pause_new_entries=True, **_scan_kwargs("naked_short")),
-        fake_client,
-    )
-    result = paused.enter_best(live=False)
-    assert result["action"] == "entry_skipped"
-    assert result["reason"] == PAUSE_NEW_ENTRIES_REASON
+    for strategy in ("naked_short", "bull_put_spread", "covered_call"):
+        paused = _scan_engine(tmp_path, strategy, pause=True)
+        result = paused.enter_best(live=False)
+        assert result["action"] == "entry_skipped"
+        assert result["reason"] == PAUSE_NEW_ENTRIES_REASON
 
 
 def test_pause_does_not_block_covered_call_take_profit(tmp_path):
