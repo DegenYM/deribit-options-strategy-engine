@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from .models import NakedPutCandidate, PortfolioSnapshot, RiskRegime, TradeGroup
 
+PAUSE_NEW_ENTRIES_REASON = "pause_new_entries"
+
 
 def last_entry_timestamp_ms_by_book(groups: list[TradeGroup]) -> dict[str, int]:
     """Most recent ``entry_timestamp_ms`` per collateral book across all groups."""

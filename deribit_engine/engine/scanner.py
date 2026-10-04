@@ -5,7 +5,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
-from ..entry_gates import regime_blocks_new_entries
+from ..entry_gates import PAUSE_NEW_ENTRIES_REASON, regime_blocks_new_entries
 from ..models import (
     NakedPutCandidate,
     OptionInstrument,
@@ -210,6 +210,8 @@ class ScannerMixin:
     ) -> list[str]:
         blockers: list[str] = []
         snap = context.snapshot
+        if self.config.pause_new_entries:
+            return [PAUSE_NEW_ENTRIES_REASON]
         if snap.portfolio_wide_entry_halt:
             blockers.extend(list(snap.halt_entry_reasons))
             return blockers
@@ -673,6 +675,8 @@ class ScannerMixin:
         top_n: int | None,
     ) -> list[NakedPutCandidate]:
         snapshot = context.snapshot
+        if self.config.pause_new_entries:
+            return []
         # Portfolio-wide kill switches (data_unavailable, open_max_loss_pct, or
         # every enabled book halted) still short-circuit the scan. Per-book
         # halts are handled inside the per-currency loop so one halted book

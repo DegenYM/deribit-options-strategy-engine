@@ -470,6 +470,7 @@ def test_config_defaults_trend_side_bias_on(tmp_path):
     assert config.enable_index_dump_entry_halt is True
     assert config.index_rally_24h_pct == Decimal("0.05")
     assert config.index_rally_48h_pct == Decimal("0.07")
+    assert config.pause_new_entries is False
 
 
 def _macro_kwargs(**overrides):

@@ -1496,6 +1496,8 @@ class EngineBase:
         candidates: list[NakedPutCandidate],
     ) -> list[NakedPutCandidate]:
         """Keep scan winners whose underlying regime and collateral book may still enter."""
+        if self.config.pause_new_entries:
+            return []
         kept: list[NakedPutCandidate] = []
         for candidate in candidates:
             if candidate_entry_halted(context.snapshot, candidate):

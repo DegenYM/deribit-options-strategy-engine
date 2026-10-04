@@ -102,7 +102,13 @@ class CoveredCallMixin:
         return delta >= _COVERED_CALL_NEAR_STRIKE_DELTA
 
     def _covered_call_new_entry_blocked(self, context: RuntimeContext, group: TradeGroup) -> bool:
-        """True when the next scan could not open a replacement call (halt / trend pause)."""
+        """True when the next scan could not open a replacement call (halt / trend pause).
+
+        ``PAUSE_NEW_ENTRIES`` is an operator wind-down, not a rewrite-risk gate:
+        take-profit / early-exit of the existing call must still run.
+        """
+        if self.config.pause_new_entries:
+            return False
         snapshot = getattr(context, "snapshot", None)
         currency = (group.currency or "").upper()
         book = (group.collateral_currency or currency).upper()
@@ -493,6 +499,7 @@ class CoveredCallMixin:
             cash_secured_target_native,
             itm_sold_ready_for_cash_secured,
         )
+        from ..entry_gates import PAUSE_NEW_ENTRIES_REASON
         from ..spot_restore_ops import covered_call_cover_native
 
         actions: list[dict[str, Any]] = []
@@ -515,6 +522,14 @@ class CoveredCallMixin:
                 continue
             if cash_secured_child_is_open(context.state.groups, group):
                 continue
+            if self.config.pause_new_entries:
+                # Completing an in-flight active roll is management of an
+                # existing put. A first / next wheel put is a new trade group.
+                if cash_secured_last_active_roll_child(group, context.state.groups) is None:
+                    skip = self._cash_secured_skip(group, PAUSE_NEW_ENTRIES_REASON, live=live)
+                    if skip:
+                        actions.append(skip)
+                    continue
             regime = self._cash_secured_regime(group.currency)
             if regime is RiskRegime.CRISIS:
                 skip = self._cash_secured_skip(group, "crisis_regime", live=live)

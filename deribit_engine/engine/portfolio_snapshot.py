@@ -11,6 +11,7 @@ from decimal import Decimal
 
 from ..cross_book_flow import cross_book_flow_adjustments_native
 from ..entry_gates import (
+    PAUSE_NEW_ENTRIES_REASON,
     append_underlying_regime_halt_reasons_for_usdc_book,
     build_halt_new_entries_by_currency,
 )
@@ -309,6 +310,12 @@ class PortfolioSnapshotMixin:
             halt_new_entries_by_currency=halt_new_entries_by_currency,
             regime_by_currency=regime_by_currency,
         )
+        if self.config.pause_new_entries:
+            halt_new_entries = True
+            for currency in self.config.managed_currencies:
+                halt_new_entries_by_currency[currency.upper()] = True
+            if PAUSE_NEW_ENTRIES_REASON not in halt_entry_reasons:
+                halt_entry_reasons.insert(0, PAUSE_NEW_ENTRIES_REASON)
         if halt_new_entries and not halt_entry_reasons:
             halt_entry_reasons.append("halt_new_entries (composite; check portfolio flags)")
         return PortfolioSnapshot(

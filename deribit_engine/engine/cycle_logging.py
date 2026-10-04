@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..entry_gates import PAUSE_NEW_ENTRIES_REASON
 from ..models import RiskRegime
 from .context import _MAX_SCAN_BLOCKER_LOG_LINES, LOG_REASON_NUMBER_RE, LOGGER
 
@@ -78,6 +79,8 @@ class CycleLoggingMixin:
         candidates: list[Any],
         state: Any | None = None,
     ) -> str:
+        if self.config.pause_new_entries:
+            return PAUSE_NEW_ENTRIES_REASON
         if state is not None and getattr(self.config, "option_strategy", "") == "covered_call" and not candidates:
             blocked = [
                 ccy for ccy in self.config.managed_currencies if self._covered_call_spot_exit_blocks_entry(state, ccy)

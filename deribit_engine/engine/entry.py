@@ -3,6 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Any
 
+from ..entry_gates import PAUSE_NEW_ENTRIES_REASON
 from ..exceptions import ExchangeError
 from ..models import (
     NakedPutCandidate,
@@ -52,6 +53,13 @@ class EntryMixin:
         candidates: list[NakedPutCandidate],
         live: bool,
     ) -> dict[str, Any]:
+        if self.config.pause_new_entries:
+            return {
+                "action": "entry_skipped",
+                "reason": PAUSE_NEW_ENTRIES_REASON,
+                "regime": context.snapshot.regime.value,
+                "portfolio": context.snapshot.to_dict(),
+            }
         if not candidates:
             return {
                 "action": "no_candidate",

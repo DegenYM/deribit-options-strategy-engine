@@ -266,6 +266,10 @@ INDEX_RALLY_24H_PCT=0.05
 INDEX_RALLY_48H_PCT=0.07
 # Dump / DVOL pause (naked / bull put). Covered call sets this false.
 ENABLE_INDEX_DUMP_ENTRY_HALT=true
+# 營運員風控：暫時停開任何新倉（含 covered_call / naked_short / bull_put / wheel 下一張 put）。
+# 既有倉仍管理（TP、time exit、defense、hard-derisk、既有倉 roll）。預設 false。
+# MAX_CONCURRENT_GROUPS=0 是不限槽位，不是停開；要停開請設這個。
+PAUSE_NEW_ENTRIES=false
 HALT_DRAWDOWN_PCT=0.025
 HARD_DERISK_DRAWDOWN_PCT=0.06
 HARD_DERISK_MAINTENANCE_MARGIN_RATIO=0.33

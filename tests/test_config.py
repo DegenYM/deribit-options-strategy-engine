@@ -189,6 +189,16 @@ def test_load_config_parses_index_rally_entry_halt(tmp_path: Path):
     assert config.enable_index_dump_entry_halt is True
 
 
+def test_load_config_parses_pause_new_entries(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("PAUSE_NEW_ENTRIES=true\n")
+    config = load_config(env_file, require_private=False)
+    assert config.pause_new_entries is True
+
+    env_file.write_text("PAUSE_NEW_ENTRIES=false\n")
+    assert load_config(env_file, require_private=False).pause_new_entries is False
+
+
 def test_load_config_parses_index_dump_entry_halt_off(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text("ENABLE_INDEX_DUMP_ENTRY_HALT=false\n")
