@@ -36,6 +36,7 @@ Field groups
   ``book_mm_*``, ``max_concurrent_groups``, ``max_groups_per_currency``,
   ``max_groups_per_book``, ``min_book_equity_usdc``, ``halt_open_max_loss_pct``,
   ``halt_drawdown_pct``, ``hard_derisk_*``, ``index_drawdown_*``, ``dvol_*``,
+  ``enable_index_rally_entry_halt``, ``index_rally_*``, ``enable_index_dump_entry_halt``,
   ``cooldown_hours``, ``entry_cooldown_minutes``, ``recovery_normal_cycles``,
   ``cash_flow_query_interval_seconds``, ``naked_entry_down_*``.
 - **exits / defense**: ``tp_capture_pct``, ``enable_dynamic_tp``, ``tp_*``,
@@ -319,6 +320,13 @@ class BotConfig:
     # Deadband: |signal| below this is treated as neutral (no side tilt).
     trend_side_min_signal: Decimal = Decimal("0.02")
     score_weight_trend: Decimal = Decimal("3")
+    # Pause new entries after a fast index squeeze. Elevated only — never crisis.
+    enable_index_rally_entry_halt: bool = True
+    index_rally_24h_pct: Decimal = Decimal("0.05")
+    index_rally_48h_pct: Decimal = Decimal("0.07")
+    # Pause new entries on 24h dump / DVOL elevated+crisis. Covered call turns
+    # this off: spot is already held, and a dump makes short calls safer.
+    enable_index_dump_entry_halt: bool = True
     # Dynamic take-profit thresholds by DTE.
     enable_dynamic_tp: bool = False
     tp_capture_pct_dte_long: Decimal = Decimal("0.40")
@@ -1407,6 +1415,12 @@ def load_config(
         trend_side_ref_pct=to_decimal(_optional(values, "TREND_SIDE_REF_PCT", "0.05")),
         trend_side_min_signal=to_decimal(_optional(values, "TREND_SIDE_MIN_SIGNAL", "0.02")),
         score_weight_trend=to_decimal(_optional(values, "SCORE_WEIGHT_TREND", "3")),
+        enable_index_rally_entry_halt=_to_bool(
+            _optional(values, "ENABLE_INDEX_RALLY_ENTRY_HALT", "true"), default=True
+        ),
+        index_rally_24h_pct=to_decimal(_optional(values, "INDEX_RALLY_24H_PCT", "0.05")),
+        index_rally_48h_pct=to_decimal(_optional(values, "INDEX_RALLY_48H_PCT", "0.07")),
+        enable_index_dump_entry_halt=_to_bool(_optional(values, "ENABLE_INDEX_DUMP_ENTRY_HALT", "true"), default=True),
         enable_dynamic_tp=_to_bool(_optional(values, "ENABLE_DYNAMIC_TP", "false"), default=False),
         tp_capture_pct_dte_long=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_LONG", "0.40")),
         tp_capture_pct_dte_short=to_decimal(_optional(values, "TP_CAPTURE_PCT_DTE_SHORT", "0.60")),

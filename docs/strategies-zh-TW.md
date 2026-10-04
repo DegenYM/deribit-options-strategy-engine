@@ -21,7 +21,10 @@
 - 只做流動性足夠的 short leg：`OI`、`book notional`、`spread ratio` 都要過門檻
 - `MIN_LIQUID_EXPIRIES_REQUIRED` 可控制 DTE 視窗內至少需要幾個可交易 expiry 才允許開倉
 - regime 分為 `normal / elevated / crisis`
-- `crisis` 仍**完全停開新倉**。`elevated`（含 24h 指數回撤與 DVOL 放大）對 **`covered_call`** 不停開：仍可進場，但把有效 `*_DELTA_MAX` 收緊 `ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.02**，絕不低於既有 `*_DELTA_MIN`）。**`naked_short` 預設停開**（無底倉的 short put 是下跌尾部，elevated／連續下跌正是最不該新賣保險的時候）；要改走「收緊後仍可賣」須設 `NAKED_ALLOW_ELEVATED_ENTRY=true`，此時用較大的 `NAKED_ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.04**）。Naked 連續下跌（兩個交易日各自 ≥ `NAKED_ENTRY_DOWN_DAY_PCT`）升為 elevated 後走同一條停開路徑。`data_unavailable` 一律停開。`hard stop` 直接平倉；`soft trigger` 優先 roll，不行就平倉；`TP` 與 `time exit` 都會主動退場。naked short 防守需連續 **2** 個 manage cycle 確認（`DEFENSE_CONFIRM_CYCLES=2`）。
+- **快速拉升**：24h 或 48h 指數漲幅超過 `INDEX_RALLY_24H_PCT` / `INDEX_RALLY_48H_PCT` 時，該標的標成 `elevated`（不是 `crisis`，**不會**因此 hard-derisk 既有倉）。拉升（`index_24h_rally` / `index_48h_rally`）**一律停開新倉**，含 `covered_call`。策略骨架已寫入 `ENABLE_INDEX_RALLY_ENTRY_HALT=true`、`INDEX_RALLY_24H_PCT=0.05`、`INDEX_RALLY_48H_PCT=0.07`
+- **Covered call 不因快速下跌停開倉**：現貨本來就持有，dump 時 short call 更 OTM、權利金通常更厚。`.env.covered_call` 設 `ENABLE_INDEX_DUMP_ENTRY_HALT=false`；naked / bull put 維持預設 `true`。流動性危機與拉升 halt 仍會擋 CC
+- 既有 `ENABLE_TREND_SIDE_BIAS` 只會在 put/call 之間偏排序，**不會**停開倉
+- `crisis` 仍**完全停開新倉**。`elevated`（24h 指數回撤與 DVOL 放大）對 **`covered_call`** 不停開：仍可進場，但把有效 `*_DELTA_MAX` 收緊 `ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.02**，絕不低於既有 `*_DELTA_MIN`）。**`naked_short` 預設停開**（無底倉的 short put 是下跌尾部，elevated／連續下跌正是最不該新賣保險的時候）；要改走「收緊後仍可賣」須設 `NAKED_ALLOW_ELEVATED_ENTRY=true`，此時用較大的 `NAKED_ELEVATED_DELTA_MAX_TIGHTEN`（預設 **0.04**）。Naked 連續下跌（兩個交易日各自 ≥ `NAKED_ENTRY_DOWN_DAY_PCT`）升為 elevated 後走同一條停開路徑。`data_unavailable` 一律停開。`hard stop` 直接平倉；`soft trigger` 優先 roll，不行就平倉；`TP` 與 `time exit` 都會主動退場。naked short 防守需連續 **2** 個 manage cycle 確認（`DEFENSE_CONFIRM_CYCLES=2`）。
 
 ## 策略比較
 
@@ -41,7 +44,7 @@
 
 ### `covered_call`
 
-只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險。選約以**保留現貨**為原則：**delta 為硬門檻與排序主軸**（優先於 TARGET APR），`CALL_OTM_MIN` 僅作安全地板（依 tier：low 較高、high 較低），**不設 OTM max**；同 delta 下偏好更深 OTM。風險是上漲收益被履約價封頂，以及 ITM 結算後仍可能留下 spot exposure。Low 的進場 spread 上限為 **18%**（`INVERSE_MAX_SPREAD_RATIO=0.18`；medium／high 仍 15%）：上漲週期只放寬 bid-ask，**不放寬 OTM／delta**，以免把 LOW 做成更近 strike。
+只用既有 BTC/ETH 現貨庫存賣 call；現貨 cover 會降低 upside short call 的爆倉型風險。選約以**保留現貨**為原則：**delta 為硬門檻與排序主軸**（優先於 TARGET APR），`CALL_OTM_MIN` 僅作安全地板（依 tier：low 較高、high 較低），**不設 OTM max**；同 delta 下偏好更深 OTM。風險是上漲收益被履約價封頂，以及 ITM 結算後仍可能留下 spot exposure。Low 的進場 spread 上限為 **18%**（`INVERSE_MAX_SPREAD_RATIO=0.18`；medium／high 仍 15%）：上漲週期只放寬 bid-ask，**不放寬 OTM／delta**，以免把 LOW 做成更近 strike。快速下跌**不停**新倉（`ENABLE_INDEX_DUMP_ENTRY_HALT=false`）；快速拉升仍停。
 
 **獲利／退場口徑（幣本位）**：BTC/ETH 本位 covered call 的 take-profit、time-exit、`profit_capture` 以**權利金幣數**（進場均價 × 數量 − 進場 fee）對比買回成本衡量，**不**因標的指數上漲把同一 ETH/BTC premium 換算成更高 USDC 而誤判未達門檻。USDC linear 部位仍走 USDC 口徑。
 
