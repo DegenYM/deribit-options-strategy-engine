@@ -294,7 +294,9 @@ def _restore_plan(
     spot_name = spot_restore_spot_instrument_name(group, groups, child=child)
     return {
         "action": "spot-restore",
-        "order_type": "market",
+        "order_type": "limit",
+        "time_in_force": "immediate_or_cancel",
+        "execution_note": ("IOC limit at the ask (about +0.5%), sized to free quote, not a naked market buy"),
         "restore_reason": RESTORE_REASON,
         "currency": group.currency,
         "unrestored_amount": format_decimal(unrestored, 8),
@@ -328,7 +330,7 @@ def _csp_abort_plan(
         will.append("no open CSP")
     unrestored = unrestored_spot_exit_native(parent, groups=groups) if parent is not None else to_decimal(0)
     if restore is not None and unrestored > 0:
-        will.append(f"market-buy cover {restore.get('spot_instrument_name')}")
+        will.append(f"IOC limit-buy cover at the ask on {restore.get('spot_instrument_name')}, sized to free quote")
     else:
         will.append("no unrestored cover")
     return {
@@ -388,13 +390,77 @@ def _csp_abort_close_completed(close_result: dict[str, Any] | None, child: Trade
     return False
 
 
+_NO_FILL_SKIP_REASONS = frozenset({"not_enough_funds", "ioc_unfilled"})
+
+
+def _spot_restore_has_fill(result: dict[str, Any]) -> bool:
+    for key in ("filled_native", "filled_amount", "filled_quote_spent", "spot_restore_amount"):
+        if to_decimal(result.get(key)) > 0:
+            return True
+    trades = result.get("trades")
+    if isinstance(trades, list):
+        for trade in trades:
+            if isinstance(trade, dict) and to_decimal(trade.get("amount")) > 0:
+                return True
+    return False
+
+
+def _spot_restore_is_structured_skip(result: dict[str, Any]) -> bool:
+    """True when the operator should see a failed restore, not a submitted order.
+
+    A partial or full fill stays a success even if the reason names an IOC miss.
+    """
+    action = str(result.get("action") or "")
+    if "skipped" in action:
+        return True
+    reason = str(result.get("reason") or "").strip()
+    return reason in _NO_FILL_SKIP_REASONS and not _spot_restore_has_fill(result)
+
+
+def _human_restore_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower()
+    if "jsonrpc" in lowered or text[0] in "{[":
+        return ""
+    if "private/buy" in lowered and ("http" in lowered or "code" in lowered):
+        return ""
+    if "not_enough_funds_in_currency" in lowered and ("http" in lowered or "code" in lowered or "{" in text):
+        return ""
+    return text
+
+
 def _csp_abort_restore_succeeded(restore_result: dict[str, Any] | None, *, needed: bool) -> bool:
     if not needed:
         return True
     if not restore_result:
         return False
+    if _spot_restore_is_structured_skip(restore_result):
+        return False
     action = str(restore_result.get("action") or "")
-    return action.startswith("spot_restore") and "skipped" not in action
+    return action.startswith("spot_restore")
+
+
+def _spot_restore_failure_detail(result: dict[str, Any] | None) -> str:
+    if not result:
+        return "Cover restore did not complete."
+    message = _human_restore_text(result.get("message"))
+    if message:
+        return message
+    nested = result.get("restore")
+    if isinstance(nested, dict):
+        nested_message = _human_restore_text(nested.get("message"))
+        if nested_message:
+            return nested_message
+    reason = str(result.get("reason") or "").strip()
+    if reason == "not_enough_funds":
+        return "Not enough free quote to buy the minimum size at the IOC limit."
+    if reason == "ioc_unfilled":
+        return "IOC limit buy did not fill."
+    if reason:
+        return f"Spot restore skipped ({reason})."
+    return "Cover restore did not complete."
 
 
 def _csp_abort_payload(
@@ -406,8 +472,9 @@ def _csp_abort_payload(
     csp_group_id: str | None,
     cancelled: dict[str, Any] | None = None,
     result: dict[str, Any],
+    detail: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "ok": ok,
         "live": True,
         "kind": "csp_abort_restore",
@@ -418,6 +485,9 @@ def _csp_abort_payload(
         "cancelled_resting": cancelled,
         "result": result,
     }
+    if detail:
+        payload["detail"] = detail
+    return payload
 
 
 def run_close_position(
@@ -584,14 +654,14 @@ def run_spot_restore(
         instrument_name=spot_restore_spot_instrument_name(group, context.state.groups),
         groups=context.state.groups,
     )
+    action = str(result.get("action") or "")
+    skipped = _spot_restore_is_structured_skip(result)
     if live:
-        if str(result.get("action") or "").startswith("spot_restore") and "skipped" not in str(
-            result.get("action") or ""
-        ):
+        if action.startswith("spot_restore") and not skipped:
             bot._persist_trade_journal_actions([result])
         bot.state_store.save(context.state)
-    return {
-        "ok": True,
+    body: dict[str, Any] = {
+        "ok": not skipped,
         "live": live,
         "kind": "spot_restore",
         "account": spec.slug,
@@ -599,6 +669,9 @@ def run_spot_restore(
         "cancelled_resting": cancelled,
         "result": result,
     }
+    if skipped:
+        body["detail"] = _spot_restore_failure_detail(result)
+    return body
 
 
 def run_csp_abort_restore(
@@ -711,19 +784,17 @@ def run_csp_abort_restore(
                 order_type="market",
                 restore_reason=CSP_ABORT_RESTORE_LIVE_REASON,
                 park_resting=False,
-                instrument_name=spot_restore_spot_instrument_name(
-                    parent, context.state.groups, child=child
-                ),
+                instrument_name=spot_restore_spot_instrument_name(parent, context.state.groups, child=child),
                 groups=context.state.groups,
             )
-            if str(restore_result.get("action") or "").startswith("spot_restore") and "skipped" not in str(
-                restore_result.get("action") or ""
-            ):
+            restore_action = str(restore_result.get("action") or "")
+            if restore_action.startswith("spot_restore") and not _spot_restore_is_structured_skip(restore_result):
                 bot._persist_trade_journal_actions([restore_result])
         _mark_csp_wheel_skipped(parent)
         bot.state_store.save(context.state)
 
     if not _csp_abort_restore_succeeded(restore_result, needed=restore_needed):
+        detail = _spot_restore_failure_detail(restore_result)
         return _csp_abort_payload(
             ok=False,
             spec_slug=spec.slug,
@@ -731,9 +802,11 @@ def run_csp_abort_restore(
             parent_group_id=parent_group_id,
             csp_group_id=csp_group_id,
             cancelled=cancelled,
+            detail=detail,
             result={
                 "action": "csp_abort_restore_partial",
                 "reason": "cover_restore_failed",
+                "detail": detail,
                 "close": close_result,
                 "restore": restore_result,
             },

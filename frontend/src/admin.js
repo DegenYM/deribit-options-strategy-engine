@@ -399,14 +399,14 @@ async function runFrontendAction(action) {
 const TRADE_KINDS = {
   recover: {
     title: "Recover market",
-    lead: "Emergency market buyback of ITM-sold cover. If this group still has a resting auto limit, live submit cancels it first.",
+    lead: "Live submit cancels a resting auto limit, then sends an IOC limit at the ask (about 0.5% through), sized to free USDC/USDT. If free quote covers the full unrestored size, it buys the full cover. It does not send a naked market buy: Deribit reserves USDC against a much higher price and returns not_enough_funds even when the ask is affordable.",
     endpoint: "spot-restore",
     empty: "No recoverable groups (need closed + unrestored).",
     pick: "restore",
   },
   "csp-abort-restore": {
     title: "Close CSP + recover cover",
-    lead: "Skip the cash-secured wheel, market-close the open put, then market-buy cover on the ITM exit pair (BTC_USDC / ETH_USDC when the wheel sold USDC). Preview first; type LIVE to submit.",
+    lead: "Skip the cash-secured wheel, market-close the open put, then IOC-limit buy cover at the ask on the ITM exit pair, sized to free quote (not a naked market buy). Preview first; type LIVE to submit.",
     endpoint: "csp-abort-restore",
     empty: "No open cash-secured puts.",
     pick: "csp-abort",
@@ -550,7 +550,7 @@ function formatPreviewText(body) {
       lines.push(`Breakeven           ${formatPx(restore.breakeven_price, quote)}`);
     }
     lines.push("");
-    lines.push("Live market fill can differ from this estimate.");
+    lines.push("Cover buy is an IOC limit at the ask, sized to free quote — not a naked market buy.");
     return lines.join("\n");
   }
   if (plan.quantity) lines.push(`qty ${plan.quantity} · ${plan.order_type || "market"}`);
@@ -580,12 +580,18 @@ function formatPreviewText(body) {
   const breakeven = pickEstimate(plan, "breakeven_price");
   const remaining = pickEstimate(plan, "remaining_proceeds_usdt");
 
-  if (body.kind === "spot_restore" || plan.action === "spot-restore") {
+  const recoverPreview = body.kind === "spot_restore" || plan.action === "spot-restore";
+  if (recoverPreview) {
+    const spotName = String(plan.spot_instrument_name || "").trim();
+    const quote = String(plan.quote_currency || "").trim();
+    const pair = spotName && quote ? `${spotName} / ${quote}` : spotName || quote;
     lines.push("");
-    lines.push(`Est. buy price     market`);
-    lines.push(`Breakeven          ${formatPx(breakeven, "USDT")}`);
+    if (pair) lines.push(`Instrument         ${pair}`);
+    lines.push("Est. buy price     IOC limit at the ask (about 0.5% through)");
+    lines.push("Size               full cover when free quote covers it; capped only when it cannot");
+    lines.push(`Breakeven          ${formatPx(breakeven, quote || "USDT")}`);
     lines.push(`Remaining proceeds ${remaining == null ? "—" : `$${Number(remaining).toFixed(2)}`}`);
-    lines.push(`Est. PnL           unknown until market fill`);
+    lines.push("Est. PnL           unknown until the IOC fills");
   } else if (body.kind !== "panic_close") {
     lines.push("");
     lines.push(`Est. close price   ${formatPx(closePx, book)}`);
@@ -624,7 +630,11 @@ function formatPreviewText(body) {
     }
   }
   lines.push("");
-  lines.push("Live market fill can differ from this estimate.");
+  lines.push(
+    recoverPreview
+      ? "IOC limit at the ask, sized to free USDC/USDT. Full cover when free quote covers the unrestored size; live size is capped only when it cannot. Not a naked market buy."
+      : "Live market fill can differ from this estimate."
+  );
   return lines.join("\n");
 }
 
@@ -787,8 +797,14 @@ async function postTrade({ live }) {
       body: JSON.stringify(payload),
     });
     const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(formatApiError(body.detail, `HTTP ${response.status}`));
+    if (!response.ok || body.ok === false) {
+      const detail =
+        body.detail ||
+        body.result?.message ||
+        body.result?.restore?.message ||
+        body.result?.reason ||
+        `HTTP ${response.status}`;
+      throw new Error(formatApiError(detail, `HTTP ${response.status}`));
     }
     setDialogPreview(live ? JSON.stringify(body, null, 2) : formatPreviewText(body));
     if (!live) {
@@ -797,7 +813,12 @@ async function postTrade({ live }) {
       if (els.dialogLiveBtn) els.dialogLiveBtn.disabled = false;
       setActionStatus(`${spec.title} preview ready. Confirm to submit.`, "info");
     } else {
-      setActionStatus(`${spec.title} live order submitted.`, "ok");
+      const note = typeof body.result?.message === "string" ? body.result.message.trim() : "";
+      if (body.result?.capped_to_available_quote || note) {
+        setActionStatus(note ? `${spec.title}: ${note}` : `${spec.title}: live size capped to free quote.`, "info");
+      } else {
+        setActionStatus(`${spec.title} live order submitted.`, "ok");
+      }
       if (els.frame && !els.frame.hidden) {
         els.frame.src = els.frame.src;
       }

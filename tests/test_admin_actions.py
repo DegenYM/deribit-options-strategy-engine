@@ -382,6 +382,10 @@ def test_preview_does_not_build_bot(tmp_path: Path, monkeypatch) -> None:
     assert close["plan"]["est_close_fee_usdc"] == "0"
     assert restore["plan"]["will_cancel_resting_order_id"] == "parked-1"
     assert restore["plan"]["breakeven_price"] == "78000"
+    assert restore["plan"]["order_type"] == "limit"
+    assert restore["plan"]["time_in_force"] == "immediate_or_cancel"
+    assert "IOC limit" in restore["plan"]["execution_note"]
+    assert "not a naked market buy" in restore["plan"]["execution_note"]
     assert panic["plan"]["accounts"][0]["open_groups"][0]["group_id"] == "0010"
     assert panic["plan"]["accounts"][0]["open_groups"][0]["est_pnl_usdc"] == "20"
     assert abort["plan"]["action"] == "csp-abort-restore"
@@ -389,6 +393,7 @@ def test_preview_does_not_build_bot(tmp_path: Path, monkeypatch) -> None:
     assert abort["plan"]["restore"]["spot_instrument_name"] == "BTC_USDC"
     assert abort["plan"]["restore"]["quote_currency"] == "USDC"
     assert abort["plan"]["close"]["short_instrument_name"] == "BTC_USDC-11SEP26-73000-P"
+    assert any("IOC limit-buy" in step for step in abort["plan"]["will"])
 
 
 def test_csp_abort_restore_usdt_exit_parent_buys_usdc(tmp_path: Path, monkeypatch) -> None:
@@ -618,6 +623,237 @@ def test_csp_abort_restore_rewrites_skip_after_reload_entered(tmp_path: Path, mo
     assert parent.cash_secured_status == "skipped"
     assert parent.cash_secured_reason == CSP_ABORT_RESTORE_REASON
     assert child.close_reason == "manual_close"
+
+
+def _patch_live_restore(monkeypatch, tmp_path: Path, state: StrategyState, execute_result: dict, *, journal=None):
+    account = _account(tmp_path)
+
+    class _Bot:
+        client = SimpleNamespace(cancel_order=lambda order_id: {"cancelled": order_id})
+        state_store = SimpleNamespace(save=lambda _state: None)
+
+        def _load_runtime(self, live=False):
+            del live
+            return SimpleNamespace(state=state)
+
+        def _persist_trade_journal_actions(self, actions):
+            if journal is not None:
+                journal(actions)
+
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.load_manifest",
+        lambda *_a, **_k: _manifest(tmp_path, account),
+    )
+    monkeypatch.setattr("deribit_engine.config.has_private_creds_for_env", lambda *_a, **_k: True)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._load_state", lambda *_a, **_k: state)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._build_bot", lambda *_a, **_k: _Bot())
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions._spot_restore_order_is_open",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.execute_spot_restore_for_group",
+        lambda *_a, **_k: execute_result,
+    )
+
+
+def test_run_spot_restore_skipped_is_not_ok(tmp_path: Path, monkeypatch) -> None:
+    group = _restore_group()
+    state = StrategyState(groups=[group])
+    message = "USDC free 1000 cannot buy min ETH at the ask"
+    payload = {
+        "action": "spot_restore_skipped",
+        "reason": "not_enough_funds",
+        "message": message,
+    }
+
+    def _refuse_journal(actions):
+        raise AssertionError(f"skipped restore must not be journaled: {actions}")
+
+    _patch_live_restore(monkeypatch, tmp_path, state, payload, journal=_refuse_journal)
+
+    result = run_spot_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="43",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is False
+    assert result["detail"] == message
+    assert result["result"] == payload
+    assert "jsonrpc" not in result["detail"]
+
+
+def test_run_spot_restore_no_fill_reason_is_not_ok(tmp_path: Path, monkeypatch) -> None:
+    group = _restore_group()
+    state = StrategyState(groups=[group])
+    payload = {
+        "action": "spot_restore",
+        "reason": "ioc_unfilled",
+        "filled_native": "0",
+    }
+
+    def _refuse_journal(actions):
+        raise AssertionError(f"unfilled restore must not be journaled: {actions}")
+
+    _patch_live_restore(monkeypatch, tmp_path, state, payload, journal=_refuse_journal)
+
+    result = run_spot_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="43",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is False
+    assert result["detail"] == "IOC limit buy did not fill."
+    assert result["result"] is payload
+    assert "jsonrpc" not in result["detail"]
+    assert "HTTP 400" not in result["detail"]
+
+
+def test_run_spot_restore_raw_exchange_body_is_not_detail(tmp_path: Path, monkeypatch) -> None:
+    group = _restore_group()
+    state = StrategyState(groups=[group])
+    raw = (
+        'private/buy failed: HTTP 400 {"jsonrpc":"2.0","error":{"code":10039,'
+        '"message":"not_enough_funds_in_currency"},"testnet":false}'
+    )
+    payload = {
+        "action": "spot_restore_skipped",
+        "reason": "not_enough_funds",
+        "message": raw,
+        "filled_native": "0",
+    }
+    _patch_live_restore(monkeypatch, tmp_path, state, payload)
+
+    result = run_spot_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="43",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is False
+    assert result["detail"] == "Not enough free quote to buy the minimum size at the IOC limit."
+    assert result["result"]["message"] == raw
+    assert "jsonrpc" not in result["detail"]
+    assert "HTTP 400" not in result["detail"]
+    assert "not_enough_funds_in_currency" not in result["detail"]
+
+
+def test_run_spot_restore_partial_cap_stays_ok(tmp_path: Path, monkeypatch) -> None:
+    group = _restore_group()
+    state = StrategyState(groups=[group])
+    message = "IOC buy capped to free USDC: 0.5 of 1 ETH at the ask (free USDC 1800)."
+    payload = {
+        "action": "spot_restore",
+        "capped_to_available_quote": True,
+        "message": message,
+        "filled_native": "0.5",
+    }
+    _patch_live_restore(monkeypatch, tmp_path, state, payload)
+
+    result = run_spot_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="43",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is True
+    assert "detail" not in result
+    assert result["result"]["capped_to_available_quote"] is True
+    assert result["result"]["message"] == message
+
+
+def test_run_spot_restore_partial_fill_stays_ok(tmp_path: Path, monkeypatch) -> None:
+    group = _restore_group()
+    state = StrategyState(groups=[group])
+    message = "IOC buy filled 0.4 of 1 ETH before the remainder expired."
+    payload = {
+        "action": "spot_restore",
+        "reason": "ioc_unfilled",
+        "filled_native": "0.4",
+        "message": message,
+    }
+    _patch_live_restore(monkeypatch, tmp_path, state, payload)
+
+    result = run_spot_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="43",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is True
+    assert "detail" not in result
+    assert result["result"]["message"] == message
+    assert result["result"]["filled_native"] == "0.4"
+
+
+def test_csp_abort_cover_restore_failed_includes_readable_detail(tmp_path: Path, monkeypatch) -> None:
+    account = _account(tmp_path)
+    parent = _wheel_parent()
+    child = _csp_child()
+    state = StrategyState(groups=[parent, child])
+    message = "Not enough free USDC to buy min 0.0001 BTC on BTC_USDC at IOC limit 70350 (needed notional 7035)."
+
+    class _Bot:
+        client = SimpleNamespace(cancel_order=lambda order_id: {"cancelled": order_id})
+        state_store = SimpleNamespace(save=lambda _state: None)
+
+        def _load_runtime(self, live=False):
+            del live
+            return SimpleNamespace(state=state)
+
+        def close_positions(self, **kwargs):
+            del kwargs
+            child.status = "closed"
+            return {"action": "close-position", "actions": [{"ok": True}], "skipped": []}
+
+        def _persist_trade_journal_actions(self, actions):
+            del actions
+
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.load_manifest",
+        lambda *_a, **_k: _manifest(tmp_path, account),
+    )
+    monkeypatch.setattr("deribit_engine.config.has_private_creds_for_env", lambda *_a, **_k: True)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._load_state", lambda *_a, **_k: state)
+    monkeypatch.setattr("deribit_engine.admin_server.actions._build_bot", lambda *_a, **_k: _Bot())
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions._spot_restore_order_is_open",
+        lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        "deribit_engine.admin_server.actions.execute_spot_restore_for_group",
+        lambda *_a, **_k: {
+            "action": "spot_restore_skipped",
+            "reason": "not_enough_funds",
+            "message": message,
+        },
+    )
+
+    result = run_csp_abort_restore(
+        "alice",
+        repo_root=tmp_path,
+        account="covered_call",
+        group_id="0098",
+        live=True,
+        confirm=LIVE_CONFIRM,
+    )
+    assert result["ok"] is False
+    assert result["result"]["reason"] == "cover_restore_failed"
+    assert result["detail"] == message
+    assert result["result"]["detail"] == message
+    assert "jsonrpc" not in result["detail"]
 
 
 def test_admin_trade_routes(tmp_path: Path, monkeypatch) -> None:

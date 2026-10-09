@@ -1,8 +1,10 @@
 from decimal import Decimal
 from unittest.mock import MagicMock
 
+import pytest
 from conftest import FakeClient, make_config
 
+from deribit_engine.exceptions import ExchangeError
 from deribit_engine.models import TradeGroup
 from deribit_engine.spot_restore_ops import (
     SpotRestoreRunSummary,
@@ -24,7 +26,92 @@ from deribit_engine.spot_restore_ops import (
     spot_restore_spot_instrument_name,
     unrestored_spot_exit_native,
 )
+from deribit_engine.utils import align_option_order_amount, ceil_to_step
 from deribit_engine.wallet_ops import spot_buy_quote_spent_from_trades
+
+ETH_ASK = Decimal("3500")
+ETH_TICK = Decimal("0.05")
+
+
+def _eth_ioc_limit(ask: Decimal = ETH_ASK) -> Decimal:
+    return ceil_to_step(ask * Decimal("1.005"), ETH_TICK)
+
+
+def _eth_group(**overrides) -> TradeGroup:
+    payload = {
+        "group_id": "0071",
+        "currency": "ETH",
+        "short_instrument_name": "ETH-28MAR25-4000-C",
+        "short_label": "cc-eth-0071",
+        "covered_underlying_quantity": "1",
+        "quantity": "1",
+        "spot_exit_amount": "1",
+        "spot_exit_settlement_loss": "0",
+        "short_entry_average_price": "0",
+        "entry_fee_collateral": "0",
+        "spot_exit_quote_proceeds": "3500",
+        "spot_exit_quote_proceeds_lifetime": "3500",
+    }
+    payload.update(overrides)
+    return _group(**payload)
+
+
+def _restore_bot(tmp_path, client: FakeClient):
+    config = make_config(
+        tmp_path,
+        option_strategy="covered_call",
+        option_markets_profile="inverse_native",
+        covered_call_spot_exit_enabled=True,
+        order_label_prefix="covered_call",
+        managed_currencies=("ETH", "BTC"),
+    )
+    bot = MagicMock()
+    bot.client = client
+    bot.config = config
+    return bot
+
+
+def _set_quote_balances(
+    client: FakeClient,
+    *,
+    usdc: str,
+    usdt: str | None = None,
+    equity: str = "1000000",
+    withdrawal: str = "0",
+) -> None:
+    """Equity is margin-locked. Free quote is available_funds, not balance."""
+
+    def row(currency: str, available: str) -> dict:
+        return {
+            "currency": currency,
+            "balance": equity,
+            "equity": equity,
+            "available_funds": available,
+            "available_withdrawal_funds": withdrawal,
+            "initial_margin": "0",
+            "maintenance_margin": "0",
+            "delta_total": "0",
+            "options_delta": "0",
+            "options_gamma": "0",
+            "options_theta": "0",
+        }
+
+    rows = [row("USDC", usdc)]
+    if usdt is not None:
+        rows.append(row("USDT", usdt))
+    client.get_account_summaries = lambda extended=False: rows
+
+
+def _emergency_eth(bot, group: TradeGroup, **kwargs):
+    return execute_spot_restore_for_group(
+        bot,
+        group,
+        live=True,
+        order_type="market",
+        restore_reason="emergency_spot_restore",
+        instrument_name="ETH_USDC",
+        **kwargs,
+    )
 
 
 def _group(**overrides) -> TradeGroup:
@@ -925,3 +1012,220 @@ def test_execute_spot_restore_ceils_buy_amount_to_option_lot(tmp_path) -> None:
     assert Decimal(preview["buy_amount"]) == Decimal("0.1")
     assert Decimal(preview["option_lot"]) == Decimal("0.01")
     assert Decimal(preview["restore_target"]) == Decimal("0.09978985")
+
+
+def test_emergency_restore_full_cover_is_ioc_limit_not_market(tmp_path) -> None:
+    """Lot-ceil 0.91 → 1 ETH, and a large USDC balance pays that full IOC."""
+    group = _eth_group(spot_exit_amount="0.91", covered_underlying_quantity="1", quantity="1")
+    client = FakeClient()
+    _set_quote_balances(client, usdc="100000", usdt="100000")
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    limit = _eth_ioc_limit()
+    assert len(client.placed_orders) == 1
+    order = client.placed_orders[0]
+    assert order["order_type"] == "limit"
+    assert order["time_in_force"] == "immediate_or_cancel"
+    assert order["instrument_name"] == "ETH_USDC"
+    assert Decimal(str(order["price"])) == limit
+    assert Decimal(str(order["price"])) > ETH_ASK
+    assert Decimal(str(order["amount"])) == Decimal("1")
+    assert result["action"] == "spot_restore"
+    assert result["order_type"] == "limit"
+    assert result["time_in_force"] == "immediate_or_cancel"
+    assert result["spot_restore_status"] == "filled"
+    assert group.spot_restore_status == "filled"
+    assert group.spot_restore_amount == Decimal("1")
+    assert group.spot_restore_instrument_name == "ETH_USDC"
+    assert group.spot_restore_quote_spent > 0
+    assert "capped_to_free_quote" not in result
+
+
+def test_emergency_restore_full_size_when_usdc_covers_ask_not_a_market_collar(tmp_path) -> None:
+    """EUGENE: free USDC covers target × IOC limit and is far below a 2× collar."""
+    group = _eth_group()
+    client = FakeClient()
+    limit = _eth_ioc_limit()
+    needed = limit * Decimal("1")
+    free = needed / Decimal("0.995") + Decimal("0.01")
+    assert free * Decimal("0.995") >= needed
+    assert free < needed * Decimal("2")
+    _set_quote_balances(client, usdc=format(free, "f"), equity="1000000", withdrawal="0")
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    assert len(client.placed_orders) == 1
+    order = client.placed_orders[0]
+    assert order["order_type"] == "limit"
+    assert order["time_in_force"] == "immediate_or_cancel"
+    assert Decimal(str(order["price"])) == limit
+    assert Decimal(str(order["amount"])) == Decimal("1")
+    assert result["action"] == "spot_restore"
+    assert group.spot_restore_status == "filled"
+    assert group.spot_restore_amount == Decimal("1")
+    assert group.spot_restore_instrument_name == "ETH_USDC"
+
+
+def test_emergency_restore_caps_to_free_quote_and_stays_on_planned_pair(tmp_path) -> None:
+    group = _eth_group()
+    client = FakeClient()
+    limit = _eth_ioc_limit()
+    free = Decimal("1800")
+    _set_quote_balances(client, usdc=str(free), usdt="100000", equity="1000000", withdrawal="0")
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    budget = free * Decimal("0.995")
+    expected = align_option_order_amount(budget / limit, Decimal("0.001"), Decimal("0.001"))
+    assert Decimal("0") < expected < Decimal("1")
+    assert len(client.placed_orders) == 1
+    order = client.placed_orders[0]
+    assert order["instrument_name"] == "ETH_USDC"
+    assert order["order_type"] == "limit"
+    assert order["time_in_force"] == "immediate_or_cancel"
+    assert Decimal(str(order["amount"])) == expected
+    assert Decimal(str(order["amount"])) * limit <= budget
+    assert result["action"] == "spot_restore"
+    assert result.get("capped_to_free_quote") is True
+    assert "capped to free" in str(result.get("message") or "")
+    assert group.spot_restore_status == "filled"
+    assert group.spot_restore_amount == expected
+    assert group.spot_restore_instrument_name == "ETH_USDC"
+    assert unrestored_spot_exit_native(group) > 0
+
+
+def test_emergency_restore_uses_usdt_only_when_usdc_cannot_fund_min(tmp_path) -> None:
+    group = _eth_group()
+    client = FakeClient()
+    _set_quote_balances(client, usdc="1", usdt="100000", equity="1000000")
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    assert len(client.placed_orders) == 1
+    order = client.placed_orders[0]
+    assert order["instrument_name"] == "ETH_USDT"
+    assert order["order_type"] == "limit"
+    assert order["time_in_force"] == "immediate_or_cancel"
+    assert Decimal(str(order["price"])) == _eth_ioc_limit()
+    assert Decimal(str(order["amount"])) == Decimal("1")
+    assert result["action"] == "spot_restore"
+    assert group.spot_restore_status == "filled"
+    assert group.spot_restore_instrument_name == "ETH_USDT"
+    assert group.spot_restore_amount == Decimal("1")
+
+
+def test_emergency_restore_skips_when_neither_quote_funds_min_lot(tmp_path) -> None:
+    group = _eth_group()
+    client = FakeClient()
+    _set_quote_balances(client, usdc="1", usdt="1", equity="1000000")
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    assert client.placed_orders == []
+    assert result["action"] == "spot_restore_skipped"
+    assert result["reason"] == "not_enough_funds"
+    message = str(result.get("message") or "")
+    assert "not_enough_funds" not in message or "minimum" in message
+    assert "ETH_USDC" in message
+    assert "ETH_USDT" in message
+    assert "0.001" in message
+    assert "3517.5" in message
+    assert "needed notional" in message
+    assert "1" in message
+    assert group.spot_restore_status != "filled"
+    assert "jsonrpc" not in message
+
+
+def test_emergency_restore_exchange_reject_tries_other_pair_once(tmp_path) -> None:
+    group = _eth_group()
+    client = FakeClient()
+    _set_quote_balances(client, usdc="100000", usdt="100000")
+    original = client.place_buy_order
+
+    def wrapped(**kwargs):
+        if kwargs.get("instrument_name") == "ETH_USDC":
+            raise ExchangeError(
+                'private/buy failed: HTTP 400 {"jsonrpc":"2.0","error":{"code":10039,'
+                '"message":"not_enough_funds_in_currency"},"testnet":false}'
+            )
+        return original(**kwargs)
+
+    client.place_buy_order = wrapped
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    assert len(client.placed_orders) == 1
+    assert client.placed_orders[0]["instrument_name"] == "ETH_USDT"
+    assert client.placed_orders[0]["order_type"] == "limit"
+    assert Decimal(str(client.placed_orders[0]["amount"])) == Decimal("1")
+    assert result["action"] == "spot_restore"
+    assert group.spot_restore_instrument_name == "ETH_USDT"
+    assert "jsonrpc" not in str(result.get("message") or "")
+
+
+def test_emergency_restore_exchange_reject_without_fallback_is_skipped(tmp_path) -> None:
+    group = _eth_group()
+    client = FakeClient()
+    _set_quote_balances(client, usdc="100000", usdt="1")
+
+    def wrapped(**kwargs):
+        raise ExchangeError('private/buy failed: HTTP 400 {"error":{"message":"not_enough_funds_in_currency"}}')
+
+    client.place_buy_order = wrapped
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    assert client.placed_orders == []
+    assert result["action"] == "spot_restore_skipped"
+    assert result["reason"] == "not_enough_funds"
+    message = str(result["message"])
+    assert "not_enough_funds" in message
+    assert "ETH_USDC" in message
+    assert "0.001" in message
+    assert "jsonrpc" not in message
+    assert group.spot_restore_status != "filled"
+
+
+def test_emergency_restore_mark_fallback_when_ask_missing(tmp_path) -> None:
+    group = _eth_group()
+    client = FakeClient()
+    client.order_book_overrides["ETH_USDC"] = {
+        "instrument_name": "ETH_USDC",
+        "best_bid_price": "3490",
+        "best_bid_amount": "1",
+        "best_ask_price": "0",
+        "best_ask_amount": "0",
+        "mark_price": "3500",
+        "index_price": "3500",
+    }
+    _set_quote_balances(client, usdc="100000")
+    bot = _restore_bot(tmp_path, client)
+
+    result = _emergency_eth(bot, group)
+
+    assert Decimal(str(client.placed_orders[0]["price"])) == _eth_ioc_limit()
+    assert result["price_source"] == "mark"
+    assert result["action"] == "spot_restore"
+
+
+def test_emergency_restore_other_exchange_errors_still_raise(tmp_path) -> None:
+    group = _eth_group()
+    client = FakeClient()
+    _set_quote_balances(client, usdc="100000")
+
+    def wrapped(**kwargs):
+        raise ExchangeError("price_too_high 4000")
+
+    client.place_buy_order = wrapped
+    bot = _restore_bot(tmp_path, client)
+
+    with pytest.raises(ExchangeError, match="price_too_high"):
+        _emergency_eth(bot, group)

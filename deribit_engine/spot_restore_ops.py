@@ -1186,6 +1186,11 @@ def reconcile_spot_restores_in_groups(
 # Live market restore buys the native target (never this extra as extra coins).
 SPOT_RESTORE_ORDER_BUDGET_BUFFER = Decimal("1.001")
 DEFAULT_SPOT_RESTORE_WAIT_SECONDS = 120
+# Emergency admin / CSP-abort buys cross the ask with an IOC limit. A naked
+# market buy makes Deribit reserve quote against a collar far above the ask
+# (error 10039) even when free quote covers the ask notional.
+EMERGENCY_IOC_ASK_BUFFER = Decimal("1.005")
+EMERGENCY_QUOTE_HAIRCUT = Decimal("0.995")
 
 
 def _quote_budget_for_base_buy(
@@ -1460,6 +1465,282 @@ def place_spot_restore_limit_buy(
         payload["skipped"] = True
         payload["reason"] = "timed_out"
     return payload
+
+
+def _emergency_restore_reason(restore_reason: str | None) -> bool:
+    return str(restore_reason or "").startswith("emergency_")
+
+
+def _alternate_spot_instrument_name(instrument_name: str) -> str | None:
+    name = str(instrument_name or "").upper()
+    if name.endswith("_USDC"):
+        return f"{name[:-5]}_USDT"
+    if name.endswith("_USDT"):
+        return f"{name[:-5]}_USDC"
+    return None
+
+
+def _emergency_free_quote(client: DeribitClient, quote_currency: str) -> Decimal:
+    """Free quote for a spot buy. Equity and balance stay margin-locked — ignore them."""
+    from .wallet_ops import _summary_for_currency
+
+    summary = _summary_for_currency(client, quote_currency)
+    if summary is None:
+        return Decimal("0")
+    return max(summary.available_funds, summary.available_withdrawal_funds, Decimal("0"))
+
+
+def _emergency_ioc_limit_price(
+    client: DeribitClient,
+    instrument: Any,
+    instrument_name: str,
+) -> tuple[Decimal, str]:
+    """Tick-ceil ask × 1.005 so the IOC crosses. Do not floor — that can rest below the ask."""
+    book = OrderBookSnapshot.from_api(client.get_order_book(instrument_name, depth=1))
+    raw = Decimal("0")
+    source = "unavailable"
+    if book.best_ask_price > 0:
+        raw = book.best_ask_price * EMERGENCY_IOC_ASK_BUFFER
+        source = "best_ask"
+    elif book.mark_price > 0:
+        raw = book.mark_price * EMERGENCY_IOC_ASK_BUFFER
+        source = "mark"
+    if raw <= 0:
+        return Decimal("0"), source
+    tick = instrument.tick_size_for_price(raw)
+    if tick <= 0:
+        return raw, source
+    return ceil_to_step(raw, tick), source
+
+
+def _emergency_ioc_send_amount(
+    *,
+    target: Decimal,
+    limit_price: Decimal,
+    free_quote: Decimal,
+    contract_size: Decimal,
+    min_trade_amount: Decimal,
+) -> Decimal:
+    """Full target when free quote covers it; otherwise floor to what the quote can pay."""
+    if target <= 0 or limit_price <= 0:
+        return Decimal("0")
+    budget = free_quote * EMERGENCY_QUOTE_HAIRCUT
+    if budget <= 0:
+        return Decimal("0")
+    if target * limit_price <= budget:
+        return target
+    affordable = budget / limit_price
+    return align_option_order_amount(
+        min(target, affordable),
+        contract_size,
+        min_trade_amount,
+    )
+
+
+def _assess_emergency_spot_pair(
+    client: DeribitClient,
+    *,
+    instrument_name: str,
+    amount: Decimal,
+) -> dict[str, Any]:
+    from .wallet_ops import _lookup_spot_instrument
+
+    name = instrument_name.upper()
+    base = name.split("_", 1)[0]
+    instrument = _lookup_spot_instrument(client, name, base)
+    limit_px, source = _emergency_ioc_limit_price(client, instrument, name)
+    quote = name.split("_", 1)[1] if "_" in name else ""
+    free = _emergency_free_quote(client, quote)
+    send = _emergency_ioc_send_amount(
+        target=amount,
+        limit_price=limit_px,
+        free_quote=free,
+        contract_size=instrument.contract_size,
+        min_trade_amount=instrument.min_trade_amount,
+    )
+    return {
+        "instrument_name": name,
+        "base_currency": base,
+        "limit_price": limit_px,
+        "price_source": source,
+        "quote_currency": quote,
+        "free_quote": free,
+        "send_amount": send,
+        "target": amount,
+        "min_trade_amount": instrument.min_trade_amount,
+        "needed_notional": amount * limit_px if limit_px > 0 and amount > 0 else Decimal("0"),
+        "tradable": send > 0,
+    }
+
+
+def _assess_emergency_alternate_pair(
+    client: DeribitClient,
+    *,
+    instrument_name: str,
+    amount: Decimal,
+) -> dict[str, Any] | None:
+    alt_name = _alternate_spot_instrument_name(instrument_name)
+    if not alt_name:
+        return None
+    try:
+        return _assess_emergency_spot_pair(client, instrument_name=alt_name, amount=amount)
+    except Exception:  # noqa: BLE001
+        LOGGER.debug("emergency spot restore: alternate pair %s unavailable", alt_name, exc_info=True)
+        return None
+
+
+def _format_emergency_pair_funds(plan: dict[str, Any]) -> str:
+    return (
+        f"{plan.get('instrument_name')} free {plan.get('quote_currency')} "
+        f"{format_decimal(to_decimal(plan.get('free_quote')), 4)} "
+        f"(min size {format_decimal(to_decimal(plan.get('min_trade_amount')), 8)}, "
+        f"IOC limit {format_decimal(to_decimal(plan.get('limit_price')), 4)}, "
+        f"needed notional {format_decimal(to_decimal(plan.get('needed_notional')), 4)})"
+    )
+
+
+def _emergency_not_enough_funds_result(
+    planned: dict[str, Any],
+    alternate: dict[str, Any] | None,
+    *,
+    exchange_rejected: bool = False,
+) -> dict[str, Any]:
+    if exchange_rejected:
+        lead = "Not enough free quote: the exchange rejected the IOC buy (not_enough_funds)."
+    else:
+        lead = "Not enough free quote to buy the minimum size at the IOC limit."
+    parts = [lead, _format_emergency_pair_funds(planned) + "."]
+    if alternate is not None:
+        parts.append(f"Other pair {_format_emergency_pair_funds(alternate)}.")
+    else:
+        parts.append("The other spot pair cannot fund the minimum size either.")
+    return {
+        "skipped": True,
+        "reason": "not_enough_funds",
+        "message": " ".join(parts),
+        "filled_native": "0",
+        "trades": [],
+        "order_type": "limit",
+        "time_in_force": "immediate_or_cancel",
+        "instrument_name": planned.get("instrument_name"),
+        "limit_price": format_decimal(to_decimal(planned.get("limit_price")), 4),
+        "free_quote": format_decimal(to_decimal(planned.get("free_quote")), 4),
+        "min_trade_amount": format_decimal(to_decimal(planned.get("min_trade_amount")), 8),
+        "needed_notional": format_decimal(to_decimal(planned.get("needed_notional")), 4),
+    }
+
+
+def _is_not_enough_funds_error(exc: BaseException) -> bool:
+    return isinstance(exc, ExchangeError) and "not_enough_funds" in str(exc).lower()
+
+
+def _submit_emergency_ioc_buy(
+    client: DeribitClient,
+    plan: dict[str, Any],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    response = client.place_buy_order(
+        instrument_name=plan["instrument_name"],
+        amount=plan["send_amount"],
+        price=plan["limit_price"],
+        label=label,
+        order_type="limit",
+        time_in_force="immediate_or_cancel",
+    )
+    order = _response_order(response)
+    order_id = str(order.get("order_id") or "").strip()
+    trades = list(response.get("trades") or []) if isinstance(response, dict) else []
+    if not trades and order_id:
+        try:
+            trades = list(client.get_user_trades_by_order(order_id) or [])
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("spot_restore emergency IOC: trades lookup failed order=%s", order_id, exc_info=True)
+            trades = []
+    buy_trades = [t for t in trades if str(t.get("direction") or "").lower() in {"", "buy"}]
+    filled_native = sum((to_decimal(t.get("amount")) for t in buy_trades), Decimal("0"))
+    if filled_native <= 0:
+        filled_native = _response_filled_amount(response)
+    payload: dict[str, Any] = {
+        "skipped": filled_native <= 0,
+        "reason": None if filled_native > 0 else "unfilled",
+        "order_type": "limit",
+        "time_in_force": "immediate_or_cancel",
+        "limit_price": format_decimal(plan["limit_price"], 4),
+        "price_source": plan.get("price_source"),
+        "order_id": order_id or None,
+        "filled_native": format_decimal(filled_native, 8),
+        "trades": buy_trades,
+        "response": response,
+        "requested_amount": format_decimal(plan["send_amount"], 8),
+        "buy_amount": format_decimal(plan["send_amount"], 8),
+        "instrument_name": plan["instrument_name"],
+        "quote_currency": plan.get("quote_currency"),
+        "free_quote": format_decimal(plan["free_quote"], 4),
+    }
+    notes: list[str] = []
+    switched_from = str(plan.get("switched_from") or "").strip()
+    if switched_from:
+        notes.append(f"Bought {plan['instrument_name']} after {switched_from} could not fund this IOC.")
+    if plan["send_amount"] + Decimal("1e-12") < to_decimal(plan.get("target")):
+        payload["capped_to_free_quote"] = True
+        notes.append(
+            "IOC buy capped to free "
+            f"{plan.get('quote_currency')}: "
+            f"{format_decimal(plan['send_amount'], 8)} of {format_decimal(to_decimal(plan.get('target')), 8)} "
+            f"{plan.get('base_currency')} at limit {format_decimal(plan['limit_price'], 4)} "
+            f"(free {plan.get('quote_currency')} {format_decimal(plan['free_quote'], 4)})."
+        )
+    if notes:
+        payload["message"] = " ".join(notes)
+    return payload
+
+
+def place_spot_restore_emergency_ioc_buy(
+    client: DeribitClient,
+    *,
+    instrument_name: str,
+    amount: Decimal,
+    label: str,
+) -> dict[str, Any]:
+    """IOC limit buy that crosses the ask, sized to free quote.
+
+    A naked market buy reserves quote at a collar above the best ask, so Deribit
+    returns ``not_enough_funds_in_currency`` even when free quote covers the ask.
+    Stay on the planned pair when it can fund a tradable slice. Try the other
+    stable pair only when the planned pair cannot meet ``min_trade_amount``.
+    """
+    planned = _assess_emergency_spot_pair(client, instrument_name=instrument_name, amount=amount)
+    chosen = planned
+    if not planned["tradable"]:
+        alternate = _assess_emergency_alternate_pair(client, instrument_name=planned["instrument_name"], amount=amount)
+        if alternate is not None and alternate["tradable"]:
+            chosen = alternate
+            chosen["switched_from"] = planned["instrument_name"]
+        else:
+            return _emergency_not_enough_funds_result(planned, alternate)
+
+    try:
+        return _submit_emergency_ioc_buy(client, chosen, label=label)
+    except ExchangeError as exc:
+        if not _is_not_enough_funds_error(exc):
+            raise
+        LOGGER.info(
+            "emergency spot restore IOC rejected not_enough_funds instrument=%s",
+            chosen.get("instrument_name"),
+        )
+        if chosen.get("instrument_name") != planned["instrument_name"]:
+            return _emergency_not_enough_funds_result(planned, chosen, exchange_rejected=True)
+        alternate = _assess_emergency_alternate_pair(client, instrument_name=planned["instrument_name"], amount=amount)
+        if alternate is not None and alternate["tradable"]:
+            alternate["switched_from"] = planned["instrument_name"]
+            try:
+                return _submit_emergency_ioc_buy(client, alternate, label=label)
+            except ExchangeError as exc2:
+                if not _is_not_enough_funds_error(exc2):
+                    raise
+                return _emergency_not_enough_funds_result(planned, alternate, exchange_rejected=True)
+        return _emergency_not_enough_funds_result(planned, alternate, exchange_rejected=True)
 
 
 def place_spot_restore_market_buy(
@@ -2173,12 +2454,26 @@ def execute_spot_restore_for_group(
             payload["action"] = "spot_restore_skipped"
             payload["reason"] = "auto_restore_market_forbidden"
             return payload
-        result = place_spot_restore_market_buy(
-            bot.client,
-            instrument_name=instrument_name,
-            amount=target,
-            label=label,
-        )
+        if _emergency_restore_reason(restore_reason):
+            # Never a naked market buy: Deribit reserves quote at a collar above
+            # the ask and rejects with not_enough_funds even when free quote covers it.
+            result = place_spot_restore_emergency_ioc_buy(
+                bot.client,
+                instrument_name=instrument_name,
+                amount=target,
+                label=label,
+            )
+            bought = str(result.get("instrument_name") or "").strip()
+            if bought:
+                instrument_name = bought
+                payload["instrument_name"] = bought
+        else:
+            result = place_spot_restore_market_buy(
+                bot.client,
+                instrument_name=instrument_name,
+                amount=target,
+                label=label,
+            )
         payload.update(
             {
                 k: v
