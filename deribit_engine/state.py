@@ -323,7 +323,9 @@ _CASH_SECURED_STATUS_RANK = {
     "entered": 3,
 }
 _OPERATOR_CSP_ABORT_REASON = "operator_csp_abort_restore"
-_OPERATOR_RESTORE_REASON_MARKERS = ("manual", "operator")
+# Admin "Recover market" writes ``emergency_spot_restore``; without that marker a
+# live cycle still holding ``skipped`` (rank 4 > filled) wiped the operator fill.
+_OPERATOR_RESTORE_REASON_MARKERS = ("manual", "operator", "emergency")
 
 
 def _merge_operator_manual_cover_restore(memory: TradeGroup, disk: TradeGroup) -> bool:

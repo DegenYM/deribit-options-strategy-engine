@@ -315,6 +315,37 @@ def test_merge_keeps_operator_manual_restore_over_live_skipped() -> None:
     assert memory.groups[0].cash_secured_reason == "operator_csp_abort_restore"
 
 
+def test_merge_keeps_admin_emergency_restore_over_live_skipped() -> None:
+    """Admin "Recover market" (emergency_spot_restore) must survive a stale live save.
+
+    Seen 2026-10-08 on eugene #0020 / jack #0095 / an #0048 / youming #0095: the
+    exchange filled the IOC, admin saved ``filled``, then a live cycle still holding
+    ``skipped`` (rank 4) wrote it back and the CSP wheel saw the cover as unrestored.
+    """
+    from deribit_engine.state import merge_concurrent_group_updates
+
+    memory = _sample_state()
+    memory.groups[0].group_id = "0020"
+    memory.groups[0].spot_restore_status = "skipped"
+    memory.groups[0].spot_restore_amount = Decimal("0")
+    memory.groups[0].spot_restore_reason = "auto_spot_restore_park"
+
+    disk = _sample_state()
+    disk.groups[0].group_id = "0020"
+    disk.groups[0].spot_restore_status = "filled"
+    disk.groups[0].spot_restore_amount = Decimal("0.99313743")
+    disk.groups[0].spot_restore_quote_spent = Decimal("2398.9686")
+    disk.groups[0].spot_restore_instrument_name = "ETH_USDC"
+    disk.groups[0].spot_restore_reason = "emergency_spot_restore"
+
+    merged = merge_concurrent_group_updates(memory, disk)
+    assert merged == ["0020"]
+    assert memory.groups[0].spot_restore_status == "filled"
+    assert memory.groups[0].spot_restore_amount == Decimal("0.99313743")
+    assert memory.groups[0].spot_restore_quote_spent == Decimal("2398.9686")
+    assert memory.groups[0].spot_restore_reason == "emergency_spot_restore"
+
+
 def test_merge_keeps_in_memory_operator_manual_restore_over_disk_skipped() -> None:
     from deribit_engine.state import merge_concurrent_group_updates
 
