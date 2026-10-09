@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { STATE } from "../../frontend/src/shared/state.js";
 import {
   aggregateProfitDisposition,
   annualizeRealizedApr,
@@ -1314,6 +1315,40 @@ assert.equal(
   "csp-abort-restore",
 );
 assert.equal(resolveAdminGroupActionKind(eugene0021, eugeneGroups), null);
+
+// #0020 after the 2026-10-08 journal repair: journal holds the 0.99313743 labeled fill,
+// 0.005 ETH is still out. The labeled fill must not be subtracted a second time.
+{
+  const prevStatus = STATE.status;
+  STATE.status = {
+    ...eugeneCompStatus,
+    spot_restore_fill_stats_by_book: {
+      ETH: {
+        native_bought: "0.99313743",
+        usdt_spent: "2398.9686",
+        by_group: { "0020": { native_bought: "0.99313743", usdt_spent: "2398.9686" } },
+      },
+    },
+  };
+  const repaired = {
+    ...eugene0020,
+    spot_restore_status: "filled",
+    spot_restore_amount: "0.99313743",
+    spot_restore_quote_spent: "2398.9686",
+    spot_restore_quote_spent_lifetime: "2398.9686",
+    spot_restore_instrument_name: "ETH_USDC",
+  };
+  const repairedGroups = { closed: [repaired], open: [] };
+  const left = unrestoredSpotExitNative(repaired, repairedGroups);
+  assert.ok(left > 0.001 && left < 0.01, `repaired #0020 unrestored=${left}`);
+  assert.equal(adminGroupNeedsMarketRecover(repaired, repairedGroups), true);
+  assert.equal(resolveAdminGroupActionKind(repaired, repairedGroups), "recover");
+  // Journal still skipped: the labeled fill nets the unrestored amount instead.
+  const skippedGroups = { closed: [eugene0020], open: [] };
+  const skippedLeft = unrestoredSpotExitNative(eugene0020, skippedGroups) - 0.99313743;
+  assert.equal(adminGroupNeedsMarketRecover(eugene0020, skippedGroups), skippedLeft > 1e-9);
+  STATE.status = prevStatus;
+}
 
 const partialRestore = group({
   group_id: "partial",

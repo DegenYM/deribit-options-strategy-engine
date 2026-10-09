@@ -4861,7 +4861,9 @@ export function groupHasFilledSpotRestore(g) {
  */
 export function adminGroupNeedsMarketRecover(g, groups = STATE.groups) {
   const unrestored = unrestoredSpotExitNative(g, groups);
-  const fill = labeledRestoreFillForGroup(g);
+  // The labeled exchange fill only covers a journal that missed it; once the journal
+  // records the restore, unrestored already nets it and subtracting again hides Recover.
+  const fill = journalRestoreAlreadyFilled(g, groups) ? null : labeledRestoreFillForGroup(g);
   const remain = fill ? Math.max(0, unrestored - fill.native) : unrestored;
   if (remain <= ADMIN_RECOVER_EPS) return false;
   const book = String(g?.currency || g?.collateral_currency || "").toUpperCase();
