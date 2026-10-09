@@ -21,6 +21,7 @@ const UNIT_TESTS = [
   "test_overview_equity.mjs",
   "test_book_card_splits.mjs",
   "test_activity_tabs.mjs",
+  "test_unattributed_spot.mjs",
 ];
 
 let failed = 0;

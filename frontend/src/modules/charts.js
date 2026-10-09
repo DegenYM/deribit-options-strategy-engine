@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, groupHasItmSpotExitFills, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isCashSecuredGroup, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlNativeForProfitSwap, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, sumItmSpotExitNetUsdtByBook, sumItmSpotExitNetUsdtForTotalProfit, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc } from "./domain.js";
+import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, groupHasItmSpotExitFills, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isCashSecuredGroup, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlNativeForProfitSwap, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, sumItmSpotExitNetUsdtByBook, sumItmSpotExitNetUsdtForTotalProfit, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc, unattributedSpotPnlUsd } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -544,6 +544,7 @@ export function profitCompositionByBook(report, groups, status) {
     swappedUsdtByBook,
     usdByBook,
     hedgeTotalUsd: resolveHedgeNetPnlUsd(status, report),
+    unattributedSpotUsd: unattributedSpotPnlUsd(status),
   };
 }
 
@@ -625,12 +626,16 @@ export function aggregateProfitDisposition(report, groups, status, { windowDays 
   return disposition ? alignProfitDispositionToUsdtWallet(disposition, status) : null;
 }
 
-/** Lifetime Total profit: premium swap + unswept × spot + ITM exit−restore net (+ hedge). */
+/**
+ * Lifetime Total profit: premium swap + unswept × spot + ITM exit−restore net
+ * (+ hedge, + unattributed operator/manual spot fills).
+ */
 export function sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status) {
   const fromDisposition = sumRealizedPnlUsdcFromDisposition(report, groups, status);
   const hedge = resolveHedgeNetPnlUsd(status, report);
-  if (fromDisposition === null && hedge === null) return null;
-  return (fromDisposition ?? 0) + (hedge ?? 0);
+  const otherSpot = unattributedSpotPnlUsd(status);
+  if (fromDisposition === null && hedge === null && otherSpot === null) return null;
+  return (fromDisposition ?? 0) + (hedge ?? 0) + (otherSpot ?? 0);
 }
 
 export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDays) {
@@ -639,8 +644,9 @@ export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDay
     windowDays: days,
   });
   const hedge = hedgeWindowNetPnlUsd(status, days);
-  if (fromDisposition === null && hedge === null) return null;
-  return (fromDisposition ?? 0) + (hedge ?? 0);
+  const otherSpot = unattributedSpotPnlUsd(status, { windowDays: days });
+  if (fromDisposition === null && hedge === null && otherSpot === null) return null;
+  return (fromDisposition ?? 0) + (hedge ?? 0) + (otherSpot ?? 0);
 }
 
 /** Match backend ``_annualize_apr``. */

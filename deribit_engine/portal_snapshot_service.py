@@ -200,6 +200,7 @@ class PortalSnapshotService:
             "premium_sweep_fill_stats_by_book": status.get("premium_sweep_fill_stats_by_book") or {},
             "spot_exit_fill_stats_by_book": status.get("spot_exit_fill_stats_by_book") or {},
             "spot_restore_fill_stats_by_book": status.get("spot_restore_fill_stats_by_book") or {},
+            "unattributed_spot_pnl": status.get("unattributed_spot_pnl") or {},
             "hedge_pnl_summary": status.get("hedge_pnl_summary") or {},
         }
         payload = _truncate_long_strings(payload)
@@ -210,6 +211,7 @@ class PortalSnapshotService:
                 "fill_stats": status.get("premium_sweep_fill_stats_by_book"),
                 "spot_exit_fill_stats": status.get("spot_exit_fill_stats_by_book"),
                 "spot_restore_fill_stats": status.get("spot_restore_fill_stats_by_book"),
+                "unattributed_spot_pnl": (status.get("unattributed_spot_pnl") or {}).get("total_usd"),
                 "hedge_pnl": status.get("hedge_pnl_summary"),
             }
         )

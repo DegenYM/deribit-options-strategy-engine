@@ -934,6 +934,16 @@ class EngineBase:
             except Exception:  # noqa: BLE001
                 LOGGER.debug("spot_restore_fill_stats_by_book failed", exc_info=True)
             _mark("spot_restore_fill_stats")
+        if self.config.has_private_credentials:
+            try:
+                from ..unattributed_spot_pnl import unattributed_spot_pnl
+
+                unattributed = unattributed_spot_pnl(self.client, self.config.order_label_prefix)
+                if unattributed:
+                    payload["unattributed_spot_pnl"] = unattributed
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("unattributed_spot_pnl failed", exc_info=True)
+            _mark("unattributed_spot_pnl")
         try:
             from ..hedge_pnl import attach_hedge_performance_windows, summarize_hedge_pnl_for_scope
 

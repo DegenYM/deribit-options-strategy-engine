@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, adminGroupActionsHtml, activityOpenRows, activityPaginationHtml, aggregateMaintenanceHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityBySubAccount, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bookSubAccountCountLabel, bookSubAccountSplitsHtml, bullPutSpreadWidth, cashSecuredMetaLine, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, exchangeOutageBannerHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, formatRiskTierSummary, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, lifetimePerformanceStartMs, normalizeActivityTab, normalizeRiskTier, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, riskTierChipHtml, riskTierForStrategy, riskTierLabel, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, summarizeCashSecuredDisposition, summarizeSpotExitDisposition, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
+import { accountHint, activeHedgeSummaryRows, activityClosedRows, activityLifecycleCardHtml, adminGroupActionsHtml, activityOpenRows, activityPaginationHtml, aggregateMaintenanceHtml, aggregateSkeletonHtml, annualizedAprOnPositionCapital, bookDayPnlUsdForDisplay, bookEquityBySubAccount, bookEquityNative, bookEquityUsdByBook, bookEquityUsdForDisplay, bookSubAccountCountLabel, bookSubAccountSplitsHtml, bullPutSpreadWidth, cashSecuredMetaLine, closedRowsForStrategyStats, closedTimestampMs, collateralBookSpotUsd, currentOpenRows, dashboardStrategyIds, escapeHtml, exchangeOutageBannerHtml, fmtDate, fmtDeribitPriceCell, fmtNativeBookAmount, fmtNativeUnrealizedDisplay, fmtNum, fmtPct, fmtStrike, fmtTime, fmtUsd, fmtUsdNativeBookStackHtml, formatFetchError, formatRiskTierSummary, groupCloseFeeNative, groupCloseFeeUsd, groupEntryCreditNative, groupEntryFeeNative, groupEntryFeeUsd, groupEntryNetApr, groupHoldingDays, groupRealizedApr, hasOwn, hedgeLifetimePnlSummary, investorOverviewHtml, isDashboardStrategy, isInvestorOverviewDisplayReady, isOverviewRealizedDisplayReady, lifetimePerformanceStartMs, normalizeActivityTab, normalizeRiskTier, normalizeStrategyId, num, openPositionTitle, openRowBookCollateralUpper, openRowDisplayNativeUnrealizedValue, openRowDisplayUnrealizedUsd, openRowDteDays, openRowEntryCreditUsd, openRowLegFieldValue, openRowLegInstrumentName, openRowLegPnlUsd, openRowLegPriceGap, openRowLegSignedSizeForDisplay, openRowLegStrike, optionPutCallLabel, overviewDesktopContentHtml, overviewEquityBreakdown, paginateRows, pnlClass, portfolioDayPnlUsdForDisplay, realizedPnlDisplayUsdc, realizedPnlInAprBookNative, renderDataFreshnessBadge, resolvedPortfolio, riskTierChipHtml, riskTierForStrategy, riskTierLabel, setText, strategyChipHtml, strategyId, strategyInfo, strategyLegDetail, strategyOrder, strategyTitle, summarizeCashSecuredDisposition, summarizeSpotExitDisposition, tradeGroupAprBook, tradeGroupAprCapitalBase } from "./domain.js";
 import { aggregateProfitDisposition, computeLifetimeRealizedApr, computeWindowRealizedApr, profitCompositionByBook, sumLifetimeRealizedPnlNativeByBook, sumLifetimeRealizedPnlUsdcAtSpot, sumOpenCreditByStrategy, sumStrategyRealizedPnlUsdcAtSpot, sumWindowRealizedPnlNativeByBook, sumWindowRealizedPnlUsdcAtSpot } from "./charts.js";
 import { strategiesSectionOpen } from "./sections.js";
 export function renderInvestorHeaderIdentity(health) {
@@ -496,15 +496,19 @@ export function renderAggregate(status, report) {
   const root = document.getElementById("aggregate-card");
   if (!root) return;
 
-  const investorRealizedReady = !INVESTOR || isInvestorOverviewDisplayReady();
-  if (INVESTOR && STATE.deribitMaintenance && !investorRealizedReady) {
+  // Ops/ADMIN share the realized gate with investors: wait for groups.closed +
+  // spot marks so recent_closed-only ITM exit−restore does not flash a partial Total.
+  const realizedReady = INVESTOR
+    ? isInvestorOverviewDisplayReady()
+    : isOverviewRealizedDisplayReady();
+  if (INVESTOR && STATE.deribitMaintenance && !realizedReady) {
     root.innerHTML = aggregateMaintenanceHtml();
     renderDataFreshnessBadge();
     return;
   }
   if (
     INVESTOR &&
-    !investorRealizedReady &&
+    !realizedReady &&
     (!STATE.investorReady || STATE.refreshInFlight)
   ) {
     root.innerHTML = aggregateSkeletonHtml();
@@ -513,11 +517,15 @@ export function renderAggregate(status, report) {
   }
 
   const { portfolio, source } = resolvedPortfolio();
-  const summary = investorRealizedReady ? report?.summary : null;
+  const summary = realizedReady ? report?.summary : null;
 
   if (!portfolio && !summary) {
     if (INVESTOR && STATE.deribitMaintenance) {
       root.innerHTML = aggregateMaintenanceHtml();
+      renderDataFreshnessBadge();
+    } else if (report?.summary && !realizedReady) {
+      // Have summary but still waiting on closed set / spots — skeleton, not partial Total.
+      root.innerHTML = aggregateSkeletonHtml();
       renderDataFreshnessBadge();
     } else if (INVESTOR && (STATE.refreshInFlight || !STATE.investorReady)) {
       root.innerHTML = aggregateSkeletonHtml();
@@ -543,16 +551,16 @@ export function renderAggregate(status, report) {
   );
   const creditByStrategy = sumOpenCreditByStrategy(openRows, status, STATE.groups);
 
-  const lifetimePnlAtSpot = investorRealizedReady
+  const lifetimePnlAtSpot = realizedReady
     ? sumLifetimeRealizedPnlUsdcAtSpot(report, STATE.groups, status)
     : null;
-  const lifetimePnl = investorRealizedReady
+  const lifetimePnl = realizedReady
     ? lifetimePnlAtSpot ?? num(summary?.realized_pnl_usdc)
     : null;
-  const lifetimeAprAtSpot = investorRealizedReady
+  const lifetimeAprAtSpot = realizedReady
     ? computeLifetimeRealizedApr(report, STATE.groups, status, summary)
     : null;
-  const lifetimeApr = investorRealizedReady
+  const lifetimeApr = realizedReady
     ? lifetimeAprAtSpot ?? num(summary?.lifetime_realized_apr)
     : null;
   const winRate = num(summary?.realized_win_rate);
@@ -560,16 +568,16 @@ export function renderAggregate(status, report) {
   const closedCount = num(summary?.realized_closed_group_count);
   const windowDays = num(summary?.window_days_used);
   const windowLabelDaysForPnl = windowDays ?? 30;
-  const windowPnlAtSpot = investorRealizedReady
+  const windowPnlAtSpot = realizedReady
     ? sumWindowRealizedPnlUsdcAtSpot(report, STATE.groups, status, windowLabelDaysForPnl)
     : null;
-  const windowPnl = investorRealizedReady
+  const windowPnl = realizedReady
     ? windowPnlAtSpot ?? num(summary?.window_realized_pnl_usdc)
     : null;
-  const windowAprAtSpot = investorRealizedReady
+  const windowAprAtSpot = realizedReady
     ? computeWindowRealizedApr(report, STATE.groups, status, summary, windowLabelDaysForPnl)
     : null;
-  const windowApr = investorRealizedReady
+  const windowApr = realizedReady
     ? windowAprAtSpot ?? num(summary?.window_realized_apr)
     : null;
   const lifetimeStartMs = summary ? lifetimePerformanceStartMs(report, STATE.groups) : null;

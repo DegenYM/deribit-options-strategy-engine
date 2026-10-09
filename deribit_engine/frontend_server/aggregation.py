@@ -357,12 +357,20 @@ def _aggregate_status(
     account_summaries: dict[str, dict[str, Decimal]] = defaultdict(lambda: defaultdict(lambda: Decimal("0")))
     underlying_index_usd: dict[str, str] = {}
     seen_balance_identity: set[str] = set()
+    # One spot fill history per Deribit login (shared sub-accounts must not double count).
+    unattributed_payloads: list[dict[str, Any]] = []
+    seen_unattributed_identity: set[str] = set()
 
     for account in accounts:
         payload = payload_by_name.get(account.name)
         if payload is None:
             continue
         statuses.append(payload)
+        if payload.get("unattributed_spot_pnl"):
+            identity = _live_api_identity(account)
+            if identity not in seen_unattributed_identity:
+                seen_unattributed_identity.add(identity)
+                unattributed_payloads.append(payload)
         for key, value in (payload.get("underlying_index_usd") or {}).items():
             if _dec(value) > 0:
                 underlying_index_usd[str(key).upper()] = str(value)
@@ -382,6 +390,7 @@ def _aggregate_status(
     fill_stats = _aggregate_premium_sweep_fill_stats(statuses)
     spot_exit_stats = _aggregate_spot_exit_fill_stats(statuses)
     spot_restore_stats = _aggregate_spot_restore_fill_stats(statuses)
+    unattributed_spot = _aggregate_unattributed_spot_pnl(unattributed_payloads)
     trade_groups = _dedupe_trade_group_rows(trade_groups)
     aggregated: dict[str, Any] = {
         "env": "multi" if len(accounts) > 1 else accounts[0].config.env,
@@ -424,6 +433,8 @@ def _aggregate_status(
         aggregated["spot_exit_fill_stats_by_book"] = spot_exit_stats
     if spot_restore_stats:
         aggregated["spot_restore_fill_stats_by_book"] = spot_restore_stats
+    if unattributed_spot:
+        aggregated["unattributed_spot_pnl"] = unattributed_spot
     hedge_summary = _aggregate_hedge_pnl(active_accounts)
     if hedge_summary:
         aggregated["hedge_pnl_summary"] = hedge_summary
@@ -511,6 +522,7 @@ def _aggregate_premium_sweep_fill_stats(
 FILL_STATS_CACHE_KEY = "premium_sweep_fill_stats"
 SPOT_EXIT_FILL_STATS_CACHE_KEY = "spot_exit_fill_stats"
 SPOT_RESTORE_FILL_STATS_CACHE_KEY = "spot_restore_fill_stats"
+UNATTRIBUTED_SPOT_PNL_CACHE_KEY = "unattributed_spot_pnl"
 
 _SPOT_EXIT_FILL_STAT_SUM_KEYS = (
     "native_sold",
@@ -548,6 +560,54 @@ def _aggregate_spot_exit_fill_stats(
             "avg_price_usd": format_decimal(usdt / native, 2) if native > 0 else "0",
         }
     return out
+
+
+def _aggregate_unattributed_spot_pnl(
+    payloads: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Sum per-login unattributed spot P&L (callers de-dupe shared API identities)."""
+    from ..utils import format_decimal
+
+    rows = [p.get("unattributed_spot_pnl") for p in payloads]
+    rows = [row for row in rows if isinstance(row, dict)]
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    by_book: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+    by_label: dict[str, dict[str, Any]] = {}
+    sums: dict[str, dict[str, Decimal]] = {
+        "unmatched_native_sold": defaultdict(lambda: Decimal("0")),
+        "open_unattributed_native": defaultdict(lambda: Decimal("0")),
+    }
+    events: list[dict[str, Any]] = []
+    total = Decimal("0")
+    trade_count = 0
+    for row in rows:
+        total += _dec(row.get("total_usd"))
+        trade_count += int(row.get("trade_count") or 0)
+        for book, value in (row.get("by_book") or {}).items():
+            by_book[str(book).upper()] += _dec(value)
+        for label, stat in (row.get("by_label") or {}).items():
+            acc = by_label.setdefault(label, {"trades": 0, "usd": Decimal("0")})
+            acc["trades"] += int((stat or {}).get("trades") or 0)
+            acc["usd"] += _dec((stat or {}).get("usd"))
+        for key, acc_map in sums.items():
+            for book, value in (row.get(key) or {}).items():
+                acc_map[str(book).upper()] += _dec(value)
+        events.extend(e for e in (row.get("events") or []) if isinstance(e, dict))
+    events.sort(key=lambda e: int(e.get("ts_ms") or 0))
+    return {
+        "total_usd": format_decimal(total, 4),
+        "by_book": {book: format_decimal(v, 4) for book, v in sorted(by_book.items())},
+        "by_label": {
+            label: {"trades": stat["trades"], "usd": format_decimal(stat["usd"], 4)}
+            for label, stat in sorted(by_label.items())
+        },
+        **{key: {book: format_decimal(v, 8) for book, v in sorted(acc.items())} for key, acc in sums.items()},
+        "events": events,
+        "trade_count": trade_count,
+    }
 
 
 def _aggregate_spot_restore_fill_stats(
@@ -647,6 +707,15 @@ def attach_cached_premium_sweep_fill_stats(
             if out is status:
                 out = dict(out)
             out["spot_restore_fill_stats_by_book"] = cached_restore
+    unattributed = status.get("unattributed_spot_pnl")
+    if unattributed:
+        cache.seed(UNATTRIBUTED_SPOT_PNL_CACHE_KEY, unattributed)
+    else:
+        cached_unattributed = cache.get_stale(UNATTRIBUTED_SPOT_PNL_CACHE_KEY)
+        if cached_unattributed:
+            if out is status:
+                out = dict(out)
+            out["unattributed_spot_pnl"] = cached_unattributed
     return out
 
 

@@ -150,27 +150,37 @@ function livePortfolioDisplayReady() {
   return isPortfolioBreakdownConsistent(live) || isStatusBreakdownConsistent(STATE.status);
 }
 
-function investorSpotMarksReady() {
+function overviewSpotMarksReady() {
   return (
     num(STATE.status?.underlying_index_usd?.BTC) !== null ||
     num(STATE.lastSpotUsd?.BTC) !== null
   );
 }
 
-/** True when overview KPIs (especially realized P&L) can be shown without partial/stale math. */
+/**
+ * True when Total profit / Profit composition can be shown without partial math.
+ * Waits for full ``groups.closed`` + spot marks so recent_closed-only ITM
+ * exit−restore USDT does not flash a negative Total before BTC/ETH Remaining.
+ */
+export function isOverviewRealizedDisplayReady() {
+  if (!STATE.report?.summary) return false;
+  if (STATE.health?.has_private_creds !== false) {
+    if (!STATE.groups || !Array.isArray(STATE.groups.closed)) return false;
+    if (!overviewSpotMarksReady()) return false;
+  }
+  return true;
+}
+
+/** True when investor overview KPIs can be shown without partial/stale math. */
 export function isInvestorOverviewDisplayReady() {
   if (!INVESTOR) return true;
-  if (!STATE.report?.summary) return false;
+  if (!isOverviewRealizedDisplayReady()) return false;
   const { portfolio } = resolvedPortfolio();
   if (!portfolio || !portfolioHasEquity(portfolio)) return false;
   const portfolioOk =
     isPortfolioBreakdownConsistent(portfolio) ||
     (STATE.status && isStatusBreakdownConsistent(STATE.status));
   if (!portfolioOk) return false;
-  if (STATE.health?.has_private_creds !== false) {
-    if (!STATE.groups || !Array.isArray(STATE.groups.closed)) return false;
-    if (!investorSpotMarksReady()) return false;
-  }
   return true;
 }
 
@@ -571,7 +581,7 @@ function overviewBreakdownRowHtml(row) {
       </div>`;
   return `<div class="overview-breakdown-row overview-breakdown-row--${row.book.toLowerCase()}${row.isLoss ? " overview-breakdown-row--loss" : ""}">
       <div class="overview-breakdown-head">
-        <span class="overview-breakdown-label">${bookNativeSymbolHtml(row.book)}<span class="overview-breakdown-book">${row.book}</span></span>
+        <span class="overview-breakdown-label">${bookNativeSymbolHtml(row.book)}<span class="overview-breakdown-book">${row.labelText ?? row.book}</span></span>
         ${headPct}
       </div>
       ${row.showBar === false ? "" : `<div class="overview-breakdown-bar" aria-hidden="true"><span class="overview-breakdown-bar-fill ${row.barFillClass ?? `overview-breakdown-bar-fill--${row.book.toLowerCase()}`}" style="width:${row.barWidth}"></span></div>`}
@@ -656,9 +666,12 @@ function buildProfitCompositionRows(ctx) {
     swappedUsdtByBook,
     usdByBook,
     hedgeTotalUsd,
+    unattributedSpotUsd,
   } = profitCompositionByBook;
   const hedgeUsd = num(hedgeTotalUsd) ?? 0;
   const hasHedge = Math.abs(hedgeUsd) >= 0.005;
+  const otherSpotUsd = num(unattributedSpotUsd) ?? 0;
+  const hasOtherSpot = Math.abs(otherSpotUsd) >= 0.005;
   const places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 };
   const entries = CORE_BOOKS.map((book) => {
     const native = num(nativeByBook?.[book]);
@@ -703,6 +716,10 @@ function buildProfitCompositionRows(ctx) {
   if (hasHedge) {
     if (hedgeUsd > 0) gainUsdTotal += hedgeUsd;
     else if (hedgeUsd < 0) lossUsdTotal += Math.abs(hedgeUsd);
+  }
+  if (hasOtherSpot) {
+    if (otherSpotUsd > 0) gainUsdTotal += otherSpotUsd;
+    else lossUsdTotal += Math.abs(otherSpotUsd);
   }
   const byBook = Object.fromEntries(entries.map((entry) => [entry.book, entry]));
 
@@ -778,6 +795,25 @@ function buildProfitCompositionRows(ctx) {
     };
   }
 
+  /** Operator / manual spot fills outside every group journal (exchange-backed). */
+  function unattributedSpotRow(usd, usdDenom, isLoss) {
+    const pct = usdDenom > 0 ? Math.abs(usd) / usdDenom : null;
+    const pctText = pct !== null ? fmtPct(pct, 1) : "—";
+    const barWidth =
+      pct !== null ? `${Math.min(100, Math.max(pct * 100, isLoss ? 8 : 2)).toFixed(1)}%` : "0%";
+    return {
+      book: "USDC",
+      labelText: i18n("Unattributed spot", "未歸屬現貨"),
+      pctText,
+      barWidth,
+      detailText: i18n("operator / manual fills", "手動 / operator 成交"),
+      primaryText: fmtUsdAbsForPnlCue(usd),
+      tone: pnlClass(usd),
+      isLoss,
+      barFillClass: isLoss ? "overview-breakdown-bar-fill--loss" : undefined,
+    };
+  }
+
   const rows = [];
   for (const book of CORE_BOOKS) {
     const entry = byBook[book];
@@ -795,6 +831,15 @@ function buildProfitCompositionRows(ctx) {
         hedgeProfitRow(hedgeUsd, hedgeUsd < 0 ? lossUsdTotal : gainUsdTotal, hedgeUsd < 0)
       );
     }
+  }
+  if (hasOtherSpot) {
+    rows.push(
+      unattributedSpotRow(
+        otherSpotUsd,
+        otherSpotUsd < 0 ? lossUsdTotal : gainUsdTotal,
+        otherSpotUsd < 0
+      )
+    );
   }
 
   return overviewBreakdownRowsHtml(rows, {
@@ -2382,6 +2427,28 @@ function journalRestoreAlreadyFilled(g, groups) {
   return wheelSpotRestoreFilledNative(g, groups) > spotRestoreLotThreshold(book);
 }
 
+/** Exchange-backed realized P&L of spot fills no group journal records (operator / manual). */
+export function unattributedSpotPnl(status) {
+  const row = status?.unattributed_spot_pnl;
+  if (!row || typeof row !== "object" || num(row.total_usd) === null) return null;
+  return row;
+}
+
+/** Unattributed spot USD, lifetime or for fills inside the trailing ``windowDays``. */
+export function unattributedSpotPnlUsd(status, { windowDays = null, nowMs = Date.now() } = {}) {
+  const row = unattributedSpotPnl(status);
+  if (!row) return null;
+  if (windowDays == null) return num(row.total_usd);
+  const cutoffMs = nowMs - windowDays * 24 * 3600 * 1000;
+  let total = 0;
+  for (const event of row.events || []) {
+    const ts = num(event?.ts_ms);
+    if (ts === null || ts < cutoffMs) continue;
+    total += num(event?.usd) ?? 0;
+  }
+  return total;
+}
+
 /** Merge live status; retain exchange fill stats when a fast refresh omits them. */
 export function mergeStatusPayload(prev, next) {
   if (!next || typeof next !== "object") return prev ?? next ?? null;
@@ -2400,6 +2467,9 @@ export function mergeStatusPayload(prev, next) {
   const prevSpotRestore = spotRestoreFillStatsByBook(prev);
   if (!nextSpotRestore && prevSpotRestore) {
     merged.spot_restore_fill_stats_by_book = prevSpotRestore;
+  }
+  if (!unattributedSpotPnl(next) && unattributedSpotPnl(prev)) {
+    merged.unattributed_spot_pnl = prev.unattributed_spot_pnl;
   }
   const nextHedge = next.hedge_pnl_summary;
   const prevHedge = prev?.hedge_pnl_summary;

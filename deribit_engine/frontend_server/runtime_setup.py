@@ -356,7 +356,7 @@ def build_runtime_setup(
         return live_status.get("premium_sweep_fill_stats_by_book") or {}
 
     def _enrich_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        from .aggregation import SPOT_EXIT_FILL_STATS_CACHE_KEY
+        from .aggregation import SPOT_EXIT_FILL_STATS_CACHE_KEY, UNATTRIBUTED_SPOT_PNL_CACHE_KEY
 
         fill_stats = _fill_stats_for_snapshot()
         cached_status = status_cache.try_get("status") or {}
@@ -364,7 +364,10 @@ def build_runtime_setup(
         spot_exit_stats = cached_status.get("spot_exit_fill_stats_by_book") or fill_stats_cache.get_stale(
             SPOT_EXIT_FILL_STATS_CACHE_KEY
         )
-        if not fill_stats and not hedge_summary and not spot_exit_stats:
+        unattributed = cached_status.get("unattributed_spot_pnl") or fill_stats_cache.get_stale(
+            UNATTRIBUTED_SPOT_PNL_CACHE_KEY
+        )
+        if not fill_stats and not hedge_summary and not spot_exit_stats and not unattributed:
             return payload
         out = dict(payload)
         live_status = dict(out.get("live_status") or {})
@@ -372,6 +375,8 @@ def build_runtime_setup(
             live_status["premium_sweep_fill_stats_by_book"] = fill_stats
         if spot_exit_stats:
             live_status["spot_exit_fill_stats_by_book"] = spot_exit_stats
+        if unattributed and not live_status.get("unattributed_spot_pnl"):
+            live_status["unattributed_spot_pnl"] = unattributed
         if hedge_summary:
             live_status["hedge_pnl_summary"] = hedge_summary
         out["live_status"] = live_status
