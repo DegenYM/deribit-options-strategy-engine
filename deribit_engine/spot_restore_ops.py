@@ -352,59 +352,24 @@ def spot_restore_lot_threshold(currency: str) -> Decimal:
     return Decimal("0.001") if str(currency or "").upper() == "ETH" else Decimal("0.0001")
 
 
-def default_option_restore_lot(currency: str) -> Decimal:
-    """USDC linear ``min_trade_amount`` fallback (live BTC 0.01 / ETH 0.1)."""
-    return Decimal("0.1") if str(currency or "").upper() == "ETH" else Decimal("0.01")
-
-
-def lookup_usdc_linear_option_lot(client: DeribitClient | None, currency: str) -> Decimal:
-    """USDC linear option min lot from the catalog, else the documented fallback."""
-    typical = default_option_restore_lot(currency)
-    if client is None:
-        return typical
-    try:
-        rows = client.get_instruments("USDC", kind="option", expired=False) or []
-    except Exception:  # noqa: BLE001
-        LOGGER.debug("spot_restore: USDC linear lot lookup failed currency=%s", currency, exc_info=True)
-        return typical
-    prefix = f"{str(currency or '').upper()}_USDC-"
-    found: list[Decimal] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("instrument_name") or "")
-        if not name.startswith(prefix) or "PERPETUAL" in name.upper():
-            continue
-        amount = to_decimal(row.get("min_trade_amount"))
-        if amount > 0:
-            found.append(amount)
-    return min(found) if found else typical
-
-
 def align_spot_restore_buy_amount(
     *,
     amount: Decimal,
     spot_contract_size: Decimal,
     spot_min_trade: Decimal,
-    option_lot: Decimal,
     cap: Decimal | None,
-    size_mode: str,
 ) -> Decimal:
-    """Ceil default restore buys to the USDC linear lot (BTC 0.01 / ETH 0.1), then the spot grid.
+    """Ceil a restore buy to the *spot* grid, never past ``cap`` (the cover).
 
-    Dust below the *spot* min is omitted. Explicit ``--amount`` / ``--usdt`` only
-    ceil to the spot step so a partial manual size is not inflated to a full lot.
+    The spot instrument sets the tradable unit; option lots do not. Ceiling to
+    the USDC linear option lot (ETH 0.1) turned a 0.005 ETH tail into a 0.1 ETH
+    order that drained free USDC on 2026-10-09. Dust below the spot min is omitted.
     """
     if amount <= 0:
         return Decimal("0")
     if spot_min_trade > 0 and amount < spot_min_trade:
         return Decimal("0")
     cover = cap if cap is not None and cap > 0 else None
-    if str(size_mode or "") == "full_unrestored" and option_lot > 0:
-        aligned = ceil_to_step(amount, option_lot)
-        if cover is not None and aligned > cover:
-            aligned = cover
-        amount = aligned
     return ceil_option_order_amount(amount, spot_contract_size, spot_min_trade, cap=cover)
 
 
@@ -2252,14 +2217,11 @@ def execute_spot_restore_for_group(
 
     spot_instrument = _lookup_spot_instrument(bot.client, instrument_name, currency)
     cover_cap = to_decimal(plan["cover"])
-    option_lot = lookup_usdc_linear_option_lot(bot.client, currency)
     aligned_target = align_spot_restore_buy_amount(
         amount=target,
         spot_contract_size=spot_instrument.contract_size,
         spot_min_trade=spot_instrument.min_trade_amount,
-        option_lot=option_lot,
         cap=cover_cap if cover_cap > 0 else None,
-        size_mode=str(sized.get("size_mode") or ""),
     )
     if target > 0 and aligned_target <= 0:
         # Below exchange min/step: omit (never round up past cover).
@@ -2325,7 +2287,8 @@ def execute_spot_restore_for_group(
         "premium_still_held_est": bool(plan.get("premium_still_held_est")),
         "spot_exit_status": str(group.spot_exit_status or "") or None,
         "restore_target": format_decimal(to_decimal(plan["target"]), 8),
-        "option_lot": format_decimal(option_lot, 8),
+        "spot_min_trade_amount": format_decimal(spot_instrument.min_trade_amount, 8),
+        "spot_contract_size": format_decimal(spot_instrument.contract_size, 8),
         "size_mode": sized.get("size_mode"),
         "order_type": resolved_order_type,
         "label": label,

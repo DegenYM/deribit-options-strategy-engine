@@ -16,7 +16,6 @@ from deribit_engine.spot_restore_ops import (
     itm_spot_exit_net_usdt_for_total_profit,
     itm_spot_round_trip_complete,
     list_spot_restore_candidates,
-    lookup_usdc_linear_option_lot,
     plan_spot_restore_to_cover,
     reconcile_spot_restore_from_exchange,
     resolve_spot_restore_order_size,
@@ -145,38 +144,21 @@ def _group(**overrides) -> TradeGroup:
     return TradeGroup.from_dict(payload)
 
 
-def test_align_spot_restore_buy_amount_ceils_full_restore_to_option_lot() -> None:
-    kwargs = dict(
-        spot_contract_size=Decimal("0.0001"),
-        spot_min_trade=Decimal("0.0001"),
-        option_lot=Decimal("0.01"),
-        cap=Decimal("0.1"),
-    )
-    assert align_spot_restore_buy_amount(
-        amount=Decimal("0.09978985"),
-        size_mode="full_unrestored",
-        **kwargs,
-    ) == Decimal("0.1")
-    assert align_spot_restore_buy_amount(
-        amount=Decimal("0.04"),
-        size_mode="full_unrestored",
-        **kwargs,
-    ) == Decimal("0.04")
-    assert align_spot_restore_buy_amount(
-        amount=Decimal("0.05"),
-        size_mode="usdt",
-        **kwargs,
-    ) == Decimal("0.05")
-    assert align_spot_restore_buy_amount(
-        amount=Decimal("0.00005"),
-        size_mode="full_unrestored",
-        **kwargs,
-    ) == Decimal("0")
+def test_align_spot_restore_buy_amount_uses_spot_grid_not_option_lot() -> None:
+    kwargs = dict(spot_contract_size=Decimal("0.0001"), spot_min_trade=Decimal("0.0001"), cap=Decimal("0.1"))
+    # Ceil to the spot step only; a BTC 0.01 option lot must not inflate 0.0997 → 0.1.
+    assert align_spot_restore_buy_amount(amount=Decimal("0.09978985"), **kwargs) == Decimal("0.0998")
+    assert align_spot_restore_buy_amount(amount=Decimal("0.04"), **kwargs) == Decimal("0.04")
+    assert align_spot_restore_buy_amount(amount=Decimal("0.00005"), **kwargs) == Decimal("0")
+    # Never past the cover cap.
+    assert align_spot_restore_buy_amount(amount=Decimal("0.12"), **kwargs) == Decimal("0.1")
 
 
-def test_lookup_usdc_linear_option_lot_uses_catalog_min() -> None:
-    assert lookup_usdc_linear_option_lot(FakeClient(), "BTC") == Decimal("0.01")
-    assert lookup_usdc_linear_option_lot(FakeClient(), "ETH") == Decimal("0.1")
+def test_align_spot_restore_buy_amount_eth_tail_stays_small() -> None:
+    """eugene #0020 / an #0048 tails (2026-10-09) must not become a 0.1 ETH order."""
+    kwargs = dict(spot_contract_size=Decimal("0.0001"), spot_min_trade=Decimal("0.0001"), cap=Decimal("1"))
+    assert align_spot_restore_buy_amount(amount=Decimal("0.00508756"), **kwargs) == Decimal("0.0051")
+    assert align_spot_restore_buy_amount(amount=Decimal("0.00583848"), **kwargs) == Decimal("0.0059")
 
 
 def test_spot_buy_quote_spent_from_trades_adds_fees() -> None:
@@ -714,32 +696,33 @@ def test_execute_spot_restore_default_targets_swap_settle_minus_premium(tmp_path
     assert preview["settlement_loss"] == "0.012"
     assert preview["premium_native"] == "0.0027"
     assert preview["restore_target"] == "0.0943"
-    assert preview["buy_amount"] == "0.1"
-    assert preview["option_lot"] == "0.01"
+    # Spot grid only (BTC 0.0001); no ceil to the 0.01 USDC linear option lot.
+    assert preview["buy_amount"] == "0.0943"
+    assert preview["spot_min_trade_amount"] == "0.0001"
     assert preview["buy_currency"] == "BTC"
     assert preview["current_price"] == "70000"
     assert preview["order_type"] == "limit"
     assert preview["post_only"] is True
     assert preview["wait_seconds"] == 120
     assert preview["current_price_source"] == "best_bid"
-    assert preview["estimated_usdt"] == "7000"
-    assert preview["order_budget_usdt"] == "7000"
+    assert preview["estimated_usdt"] == "6601"
+    assert preview["order_budget_usdt"] == "6601"
     assert preview["limit_price"] == "70000"
     comp = preview["buy_amount_composition"]
     assert comp["swap_sold"] == "0.085"
     assert comp["settlement_loss"] == "0.012"
     assert comp["premium_native"] == "0.0027"
-    assert comp["this_order_buy_amount"] == "0.1"
+    assert comp["this_order_buy_amount"] == "0.0943"
     assert "premium" in comp["expression"]
-    assert preview["preview"]["buy_amount"] == "0.1"
+    assert preview["preview"]["buy_amount"] == "0.0943"
     assert preview["unrestored_amount"] == "0.0943"
 
     report = format_spot_restore_human_report(SpotRestoreRunSummary(live=False, actions=[preview]))
     text = "\n".join(report)
-    assert "預計買回: 0.1 BTC" in text
+    assert "預計買回: 0.0943 BTC" in text
     assert "組成:" in text
     assert "當前價格: 70000 USDT" in text
-    assert "預計花費: 7000 USDT" in text
+    assert "預計花費: 6601 USDT" in text
     assert "limit@bid GTC" in text
     assert "wait=120s" in text
     assert "spot_exit: status=filled  filled=0.085 BTC" in text
@@ -775,9 +758,9 @@ def test_execute_spot_restore_market_preview_uses_ask_buffer(tmp_path) -> None:
     preview = execute_spot_restore_for_group(bot, group, live=False, order_type="market")
     assert preview["order_type"] == "market"
     assert preview["current_price_source"] == "best_ask"
-    assert preview["buy_amount"] == "0.1"
-    assert preview["estimated_usdt"] == "7000"
-    assert preview["order_budget_usdt"] == "7007"
+    assert preview["buy_amount"] == "0.0943"
+    assert preview["estimated_usdt"] == "6601"
+    assert preview["order_budget_usdt"] == "6607.601"
     assert "1.001" in preview["order_budget_usdt_meaning"]
     assert "native buy_amount" in preview["order_budget_usdt_meaning"]
 
@@ -981,7 +964,7 @@ def test_execute_spot_restore_omits_dust_below_min_not_round_up(tmp_path) -> Non
     assert "omit" in report
 
 
-def test_execute_spot_restore_ceils_buy_amount_to_option_lot(tmp_path) -> None:
+def test_execute_spot_restore_buy_amount_uses_spot_grid(tmp_path) -> None:
     group = _group(
         group_id="0095",
         short_instrument_name="BTC-28AUG26-73000-C",
@@ -994,7 +977,7 @@ def test_execute_spot_restore_ceils_buy_amount_to_option_lot(tmp_path) -> None:
         short_entry_average_price="0.0015",
         entry_fee_collateral="0.00001875",
     )
-    # 0.0915 + 0.0084211 − 0.00013125 = 0.09978985 → ceil to BTC USDC linear 0.01 = 0.1
+    # 0.0915 + 0.0084211 − 0.00013125 = 0.09978985 → ceil to the BTC spot step 0.0001 = 0.0998
     client = FakeClient()
     config = make_config(
         tmp_path,
@@ -1009,13 +992,13 @@ def test_execute_spot_restore_ceils_buy_amount_to_option_lot(tmp_path) -> None:
 
     preview = execute_spot_restore_for_group(bot, group, live=False, park_resting=True)
     assert preview["action"] == "spot_restore_preview"
-    assert Decimal(preview["buy_amount"]) == Decimal("0.1")
-    assert Decimal(preview["option_lot"]) == Decimal("0.01")
+    assert Decimal(preview["buy_amount"]) == Decimal("0.0998")
+    assert "option_lot" not in preview
     assert Decimal(preview["restore_target"]) == Decimal("0.09978985")
 
 
 def test_emergency_restore_full_cover_is_ioc_limit_not_market(tmp_path) -> None:
-    """Lot-ceil 0.91 → 1 ETH, and a large USDC balance pays that full IOC."""
+    """Restore 0.91 ETH on the spot grid (no option-lot ceil to 1); large USDC pays it in full."""
     group = _eth_group(spot_exit_amount="0.91", covered_underlying_quantity="1", quantity="1")
     client = FakeClient()
     _set_quote_balances(client, usdc="100000", usdt="100000")
@@ -1031,13 +1014,13 @@ def test_emergency_restore_full_cover_is_ioc_limit_not_market(tmp_path) -> None:
     assert order["instrument_name"] == "ETH_USDC"
     assert Decimal(str(order["price"])) == limit
     assert Decimal(str(order["price"])) > ETH_ASK
-    assert Decimal(str(order["amount"])) == Decimal("1")
+    assert Decimal(str(order["amount"])) == Decimal("0.91")
     assert result["action"] == "spot_restore"
     assert result["order_type"] == "limit"
     assert result["time_in_force"] == "immediate_or_cancel"
     assert result["spot_restore_status"] == "filled"
     assert group.spot_restore_status == "filled"
-    assert group.spot_restore_amount == Decimal("1")
+    assert group.spot_restore_amount == Decimal("0.91")
     assert group.spot_restore_instrument_name == "ETH_USDC"
     assert group.spot_restore_quote_spent > 0
     assert "capped_to_free_quote" not in result
