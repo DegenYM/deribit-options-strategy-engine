@@ -62,7 +62,10 @@ def test_a_short_history_never_claims_a_bull_regime():
 
 
 def test_the_regime_reads_short_ma_against_long_ma():
-    for closes, expected in (([100.0 + i * 0.5 for i in range(120)], True), ([160.0 - i * 0.5 for i in range(120)], False)):
+    for closes, expected in (
+        ([100.0 + i * 0.5 for i in range(120)], True),
+        ([160.0 - i * 0.5 for i in range(120)], False),
+    ):
         series = _six_hourly(closes)
         reading = trend_reading_from_index_series(series, end_ts_ms=series[-1][0], ma_window=20, regime_ma_window=100)
         assert reading is not None and reading.bull_regime is expected

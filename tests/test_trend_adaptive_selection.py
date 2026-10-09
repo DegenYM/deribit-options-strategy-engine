@@ -103,7 +103,9 @@ def test_falling_stretches_the_ceiling_but_never_the_floor(tmp_path):
 def test_the_otm_floor_moves_in_proportion(tmp_path):
     """Three points off an 8% floor is a nudge; off a 5% one it would be most of the distance."""
     assert _selector(tmp_path, signal="-1").effective_call_otm_min(BTC) == Decimal("0.05")
-    assert _selector(tmp_path, signal="-1", btc_call_otm_min=Decimal("0.05")).effective_call_otm_min(BTC) == Decimal("0.03125")
+    assert _selector(tmp_path, signal="-1", btc_call_otm_min=Decimal("0.05")).effective_call_otm_min(BTC) == Decimal(
+        "0.03125"
+    )
 
 
 # --- the pause: speed and direction -------------------------------------------------
