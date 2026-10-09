@@ -16,6 +16,7 @@ import {
   groupHasItmSpotExitFills,
   itmFoldedPremiumUsdt,
   itmSpotExitNetUsdtForTotalProfit,
+  itmCoverResidualNative,
   itmSpotExitPremiumFolded,
   itmSpotExitDisplayNetUsdt,
   itmSpotRoundTripComplete,
@@ -1191,8 +1192,20 @@ const eugene0027 = group({
   csp_premium_swap_native: "0.0005",
 });
 const eugeneCompStatus = { ...status, underlying_index_usd: { BTC: 80000, ETH: 2400 } };
-const eugene0021Net = 2399.43 - 2405.859;
-const eugene0022Net = 7688.8399 - 7856.6957;
+const eugene0021ItmNet = 2399.43 - 2405.859;
+const eugene0022ItmNet = 7688.8399 - 7856.6957;
+// Cover coin left after the round trip: restored − sold + realized option native.
+const eugene0021Residual = 1 - 0.9608 + -0.03657;
+const eugene0022Residual = 0.1 - 0.0965 + -0.00327575;
+assert.ok(
+  Math.abs(
+    itmCoverResidualNative(eugene0021, [eugene0021, eugene0026Premium], eugeneCompStatus) - eugene0021Residual
+  ) < 1e-9,
+);
+assert.ok(Math.abs(itmCoverResidualNative(eugene0022, [eugene0022], eugeneCompStatus) - eugene0022Residual) < 1e-9);
+// USDT row / Total profit = exit − restore USDT + residual × spot.
+const eugene0021Net = eugene0021ItmNet + eugene0021Residual * 2400;
+const eugene0022Net = eugene0022ItmNet + eugene0022Residual * 80000;
 
 const eugene0020Comp = profitCompositionByBook(
   report,
@@ -1252,7 +1265,10 @@ assert.ok(eugeneHtml.includes("exit") || eugeneHtml.includes("賣出"), eugeneHt
 const itmFoldComp = profitCompositionByBook(report, { closed: [itmFolded], open: [] }, status);
 const foldNet = itmSpotExitNetUsdtForTotalProfit(itmFolded);
 assert.ok(foldNet !== null);
-assert.ok(Math.abs((itmFoldComp.usdByBook?.USDT ?? 0) - foldNet) < 0.05);
+// Folded premium left with the swap: coin change = restored − sold + realized native.
+const foldResidual = 1.9999 - 2.0156 + 0.00812;
+assert.ok(Math.abs(itmCoverResidualNative(itmFolded, [itmFolded], status) - foldResidual) < 1e-9);
+assert.ok(Math.abs((itmFoldComp.usdByBook?.USDT ?? 0) - (foldNet + foldResidual * 1675)) < 0.05);
 assert.ok(Math.abs((itmFoldComp.swappedUsdtByBook?.ETH ?? 0) - foldedUsdt) < 0.05);
 assert.ok(Math.abs((itmFoldComp.usdByBook?.ETH ?? 0) - foldedUsdt) < 1);
 
@@ -1489,8 +1505,13 @@ assert.ok(
 assert.equal(itmSpotExitNetUsdtForTotalProfit(ym0096, ymGroups, ymStatus), null);
 assert.ok(ymRestoreNet < 0, "YM #0095 recover is a loss");
 const ymComp = profitCompositionByBook(report, ymGroups, ymStatus);
-assert.ok(Math.abs((ymComp.usdByBook?.USDT ?? 0) - ymRestoreNet) < 0.05, `ym labeled usdt=${ymComp.usdByBook?.USDT}`);
-assert.ok(Math.abs((ymComp.earnedUsdByBook?.USDT ?? 0) - ymRestoreNet) < 0.05, `ym labeled earned usdt=${ymComp.earnedUsdByBook?.USDT}`);
+// Labeled 0.1 BTC restore vs the post-settlement exit: residual coin rides the USDT row.
+const ym0095Residual =
+  0.1 - Number(ym0095.spot_exit_amount) + Number(ym0095.realized_pnl_collateral_native);
+assert.ok(Math.abs(itmCoverResidualNative(ym0095, [ym0095, ym0096], ymStatus) - ym0095Residual) < 1e-9);
+const ymRoundTrip = ymRestoreNet + ym0095Residual * 77014.57;
+assert.ok(Math.abs((ymComp.usdByBook?.USDT ?? 0) - ymRoundTrip) < 0.05, `ym labeled usdt=${ymComp.usdByBook?.USDT}`);
+assert.ok(Math.abs((ymComp.earnedUsdByBook?.USDT ?? 0) - ymRoundTrip) < 0.05, `ym labeled earned usdt=${ymComp.earnedUsdByBook?.USDT}`);
 assert.ok((ymComp.usdByBook?.USDT ?? 0) < 0, "composition USDT must be the recover loss");
 const ymPanel = summarizeSpotExitDisposition(ymGroups, { status: ymStatus });
 assert.ok(ymPanel);
@@ -1627,7 +1648,13 @@ const jackStatus = {
   },
 };
 const jackComp = profitCompositionByBook(report, jackGroups, jackStatus);
-assert.ok(Math.abs((jackComp.usdByBook?.USDT ?? 0) - jack0104Net) < 0.05, `jack usdt=${jackComp.usdByBook?.USDT}`);
+// #0103 is not a recognized round trip, so only #0104 carries a cover residual.
+const jack0104Residual = 0.0998 - 0.0978 + -0.001995;
+assert.ok(Math.abs(itmCoverResidualNative(jack0103, [jack0103, jack0104], jackStatus)) < 1e-12);
+assert.ok(
+  Math.abs((jackComp.usdByBook?.USDT ?? 0) - (jack0104Net + jack0104Residual * 77000.07)) < 0.05,
+  `jack usdt=${jackComp.usdByBook?.USDT}`,
+);
 assert.ok((jackComp.usdByBook?.USDT ?? 0) < 100, "Jack Total must not include #0103 exit notional");
 const jackPanel = summarizeSpotExitDisposition(jackGroups, { status: jackStatus });
 assert.ok(jackPanel);
@@ -1664,7 +1691,7 @@ const eugene0033Overbuy = group({
 });
 const eugeneOverbuyGroups = { closed: [eugene0022, eugene0033Overbuy], open: [] };
 assert.ok(
-  Math.abs((itmSpotExitNetUsdtForTotalProfit(eugene0022, eugeneOverbuyGroups) ?? 0) - eugene0022Net) < 0.02,
+  Math.abs((itmSpotExitNetUsdtForTotalProfit(eugene0022, eugeneOverbuyGroups) ?? 0) - eugene0022ItmNet) < 0.02,
   "Eugene #0033 overbuy must not be subtracted from #0022 net",
 );
 const eugeneOverbuyComp = profitCompositionByBook(report, eugeneOverbuyGroups, eugeneCompStatus);
@@ -1678,6 +1705,6 @@ const eugeneOverbuyPanel = summarizeSpotExitDisposition(eugeneOverbuyGroups, {
   },
 });
 assert.ok(Math.abs((eugeneOverbuyPanel.boughtNative?.BTC ?? 0) - 0.1) < 1e-6, `eugene bought=${eugeneOverbuyPanel.boughtNative?.BTC}`);
-assert.ok(Math.abs((eugeneOverbuyPanel.usdtNet ?? 0) - eugene0022Net) < 0.05);
+assert.ok(Math.abs((eugeneOverbuyPanel.usdtNet ?? 0) - eugene0022ItmNet) < 0.05);
 
 console.log("test_profit_disposition: ok");

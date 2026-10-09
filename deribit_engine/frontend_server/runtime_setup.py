@@ -356,7 +356,11 @@ def build_runtime_setup(
         return live_status.get("premium_sweep_fill_stats_by_book") or {}
 
     def _enrich_snapshot_payload(payload: dict[str, Any]) -> dict[str, Any]:
-        from .aggregation import SPOT_EXIT_FILL_STATS_CACHE_KEY, UNATTRIBUTED_SPOT_PNL_CACHE_KEY
+        from .aggregation import (
+            SPOT_EXIT_FILL_STATS_CACHE_KEY,
+            UNATTRIBUTED_SPOT_PNL_CACHE_KEY,
+            USDC_REWARD_INCOME_CACHE_KEY,
+        )
 
         fill_stats = _fill_stats_for_snapshot()
         cached_status = status_cache.try_get("status") or {}
@@ -377,6 +381,9 @@ def build_runtime_setup(
             live_status["spot_exit_fill_stats_by_book"] = spot_exit_stats
         if unattributed and not live_status.get("unattributed_spot_pnl"):
             live_status["unattributed_spot_pnl"] = unattributed
+        reward = cached_status.get("usdc_reward_income") or fill_stats_cache.get_stale(USDC_REWARD_INCOME_CACHE_KEY)
+        if reward and not live_status.get("usdc_reward_income"):
+            live_status["usdc_reward_income"] = reward
         if hedge_summary:
             live_status["hedge_pnl_summary"] = hedge_summary
         out["live_status"] = live_status

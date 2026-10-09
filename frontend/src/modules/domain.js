@@ -667,11 +667,14 @@ function buildProfitCompositionRows(ctx) {
     usdByBook,
     hedgeTotalUsd,
     unattributedSpotUsd,
+    usdcRewardUsd: usdcYieldUsd,
   } = profitCompositionByBook;
   const hedgeUsd = num(hedgeTotalUsd) ?? 0;
   const hasHedge = Math.abs(hedgeUsd) >= 0.005;
   const otherSpotUsd = num(unattributedSpotUsd) ?? 0;
   const hasOtherSpot = Math.abs(otherSpotUsd) >= 0.005;
+  const yieldUsd = num(usdcYieldUsd) ?? 0;
+  const hasYield = Math.abs(yieldUsd) >= 0.005;
   const places = { BTC: 5, ETH: 4, USDC: 2, USDT: 2 };
   const entries = CORE_BOOKS.map((book) => {
     const native = num(nativeByBook?.[book]);
@@ -721,6 +724,10 @@ function buildProfitCompositionRows(ctx) {
     if (otherSpotUsd > 0) gainUsdTotal += otherSpotUsd;
     else lossUsdTotal += Math.abs(otherSpotUsd);
   }
+  if (hasYield) {
+    if (yieldUsd > 0) gainUsdTotal += yieldUsd;
+    else lossUsdTotal += Math.abs(yieldUsd);
+  }
   const byBook = Object.fromEntries(entries.map((entry) => [entry.book, entry]));
 
   function profitRow(entry, { isLoss, usdDenom }) {
@@ -743,7 +750,7 @@ function buildProfitCompositionRows(ctx) {
     } else if (isStable) {
       detailText =
         book === "USDT"
-          ? i18n("exit − restore", "賣出 − 買回")
+          ? i18n("ITM exit − restore ± cover", "ITM 賣出 − 買回 ± 幣差")
           : i18n("stablecoin", "穩定幣");
       primaryText = displayUsd !== null ? fmtUsdAbsForPnlCue(displayUsd) : nativeText;
     } else if (swappedUsdt > 0.005 && isMeaningfulNativeForBook(swappedNative, book)) {
@@ -795,6 +802,24 @@ function buildProfitCompositionRows(ctx) {
     };
   }
 
+  function extraUsdRow(usd, usdDenom, isLoss, labelText, detailText) {
+    const pct = usdDenom > 0 ? Math.abs(usd) / usdDenom : null;
+    const pctText = pct !== null ? fmtPct(pct, 1) : "—";
+    const barWidth =
+      pct !== null ? `${Math.min(100, Math.max(pct * 100, isLoss ? 8 : 2)).toFixed(1)}%` : "0%";
+    return {
+      book: "USDC",
+      labelText,
+      pctText,
+      barWidth,
+      detailText,
+      primaryText: fmtUsdAbsForPnlCue(usd),
+      tone: pnlClass(usd),
+      isLoss,
+      barFillClass: isLoss ? "overview-breakdown-bar-fill--loss" : undefined,
+    };
+  }
+
   /** Operator / manual spot fills outside every group journal (exchange-backed). */
   function unattributedSpotRow(usd, usdDenom, isLoss) {
     const pct = usdDenom > 0 ? Math.abs(usd) / usdDenom : null;
@@ -831,6 +856,17 @@ function buildProfitCompositionRows(ctx) {
         hedgeProfitRow(hedgeUsd, hedgeUsd < 0 ? lossUsdTotal : gainUsdTotal, hedgeUsd < 0)
       );
     }
+  }
+  if (hasYield) {
+    rows.push(
+      extraUsdRow(
+        yieldUsd,
+        yieldUsd < 0 ? lossUsdTotal : gainUsdTotal,
+        yieldUsd < 0,
+        i18n("USDC yield", "USDC 收益"),
+        i18n("exchange balance reward", "交易所餘額獎勵")
+      )
+    );
   }
   if (hasOtherSpot) {
     rows.push(
@@ -2427,6 +2463,57 @@ function journalRestoreAlreadyFilled(g, groups) {
   return wheelSpotRestoreFilledNative(g, groups) > spotRestoreLotThreshold(book);
 }
 
+/**
+ * Coin left on the collateral book after a recognized ITM round trip:
+ * restored − sold + realized option native (premium − fees − settlement).
+ * exit − restore USDT alone misses it whenever the restore buys more or less
+ * coin than the exit sold plus the settlement took (e.g. full cover restored
+ * after a smaller post-settlement exit).
+ */
+export function itmCoverResidualNative(g, groups, status) {
+  if (itmSpotExitNetUsdtForTotalProfit(g, groups, status) === null) return 0;
+  const book = tradeGroupAprBook(g);
+  if (book !== "BTC" && book !== "ETH") return 0;
+  const realized = num(g?.realized_pnl_collateral_native);
+  if (realized === null) return 0;
+  const sold = _itmSpotExitSwapNative(g);
+  let restored = wheelSpotRestoreFilledNative(g, groups);
+  if (!(restored > 0)) restored = labeledRestoreFillForGroup(g, status)?.native ?? 0;
+  if (!(sold > 0) || !(restored > 0)) return 0;
+  return restored - sold + realized;
+}
+
+/** ITM cover residual valued at live spot, by collateral book. */
+export function sumItmCoverResidualUsdByBook(rows, status) {
+  const out = { BTC: 0, ETH: 0 };
+  let any = false;
+  for (const g of rows || []) {
+    const residual = itmCoverResidualNative(g, rows, status);
+    if (Math.abs(residual) < 1e-12) continue;
+    const book = tradeGroupAprBook(g);
+    const spot = spotUsdForBook(status, book);
+    if (spot === null || !(spot > 0)) continue;
+    out[book] += residual * spot;
+    any = true;
+  }
+  return any ? out : null;
+}
+
+/** Exchange-credited USDC balance yield (``usdc_reward`` transaction-log rows). */
+export function usdcRewardUsd(status, { windowDays = null, nowMs = Date.now() } = {}) {
+  const row = status?.usdc_reward_income;
+  if (!row || typeof row !== "object" || num(row.total_usd) === null) return null;
+  if (windowDays == null) return num(row.total_usd);
+  const cutoffMs = nowMs - windowDays * 24 * 3600 * 1000;
+  let total = 0;
+  for (const event of row.events || []) {
+    const ts = num(event?.ts_ms);
+    if (ts === null || ts < cutoffMs) continue;
+    total += num(event?.usd) ?? 0;
+  }
+  return total;
+}
+
 /** Exchange-backed realized P&L of spot fills no group journal records (operator / manual). */
 export function unattributedSpotPnl(status) {
   const row = status?.unattributed_spot_pnl;
@@ -2470,6 +2557,9 @@ export function mergeStatusPayload(prev, next) {
   }
   if (!unattributedSpotPnl(next) && unattributedSpotPnl(prev)) {
     merged.unattributed_spot_pnl = prev.unattributed_spot_pnl;
+  }
+  if (usdcRewardUsd(next) === null && usdcRewardUsd(prev) !== null) {
+    merged.usdc_reward_income = prev.usdc_reward_income;
   }
   const nextHedge = next.hedge_pnl_summary;
   const prevHedge = prev?.hedge_pnl_summary;

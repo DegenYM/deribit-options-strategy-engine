@@ -277,3 +277,57 @@ def unattributed_spot_pnl(client: Any, order_label_prefix: str) -> dict[str, Any
     with _cache_lock:
         _cache[key] = (now, payload)
     return payload
+
+
+# ---- exchange balance yield -------------------------------------------------
+
+USDC_REWARD_TYPE = "usdc_reward"
+USDC_REWARD_CACHE_TTL_SEC = 1800.0
+# Deribit launched USDC balance rewards long after this; bounds the log scan.
+_REWARD_LOG_START_MS = 1_704_067_200_000  # 2024-01-01T00:00:00Z
+_reward_cache: dict[int, tuple[float, dict[str, Any] | None]] = {}
+
+
+def summarize_usdc_rewards(logs: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    """Sum ``usdc_reward`` transaction-log credits (USD at $1 parity)."""
+    events: list[dict[str, Any]] = []
+    total = ZERO
+    for row in logs:
+        if not isinstance(row, dict) or str(row.get("type") or "") != USDC_REWARD_TYPE:
+            continue
+        change = to_decimal(row.get("change"))
+        if change == 0:
+            continue
+        total += change
+        events.append({"ts_ms": int(row.get("timestamp") or 0), "usd": change})
+    if not events:
+        return None
+    events.sort(key=lambda e: e["ts_ms"])
+    return {
+        "total_usd": format_decimal(total, 4),
+        "events": [{"ts_ms": e["ts_ms"], "usd": format_decimal(e["usd"], 4)} for e in events],
+        "count": len(events),
+    }
+
+
+def usdc_reward_income(client: Any) -> dict[str, Any] | None:
+    """USDC balance yield credited by Deribit (cached ``USDC_REWARD_CACHE_TTL_SEC``)."""
+    key = id(client)
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _reward_cache.get(key)
+        if hit and now - hit[0] < USDC_REWARD_CACHE_TTL_SEC:
+            return hit[1]
+    iterate = getattr(client, "iter_transaction_log", None)
+    if not callable(iterate):
+        return None
+    logs = iterate(
+        currency="USDC",
+        start_timestamp=_REWARD_LOG_START_MS,
+        end_timestamp=int(time.time() * 1000),
+        count=250,
+    )
+    payload = summarize_usdc_rewards(logs)
+    with _cache_lock:
+        _reward_cache[key] = (now, payload)
+    return payload

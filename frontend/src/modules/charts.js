@@ -14,7 +14,7 @@ import {
   fmt,
 } from "../shared/config.js";
 import { STATE } from "../shared/state.js";
-import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, groupHasItmSpotExitFills, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isCashSecuredGroup, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlNativeForProfitSwap, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, sumItmSpotExitNetUsdtByBook, sumItmSpotExitNetUsdtForTotalProfit, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc, unattributedSpotPnlUsd } from "./domain.js";
+import { alignProfitDispositionToUsdtWallet, bookEquityNative, bookEquityUsdForDisplay, dashboardStrategyIds, dedupeTradeGroups, emptyProfitDisposition, entryTimestampMs, fmtNativeBookAmount, fmtNum, fmtPct, fmtUsd, groupHasItmSpotExitFills, hedgeLifetimeNetPnlUsd, hedgeWindowNetPnlUsd, isCashSecuredGroup, isDashboardStrategy, isDisplayableClosedTradeGroup, isMeaningfulNativeForBook, isPremiumProceedsPoolExcludedGroup, normalizeStrategyId, num, openRowEntryCreditUsd, pnlClass, profitDispositionForGroup, realizedPnlDisplayUsdc, realizedPnlNativeForProfitSwap, realizedUsdByBookFromProfitDisposition, realizedUsdFromProfitDisposition, resolveHedgeNetPnlUsd, resolvedPortfolio, setText, spotUsdForBook, strategyId, strategyInfo, strategyOrder, summarizeProfitDisposition, sumItmSpotExitNetUsdtByBook, sumItmSpotExitNetUsdtForTotalProfit, tradeGroupAprBook, closedTimestampMs, aprEffectiveCapitalUsdc, unattributedSpotPnlUsd, sumItmCoverResidualUsdByBook, usdcRewardUsd } from "./domain.js";
 export function chartCommonOptions() {
   return {
     responsive: true,
@@ -356,7 +356,7 @@ function sumRealizedPnlUsdcFromRows(rows, status) {
         status
       )
     : null;
-  const itmNet = sumItmSpotExitNetUsdtForTotalProfit(rows, status);
+  const itmNet = sumItmSpotExitNetUsdtForTotalProfit(rows, status) + _itmCoverResidualUsdTotal(rows, status);
   if (fromDisposition !== null || Math.abs(itmNet) >= 0.005) {
     return (fromDisposition ?? 0) + itmNet;
   }
@@ -398,11 +398,20 @@ function _emptyUsdByBook() {
   return { BTC: 0, ETH: 0, USDC: 0, USDT: 0 };
 }
 
-/** Recognized ITM exit−restore nets belong on the USDT book, not coin premium / leftover USDC. */
+function _itmCoverResidualUsdTotal(rows, status) {
+  const byBook = sumItmCoverResidualUsdByBook(rows, status);
+  if (!byBook) return 0;
+  return (num(byBook.BTC) ?? 0) + (num(byBook.ETH) ?? 0);
+}
+
+/**
+ * Recognized ITM round trips belong on the USDT row, not coin premium / leftover USDC:
+ * exit − restore USDT plus the cover coin left over (or short) at live spot.
+ */
 function _itmSpotExitNetUsdtTotal(rows, status) {
   const itmByBook = sumItmSpotExitNetUsdtByBook(rows, status);
-  if (!itmByBook) return 0;
-  return (num(itmByBook.BTC) ?? 0) + (num(itmByBook.ETH) ?? 0);
+  const net = itmByBook ? (num(itmByBook.BTC) ?? 0) + (num(itmByBook.ETH) ?? 0) : 0;
+  return net + _itmCoverResidualUsdTotal(rows, status);
 }
 
 function _mergeItmNetIntoUsdByBook(usdByBook, rows, status) {
@@ -545,6 +554,7 @@ export function profitCompositionByBook(report, groups, status) {
     usdByBook,
     hedgeTotalUsd: resolveHedgeNetPnlUsd(status, report),
     unattributedSpotUsd: unattributedSpotPnlUsd(status),
+    usdcRewardUsd: usdcRewardUsd(status),
   };
 }
 
@@ -627,15 +637,16 @@ export function aggregateProfitDisposition(report, groups, status, { windowDays 
 }
 
 /**
- * Lifetime Total profit: premium swap + unswept × spot + ITM exit−restore net
- * (+ hedge, + unattributed operator/manual spot fills).
+ * Lifetime Total profit: premium swap + unswept × spot + ITM round trip
+ * (+ hedge, + unattributed operator/manual spot fills, + USDC balance yield).
  */
 export function sumLifetimeRealizedPnlUsdcAtSpot(report, groups, status) {
   const fromDisposition = sumRealizedPnlUsdcFromDisposition(report, groups, status);
   const hedge = resolveHedgeNetPnlUsd(status, report);
   const otherSpot = unattributedSpotPnlUsd(status);
-  if (fromDisposition === null && hedge === null && otherSpot === null) return null;
-  return (fromDisposition ?? 0) + (hedge ?? 0) + (otherSpot ?? 0);
+  const reward = usdcRewardUsd(status);
+  if (fromDisposition === null && hedge === null && otherSpot === null && reward === null) return null;
+  return (fromDisposition ?? 0) + (hedge ?? 0) + (otherSpot ?? 0) + (reward ?? 0);
 }
 
 export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDays) {
@@ -645,8 +656,9 @@ export function sumWindowRealizedPnlUsdcAtSpot(report, groups, status, windowDay
   });
   const hedge = hedgeWindowNetPnlUsd(status, days);
   const otherSpot = unattributedSpotPnlUsd(status, { windowDays: days });
-  if (fromDisposition === null && hedge === null && otherSpot === null) return null;
-  return (fromDisposition ?? 0) + (hedge ?? 0) + (otherSpot ?? 0);
+  const reward = usdcRewardUsd(status, { windowDays: days });
+  if (fromDisposition === null && hedge === null && otherSpot === null && reward === null) return null;
+  return (fromDisposition ?? 0) + (hedge ?? 0) + (otherSpot ?? 0) + (reward ?? 0);
 }
 
 /** Match backend ``_annualize_apr``. */

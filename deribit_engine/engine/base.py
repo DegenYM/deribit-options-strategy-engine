@@ -944,6 +944,15 @@ class EngineBase:
             except Exception:  # noqa: BLE001
                 LOGGER.debug("unattributed_spot_pnl failed", exc_info=True)
             _mark("unattributed_spot_pnl")
+            try:
+                from ..unattributed_spot_pnl import usdc_reward_income
+
+                reward = usdc_reward_income(self.client)
+                if reward:
+                    payload["usdc_reward_income"] = reward
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("usdc_reward_income failed", exc_info=True)
+            _mark("usdc_reward_income")
         try:
             from ..hedge_pnl import attach_hedge_performance_windows, summarize_hedge_pnl_for_scope
 

@@ -196,3 +196,53 @@ def test_attach_cached_keeps_unattributed_spot_pnl() -> None:
     assert cache.store[UNATTRIBUTED_SPOT_PNL_CACHE_KEY] == row
     out = attach_cached_premium_sweep_fill_stats({"portfolio": {}}, cache)  # type: ignore[arg-type]
     assert out["unattributed_spot_pnl"] == row
+
+
+def test_summarize_usdc_rewards_only_counts_reward_rows() -> None:
+    from deribit_engine.unattributed_spot_pnl import summarize_usdc_rewards
+
+    logs = [
+        {"type": "usdc_reward", "timestamp": 2, "change": 9.84004255},
+        {"type": "trade", "timestamp": 3, "change": -82.85},
+        {"type": "usdc_reward", "timestamp": 1, "change": 1.14812027},
+        {"type": "usdc_reward", "timestamp": 4, "change": 0},
+    ]
+    out = summarize_usdc_rewards(logs)
+    assert out is not None
+    assert Decimal(out["total_usd"]) == Decimal("10.9881")
+    assert [e["ts_ms"] for e in out["events"]] == [1, 2]
+    assert out["count"] == 2
+    assert summarize_usdc_rewards([{"type": "trade", "change": 1}]) is None
+
+
+def test_usdc_reward_income_fetches_once_per_ttl() -> None:
+    from deribit_engine.unattributed_spot_pnl import usdc_reward_income
+
+    class _LogClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def iter_transaction_log(self, **kwargs: Any):
+            self.calls += 1
+            assert kwargs["currency"] == "USDC"
+            yield {"type": "usdc_reward", "timestamp": 5, "change": "2.5"}
+
+    client = _LogClient()
+    out = usdc_reward_income(client)
+    assert out is not None and Decimal(out["total_usd"]) == Decimal("2.5")
+    assert usdc_reward_income(client) is out
+    assert client.calls == 1
+
+
+def test_aggregate_usdc_reward_income_sums_logins() -> None:
+    from deribit_engine.frontend_server.aggregation import _aggregate_usdc_reward_income
+
+    a = {"total_usd": "1.5", "events": [{"ts_ms": 2, "usd": "1.5"}], "count": 1}
+    b = {"total_usd": "2", "events": [{"ts_ms": 1, "usd": "2"}], "count": 1}
+    assert _aggregate_usdc_reward_income([{"usdc_reward_income": a}]) is a
+    merged = _aggregate_usdc_reward_income([{"usdc_reward_income": a}, {"usdc_reward_income": b}, {}])
+    assert merged is not None
+    assert Decimal(merged["total_usd"]) == Decimal("3.5")
+    assert [e["ts_ms"] for e in merged["events"]] == [1, 2]
+    assert merged["count"] == 2
+    assert _aggregate_usdc_reward_income([{}]) is None

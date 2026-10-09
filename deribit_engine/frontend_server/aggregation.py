@@ -360,6 +360,8 @@ def _aggregate_status(
     # One spot fill history per Deribit login (shared sub-accounts must not double count).
     unattributed_payloads: list[dict[str, Any]] = []
     seen_unattributed_identity: set[str] = set()
+    reward_payloads: list[dict[str, Any]] = []
+    seen_reward_identity: set[str] = set()
 
     for account in accounts:
         payload = payload_by_name.get(account.name)
@@ -371,6 +373,11 @@ def _aggregate_status(
             if identity not in seen_unattributed_identity:
                 seen_unattributed_identity.add(identity)
                 unattributed_payloads.append(payload)
+        if payload.get("usdc_reward_income"):
+            identity = _live_api_identity(account)
+            if identity not in seen_reward_identity:
+                seen_reward_identity.add(identity)
+                reward_payloads.append(payload)
         for key, value in (payload.get("underlying_index_usd") or {}).items():
             if _dec(value) > 0:
                 underlying_index_usd[str(key).upper()] = str(value)
@@ -391,6 +398,7 @@ def _aggregate_status(
     spot_exit_stats = _aggregate_spot_exit_fill_stats(statuses)
     spot_restore_stats = _aggregate_spot_restore_fill_stats(statuses)
     unattributed_spot = _aggregate_unattributed_spot_pnl(unattributed_payloads)
+    usdc_reward = _aggregate_usdc_reward_income(reward_payloads)
     trade_groups = _dedupe_trade_group_rows(trade_groups)
     aggregated: dict[str, Any] = {
         "env": "multi" if len(accounts) > 1 else accounts[0].config.env,
@@ -435,6 +443,8 @@ def _aggregate_status(
         aggregated["spot_restore_fill_stats_by_book"] = spot_restore_stats
     if unattributed_spot:
         aggregated["unattributed_spot_pnl"] = unattributed_spot
+    if usdc_reward:
+        aggregated["usdc_reward_income"] = usdc_reward
     hedge_summary = _aggregate_hedge_pnl(active_accounts)
     if hedge_summary:
         aggregated["hedge_pnl_summary"] = hedge_summary
@@ -523,6 +533,7 @@ FILL_STATS_CACHE_KEY = "premium_sweep_fill_stats"
 SPOT_EXIT_FILL_STATS_CACHE_KEY = "spot_exit_fill_stats"
 SPOT_RESTORE_FILL_STATS_CACHE_KEY = "spot_restore_fill_stats"
 UNATTRIBUTED_SPOT_PNL_CACHE_KEY = "unattributed_spot_pnl"
+USDC_REWARD_INCOME_CACHE_KEY = "usdc_reward_income"
 
 _SPOT_EXIT_FILL_STAT_SUM_KEYS = (
     "native_sold",
@@ -607,6 +618,28 @@ def _aggregate_unattributed_spot_pnl(
         **{key: {book: format_decimal(v, 8) for book, v in sorted(acc.items())} for key, acc in sums.items()},
         "events": events,
         "trade_count": trade_count,
+    }
+
+
+def _aggregate_usdc_reward_income(payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Sum per-login USDC balance yield (callers de-dupe shared API identities)."""
+    from ..utils import format_decimal
+
+    rows = [p.get("usdc_reward_income") for p in payloads]
+    rows = [row for row in rows if isinstance(row, dict)]
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    events = sorted(
+        (e for row in rows for e in (row.get("events") or []) if isinstance(e, dict)),
+        key=lambda e: int(e.get("ts_ms") or 0),
+    )
+    total = sum((_dec(row.get("total_usd")) for row in rows), Decimal("0"))
+    return {
+        "total_usd": format_decimal(total, 4),
+        "events": events,
+        "count": sum(int(row.get("count") or 0) for row in rows),
     }
 
 
@@ -716,6 +749,15 @@ def attach_cached_premium_sweep_fill_stats(
             if out is status:
                 out = dict(out)
             out["unattributed_spot_pnl"] = cached_unattributed
+    reward = status.get("usdc_reward_income")
+    if reward:
+        cache.seed(USDC_REWARD_INCOME_CACHE_KEY, reward)
+    else:
+        cached_reward = cache.get_stale(USDC_REWARD_INCOME_CACHE_KEY)
+        if cached_reward:
+            if out is status:
+                out = dict(out)
+            out["usdc_reward_income"] = cached_reward
     return out
 
 
