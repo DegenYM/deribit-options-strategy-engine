@@ -12,7 +12,7 @@ from pathlib import Path
 from .atomic_io import atomic_write_text, durable_append_text
 from .env_parse import parse_env_bool
 from .models import StrategyState, TradeGroup
-from .utils import json_default, utc_now_ms
+from .utils import json_default, to_decimal, utc_now_ms
 
 try:
     import fcntl
@@ -453,6 +453,15 @@ def merge_concurrent_group_updates(memory: StrategyState, disk: StrategyState) -
         if other is None:
             continue
         restore_snap = _operator_manual_restore_snapshot(group)
+        disk_restore_snap = _operator_manual_restore_snapshot(other)
+        # Both sides are operator restores: a later admin top-up on disk carries the
+        # larger cumulative amount, so the stale in-memory snapshot must not win.
+        if (
+            restore_snap is not None
+            and disk_restore_snap is not None
+            and to_decimal(disk_restore_snap["spot_restore_amount"]) > to_decimal(restore_snap["spot_restore_amount"])
+        ):
+            restore_snap = disk_restore_snap
         csp_mem = _operator_csp_abort_snapshot(group)
         csp_disk = _operator_csp_abort_snapshot(other)
         touched = False

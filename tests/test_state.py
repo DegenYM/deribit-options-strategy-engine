@@ -346,6 +346,38 @@ def test_merge_keeps_admin_emergency_restore_over_live_skipped() -> None:
     assert memory.groups[0].spot_restore_reason == "emergency_spot_restore"
 
 
+def test_merge_keeps_disk_admin_top_up_over_stale_operator_snapshot() -> None:
+    """an #0048 on 2026-10-09: repaired journal (operator marker) sat in live memory
+    while admin topped up the remainder on disk. The stale in-memory operator
+    snapshot must not overwrite the larger cumulative restore."""
+    from deribit_engine.state import merge_concurrent_group_updates
+
+    memory = _sample_state()
+    memory.groups[0].group_id = "0048"
+    memory.groups[0].spot_restore_status = "filled"
+    memory.groups[0].spot_restore_amount = Decimal("0.99220901")
+    memory.groups[0].spot_restore_quote_spent = Decimal("2400.21312086")
+    memory.groups[0].spot_restore_order_id = "ETH_USDC-9544513968"
+    memory.groups[
+        0
+    ].spot_restore_reason = "auto_spot_restore_park;operator_cancelled;operator_journal_repair_from_exchange"
+
+    disk = _sample_state()
+    disk.groups[0].group_id = "0048"
+    disk.groups[0].spot_restore_status = "filled"
+    disk.groups[0].spot_restore_amount = Decimal("1.00135357")
+    disk.groups[0].spot_restore_quote_spent = Decimal("2423.04448")
+    disk.groups[0].spot_restore_order_id = "ETH_USDC-9558800000"
+    disk.groups[0].spot_restore_reason = "emergency_spot_restore"
+
+    merged = merge_concurrent_group_updates(memory, disk)
+    assert merged == ["0048"]
+    assert memory.groups[0].spot_restore_amount == Decimal("1.00135357")
+    assert memory.groups[0].spot_restore_quote_spent == Decimal("2423.04448")
+    assert memory.groups[0].spot_restore_order_id == "ETH_USDC-9558800000"
+    assert memory.groups[0].spot_restore_reason == "emergency_spot_restore"
+
+
 def test_merge_keeps_in_memory_operator_manual_restore_over_disk_skipped() -> None:
     from deribit_engine.state import merge_concurrent_group_updates
 
