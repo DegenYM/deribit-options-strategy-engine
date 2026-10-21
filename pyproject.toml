@@ -29,7 +29,7 @@ pdf = [
     "reportlab>=4.0,<5",
     "matplotlib>=3.8,<4",
     "numpy>=1.26,<3",
-    "pillow>=12.3,<13",
+    "pillow>=12.3,<14",
 ]
 dev = [
     "pytest>=8,<10",
