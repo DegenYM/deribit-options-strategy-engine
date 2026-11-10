@@ -45,6 +45,13 @@ def launchd_job_path(label: str) -> str:
     return f"{launchd_gui_domain()}/{label}"
 
 
+def launchd_plist_label(plist_path: Path, label: str | None = None) -> str:
+    """Return the launchd label, defaulting to the plist stem (filename without .plist)."""
+    if label:
+        return label
+    return plist_path.stem
+
+
 def _run_launchctl(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["launchctl", *args],
@@ -63,21 +70,35 @@ def is_launchd_loaded(label: str) -> bool:
     return result.returncode == 0
 
 
-def bootstrap_plist(plist_path: Path) -> tuple[bool, str]:
+def enable_launchd(label: str) -> tuple[bool, str]:
+    """Clear the launchd disabled bit so a later bootstrap or login can load the job.
+
+    ``start`` / ``restart`` / ``stop`` never mean permanent disable. There is no
+    helper here for a one-way ``launchctl disable``.
+    """
+    result = _run_launchctl("enable", launchd_job_path(label))
+    if result.returncode == 0:
+        return True, "enabled"
+    detail = _combined_output(result).strip() or f"exit {result.returncode}"
+    return False, detail
+
+
+def bootstrap_plist(plist_path: Path, label: str | None = None) -> tuple[bool, str]:
+    resolved = launchd_plist_label(plist_path, label)
+    enabled, enable_msg = enable_launchd(resolved)
+    if not enabled:
+        return False, f"enable failed: {enable_msg}"
     domain = launchd_gui_domain()
     result = _run_launchctl("bootstrap", domain, str(plist_path))
     if result.returncode == 0:
         return True, "bootstrapped"
     output = _combined_output(result).strip()
-    if "already" in output.lower() or "input/output error" in output.lower():
+    # "already loaded" and Input/output error are ambiguous (the latter is also
+    # what macOS prints when the job is disabled). Only treat them as success
+    # when launchctl print confirms the job is actually in the domain.
+    if is_launchd_loaded(resolved):
         return True, "already loaded"
-    legacy = _run_launchctl("load", str(plist_path))
-    if legacy.returncode == 0:
-        return True, "loaded (legacy)"
-    legacy_out = _combined_output(legacy).strip()
-    if "already" in legacy_out.lower():
-        return True, "already loaded"
-    detail = output or legacy_out or f"exit {result.returncode}"
+    detail = output or f"exit {result.returncode}"
     return False, detail
 
 
@@ -85,16 +106,19 @@ def bootout_plist(plist_path: Path, label: str) -> tuple[bool, str]:
     domain = launchd_gui_domain()
     result = _run_launchctl("bootout", domain, str(plist_path))
     if result.returncode == 0:
+        enabled, enable_msg = enable_launchd(label)
+        if not enabled:
+            return True, f"stopped; enable failed: {enable_msg}"
         return True, "stopped"
     output = _combined_output(result).strip()
     if not is_launchd_loaded(label):
+        # Already out of the domain (including "not loaded" errors). Do not
+        # fall back to `launchctl unload`, which disables the job on modern macOS.
+        enabled, enable_msg = enable_launchd(label)
+        if not enabled:
+            return True, f"not loaded; enable failed: {enable_msg}"
         return True, "not loaded"
-    legacy = _run_launchctl("unload", str(plist_path))
-    if legacy.returncode == 0:
-        return True, "unloaded (legacy)"
-    if not is_launchd_loaded(label):
-        return True, "not loaded"
-    detail = output or _combined_output(legacy).strip() or f"exit {result.returncode}"
+    detail = output or f"exit {result.returncode}"
     return False, detail
 
 
@@ -103,7 +127,7 @@ def reload_plist(plist_path: Path, label: str) -> tuple[bool, str]:
         ok, msg = bootout_plist(plist_path, label)
         if not ok:
             return False, f"reload bootout failed: {msg}"
-    return bootstrap_plist(plist_path)
+    return bootstrap_plist(plist_path, label)
 
 
 def list_pids_listening_on_tcp_port(port: int) -> list[int]:
@@ -170,7 +194,7 @@ def force_reload_plist(
     killed, kill_msg = terminate_tcp_listeners(listen_port)
     if killed:
         steps.append(f"kill: {kill_msg}")
-    ok, msg = bootstrap_plist(plist_path)
+    ok, msg = bootstrap_plist(plist_path, label)
     steps.append(f"bootstrap: {msg}")
     if not ok:
         return False, "; ".join(steps)
